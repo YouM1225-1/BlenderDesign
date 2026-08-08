@@ -42,4 +42,6 @@ None.
 
 ## Commit
 
-`c3c7cbce1373514a4c5f51baa7ececb8d143c81a` (`feat: add bridge uds client`)
+Implementation: `2bb59ef2307a7e0154527b6483ee56981337033d`
+(`feat: add bridge uds client`). This report is committed separately so it can
+record that immutable implementation commit.
