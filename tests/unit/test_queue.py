@@ -209,14 +209,16 @@ def test_scene_summary_large_scene_yields_before_tick_budget_wall_clock():
     q = TaskQueue(router.handle, _RealClock())
     got: list[bytes] = []
     request = req("scene_summary")
-    q.submit(request, got.append, deadline=time.monotonic() + 5.0)
+    deadline = time.monotonic() + 5.0
+    q.submit(request, got.append, deadline=deadline)
 
     tick_durations: list[float] = []
-    while not got:
+    while not got and time.monotonic() < deadline:
         started = time.monotonic()
         q.tick(budget_ms=50)
         tick_durations.append(time.monotonic() - started)
 
+    assert got
     assert len(tick_durations) > 1
     assert max(tick_durations) < 0.12
     assert reader.sync_snapshot_called is False
@@ -341,16 +343,34 @@ def test_continuation_exception_after_yield_is_structured_error():
     assert body["error"]["message"] == "SnapshotInvalidated"
 
 
-def test_completed_continuation_past_deadline_is_dropped():
+def test_new_continuation_rechecks_budget_and_deadline_before_first_step():
     q, clock = make()
     got: list[bytes] = []
+    advanced: list[bool] = []
 
     def steps(request: envelope.Request) -> Generator[None, None, bytes]:
-        clock.now += 3.0
-        return envelope.ok_frame(request.id, {})
+        advanced.append(True)
         yield
+        return envelope.ok_frame(request.id, {})
 
-    q = TaskQueue(lambda request: steps(request), clock)
+    def consumes_budget(request: envelope.Request) -> Generator[None, None, bytes]:
+        clock.now += 0.06
+        return steps(request)
+
+    q = TaskQueue(consumes_budget, clock)
+    q.submit(req("scene_summary"), got.append, clock.now + 2.0)
+    q.tick(50)
+    assert advanced == [] and q.pending == 1
+    assert q.drain() == 1
+
+    clock = FakeClock()
+    advanced = []
+
+    def passes_deadline(request: envelope.Request) -> Generator[None, None, bytes]:
+        clock.now += 3.0
+        return steps(request)
+
+    q = TaskQueue(passes_deadline, clock)
     q.submit(req("scene_summary"), got.append, clock.now + 1.0)
     q.tick(50)
-    assert got == [] and q.pending == 0
+    assert advanced == [] and got == [] and q.pending == 0

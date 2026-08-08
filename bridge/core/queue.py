@@ -111,6 +111,17 @@ class TaskQueue:
                     frame = result
                 else:
                     continuation = result
+                    if self._clock.monotonic() >= task.deadline:
+                        self._diag.info("drop expired continuation %s", task.request.id)
+                        self._close_continuation(task.request.id, continuation)
+                        self._complete_active(task)
+                        continue
+                    if self._clock.monotonic() >= end:
+                        with self._lock:
+                            self._tasks.append(_Task(task.request, task.reply, task.deadline,
+                                                     continuation))
+                            self._active -= 1
+                        return BUSY_INTERVAL
                     try:
                         next(continuation)
                     except StopIteration as done:
