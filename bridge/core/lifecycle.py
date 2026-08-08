@@ -606,18 +606,25 @@ class BridgeSession:
         # 只删自己 bind 成功的 socket：EADDRINUSE 时该路径属于**别人**的活 listener，
         # 删掉即造成对方拒绝服务（复审 R-02 实测）
         complete = True
-        if self._socket_owned and self.socket_path != Path() \
-                and self._path_matches(self.socket_path, self._socket_identity,
-                                       stat_mod.S_ISSOCK):
-            try:
-                self.socket_path.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
+        if self._socket_owned:
+            if self.socket_path == Path() or not self._path_matches(
+                    self.socket_path.parent, self._socket_parent_identity,
+                    stat_mod.S_ISDIR):
+                return False
+            if self._path_matches(self.socket_path, self._socket_identity,
+                                  stat_mod.S_ISSOCK):
+                # POSIX has no atomic final identity-check + unlink-by-path; this
+                # bounds, but cannot eliminate, replacement after the final check.
+                try:
+                    self.socket_path.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    complete = False
+            elif not self._path_absent(self.socket_path):
                 complete = False
-        elif self._socket_owned and self.socket_path != Path() \
-                and not self._path_absent(self.socket_path):
-            complete = False
+            if complete:
+                self._socket_owned = False
         if not complete:
             # Preserve session metadata as retryable evidence whenever the owned
             # socket path was replaced or could not be removed safely.

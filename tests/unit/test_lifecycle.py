@@ -67,6 +67,13 @@ def _rpc(s: BridgeSession, method: str, token: str | None = None) -> dict:
 
 
 def test_start_creates_private_files(session, tmp_path):
+    import bridge.core.lifecycle as lc
+
+    assert lc.MAX_CONNECTIONS == 64
+    assert lc.MAX_INBOUND_PENDING == 32 * 1024 * 1024
+    assert lc.MAX_REQUEST_PAYLOAD == 64 * 1024
+    assert lc.MAX_OUTBOX == 32 * 1024 * 1024
+    assert lc.MAX_TOTAL_OUTBOX == 64 * 1024 * 1024
     d = session.session_dir
     assert stat.S_IMODE(d.stat().st_mode) == 0o700
     assert stat.S_IMODE(session.socket_path.stat().st_mode) == 0o600
@@ -472,7 +479,7 @@ def test_send_rejects_old_connection_after_fd_key_reuse():
     assert old.outbox == [] and new.outbox == []
 
 
-def test_send_enforces_global_outbox_cap_without_touching_socket(monkeypatch, caplog):
+def test_send_enforces_outbox_caps_without_touching_socket(monkeypatch, caplog):
     import bridge.core.lifecycle as lc
 
     class FakeSocket:
@@ -492,7 +499,6 @@ def test_send_enforces_global_outbox_cap_without_touching_socket(monkeypatch, ca
                                   "outbox": deque([payload]), "outbox_bytes": pending,
                                   "send_offset": 0})()
 
-    monkeypatch.setattr(lc, "MAX_TOTAL_OUTBOX", 10)
     session = BridgeSession.__new__(BridgeSession)
     session._conns_lock = threading.Lock()
     first, second = conn(1, 6), conn(2, 4)
@@ -501,11 +507,22 @@ def test_send_enforces_global_outbox_cap_without_touching_socket(monkeypatch, ca
     session._wake = lambda: wakes.append(True)
 
     with caplog.at_level(logging.INFO, logger="bcx.bridge"):
-        session.send(second, b"overflow")
+        monkeypatch.setattr(lc, "MAX_OUTBOX", 6)
+        monkeypatch.setattr(lc, "MAX_TOTAL_OUTBOX", 100)
+        session.send(first, b"x")
+        assert first.closing is True and first.outbox_bytes == 6
+        assert first.sock.close_calls == second.sock.close_calls == 0
+
+        first, second = conn(1, 6), conn(2, 4)
+        session._conns = {1: first, 2: second}
+        monkeypatch.setattr(lc, "MAX_OUTBOX", 10)
+        monkeypatch.setattr(lc, "MAX_TOTAL_OUTBOX", 10)
+        session.send(second, b"x")
     assert second.closing is True and second.outbox_bytes == 4
     assert first.sock.close_calls == second.sock.close_calls == 0
-    assert wakes == [True]
-    assert any("outbox limit exceeded" in record.message for record in caplog.records)
+    assert wakes == [True, True]
+    assert sum("outbox limit exceeded" in record.message
+               for record in caplog.records) == 2
 
 
 def test_partial_flush_keeps_retained_frame_bytes_until_pop():
@@ -729,10 +746,33 @@ def test_failed_transport_close_retains_published_paths_until_retry(tmp_path):
 def test_sun_path_fallback(tmp_path):
     deep = tmp_path / ("x" * 90)          # 让默认 socket 路径必然超 100 字节
     s = BridgeSession.start(deep, FakeReader(), blender_version="5.2.0")
+    fallback = s._sock_tmpdir
+    assert fallback is not None
+    original = fallback.with_name(fallback.name + "-original")
+    blocker = s.session_dir / "foreign.txt"
     try:
         assert len(str(s.socket_path).encode()) <= 100
         assert s.session_dir.exists()     # session.json 仍在 runtime 根下
+        fallback.rename(original)
+        fallback.mkdir(mode=0o700)
+        assert s.stop() is False
+        assert fallback.exists()
+        assert s.session_dir.exists()
+        assert (s.session_dir / "session.json").exists()
+
+        fallback.rmdir()
+        original.rename(fallback)
+        blocker.write_text("preserve")
+        assert s.stop() is False
+        assert not fallback.exists()
+        blocker.unlink()
+        assert s.stop() is True
     finally:
+        blocker.unlink(missing_ok=True)
+        if fallback.exists():
+            fallback.rmdir()
+        if original.exists():
+            original.rename(fallback)
         s.stop()
 
 
