@@ -96,6 +96,24 @@ def test_huge_params_use_fixed_bounded_digest_without_full_dumps(
     assert path.stat().st_size <= audit_module.MAX_AUDIT_LINE_BYTES
     assert "sensitive" not in path.read_text()
 
+    aggregate = {f"aggregate-secret-{index:05d}": "" for index in range(4_096)}
+    real_iterencode = audit_module.json.JSONEncoder.iterencode
+
+    def reject_aggregate_encoder(self, value, *args, **kwargs):
+        if value is aggregate:
+            raise AssertionError("aggregate params reached encoder/sort path")
+        return real_iterencode(self, value, *args, **kwargs)
+
+    monkeypatch.setattr(audit_module.json.JSONEncoder, "iterencode",
+                        reject_aggregate_encoder)
+    started = time.monotonic()
+    log.record("tool", "aggregate", ok=True, duration_ms=1.0,
+               params=aggregate, deadline=started + 1.0)
+    assert time.monotonic() - started < 0.5
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert rows[-1]["params_digest"] == audit_module.PARAMS_TRUNCATED_DIGEST
+    assert "aggregate-secret" not in path.read_text()
+
 
 def test_deep_and_unencodable_params_use_bounded_sentinel(tmp_path):
     import server.core.audit as audit_module
@@ -175,22 +193,24 @@ def test_rejects_wide_runtime_root_without_chmod(tmp_path):
 
 
 def test_rejects_logs_directory_owned_by_other_uid(tmp_path, monkeypatch):
+    import server.core.audit as audit_module
+
     logs = tmp_path / "runtime" / "logs"
     logs.mkdir(parents=True, mode=0o700)
     logs.parent.chmod(0o700)
     logs.chmod(0o700)
-    real_lstat = Path.lstat
+    real_stat = audit_module.os.stat
     foreign_uid = os.geteuid() + 1
 
-    def foreign_logs_lstat(path):
-        result = real_lstat(path)
-        if path == logs:
+    def foreign_logs_stat(path, *, dir_fd=None, follow_symlinks=True):
+        result = real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+        if path == logs.name and dir_fd is not None:
             values = list(result)
             values[4] = foreign_uid
             return os.stat_result(values)
         return result
 
-    monkeypatch.setattr(Path, "lstat", foreign_logs_lstat)
+    monkeypatch.setattr(audit_module.os, "stat", foreign_logs_stat)
     with pytest.raises(PermissionError, match="private directory"):
         AuditLog(logs)
 
@@ -263,16 +283,15 @@ def test_concurrent_first_initialization_is_race_safe_with_restrictive_umask(
     chmod_entered = threading.Event()
     release_chmod = threading.Event()
     errors = []
-    real_chmod = audit_module.os.chmod
+    real_fchmod = audit_module.os.fchmod
 
-    def delayed_first_chmod(path, mode, *, dir_fd=None, follow_symlinks=True):
-        if Path(path) == logs and not chmod_entered.is_set():
+    def delayed_first_fchmod(fd, mode):
+        if mode == 0o700 and not chmod_entered.is_set():
             chmod_entered.set()
             assert release_chmod.wait(1.0)
-        return real_chmod(path, mode, dir_fd=dir_fd,
-                          follow_symlinks=follow_symlinks)
+        return real_fchmod(fd, mode)
 
-    monkeypatch.setattr(audit_module.os, "chmod", delayed_first_chmod)
+    monkeypatch.setattr(audit_module.os, "fchmod", delayed_first_fchmod)
 
     def initialize():
         try:
@@ -296,6 +315,37 @@ def test_concurrent_first_initialization_is_race_safe_with_restrictive_umask(
         os.umask(previous_umask)
     assert all(not worker.is_alive() for worker in workers)
     assert errors == []
+
+    monkeypatch.setattr(audit_module.os, "fchmod", real_fchmod)
+    attack_runtime = tmp_path / "attack-runtime"
+    attack_runtime.mkdir(mode=0o700)
+    attack_runtime.chmod(0o700)
+    attack_logs = attack_runtime / "logs"
+    original = tmp_path / "created-original"
+    replacement = tmp_path / "wide-replacement"
+    replacement.mkdir(mode=0o755)
+    replacement.chmod(0o755)
+    real_open = audit_module.os.open
+    swapped = False
+
+    def replace_created_before_open(name, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if (name == attack_logs.name and dir_fd is not None
+                and flags & os.O_DIRECTORY and not swapped):
+            swapped = True
+            attack_logs.rename(original)
+            replacement.rename(attack_logs)
+        return real_open(name, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(audit_module.os, "open", replace_created_before_open)
+    previous_umask = os.umask(0o777)
+    try:
+        with pytest.raises(PermissionError, match="private directory"):
+            AuditLog(attack_logs)
+    finally:
+        os.umask(previous_umask)
+    assert swapped
+    assert stat.S_IMODE(attack_logs.stat().st_mode) == 0o755
 
 
 def test_concurrent_first_file_creation_waits_for_fchmod(tmp_path, monkeypatch):
@@ -357,6 +407,33 @@ def test_record_rejects_replaced_log_directory(tmp_path):
         logs.rmdir()
         original.rmdir()
 
+    runtime = tmp_path / "runtime"
+    runtime_logs = runtime / "logs"
+    parent_log = AuditLog(runtime_logs)
+    original_runtime = tmp_path / "runtime-original"
+    runtime.rename(original_runtime)
+    runtime.symlink_to(original_runtime, target_is_directory=True)
+    try:
+        with pytest.raises(PermissionError, match="private directory"):
+            parent_log.record("tool", "symlink-parent", ok=True, duration_ms=1.0)
+        assert list((original_runtime / "logs").iterdir()) == []
+    finally:
+        runtime.unlink()
+        original_runtime.rename(runtime)
+
+    runtime.rename(original_runtime)
+    runtime.mkdir(mode=0o700)
+    runtime.chmod(0o700)
+    (original_runtime / "logs").rename(runtime_logs)
+    try:
+        with pytest.raises(PermissionError, match="private directory"):
+            parent_log.record("tool", "replaced-parent", ok=True, duration_ms=1.0)
+        assert list(runtime_logs.iterdir()) == []
+    finally:
+        runtime_logs.rename(original_runtime / "logs")
+        runtime.rmdir()
+        original_runtime.rename(runtime)
+
 
 def test_request_deadline_bounds_external_file_lock(tmp_path):
     log = AuditLog(tmp_path / "logs")
@@ -398,6 +475,45 @@ def test_request_deadline_is_checked_between_serialization_steps(tmp_path, monke
                    deadline=time.monotonic() + 0.01)
     assert len(calls) == 1
     assert list((tmp_path / "logs").iterdir()) == []
+
+    monkeypatch.setattr(audit_module.json, "dumps", real_dumps)
+    open_log = AuditLog(tmp_path / "open-logs")
+    real_open = audit_module.os.open
+    real_fchmod = audit_module.os.fchmod
+    fchmod_calls = []
+
+    def slow_file_open(name, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(name, flags, mode, dir_fd=dir_fd)
+        if isinstance(name, str) and name.startswith("server-"):
+            time.sleep(0.03)
+        return fd
+
+    def track_fchmod(fd, mode):
+        fchmod_calls.append((fd, mode))
+        return real_fchmod(fd, mode)
+
+    monkeypatch.setattr(audit_module.os, "open", slow_file_open)
+    monkeypatch.setattr(audit_module.os, "fchmod", track_fchmod)
+    with pytest.raises(TimeoutError, match="audit deadline expired"):
+        open_log.record("tool", "slow-open", ok=True, duration_ms=1.0,
+                        deadline=time.monotonic() + 0.01)
+    assert fchmod_calls == []
+    assert next((tmp_path / "open-logs").glob("server-*.jsonl")).read_bytes() == b""
+
+    monkeypatch.setattr(audit_module.os, "open", real_open)
+    chmod_log = AuditLog(tmp_path / "chmod-logs")
+
+    def slow_file_fchmod(fd, mode):
+        result = real_fchmod(fd, mode)
+        if mode == 0o600:
+            time.sleep(0.03)
+        return result
+
+    monkeypatch.setattr(audit_module.os, "fchmod", slow_file_fchmod)
+    with pytest.raises(TimeoutError, match="audit deadline expired"):
+        chmod_log.record("tool", "slow-fchmod", ok=True, duration_ms=1.0,
+                         deadline=time.monotonic() + 0.01)
+    assert next((tmp_path / "chmod-logs").glob("server-*.jsonl")).read_bytes() == b""
 
 
 @pytest.mark.parametrize("slow_phase", ["write", "flush", "close"])
@@ -441,6 +557,30 @@ def test_fdopen_close_failure_does_not_close_reused_foreign_fd(tmp_path, monkeyp
     foreign_path.write_bytes(b"")
     state = {"fd": None}
 
+    def replace_with_foreign(fd):
+        replacement = os.open(foreign_path, os.O_WRONLY | os.O_APPEND)
+        if replacement != fd:
+            os.dup2(replacement, fd)
+            os.close(replacement)
+        state["fd"] = fd
+
+    class ConstructorCloseThenReuse:
+        def __init__(self, fd, mode, encoding):
+            real_fdopen(fd, mode, encoding=encoding).close()
+            replace_with_foreign(fd)
+            raise OSError("injected constructor failure")
+
+    monkeypatch.setattr(audit_module.os, "fdopen", ConstructorCloseThenReuse)
+    log = AuditLog(tmp_path / "logs")
+    with pytest.raises(OSError, match="constructor failure"):
+        log.record("tool", "constructor", ok=True, duration_ms=1.0)
+    assert state["fd"] is not None
+    try:
+        os.write(state["fd"], b"constructor")
+    finally:
+        os.close(state["fd"])
+    state["fd"] = None
+
     class CloseThenReuse:
         def __init__(self, fd, mode, encoding):
             self._fd = fd
@@ -454,17 +594,12 @@ def test_fdopen_close_failure_does_not_close_reused_foreign_fd(tmp_path, monkeyp
 
         def __exit__(self, *_args):
             self._inner.close()
-            replacement = os.open(foreign_path, os.O_WRONLY | os.O_APPEND)
-            if replacement != self._fd:
-                os.dup2(replacement, self._fd)
-                os.close(replacement)
-            state["fd"] = self._fd
+            replace_with_foreign(self._fd)
             raise OSError("injected close failure")
 
     monkeypatch.setattr(audit_module.os, "fdopen", CloseThenReuse)
-    log = AuditLog(tmp_path / "logs")
     with pytest.raises(OSError, match="close failure"):
-        log.record("tool", "request", ok=True, duration_ms=1.0)
+        log.record("tool", "context-exit", ok=True, duration_ms=1.0)
     assert state["fd"] is not None
     try:
         os.write(state["fd"], b"foreign")

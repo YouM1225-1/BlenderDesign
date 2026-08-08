@@ -29,6 +29,9 @@ def test_describe_capabilities_shape():
     assert d["supported_operation_kinds"] == []
     assert d["baseline_blender"] == {"version": "5.2.0", "platform": "macos-arm64"}
     assert d["envelope_version"] == 1
-    assert set(d["supported_tools"]) == {"get_blender_status", "get_scene_summary",
-                                         "describe_capabilities"}
+    expected_tools = ["get_blender_status", "get_scene_summary",
+                      "describe_capabilities"]
+    assert d["supported_tools"] == expected_tools
+    d["supported_tools"].append("mutated")
+    assert describe("0.1.0", connected=[])["supported_tools"] == expected_tools
     assert d["connected_instances"] == []

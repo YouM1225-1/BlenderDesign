@@ -6,7 +6,7 @@ from typing import Any
 from protocol import envelope
 from .versions import BASELINE
 
-SUPPORTED_TOOLS = ["get_blender_status", "get_scene_summary", "describe_capabilities"]
+_SUPPORTED_TOOLS = ("get_blender_status", "get_scene_summary", "describe_capabilities")
 
 
 def describe(server_version: str, connected: list[dict[str, Any]]) -> dict[str, Any]:
@@ -14,7 +14,7 @@ def describe(server_version: str, connected: list[dict[str, Any]]) -> dict[str, 
         "server_version": server_version,
         "envelope_version": envelope.ENVELOPE_VERSION,
         "phase": "phase0",
-        "supported_tools": SUPPORTED_TOOLS,
+        "supported_tools": list(_SUPPORTED_TOOLS),
         "baseline_blender": dict(BASELINE),
         "ir_schema_version": None,
         "supported_operation_kinds": [],
