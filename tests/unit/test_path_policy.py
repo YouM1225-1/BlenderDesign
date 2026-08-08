@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import pytest
 from server.core.path_policy import PathDenied, PathPolicy, same_file
@@ -18,6 +19,8 @@ def test_accepts_inside_root(policy, tmp_path):
 def test_rejects_dotdot_escape(policy, tmp_path):
     with pytest.raises(PathDenied):
         policy.resolve(str(tmp_path / "ws" / ".." / "outside.blend"))
+    with pytest.raises(PathDenied, match="outside allowed roots"):
+        policy.resolve(str(tmp_path / "ws" / ".." / "outside.py"))
 
 
 def test_rejects_symlink_escape(policy, tmp_path):
@@ -55,6 +58,7 @@ def test_same_file_distinguishes_real_different_files(tmp_path):
     a.write_bytes(b"a")
     b.write_bytes(b"b")
     assert not same_file(a, b)
+    assert not same_file(Path("/tmp/evil\0.blend"), b)
 
 
 def test_rejects_embedded_nul_as_path_denied(policy):

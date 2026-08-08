@@ -20,7 +20,7 @@ def same_file(a: Path, b: Path) -> bool:
     """
     try:
         sa, sb = a.stat(), b.stat()
-    except OSError:
+    except (OSError, ValueError):
         return False
     return (sa.st_dev, sa.st_ino) == (sb.st_dev, sb.st_ino)
 
@@ -36,9 +36,11 @@ class PathPolicy:
             path = path.resolve(strict=False)
         except (OSError, ValueError) as error:
             raise PathDenied(f"unresolvable: {raw}") from error
-        if path.suffix.lower() not in self._exts:
-            raise PathDenied(f"extension not allowed: {path.suffix}")
         for root in self._roots:
             if path == root or root in path.parents:
-                return path
-        raise PathDenied(f"outside allowed roots: {path}")
+                break
+        else:
+            raise PathDenied(f"outside allowed roots: {path}")
+        if path.suffix.lower() not in self._exts:
+            raise PathDenied(f"extension not allowed: {path.suffix}")
+        return path
