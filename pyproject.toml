@@ -1,0 +1,47 @@
+[project]
+name = "blender-codex"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = ["mcp>=2.0,<3", "pydantic>=2,<3"]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-timeout>=2.3", "pytest-asyncio>=0.24", "ruff>=0.16,<0.17", "mypy>=1.10"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+timeout = 30
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["protocol", "bridge", "server"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unused_ignores = false
+files = ["protocol", "bridge/core", "server"]
+
+[[tool.mypy.overrides]]
+module = ["bpy", "bpy.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["bridge._vendor.*", "bridge.blender.*"]
+ignore_missing_imports = true
+ignore_errors = true
+follow_imports = "skip"
+
+[project.scripts]
+blender-codex-server = "server.mcp.adapter:main"
