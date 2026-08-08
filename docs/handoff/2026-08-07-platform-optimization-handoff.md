@@ -1,37 +1,36 @@
 # 平台优化交接清单
 
-> **审计冻结提示（r12 前快照）**：本文 §1–§6 是交接方在 Plan SHA `4216c69a…` 时写下的历史快照，不是当前仓库裁决。随后真 Blender 复现发现旧 `SceneReader` 数值索引在大场景近 O(N²)，并修订为 1024 项 slice / 128 项 hash batch；Plan、URS、spec 与证据正在以新 SHA 重新物化。旧的“无需重做”“262 已闭环”和“V-03 可关闭”措辞在新审计报告发布前不得作为审批依据。见 [`handoff 对抗性审计`](../audits/2026-08-07-platform-optimization-handoff-adversarial-audit.md)。
+> **固定时点交接快照（2026-08-07 至 2026-08-08）**：§1–§6 保留 Plan SHA `4216c69a…` 时的 r12 前原始交接，§0.1 与 §5 保留随后 r15/r16 融合和所有者裁决时态；相关证据链由 `e5ac5590f8ab2d2df915771f5266bc549a3b3a4e` 冻结。全文不追踪 r17 等后续修订，旧的 262/307-test、checkbox、Gate 与审批表述均不得当作 live 状态；当前状态统一见 [ROADMAP](../ROADMAP.md)。
 
 > 日期：2026-08-07
 > 交接方：macOS 平台优化实测（本文作者）
 > 接收方：Phase 0 plan / URS / spec 维护方
 > 相关文档：[实测报告](../measurements/2026-08-07-macos-platform-optimization.md) · [融合对抗审计](../audits/2026-08-07-platform-optimization-handoff-adversarial-audit.md) · [收口 v3](../audits/2026-08-07-closeout-v3.md)
 
-> **融合审计当前指针（r15 / URS v1.11 / spec v1.11）**：本文 §1–§6 保留交接时原始待办快照；当前审批依据以 [v8 融合对抗审计](../audits/2026-08-07-platform-optimization-handoff-adversarial-audit.md)、v8 provenance 与 [closeout v3](../audits/2026-08-07-closeout-v3.md) 为准。r15 尚未执行；机械计数为 92 个可执行 checkbox + 1 个无 checkbox 的 G0 preflight，全部未执行/未勾选。官方 26 工具的注册数、最新安全 host 长序列失败与 deferred render 崩溃限定见 v8 审计，不得把宿主注册数写成稳定性证明。
+## 0. 原始一句话交接（历史快照）
 
-> **v8 收口状态（2026-08-08）**：Plan SHA 以 v8 provenance 为准；fresh-tree 门禁 307（275 unit + 32 contract），adapter 35/373 行，background/GUI smoke 通过，100k 只关闭 Bridge-RPC 子门。SDK v2 conversion 准入与 addon class 注册部分失败回滚均有反例测试；D-1/D-2、G5 模型面刷新、官方截图长序列失败与 deferred render 风险仍是用户审批/外部兼容边界，Phase 0 不得启动。
-
-## 0. 一句话交接
-
-四项平台优化中**三项已合入 plan 并全门禁通过**，第四项（blake2b）按用户裁决**撤回**；另有 **5 项待办**、**4 项待实测**、**2 项需你方决策**，逐条列在下面。
+交接当时的统计是：四项平台优化中**三项已合入 plan 并全门禁通过**，第四项（blake2b）按用户裁决**撤回**；另有 **5 项待办**、**4 项待实测**、**2 项需你方决策**。这些数量是原始快照，当前状态见 §0.1 与 [ROADMAP](../ROADMAP.md)。
 
 ## 0.1 融合后的待办裁决（先审计，再执行）
 
 | 项目 | 当前状态 | 是否阻断 Phase 0 |
 |---|---|---|
-| T-1 FR-21 inode / fd-bound 要求 | 已写入 URS v1.11；`same_file` 仍仅查询辅助，Phase 1 写入边界未实现 | 否（Phase 1 前必须保留） |
+| T-1 FR-21 inode / fd-bound 要求 | 已写入当前 URS v1.15；`same_file` 仍仅查询辅助，Phase 1 写入边界未实现 | 否（Phase 1 前必须保留） |
 | T-2 F_FULLFSYNC | 证据方向成立，留作 Phase 1 durability ADR；本轮不进入 Phase 0 | 否 |
 | T-3 APFS clonefile | 适用面/失败语义已核实，留作 Phase 1/2 候选；不替代内存态快照 | 否 |
 | T-4 Cycles Metal | baseline 枚举/选择已复现；真实 render 与 CPU fallback 仍属 Phase 2 | 否（不得误写“完全关闭”） |
-| T-5 manifest / provenance | v5/v6/v7 仅为历史；v8 manifest/provenance 已按最终 r15 Plan prose/code SHA 固定 | **已完成；仍待用户审批** |
+| T-5 manifest / provenance | v5–v8 仅固定历史 r15；r16 proposed 将由 B-5 manifest/审计固定，获批提交后再形成两提交 post-freeze attestation 链 | **B-5 proposed tuple 待批** |
 | M-1 / M-2 / M-3 | blake2b 成因、跨机/跨版、battery 影响均未形成合同；只保留为后续测量 | 否 |
 | M-4 大场景 GUI | v8 真 GUI 100k Bridge-RPC 子路径：20-query P95 `1605.18 ms`（max `2560.86 ms`）、observer P95 `1655.44 ms`、`max_tick=62.50 ms`，结构/计数通过；未覆盖 MCP stdio/adapter/Discovery/schema/audit | Bridge 子门关闭；端到端 NFR-P1 仍开放 |
-| D-1 / D-2 | 三项候选保留在 r13，是否正式接受及提交归属仍等待用户批准 | 不阻断隔离预检；阻断提交/执行 |
-| 新增红队项 | reader 双 1M/64 MiB cap、Bridge/Server 双层 scene-summary=2、SDK conversion admission、延迟 stdout tail、cleanup TOCTOU、addon class 注册回滚均已纳入 r15/v8；官方截图长序列与 deferred render 另有外部可靠性/崩溃风险 | 自研代码门已关闭；官方/G5 与最终 provenance 仍阻断审批 |
+| D-1 | 项目所有者已于 2026-08-08 明确接受全部三项平台候选 | 已关闭 |
+| D-2 | 提交动作已由 `e5ac559` 完成 | 已关闭；不能反推 D-1 已批准 |
+| 新增红队项 | r15/v8 项继续保留；r16 另补 20-ID 映射、三工具 NFR-P1、真 SIGKILL/restart、foreign uid/device/ancestor/FIFO/stale/load_pre 直接反例与 helper deadline/process/audit/provenance 护栏 | G5 以风险接受关闭；仅 B-5 proposed tuple/批准仍阻断 Task 0 |
 
-这张表是 §2–§5 历史清单的融合索引，不把“候选隔离预检通过”写成 Phase 0 已实施，也不替用户做 D-1/D-2 最终批准。
+这张表是 §2–§5 历史清单的 live 融合索引；不把候选隔离预检写成 Phase 0 已实施，也不把 G5 风险接受写成 screenshot/render 缺陷修复。
 
 ## 1. 原始候选合入记录（r12 审计前历史快照，不是当前待验证项）
+
+> 本节所有门禁数字（包括 262 passed）均为 r12 历史值；r15/v8 历史数字见 v8 provenance 与 closeout v3，live r16 只见 §0.1、ROADMAP 与 r16 B-5 审计。
 
 plan SHA-256（合入后）：`4216c69ac6c0e0f803e3fbc1340d7886c9baea782abb40bd6491f24221dcf988`
 合入前基线：`a05bf3dd2456180052e22375917cc4ef8e33a3451d505a4e1090884b660be7bf`（与红队报告的复原基线一致）
@@ -139,6 +138,8 @@ GPU 被正确枚举并启用；这只关闭 Metal 枚举/选择子项。真实 r
 
 **已测**：CPU 开销可忽略（每次唤醒仅取锁看空 deque，约 0.04%）。
 
+**后续复算更正**：原“约 0.04%”缺少持久原始样本；独立 GUI timer 复算为回调 CPU 约 0.022% → 0.096%（约 4.4×）。这仍是低 CPU 数值，但不能证明电池或深度 idle 影响可忽略。
+
 **未测**：对电池续航的实际影响。42.6 次/秒的唤醒会阻止 CPU 进入更深的空闲状态；在插电工作站上无所谓，笔记本长时间挂机场景需要实测（`powermetrics` 采样对比）。
 
 **若发现有影响**：正确解法是迟滞（活动后快、真闲下来慢），但**必须避开我踩过的坑**——见 §4 的 EXT-02。
@@ -158,17 +159,17 @@ GPU 被正确枚举并启用；这只关闭 Metal 枚举/选择子项。真实 r
 | 基于过时快照做批量字符串替换 | 补丁半数落空，plan 被改成不一致状态，被覆盖两次 | **改文件前先取 SHA-256 并在补丁脚本里做前置校验**（本次已这么做，见 §1 的两个 hash） |
 | 把「`hashlib.openssl_sha256` 不存在」推断为「无 OpenSSL 后端」 | 给出了错误的技术归因（EXT-04） | 公开属性名缺失 ≠ 后端缺失，要看 `type(h).__module__` |
 
-## 5. 需你方决策
+## 5. 决策状态
 
-### D-1 合入的三项是否接受
+### D-1 合入的三项是否接受（✅ 2026-08-08 全部接受）
 
-我已合入并全门禁通过，但这**打破了你方冻结基线的逐字节闭环**。若你方倾向维持冻结、另行安排，可以整体回退到 `a05bf3dd…`——三项改动的规格在实测报告 §3.1 / §3.3 / §3.4 里完整保留，随时可重新应用。
+项目所有者已明确接受 `IDLE_INTERVAL=0.02`、`quantize` 直接定长格式化与 `path_policy.same_file()`；不再保留代码回退动作。电量影响仍是非阻断测量，`same_file()` 仍不是 Phase 1 的 TOCTOU 防线。
 
-### D-2 提交策略
+### D-2 提交策略（提交动作已由 `e5ac559` 完成）
 
-当前工作区里**你方的 r11 修改与我的改动混在同一个 plan 文件中，无法分开提交**。`git status` 另有 9 个已修改文件与 5 个未跟踪目录（多为你方的审计产出与 evidence）。
+以下混合工作区说明是提交前历史快照：当时你方 r11 修改与本文作者改动混在同一个 Plan 文件中，无法拆分。
 
-需要你方决定：由谁提交、提交范围、commit message 如何归属。**本文作者未提交任何内容**，HEAD 仍是 `578f49e`。
+本文作者未提交任何内容是原始快照；随后 r15/v8 证据链已由 `e5ac559` 冻结。r16 仍须先批准 proposed tuple，再按 ROADMAP 的 freeze commit → attestation commit 两步执行；本轮未执行该提交动作。
 
 ## 6. 证据位置
 

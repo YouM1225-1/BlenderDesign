@@ -1,8 +1,6 @@
 # Blender × Codex Phase 0 对抗性审计与优化建议
 
-> **SUPERSEDED（2026-08-08）**：本文件是首轮优化建议快照；当前裁决见 [closeout v3](2026-08-07-closeout-v3.md) 与 [r15/v8 融合审计](2026-08-07-platform-optimization-handoff-adversarial-audit.md)。
-
-> **历史快照**：本报告保留首轮审计和优化建议，当前状态以 [2026-08-07-closeout-v2.md](2026-08-07-closeout-v2.md) 为准。
+> **固定时点快照（2026-08-07）**：本报告保留首轮审计与优化建议，不追踪后续规范、Plan 或审批状态，也不再充当当前裁决入口。当前状态统一见 [ROADMAP](../ROADMAP.md)。
 
 > 审计日期：2026-08-07  
 > 审计对象：仓库现有 URS、Phase 0 spec、Phase 0 plan、外部研究报告、Blender Lab 官方 MCP 及相关开源仓库  

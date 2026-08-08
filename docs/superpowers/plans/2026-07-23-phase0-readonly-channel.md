@@ -1,16 +1,16 @@
 # Phase 0 只读端到端链路 · 实施计划
 
-> 修订：**r15**（2026-08-08，v8 全量对抗复审；补齐 Blender 扩展 class 注册部分失败回滚；Phase 0 未执行）
+> 修订：**r17 proposed**（2026-08-08，研究报告三的确定性 catalog 与双内容 result payload 基线修订；Phase 0 未执行；新 proposed tuple 待用户批准）
 
-> **For agentic workers:** 推荐用 superpowers:subagent-driven-development 或 superpowers:executing-plans 按任务执行本计划；**若环境未安装 superpowers 插件，按任务序直接执行并逐 Step 核对即可——插件是加速项，不是前置依赖**（audit F-08）。Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** 推荐用 superpowers:subagent-driven-development 或 superpowers:executing-plans 按任务执行本计划；**若环境未安装 superpowers 插件，按任务序直接执行并逐 Step 核对即可——插件是加速项，不是前置依赖**（audit F-08）。Steps use checkbox (`- [ ]`) syntax as stable step identifiers；逐步进度记录在 executor 的外部 task log，Task 19 再写入 `docs/audits/phase0-validation-report.md`。获批后本文件本身是不可变执行输入，**不得直接勾选或改写 checkbox**，否则 Plan SHA 与 post-freeze attestation 立即失效。
 
-**Goal:** 打通 Codex → MCP Server（stdio）→ UDS → Blender Bridge → 主线程 → 结构化返回的只读链路，交付 `get_blender_status` / `get_scene_summary` / `describe_capabilities` 三个工具，满足 URS §10.1 八条验收。
+**Goal:** 打通 Codex → MCP Server（stdio）→ UDS → Blender Bridge → 主线程 → 结构化返回的只读链路，交付 `get_blender_status` / `get_scene_summary` / `describe_capabilities` 三个工具，满足 URS §10.1 的 20 项验收与三工具端到端 NFR-P1 正式门。
 
 **Architecture:** 内核/适配分层（spec P0-D3）：`protocol/` 为两侧共用的线格式单一真相源（vendoring 进 Bridge）；`bridge/core/` 与 `server/core/` 零外部依赖、纯 stdlib，bpy 与 MCP SDK 各自隔离在薄适配层。Bridge 侧单 I/O 线程 select 多路复用 + 主线程 timer tick；Server 侧无状态短命进程。
 
 **Tech Stack:** Python 3.13（Blender 5.2.0 内置 3.13.13，SPIKE-2 实测）· **`mcp>=2.0,<3`（`MCPServer`）** · uv · pytest + pytest-timeout · ruff（target py313）· mypy strict（core）
 
-**上游文档：** spec = `docs/superpowers/specs/2026-07-23-phase0-readonly-channel-design.md`（v1.11，引用记为 §N）；URS = `Blender-Codex-需求规格说明书-v1.md`（v1.11）。本 Plan 仍是交付目标；Phase 0 未执行。
+**上游文档：** spec = `docs/superpowers/specs/2026-07-23-phase0-readonly-channel-design.md`（v1.16，引用记为 §N）；URS = `Blender-Codex-需求规格说明书-v1.md`（v1.16）。本 Plan 仍是交付目标；Phase 0 未执行。
 
 ## Global Constraints
 
@@ -23,13 +23,16 @@
 - 帧上限 **16 MiB，读写两端同限**（§3.2）；帧格式 = 4 字节大端 uint32 长度 + UTF-8 JSON
 - 权限边界从 `BLENDERCODEX_ROOT` 开始：runtime/run/logs race-safe create-or-validate 为当前 uid、非 symlink、精确 `0700`，否则 fail-closed；边界外既存祖先不改。会话叶目录 exclusive `mkdir(0700)`；session/audit 文件 `0600`；socket bind 后立即 chmod `0600`（§2.2）
 - `session.json` 必须记录 socket 与父目录四个 dev/inode identity 字段；部分或全部缺失均不得 probe。Discovery 跨调用复用 scandir cursor 前必须重新 fstat 当前 run 与 cursor fd，换入、fd 关闭或 identity 不符即清空 cursor/backlog 并标记 partial
-- 平台候选实现（本机预检依据见 `docs/measurements/2026-08-07-macos-platform-optimization.md`）：`quantize` 直接定长格式化并归一负零；`IDLE_INTERVAL = 0.02`；SceneReader 以有界 collection slice 物化纯 Python 后再 yield。`same_file` 仅为非安全查询辅助，Phase 1 写入红线必须使用 fd-bound、`O_NOFOLLOW` 与 identity revalidation，不能把路径查询当作 TOCTOU 防线。**`scene_hash` 保持 SHA-256**——blake2b 的加速可复现但成因未明，未纳入合同
+- 平台候选实现（本机预检依据见 `docs/measurements/2026-08-07-macos-platform-optimization.md`）：`quantize` 直接定长格式化并归一负零；`IDLE_INTERVAL = 0.02`；SceneReader 以有界 collection slice 物化纯 Python 后再 yield。`same_file` 仅为非安全查询辅助，Phase 1 写入红线必须使用 fd-bound、`O_NOFOLLOW` 与 identity revalidation，不能把路径查询当作 TOCTOU 防线。**`scene_hash` 保持 SHA-256**——blake2b 的加速可复现但成因未明，未纳入合同。项目所有者已于 2026-08-08 正式接受前三项平台候选；不再保留代码回退动作，`IDLE_INTERVAL` 电量影响仍作为非阻断 E-3 测量
 - SceneReader 单次请求的 object/collection 各自最多 `1_000_000` 项、各自最多 64 MiB 文本；超限必须在物化前返回 `INTERNAL_LIMIT_EXCEEDED`，不得静默截断。Bridge 每实例 `scene_summary` 的 queued + active continuation 合计最多 2 个，Server adapter 的进程级准入同为 2，并由 SDK v2 middleware 包住完整 `call_next`（含结果转换与 audit postlude）；第三个 wire 请求 fail-fast 为 retryable `BRIDGE_BUSY`，不得在 async 事件循环中阻塞等待
 - stdout verifier 在目标响应后仍执行有界 tail-drain，并以 quiet timeout/EOF settle 判定延迟污染；单行、累计缓冲、事件与消息均有独立上限。所有 cleanup 在每个破坏 syscall 前重验 identity；POSIX 无可移植 compare-and-unlink/rmdir，最后一次检查后的同 UID 主动换入仍是明确威胁模型边界
+- 正式 E2E 每次 invocation 使用 fresh `0700` registry 与 128-bit marker；parent 必须在 spawn 前发布 identity-bound `0600` reservation，独立子进程先运行纯 stdlib `process_registry.py` bootstrap，在加载 MCP/Blender 重依赖前写完整 pid/pgid/marker/monotonic/dev/inode record，再 finish reservation；参数构造、SDK enter/`Popen` 在发布前失败时由 parent 按 dev/inode 清理 reservation。observer 只读且容忍 owner retire/publication rename 的单 entry 消失；已验证 cache 总量严格 ≤8，但 8 不是目录 entry cap，formal scan 由 shared absolute deadline 限界。unknown/坏 entry 记首错后继续扫，第 9 条及后续有效 overflow 均须 identity-rechecked KILL，不能遗忘其他可信组。leader 退出不等于 group 消失；PID 已复用到不同 PGID、marker/时间窗/identity 不符均 fail-closed 且不得误 signal。NFR 使用 165 s work / 从 helper spawn 起 180 s runner outer deadline；recovery 使用 non-raising signal flag 的 public 135 s supervisor / hidden 120 s worker，public work 期持续观察并为 registry cleanup 保留 5 s，取消、late poll、leader-exit child 与截止点 final KILL 均走同一 cleanup 窗口。旧 group 全消失后同数值 PID+PGID 被完整复用及最后一次 liveness check 后的同 UID 主动换入仍是 POSIX 边界
+- 正式 provenance 必须先证 clean Git，再以有 stdout byte cap 的 `git ls-files -z` 枚举至多 512 个 tracked 源；所有 required 输入必须确为 tracked，ignored vendor 只准 exact 目录/文件集合且逐文件与 `protocol/` 同 hash（单文件 16 MiB、合计 128 MiB）。Plan/URS/spec/ROADMAP 的 live/approved/source-blob SHA、exact-type 结构与最终门禁计数逐项全等。60 个 validated-result canonical preimage 每项 ≤256 KiB、跨三工具合计 ≤16 MiB、artifact ≤32 MiB；audit 使用 no-follow regular 文件/文件数/单文件/总量/单行/行数与 shared deadline 上限。外部验证器重做模型/语义/canonical digest/P95/max/代表结果；helper 自报布尔或 64-hex 外形不算证据
 - 所有时间比较用 `time.monotonic()`，不用墙钟（§3.6）
 - Server 的 runtime 根目录从环境变量 **`BLENDERCODEX_ROOT`** 读取，默认 `~/Library/Application Support/BlenderCodex`（§7.2）
 - 基线常量：Blender **5.2.0** / `macos-arm64`（§8.3）；`ENVELOPE_VERSION = 1`
 - stdio 模式下 stdout 只准 JSON-RPC，日志一律 stderr 或文件（URS NFR-O1）
+- 同一 Server 版本与 capability profile 下，`tools/list` 的名称、完整定义与顺序必须确定；固定顺序为 `get_blender_status` → `get_scene_summary` → `describe_capabilities`。不得按回合、实例状态或调用历史动态改 catalog；易变能力只经工具结果表达。`instructions`、ordered catalog/schema 与每次兼容 TextContent/`structuredContent` 的 UTF-8/canonical 字节、SHA 与 JSON 等价性进入 Task 17/18 可复算基线，但 byte 不冒充 token，也不在没有同任务 A/B 前设经验阈值
 - commit 署名 trailer 由**实际执行代理**按其自身环境规范追加；计划不硬编码任何代理署名（audit F-08——硬编码会造成虚假来源标记），示例 commit 块故意不含 trailer
 - 本机工具路径统一使用 **`/Users/yeminjie/.local/bin/uv`**（当前非交互 PATH 不含该目录）；不得假设裸 `uv` 可解析
 - 测试命令统一 `/Users/yeminjie/.local/bin/uv run --frozen pytest`；提交前该任务的全部测试必须绿
@@ -44,13 +47,17 @@
 | G2 | MCP SDK 路线与协议证据 | ✅ **采用 SDK v2.0.0**：隔离实现精确通过当前 Codex `2025-06-18`、legacy `2025-11-25` 与 SDK 直连 `2026-07-28` 三条合同。Codex 0.147.0 默认和打开 `mcp_2026_07_28` 均实测协商 `2025-06-18`，故 feature flag 不作为 2026 wire 证据。**无存量代码，不制造迁移债务**；原 Phase 1.5 的「SDK 升级」条目撤销 |
 | G3 | scene_hash 语义 | ✅ v8 隔离预检关闭：L1 字段结构 + fresh-tree 真 Blender GUI `hash_scope=true`，SceneReader 混合计数/字段与跨-yield wrapper-free 由独立 L1/background fixture 证明；仍不是 Phase 0 实施证据 |
 | G4 | 总 deadline / 发现健壮性 | ✅ v8 隔离预检关闭：慢 `scandir`、FIFO、identity/cursor/run 换入、缺字段 JSON、discovery lock、失效通知并发、单一 status deadline、半行/超长/洪泛 stdout、SDK conversion admission 与 addon 注册回滚反例进入 **307-test（275 unit + 32 contract）** 门禁 |
-| G5 | 官方 MCP 本机并存与完整目录 | ⚠️ 宿主 effective config 与注册目录为 **26/26**；历史非-render host 24/24 记录不等于当前稳定性证明，最新 24 项长序列在第 15 项 `get_screenshot_of_area_as_image` 出现截断 JSON（单独重试成功）。官方 deferred render 连续序列另已复现 Blender 5.2 `SIGABRT`，因此不能宣称 26 项稳定无问题。**当前回合模型工具面仍 10/26**，需重启/新任务后确认 26；官方截图/render 风险与自研 G1–G3 分开计，不得隐藏。详见 `docs/audits/evidence/2026-08-08-official-blender-mcp-v2.json` |
+| G5 | 官方 MCP 本机并存与完整目录 | ✅ **由项目所有者风险接受关闭，不是稳定性修复**：重启后当前模型面与宿主目录均为 26/26；截图置后的有界摘要 transcript 为 24 个非-render `ok`、审批事件 0，但严格中段截图序列仍复现截断 JSON，两个 deferred render 未重跑且既有 Blender 5.2 `SIGABRT` 证据仍成立。项目所有者于 2026-08-08 选择“当前用户接受风险”，完整 26 工具/无审批保持不变；官方风险与自研 G1–G3 分开计。A-4 artifact 只有逐调用摘要/SHA，不含 raw payload、不可重放 |
 
 **计划代码块预检（不是 Plan 执行）**：r12 的 **262 passed（L1/unit 235 + L2/contract 27）** 仅是历史快照；r13 最终门禁计数以 v6 provenance 为准。真 GUI 100k shared-mesh 连续 20 次 `BridgeClient → UDS → Bridge` 查询的 worker-side nearest-rank P95 为约 **1439.21 ms**（max 约 2071.10 ms），`max_tick≈62.12 ms`，只关闭 M-4 的真 GUI Bridge-RPC/continuation 子门；该 runner 未经过 MCP stdio、SDK middleware、Discovery、Pydantic output validation 与 audit postlude，不能单独关闭端到端 NFR-P1。v6 manifest/provenance 与原始 GUI artifact 以最终 Plan SHA 单独固定；47 个 Python fences 中只有 46 个带 path 的文件块。50 ms 仍仅是 cooperative checking budget，不外推为硬墙钟保证。机械计数为 **92 个可执行 Markdown checkbox + 1 个不带 checkbox 的 G0 preflight**，全部未执行/未勾选；原报告的 raw token=93 包含文首 checkbox 语法示例，不能再称“93 个 Step”。
 
-> **r13/v6 数字说明（历史）**：紧接上一段保留为不可改写的旧快照；当前审批只认 v8 证据，不认其 262/280 或 1439.21 ms 数字。
+> **历史数字说明**：紧接上一段只保留不可改写的旧快照；v8 固定历史 r15，r16 tuple 虽于 2026-08-08 获所有者批准，但在 source commit / attestation 前被本轮研究融合主动 supersede。当前审批只能认最终 r17 对抗审计与新 proposed tuple，不能沿用 r16 或更早的计数/SHA。
 
-**v8 当前预检（不是 Plan 执行）**：最终 Plan prose/code SHA 以 provenance 为锚点；fresh-tree 门禁为 **307 passed（L1/unit 275 + L2/contract 32）**，adapter 专项 35、实质代码 373 行，ruff/mypy/vendor/nested/`uv lock --check` 全绿。100k shared-mesh 真 GUI Bridge-RPC 20-query worker P95 **1605.18 ms**（max **2560.86 ms**）、observer P95 **1655.44 ms**、`max_tick=62.50 ms`；只关闭 Bridge 子门，不代表端到端 MCP NFR-P1。机械计数仍为 **92 个可执行 checkbox + 1 个无 checkbox 的 G0 preflight，全部未执行/未勾选**。
+**v8 历史预检（不是 Plan 执行）**：r15 Plan prose/code SHA 以 v8 provenance 为锚点；fresh-tree 门禁为 **307 passed（L1/unit 275 + L2/contract 32）**，adapter 专项 35、实质代码 373 行，ruff/mypy/vendor/nested/`uv lock --check` 全绿。100k shared-mesh 真 GUI Bridge-RPC 20-query worker P95 **1605.18 ms**（max **2560.86 ms**）、observer P95 **1655.44 ms**、`max_tick=62.50 ms`；只关闭 Bridge 子门，不代表端到端 MCP NFR-P1。机械计数为 **92 个可执行 checkbox + 1 个无 checkbox 的 G0 preflight，全部未执行/未勾选**。
+
+**r16 proposed 隔离预检（历史，未执行 Plan）**：从当时 Plan 的 49 个 path-bound Python 块与 8 个显式空 `__init__.py` 新建独立树，标准 unit **336 passed**、contract 32、全套 **368 passed**、adapter 35/373 行、Task 18 helper 53；manifest SHA-256 为 `ed50f6f1dda32b2723d27f9d0f0d5a86eb27d8711690b3ec7d2f3a5a7f1d0f12`。其完整 tuple 后来获所有者批准，但尚未形成 source commit 或 attestation 即被 r17 研究融合取代；不得作为当前执行输入。
+
+**r17 proposed 隔离预检（当前候选，未执行 Plan）**：从当前 Plan 的 49 个 path-bound Python 块与 8 个显式空 `__init__.py` 新建独立 Git 树，并只在临时树构造 source/attestation 两提交 fixture。标准 unit **337 passed**、contract **32 passed**、全套 **369 passed**；adapter **35/373** 行、Task 18 helper **54 passed**，`scripts/checks.sh` 明确输出 `ALL CHECKS PASSED`，ruff/mypy/compileall/`uv lock --check`/vendor/nested import 全绿。结构为 20 Tasks、93 open/0 checked、50 Python fences、49 path-bound/49 unique；manifest SHA-256 为 `49867d461307b7273077359062896705019d5c5e2bc2ef258ac386919b46cb80`。本轮未运行 Blender background/GUI/render、正式 NFR/recovery 或任何 Plan Task；临时 attestation 仅使 provenance 单测具备完整 fixture，不得复制为正式证据。
 
 ## File Structure
 
@@ -96,7 +103,7 @@ server/
     __init__.py              空
     adapter.py               MCPServer 三工具 + 严格参数 middleware（Task 12；实质代码 ≤375 行；v8 隔离实现 373 行）
 tests/
-  unit/                      L1（各任务内）
+  unit/                      L1（各任务内；Task 18 另含 test_e2e.py）
   contract/
     fake_bridge.py           真 core + FakeSceneReader + 线程 driver（Task 15）
     test_roundtrip.py        基础往返（Task 15）
@@ -107,6 +114,8 @@ scripts/
   checks.sh                  全部 CI 检查（Task 14）
 smoke/
   runner.py                  L3 冒烟（Task 18）
+  e2e.py                     三工具 NFR-P1 + 真 SIGKILL/restart helper（Task 18）
+  process_registry.py        E2E 私有进程记录、进程组存活与清理护栏（Task 18）
 docs/
   install.md                 codex mcp add 安装文档（Task 19）
 ```
@@ -127,12 +136,76 @@ docs/
 
 **Step 1（核对项，不计入执行复选框）：确认 Git 基线（仓库已初始化，本步只做核对）**
 
-> G0 已关闭：`git log --oneline` 应看到 `f81ee3c`（基线）与 `578f49e`（审计）。**不要再执行 `git init`**；若 `git rev-parse --show-toplevel` 指向别处，停下询问。
+> G0 已关闭：历史中应保留 `f81ee3c`（基线）、`578f49e`（v8 capture）与 `e5ac559`（post-capture anchor）。r17 采用明确两提交链：先提交获批文档形成 `source_commit`，再从该 commit 的 Plan blob 生成 attestation 并另行提交；实际执行 HEAD 必须是 attestation commit 的后代，不要求等于前一个 freeze commit。**不要再执行 `git init`**；若仓库根、commit/blob、完整 approved tuple 或祖先关系不匹配，停下重审。
 
 ```bash
 cd /Users/yeminjie/Documents/BlenderDesign
 git log --oneline | head -3
 git rev-parse --show-toplevel
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+test -f docs/audits/evidence/2026-08-08-r17-post-freeze-attestation.json
+python3 - <<'PY'
+import hashlib, json, re, subprocess
+from pathlib import Path
+
+documents = {
+    "plan": Path("docs/superpowers/plans/2026-07-23-phase0-readonly-channel.md"),
+    "urs": Path("Blender-Codex-需求规格说明书-v1.md"),
+    "spec": Path("docs/superpowers/specs/2026-07-23-phase0-readonly-channel-design.md"),
+    "roadmap": Path("docs/ROADMAP.md"),
+}
+plan = documents["plan"]
+attestation_path = Path(
+    "docs/audits/evidence/2026-08-08-r17-post-freeze-attestation.json")
+attestation = json.loads(attestation_path.read_text())
+assert type(attestation) is dict and set(attestation) == {
+    "schema_version", "generated_at", "source_commit", "approved_tuple"}
+assert (type(attestation["schema_version"]) is int
+        and attestation["schema_version"] == 1)
+assert type(attestation["generated_at"]) is str
+approved = attestation["approved_tuple"]
+text = plan.read_text()
+paths = re.findall(r"(?m)^```python\n# ([^\n]+\.py)$", text)
+actual = {
+    **{
+        f"{name}_sha256": hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in documents.items()
+    },
+    "tasks": len(re.findall(r"(?m)^### Task [0-9]+:", text)),
+    "open_checkboxes": len(re.findall(r"(?m)^- \[ \]", text)),
+    "checked_checkboxes": len(re.findall(r"(?m)^- \[[xX]\]", text)),
+    "python_fences": len(re.findall(r"(?m)^```python$", text)),
+    "path_bound_python": len(paths),
+    "unique_path_bound_python": len(set(paths)),
+    "unit_tests": 337,
+    "contract_tests": 32,
+    "full_tests": 369,
+    "adapter_tests": 35,
+    "adapter_substantive_lines": 373,
+}
+assert type(approved) is dict and set(approved) == set(actual), (approved, actual)
+assert all(type(approved[key]) is type(value) and approved[key] == value
+           for key, value in actual.items()), (approved, actual)
+source = attestation["source_commit"]
+assert type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source)
+for name, path in documents.items():
+    blob = subprocess.run(
+        ["git", "show", f"{source}:{path}"], check=True,
+        stdout=subprocess.PIPE).stdout
+    assert hashlib.sha256(blob).hexdigest() == actual[f"{name}_sha256"]
+subprocess.run(["git", "merge-base", "--is-ancestor", source, "HEAD"], check=True)
+tracked = subprocess.run(
+    ["git", "ls-files", "--error-unmatch", str(attestation_path)],
+    check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+attestation_commit = subprocess.run(
+    ["git", "log", "-1", "--format=%H", "--", tracked],
+    check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+assert source != attestation_commit
+subprocess.run(
+    ["git", "merge-base", "--is-ancestor", source, attestation_commit], check=True)
+subprocess.run(
+    ["git", "merge-base", "--is-ancestor", attestation_commit, "HEAD"], check=True)
+PY
 grep -q 'bridge/_vendor/' .gitignore || echo 'bridge/_vendor/' >> .gitignore
 ```
 
@@ -1416,7 +1489,7 @@ class TaskQueue:
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `/Users/yeminjie/.local/bin/uv run --frozen pytest tests/unit/test_queue.py -q` → 21 passed（v7；旧 15 为历史）
+Run: `/Users/yeminjie/.local/bin/uv run --frozen pytest tests/unit/test_queue.py -q` → 21 passed（r16 未改该文件；旧 15 为历史）
 
 - [ ] **Step 5: Commit**
 
@@ -2064,6 +2137,32 @@ def test_start_rejects_wide_runtime_root_without_chmod(tmp_path):
     assert stat.S_IMODE(root.stat().st_mode) == 0o755
 
 
+def test_start_rejects_runtime_root_owned_by_other_uid(tmp_path, monkeypatch):
+    import bridge.core.lifecycle as lifecycle
+
+    root = tmp_path / "foreign-runtime"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    foreign_uid = os.geteuid() + 1
+    monkeypatch.setattr(lifecycle.os, "geteuid", lambda: foreign_uid)
+
+    with pytest.raises(PermissionError, match="private directory"):
+        BridgeSession.start(root, FakeReader(), blender_version="5.2.0")
+
+
+def test_start_preserves_permissions_above_runtime_root(tmp_path):
+    ancestor = tmp_path / "shared-ancestor"
+    ancestor.mkdir(mode=0o755)
+    ancestor.chmod(0o755)
+    session = BridgeSession.start(
+        ancestor / "runtime", FakeReader(), blender_version="5.2.0")
+    try:
+        assert stat.S_IMODE(ancestor.stat().st_mode) == 0o755
+        assert stat.S_IMODE((ancestor / "runtime").stat().st_mode) == 0o700
+    finally:
+        session.stop()
+
+
 def test_start_rejects_symlink_runtime_root(tmp_path):
     target = tmp_path / "target"
     target.mkdir(mode=0o700)
@@ -2637,6 +2736,38 @@ def test_failed_start_leaves_no_artifacts(tmp_path, monkeypatch):
     assert list((tmp_path / "run").iterdir()) == []
     # 不用 active_count()：全套运行时其他用例的守护线程会造成假阳性——按名断言
     assert not any(t.name == "bcx-io" and t.is_alive() for t in threading.enumerate())
+
+
+def test_socket_is_0600_before_listen_and_session_publish(tmp_path, monkeypatch):
+    import bridge.core.lifecycle as lc
+
+    real_socket = lc.socket.socket
+    real_publish = lc.write_session_file
+    events = []
+
+    class OrderingSocket(real_socket):
+        def listen(self, backlog):
+            socket_path = Path(self.getsockname())
+            assert stat.S_IMODE(socket_path.stat().st_mode) == 0o600
+            assert not (socket_path.parent / "session.json").exists()
+            events.append("listen")
+            return super().listen(backlog)
+
+    def checked_publish(path, data, *, dir_fd=None):
+        assert events == ["listen"]
+        assert stat.S_IMODE(Path(data["socket_path"]).stat().st_mode) == 0o600
+        assert any(t.name == "bcx-io" and t.is_alive()
+                   for t in threading.enumerate())
+        events.append("publish")
+        return real_publish(path, data, dir_fd=dir_fd)
+
+    monkeypatch.setattr(lc.socket, "socket", OrderingSocket)
+    monkeypatch.setattr(lc, "write_session_file", checked_publish)
+    session = BridgeSession.start(tmp_path, FakeReader(), blender_version="5.2.0")
+    try:
+        assert events == ["listen", "publish"]
+    finally:
+        session.stop()
 
 
 def test_failed_listen_closes_listener_and_leaves_no_published_artifacts(
@@ -3533,7 +3664,7 @@ class BridgeSession:
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `/Users/yeminjie/.local/bin/uv run --frozen pytest tests/unit/test_lifecycle.py -q` → 38 passed（v7）
+Run: `/Users/yeminjie/.local/bin/uv run --frozen pytest tests/unit/test_lifecycle.py -q` → 41 passed（r16）
 （若 `test_half_header...` 偶发超时：检查 select 集合是否含已建立连接——那正是 §3.7 规则 1 要抓的缺陷）
 
 - [ ] **Step 5: Commit**
@@ -3936,6 +4067,27 @@ def test_rejects_wide_runtime_root_without_chmod(tmp_path):
     assert stat.S_IMODE(root.stat().st_mode) == 0o755
 
 
+def test_rejects_logs_directory_owned_by_other_uid(tmp_path, monkeypatch):
+    logs = tmp_path / "runtime" / "logs"
+    logs.mkdir(parents=True, mode=0o700)
+    logs.parent.chmod(0o700)
+    logs.chmod(0o700)
+    real_lstat = Path.lstat
+    foreign_uid = os.geteuid() + 1
+
+    def foreign_logs_lstat(path):
+        result = real_lstat(path)
+        if path == logs:
+            values = list(result)
+            values[4] = foreign_uid
+            return os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(Path, "lstat", foreign_logs_lstat)
+    with pytest.raises(PermissionError, match="private directory"):
+        AuditLog(logs)
+
+
 def test_rejects_preexisting_wide_audit_file(tmp_path):
     log = AuditLog(tmp_path / "logs")
     now = datetime.datetime.now(datetime.UTC)
@@ -3953,8 +4105,33 @@ def test_fifo_audit_file_never_blocks(tmp_path):
     now = datetime.datetime.now(datetime.UTC)
     path = tmp_path / "logs" / f"server-{now:%Y-%m-%d}.jsonl"
     os.mkfifo(path, mode=0o600)
+    started = time.monotonic()
     with pytest.raises(PermissionError, match="private audit file"):
         log.record("tool", "request", ok=True, duration_ms=1.0)
+    assert time.monotonic() - started < 0.5
+
+
+def test_device_audit_fd_is_rejected_before_write(tmp_path, monkeypatch):
+    import server.core.audit as audit_module
+
+    log = AuditLog(tmp_path / "logs")
+    now = datetime.datetime.now(datetime.UTC)
+    path = tmp_path / "logs" / f"server-{now:%Y-%m-%d}.jsonl"
+    path.write_text("foreign\n")
+    path.chmod(0o600)
+    real_open = audit_module.os.open
+
+    def swap_open_to_device(name, flags, mode=0o777, *, dir_fd=None):
+        if (name == path.name and dir_fd is not None
+                and not flags & os.O_EXCL):
+            return real_open("/dev/null", os.O_WRONLY | os.O_NONBLOCK)
+        return real_open(name, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(audit_module.os, "open", swap_open_to_device)
+    monkeypatch.setattr(audit_module.fcntl, "flock", lambda _fd, _flags: None)
+    with pytest.raises(PermissionError, match="private audit file"):
+        log.record("tool", "request", ok=True, duration_ms=1.0)
+    assert path.read_text() == "foreign\n"
 
 
 def test_symlink_audit_file_is_preserved(tmp_path):
@@ -4679,7 +4856,7 @@ def describe(server_version: str, connected: list[dict[str, Any]]) -> dict[str, 
     }
 ```
 
-- [ ] **Step 4: 跑测试确认通过** → 24 passed（audit 20 + versions 4；v8）
+- [ ] **Step 4: 跑测试确认通过** → 26 passed（audit 22 + versions 4；r16）
 
 - [ ] **Step 5: Commit**
 
@@ -5226,6 +5403,30 @@ def test_rejects_preexisting_wide_run_without_chmod(tmp_path):
     assert (run.stat().st_mode & 0o777) == 0o755
 
 
+def test_rejects_run_directory_owned_by_other_uid(tmp_path, monkeypatch):
+    import server.core.discovery as disc_mod
+
+    tmp_path.chmod(0o700)
+    run = tmp_path / "run"
+    run.mkdir(mode=0o700)
+    run.chmod(0o700)
+    real_stat = disc_mod.os.stat
+    foreign_uid = os.geteuid() + 1
+
+    def foreign_run_stat(name, *args, **kwargs):
+        result = real_stat(name, *args, **kwargs)
+        if name == run.name and kwargs.get("dir_fd") is not None:
+            values = list(result)
+            values[4] = foreign_uid
+            return os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(disc_mod.os, "stat", foreign_run_stat)
+    with pytest.raises(PermissionError, match="private directory"):
+        Discovery(run)
+    assert real_stat(run).st_mode & 0o777 == 0o700
+
+
 def test_replaced_run_path_is_not_scanned(tmp_path):
     run = _make_run(tmp_path)
     discovery = Discovery(run)
@@ -5549,6 +5750,22 @@ def test_expired_cleanup_deadline_preserves_evidence(tmp_path):
     assert Discovery._remove_session_dir(
         directory, (st.st_dev, st.st_ino), time.monotonic() - 1.0) is False
     assert (directory / "session.json").exists()
+
+
+def test_expired_cleanup_is_retried_by_a_later_scan(tmp_path):
+    run = _make_run(tmp_path)
+    directory = _make_session_dir(run, "gui-1-deadbeef")
+    session_file = directory / "session.json"
+    _write_private(session_file, "{}")
+    identity = directory.stat().st_dev, directory.stat().st_ino
+    assert Discovery._remove_session_dir(
+        directory, identity, time.monotonic() - 1.0) is False
+    assert session_file.exists()
+
+    old = time.time() - 120
+    os.utime(directory, (old, old))
+    assert Discovery(run).instances(force=True) == []
+    assert not directory.exists()
 
 
 def test_cleanup_rechecks_deadline_after_child_stat(tmp_path, monkeypatch):
@@ -7398,7 +7615,7 @@ class Discovery:
                         version_warning=warning, client=client)
 ```
 
-- [ ] **Step 4: 跑测试确认通过** → 当前 v8 物化树 **58 passed**（Discovery；旧 54 为历史）
+- [ ] **Step 4: 跑测试确认通过** → 当前 r16 物化树 **60 passed**（Discovery；旧 54/58 为历史）
 
 - [ ] **Step 5: Commit**
 
@@ -8300,7 +8517,7 @@ async def _audit_and_validate_tool_call(
             _ACTIVE_DEADLINE.reset(deadline_token)
 
 
-mcp = MCPServer("blender-codex", instructions=INSTRUCTIONS,
+mcp = MCPServer("blender-codex", version=SERVER_VERSION, instructions=INSTRUCTIONS,
                 middleware=[_audit_and_validate_tool_call])
 _deps_cache: tuple[Discovery, AuditLog] | None = None
 
@@ -8619,7 +8836,7 @@ if __name__ == "__main__":
 
 `pyproject.toml` 不在本任务追加内容；执行者只核对 Task 0 的既有 console entry point。若缺失，应回到 Task 0 修正单一 `[project.scripts]` 表，不能在此重复定义。
 
-- [ ] **Step 5: 跑测试确认通过** → frozen 环境下 `pytest tests/unit/test_adapter.py -q` 为 **35 passed**，v8 全量物化树 `pytest tests/unit/ -q` 为 **275 passed**、全套为 **307 passed（unit 275 + contract 32）**；`awk 'NF && $1 !~ /^#/ {n++} END{exit n>375}' server/mcp/adapter.py`（实质代码 ≤ 375 行；v8 隔离实现 373 行）
+- [ ] **Step 5: 跑测试确认通过** → frozen 环境下 `pytest tests/unit/test_adapter.py -q` 为 **35 passed**，r17 全量物化树 `pytest tests/unit/ -q` 为 **337 passed**、全套为 **369 passed（unit 337 + contract 32）**；`awk 'NF && $1 !~ /^#/ {n++} END{exit n>375}' server/mcp/adapter.py`（实质代码 ≤ 375 行；r17 隔离实现 373 行）
 
 - [ ] **Step 6: Commit**
 
@@ -9131,7 +9348,7 @@ def test_snapshot_reader_caps_collection_items_and_skips_unrequested_source(monk
 ```
 
 Run: `/Users/yeminjie/.local/bin/uv run --frozen pytest tests/unit/test_scene_reader.py -q`
-Expected: `8 passed`（v8；混合对象计数与精确 RNA 类型、每次 yield wrapper-free、generation/scene-info 竞态失效、分块 hash、源端裁剪与 reader 工作集上限成立）。
+Expected: `8 passed`（r16 未改该文件；混合对象计数与精确 RNA 类型、每次 yield wrapper-free、generation/scene-info 竞态失效、分块 hash、源端裁剪与 reader 工作集上限成立）。
 
 - [ ] **Step 2: 写 driver 注册回滚与停机接线反例**
 
@@ -9244,6 +9461,21 @@ def test_driver_wires_load_invalidation_and_ordered_stop_hooks():
     assert "session.stop(_unregister_timer, _unregister_handlers)" in source
     assert 'else {"CANCELLED"}' in panel_source
     assert "清理未完成，点击重试" in panel_source
+
+
+def test_registered_load_pre_handler_bumps_the_live_generation(monkeypatch):
+    driver, _depsgraph, load_pre, _timers, _session = _load_driver(
+        monkeypatch, "none")
+    driver.start()
+    counter = driver._state["counter"]
+    assert counter is not None
+    before = counter.generation
+
+    assert load_pre == [driver._on_load_pre]
+    load_pre[0](None)
+
+    assert counter.generation == before + 1
+    driver._state.update(session=None, counter=None)
 
 
 def _load_addon(monkeypatch, classes, stop, register_class, unregister_class):
@@ -9636,7 +9868,7 @@ def session() -> BridgeSession | None:
 ```
 
 Run: `/Users/yeminjie/.local/bin/uv run --frozen pytest tests/unit/test_driver.py -q`
-Expected: `14 passed`（v8；handler/timer/class 注册失败均完整回滚，不留 zombie session，不重复已有 hooks，cleanup 未完成时保留状态并可重试）。
+Expected: `15 passed`（r16；handler/timer/class 注册失败均完整回滚，不留 zombie session，不重复已有 hooks，cleanup 未完成时保留状态并可重试）。
 
 - [ ] **Step 4: 实现 panel.py 与两个 `__init__.py`**
 
@@ -9904,6 +10136,16 @@ platforms = ["macos-arm64"]
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+export PYTHONDONTWRITEBYTECODE=1
+
+find protocol bridge server smoke scripts tests -type d -name __pycache__ \
+  -prune -exec rm -rf '{}' +
+find protocol bridge server smoke scripts tests -type f \
+  \( -name '*.pyc' -o -name '*.pyo' \) -delete
+test -z "$(find protocol bridge server smoke scripts tests \
+  -name __pycache__ -print -quit)"
+test -z "$(find protocol bridge server smoke scripts tests -type f \
+  \( -name '*.pyc' -o -name '*.pyo' \) -print -quit)"
 
 # preflight（audit F-07/F-13）：当前非交互 PATH 不含 ~/.local/bin，使用已核实绝对路径
 UV_BIN=/Users/yeminjie/.local/bin/uv
@@ -10401,6 +10643,7 @@ git commit -m "test(L2): 大载荷、超限降级、并发、权限位、无 tok
 """
 import hashlib
 import json
+import math
 import os
 import selectors
 import subprocess
@@ -10420,6 +10663,17 @@ MAX_STDOUT_MESSAGES = 1024
 MAX_STDOUT_BACKLOG_BYTES = 32 * 1024 * 1024
 MAX_DIAGNOSTIC_LINES = 32
 MAX_DIAGNOSTIC_LINE_BYTES = 1024
+ORDERED_TOOLS = [
+    "get_blender_status", "get_scene_summary", "describe_capabilities",
+]
+FROZEN_CATALOG_BYTES = 6389
+FROZEN_CATALOG_SHA256 = "b2a833a9415363be1db0c9092f46505cb7125f978801ab57fc486448b6c842d8"
+FROZEN_SCHEMA_BYTES = 5829
+FROZEN_COMBINED_SCHEMA_SHA256 = "52e4b386e581976644ac4f8ef760bae334e11fcc78790ad1adc7ebf3540b3f5c"
+FROZEN_INSTRUCTIONS_BYTES = 322
+FROZEN_INSTRUCTIONS_SHA256 = "3810714ab9be87e9203432e446fc7ba261737153f4c85f2103a7ec983239cedb"
+FROZEN_SERVER_NAME = "blender-codex"
+FROZEN_SERVER_VERSION = "0.1.0"
 FROZEN_SCHEMA_SHA256 = {
     "describe_capabilities": "958c7cb8f5978b197a4a8e8290eb8791aa0ee0e18d64039e8a7b0344e8eb290e",
     "get_blender_status": "711d51c6c7f5d0eba37c8964374f268ca09cb41371cce05be693e2f98808304c",
@@ -10429,6 +10683,38 @@ FROZEN_SCHEMA_SHA256 = {
 INITIALIZED = {"jsonrpc": "2.0", "method": "notifications/initialized"}
 CALL = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {"name": "describe_capabilities", "arguments": {}}}
+
+
+def _reject_json_constant(value):
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _finite_json_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"non-finite JSON number: {value}")
+    return parsed
+
+
+def _reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
+def _strict_json_loads(raw):
+    return json.loads(
+        raw, parse_constant=_reject_json_constant, parse_float=_finite_json_float,
+        object_pairs_hook=_reject_duplicate_keys)
+
+
+def _canonical_json(value):
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False).encode()
 
 
 def _spawn(tmp_path):
@@ -10499,7 +10785,7 @@ class _StdoutReader:
                 raise AssertionError("stdout message flood")
             line = raw.decode("utf-8")
             self.diagnostics.append(line[:MAX_DIAGNOSTIC_LINE_BYTES])
-            obj = json.loads(line)          # 解析失败 = stdout 被污染 → FAIL
+            obj = _strict_json_loads(line)  # 解析失败 = stdout 被污染 → FAIL
             assert isinstance(obj, dict) and obj.get("jsonrpc") == "2.0"
             self.backlog.append((obj, len(raw)))
             self.backlog_bytes += len(raw)
@@ -10592,7 +10878,13 @@ def test_cold_start_and_stdout_purity(tmp_path):
         _send(p, INITIALIZED)
         _send(p, CALL)
         resp2, _ = _read_until(p, 2, time.monotonic() + 10)
-        payload = json.loads(resp2["result"]["content"][0]["text"])
+        content = resp2["result"]["content"]
+        assert (type(content) is list and len(content) == 1
+                and content[0].get("type") == "text"
+                and type(content[0].get("text")) is str)
+        payload = _strict_json_loads(content[0]["text"])
+        assert (_canonical_json(payload)
+                == _canonical_json(resp2["result"]["structuredContent"]))
         assert payload["phase"] == "phase0"
         assert payload["ir_schema_version"] is None
         _drain_stdout(p, time.monotonic() + 0.2)
@@ -10614,7 +10906,8 @@ def test_audit_request_id_matches_inbound_jsonrpc_id(tmp_path):
         _send(p, {**CALL, "id": "42"})
         _read_until(p, "42", time.monotonic() + 10)
         audit_path = next((tmp_path / "logs").glob("server-*.jsonl"))
-        rows = [json.loads(line) for line in audit_path.read_text().splitlines()]
+        rows = [_strict_json_loads(line)
+                for line in audit_path.read_text().splitlines()]
         assert rows[-2]["request_id"] == 42 and type(rows[-2]["request_id"]) is int
         assert rows[-1]["request_id"] == "42" and type(rows[-1]["request_id"]) is str
     finally:
@@ -10630,7 +10923,17 @@ def test_initialize_protocol_negotiates_exactly_requested(proc, protocol):
                             "clientInfo": {"name": "l2", "version": "0"}}})
     resp, _ = _read_until(proc, 1, time.monotonic() + 10)
     assert resp["result"]["protocolVersion"] == protocol
+    assert resp["result"]["serverInfo"]["name"] == FROZEN_SERVER_NAME
+    assert resp["result"]["serverInfo"]["version"] == FROZEN_SERVER_VERSION
     _send(proc, INITIALIZED)
+    _send(proc, CALL)
+    valid, _ = _read_until(proc, 2, time.monotonic() + 10)
+    content = valid["result"]["content"]
+    assert (type(content) is list and len(content) == 1
+            and content[0].get("type") == "text"
+            and type(content[0].get("text")) is str)
+    assert (_canonical_json(_strict_json_loads(content[0]["text"]))
+            == _canonical_json(valid["result"]["structuredContent"]))
     _send(proc, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                  "params": {"name": "describe_capabilities",
                             "arguments": {"unexpected": 1}}})
@@ -10652,15 +10955,49 @@ async def test_current_protocol_via_sdk_client(tmp_path, monkeypatch):
         assert client.session.protocol_version == CURRENT_PROTOCOL
         assert client.session.discover_result is not None
         assert client.session.initialize_result is None
+        assert client.server_info is not None
+        assert client.server_info.name == FROZEN_SERVER_NAME
+        assert client.server_info.version == FROZEN_SERVER_VERSION
         assert client.instructions is not None
         assert "允许 Codex 连接" in client.instructions
         tools = await client.list_tools()
-        names = {t.name for t in tools.tools}
-        assert names == {"get_blender_status", "get_scene_summary",
-                         "describe_capabilities"}
+        repeated = await client.list_tools()
+        assert [tool.name for tool in tools.tools] == ORDERED_TOOLS
+        assert (tools.next_cursor is None and repeated.next_cursor is None
+                and tools.result_type == "complete"
+                and repeated.result_type == "complete")
+        assert (_canonical_json(tools.model_dump(mode="json", by_alias=True))
+                == _canonical_json(
+                    repeated.model_dump(mode="json", by_alias=True)))
+        catalog = [tool.model_dump(
+            mode="json", by_alias=True, exclude_none=False) for tool in tools.tools]
+        raw_catalog = json.dumps(
+            catalog, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")).encode()
+        assert len(raw_catalog) == FROZEN_CATALOG_BYTES
+        assert hashlib.sha256(raw_catalog).hexdigest() == FROZEN_CATALOG_SHA256
+        schemas = [
+            {"name": item["name"], "inputSchema": item["inputSchema"],
+             "outputSchema": item["outputSchema"]}
+            for item in catalog
+        ]
+        raw_schemas = json.dumps(
+            schemas, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")).encode()
+        assert len(raw_schemas) == FROZEN_SCHEMA_BYTES
+        assert (hashlib.sha256(raw_schemas).hexdigest()
+                == FROZEN_COMBINED_SCHEMA_SHA256)
+        raw_instructions = client.instructions.encode()
+        assert len(raw_instructions) == FROZEN_INSTRUCTIONS_BYTES
+        assert hashlib.sha256(raw_instructions).hexdigest() == FROZEN_INSTRUCTIONS_SHA256
         result = await client.call_tool("describe_capabilities", {})
         assert result.structured_content is not None
         assert result.structured_content["phase"] == "phase0"
+        assert (type(result.content) is list and len(result.content) == 1
+                and getattr(result.content[0], "type", None) == "text"
+                and type(getattr(result.content[0], "text", None)) is str)
+        assert (_canonical_json(_strict_json_loads(result.content[0].text))
+                == _canonical_json(result.structured_content))
         with pytest.raises(MCPError) as exc:
             await client.call_tool("describe_capabilities", {"unexpected": 1})
         assert exc.value.code == -32602
@@ -10669,14 +11006,46 @@ async def test_current_protocol_via_sdk_client(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_tools_declare_closed_schemas(tmp_path, monkeypatch):
-    # 规范原始 $defs/$ref 表示的 canonical JSON digest；任一字段变化都会失败。
+    # 规范原始 $defs/$ref、完整 ordered catalog 与 instructions；任一漂移都失败。
+    assert _canonical_json({"value": 1}) != _canonical_json({"value": True})
+    with pytest.raises(ValueError, match="non-finite JSON number"):
+        _strict_json_loads('{"value": 1e999}')
     monkeypatch.setenv("BLENDERCODEX_ROOT", str(tmp_path))
     from mcp import Client
     from server.mcp.adapter import mcp as server_app
 
     async with Client(server_app, read_timeout_seconds=READ_TIMEOUT_SECONDS) as client:
-        tools = (await client.list_tools()).tools
-        assert {tool.name for tool in tools} == set(FROZEN_SCHEMA_SHA256)
+        first = await client.list_tools()
+        second = await client.list_tools()
+        tools = first.tools
+        assert [tool.name for tool in tools] == ORDERED_TOOLS
+        assert (first.next_cursor is None and second.next_cursor is None
+                and first.result_type == "complete"
+                and second.result_type == "complete")
+        assert (_canonical_json(first.model_dump(mode="json", by_alias=True))
+                == _canonical_json(second.model_dump(mode="json", by_alias=True)))
+        catalog = [tool.model_dump(
+            mode="json", by_alias=True, exclude_none=False) for tool in tools]
+        raw_catalog = json.dumps(
+            catalog, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")).encode()
+        assert len(raw_catalog) == FROZEN_CATALOG_BYTES
+        assert hashlib.sha256(raw_catalog).hexdigest() == FROZEN_CATALOG_SHA256
+        schemas = [
+            {"name": item["name"], "inputSchema": item["inputSchema"],
+             "outputSchema": item["outputSchema"]}
+            for item in catalog
+        ]
+        raw_schemas = json.dumps(
+            schemas, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")).encode()
+        assert len(raw_schemas) == FROZEN_SCHEMA_BYTES
+        assert (hashlib.sha256(raw_schemas).hexdigest()
+                == FROZEN_COMBINED_SCHEMA_SHA256)
+        assert client.instructions is not None
+        raw_instructions = client.instructions.encode()
+        assert len(raw_instructions) == FROZEN_INSTRUCTIONS_BYTES
+        assert hashlib.sha256(raw_instructions).hexdigest() == FROZEN_INSTRUCTIONS_SHA256
         for tool in tools:
             payload = {"inputSchema": tool.input_schema,
                        "outputSchema": tool.output_schema}
@@ -10806,7 +11175,7 @@ def test_stdout_message_flood_is_bounded(monkeypatch):
         p.wait(timeout=5)
 ```
 
-- [ ] **Step 2: 跑测试** → frozen 环境下 `pytest tests/contract/test_server_process.py -q` → **13 passed**（v8；含 `2025-06-18` / `2025-11-25` 精确 initialize、真实 `2026-07-28` discover、stdio→MCP adapter→UDS→FakeBridge 往返、同块 backlog/精确 id 类型、延迟污染、半行、超长 stdout 与通知洪泛反例）
+- [ ] **Step 2: 跑测试** → frozen 环境下 `pytest tests/contract/test_server_process.py -q` → **13 passed**（r16 未改该文件；含 `2025-06-18` / `2025-11-25` 精确 initialize、真实 `2026-07-28` discover、stdio→MCP adapter→UDS→FakeBridge 往返、同块 backlog/精确 id 类型、延迟污染、半行、超长 stdout 与通知洪泛反例）
 
 需在 `pyproject.toml` 的 dev 依赖加 `pytest-asyncio>=0.24` 并设 `asyncio_mode = "auto"`。SDK v2 的 `structuredContent`、当前 Codex `2025-06-18`、legacy `2025-11-25` 与 2026 discover 均按实测结果做精确断言，不保留“二选一”占位；Codex 的同名 feature flag 不替代 protocol probe。
 
@@ -10821,24 +11190,575 @@ git commit -m "test(L2): 子进程级 stdout 纯净性与冷启动预算"
 
 ### Task 18: L3 冒烟（真 GUI Blender，半自动）
 
-**需要 Blender GUI**，会打开窗口数十秒后自动退出。覆盖 spec §7.3 五项；设置 `BLENDERCODEX_LARGE_OBJECTS=100000` 时同一 runner 追加真 GUI shared-mesh 大场景 wall-clock/max-tick 门，默认值仍只跑小场景。
+**需要 Blender GUI**。基础 smoke 会打开窗口数十秒；正式门还会构造 100k 场景、跑 60 次完整 MCP 调用，并在独立隔离根执行一次真 Blender SIGKILL/restart。覆盖 spec §7.3 的基础五项、20-query cooperative 子门、三工具 NFR-P1 与恢复合同；不得把 Bridge-only 指标替代完整链路。
 
 **Files:**
 - Create: `smoke/runner.py`
+- Create: `smoke/e2e.py`
+- Create: `smoke/process_registry.py`
+- Create: `tests/unit/test_e2e.py`
+- Create on successful Step 3 only: `docs/audits/evidence/phase0-gui-nfr-smoke.json`、`phase0-nfr-p1.json`、`phase0-recovery.json`、`phase0-l3-audit-bundle.json`、`phase0-l3-execution-manifest.json` 及各自 `.sha256`
 
-- [ ] **Step 1: 写 runner**
+- [ ] **Step 1: 写 runner 与外部 E2E helper**
+
+```python
+# smoke/process_registry.py
+"""Private process-group records for bounded E2E cleanup."""
+from __future__ import annotations
+
+import json
+import os
+import re
+import secrets
+import signal
+import stat
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from pathlib import Path
+
+MAX_RECORDS = 8
+MAX_RECORD_BYTES = 4096
+MARKER_RE = re.compile(r"[0-9a-f]{32}")
+PUBLISH_TEMP_RE = re.compile(
+    r"\.[A-Za-z0-9][A-Za-z0-9_.-]*\.json\.[1-9][0-9]*\.[0-9a-f]{8}\.tmp")
+SENTINEL_MODE = "sentinel"
+REPLACE_MODE = "replace"
+
+
+@dataclass(frozen=True)
+class ProcessRecord:
+    path: Path
+    pid: int
+    pgid: int
+    marker: str
+    started_monotonic_ns: int
+    device: int
+    inode: int
+
+    def evidence(self) -> dict[str, int | str]:
+        return {
+            "pid": self.pid,
+            "pgid": self.pgid,
+            "marker": self.marker,
+            "started_monotonic_ns": self.started_monotonic_ns,
+        }
+
+
+def new_marker() -> str:
+    return secrets.token_hex(16)
+
+
+def reserve_publication(record_path: Path) -> tuple[Path, int, int]:
+    require_private_directory(record_path.parent)
+    try:
+        record_path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise FileExistsError(f"process record already exists: {record_path}")
+    reservation = record_path.parent / (
+        f".{record_path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    if PUBLISH_TEMP_RE.fullmatch(reservation.name) is None:
+        raise ValueError(f"invalid process record name: {record_path.name}")
+    descriptor = os.open(
+        reservation, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        opened = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    return reservation, opened.st_dev, opened.st_ino
+
+
+def finish_publication_reservation(path: Path, device: int, inode: int) -> None:
+    current = path.lstat()
+    if (not stat.S_ISREG(current.st_mode) or current.st_uid != os.geteuid()
+            or stat.S_IMODE(current.st_mode) != 0o600 or current.st_size != 0
+            or (current.st_dev, current.st_ino) != (device, inode)):
+        raise RuntimeError(f"process publication reservation changed: {path}")
+    path.unlink()
+
+
+def require_private_directory(path: Path) -> None:
+    st = path.lstat()
+    if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid()
+            or stat.S_IMODE(st.st_mode) != 0o700):
+        raise PermissionError(f"private 0700 directory required: {path}")
+
+
+def _validate_record_stat(st: os.stat_result, path: Path) -> None:
+    if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid()
+            or stat.S_IMODE(st.st_mode) != 0o600
+            or not 0 < st.st_size <= MAX_RECORD_BYTES):
+        raise PermissionError(f"private bounded 0600 record required: {path}")
+
+
+def _write_private_json(path: Path, value: object) -> None:
+    require_private_directory(path.parent)
+    temporary = path.parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    fd: int | None = None
+    try:
+        fd = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        os.fchmod(fd, 0o600)
+        raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        if len(raw) > MAX_RECORD_BYTES:
+            raise ValueError("process record is too large")
+        view = memoryview(raw)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short process-record write")
+            view = view[written:]
+        os.close(fd)
+        fd = None
+        os.replace(temporary, path)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        temporary.unlink(missing_ok=True)
+
+
+def publish_process(
+    path: Path,
+    marker: str,
+    pid: int,
+    pgid: int,
+    *,
+    started_monotonic_ns: int | None = None,
+) -> ProcessRecord:
+    if MARKER_RE.fullmatch(marker) is None:
+        raise ValueError("process marker must be 32 lowercase hex characters")
+    if pid <= 1 or pgid != pid:
+        raise RuntimeError("record publisher is not its process-group leader")
+    if os.getpgid(pid) != pgid:
+        raise RuntimeError("recorded process is not the expected group leader")
+    started = time.monotonic_ns() if started_monotonic_ns is None \
+        else started_monotonic_ns
+    _write_private_json(path, {
+        "schema_version": 1,
+        "pid": pid,
+        "pgid": pgid,
+        "marker": marker,
+        "started_monotonic_ns": started,
+    })
+    return read_record(path, expected_marker=marker, not_before_ns=started)
+
+
+def publish_current_process(path: Path, marker: str) -> ProcessRecord:
+    return publish_process(path, marker, os.getpid(), os.getpgrp())
+
+
+def read_record(
+    path: Path,
+    *,
+    expected_marker: str | None = None,
+    not_before_ns: int | None = None,
+) -> ProcessRecord:
+    require_private_directory(path.parent)
+    before = path.lstat()
+    _validate_record_stat(before, path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        opened = os.fstat(fd)
+        _validate_record_stat(opened, path)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise RuntimeError(f"process record changed during open: {path}")
+        raw = os.read(fd, MAX_RECORD_BYTES + 1)
+        if len(raw) != opened.st_size:
+            raise ValueError(f"process record size changed during read: {path}")
+    finally:
+        os.close(fd)
+    value = json.loads(raw)
+    expected_keys = {
+        "schema_version", "pid", "pgid", "marker", "started_monotonic_ns",
+    }
+    if type(value) is not dict or set(value) != expected_keys:
+        raise ValueError(f"malformed process record keys: {path}")
+    pid, pgid = value["pid"], value["pgid"]
+    marker, started = value["marker"], value["started_monotonic_ns"]
+    if (type(value["schema_version"]) is not int or value["schema_version"] != 1
+            or type(pid) is not int
+            or type(pgid) is not int or pid <= 1 or pgid != pid
+            or type(marker) is not str or MARKER_RE.fullmatch(marker) is None
+            or type(started) is not int or started <= 0
+            or started > time.monotonic_ns()):
+        raise ValueError(f"malformed process record values: {path}")
+    if expected_marker is not None and marker != expected_marker:
+        raise ValueError(f"process record marker differs: {path}")
+    if not_before_ns is not None and started < not_before_ns:
+        raise ValueError(f"stale process record: {path}")
+    return ProcessRecord(
+        path, pid, pgid, marker, started, opened.st_dev, opened.st_ino)
+
+
+def group_id_is_live(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Darwin can report EPERM briefly for an exited group's unreaped member.
+        return True
+    return True
+
+
+def signal_group_id(pgid: int, sig: int) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def poll_before_deadline(
+    poll: Callable[[], int | None], deadline: float,
+) -> tuple[int | None, bool]:
+    expired = time.monotonic() >= deadline
+    returncode = None if expired else poll()
+    return returncode, expired or time.monotonic() >= deadline
+
+
+def group_is_live(record: ProcessRecord) -> bool:
+    try:
+        current = os.getpgid(record.pid)
+    except ProcessLookupError:
+        # POSIX keeps the PGID allocated while any original member survives.
+        return group_id_is_live(record.pgid)
+    if current != record.pgid:
+        raise RuntimeError(f"recorded PID was reused: {record.pid}")
+    return group_id_is_live(record.pgid)
+
+
+def signal_live_records(records: Iterable[ProcessRecord], sig: int) -> None:
+    unique = {record.pgid: record for record in records}
+    first_error: Exception | None = None
+    for record in sorted(unique.values(), key=lambda item: item.pgid):
+        try:
+            if group_is_live(record):
+                signal_group_id(record.pgid, sig)
+        except Exception as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise first_error
+
+
+def _remember_known_record(
+    known_records: dict[int, ProcessRecord], record: ProcessRecord,
+) -> None:
+    first_error: Exception | None = None
+    for pgid, cached in tuple(known_records.items()):
+        if pgid == record.pgid:
+            continue
+        try:
+            live = group_is_live(cached)
+        except RuntimeError as exc:
+            del known_records[pgid]
+            if first_error is None:
+                first_error = exc
+        except Exception as exc:
+            if first_error is None:
+                first_error = exc
+        else:
+            if not live:
+                del known_records[pgid]
+    if record.pgid not in known_records and len(known_records) >= MAX_RECORDS:
+        limit_error = RuntimeError("known process record limit exceeded")
+        try:
+            signal_live_records([record], signal.SIGKILL)
+        except Exception as exc:
+            if first_error is None:
+                first_error = exc
+        if first_error is None:
+            first_error = limit_error
+    else:
+        known_records[record.pgid] = record
+    if first_error is not None:
+        raise first_error
+
+
+def _unlink_record(record: ProcessRecord) -> None:
+    current = record.path.lstat()
+    _validate_record_stat(current, record.path)
+    if (current.st_dev, current.st_ino) != (record.device, record.inode):
+        raise RuntimeError(f"process record changed before unlink: {record.path}")
+    record.path.unlink()
+
+
+def retire_record(
+    path: Path,
+    *,
+    expected_marker: str,
+    not_before_ns: int | None = None,
+) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"required process record missing: {path}")
+    record = read_record(
+        path, expected_marker=expected_marker, not_before_ns=not_before_ns)
+    if group_is_live(record):
+        raise RuntimeError(f"process group survived owner cleanup: {record.pgid}")
+    _unlink_record(record)
+
+
+def scan_records(
+    directory: Path,
+    *,
+    expected_marker: str,
+    not_before_ns: int,
+    deadline: float | None = None,
+    known_records: dict[int, ProcessRecord] | None = None,
+    retire_dead: bool = True,
+) -> tuple[list[ProcessRecord], bool]:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("process registry scan deadline expired before start")
+    require_private_directory(directory)
+    records: list[ProcessRecord] = []
+    publishing = False
+    first_error: Exception | None = None
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("process registry scan deadline expired")
+            path = directory / entry.name
+            if PUBLISH_TEMP_RE.fullmatch(entry.name) is not None:
+                try:
+                    temporary = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    publishing = True
+                    continue
+                if (not stat.S_ISREG(temporary.st_mode)
+                        or temporary.st_uid != os.geteuid()
+                        or stat.S_IMODE(temporary.st_mode) != 0o600
+                        or not 0 <= temporary.st_size <= MAX_RECORD_BYTES):
+                    if first_error is None:
+                        first_error = PermissionError(
+                            f"invalid process-record publication temporary: {path}")
+                    continue
+                publishing = True
+                try:
+                    pending = read_record(
+                        path, expected_marker=expected_marker,
+                        not_before_ns=not_before_ns)
+                except Exception:
+                    continue
+                try:
+                    pending_live = group_is_live(pending)
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+                    continue
+                if pending_live:
+                    if known_records is None:
+                        records.append(pending)
+                    else:
+                        try:
+                            _remember_known_record(known_records, pending)
+                        except Exception as exc:
+                            if first_error is None:
+                                first_error = exc
+                        if known_records.get(pending.pgid) == pending:
+                            records.append(pending)
+                continue
+            if not entry.name.endswith(".json"):
+                if first_error is None:
+                    first_error = ValueError(
+                        f"unexpected process registry entry: {entry.name}")
+                continue
+            try:
+                record = read_record(
+                    path, expected_marker=expected_marker,
+                    not_before_ns=not_before_ns)
+            except FileNotFoundError:
+                publishing = True
+                continue
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+                continue
+            try:
+                record_live = group_is_live(record)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+                continue
+            if record_live:
+                if known_records is None:
+                    records.append(record)
+                else:
+                    try:
+                        _remember_known_record(known_records, record)
+                    except Exception as exc:
+                        if first_error is None:
+                            first_error = exc
+                    if known_records.get(record.pgid) == record:
+                        records.append(record)
+            else:
+                if retire_dead:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise TimeoutError("process registry deadline expired before unlink")
+                    try:
+                        _unlink_record(record)
+                    except FileNotFoundError:
+                        publishing = True
+                    except Exception as exc:
+                        if first_error is None:
+                            first_error = exc
+                else:
+                    publishing = True
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("process registry scan deadline expired before completion")
+    if known_records is not None:
+        current = {record.pgid: record for record in records}
+        for pgid, record in tuple(known_records.items()):
+            if pgid in current:
+                continue
+            try:
+                live = group_is_live(record)
+            except RuntimeError as exc:
+                del known_records[pgid]
+                if first_error is None:
+                    first_error = exc
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+            else:
+                if not live:
+                    del known_records[pgid]
+                elif not publishing:
+                    current[pgid] = record
+        if not publishing:
+            known_records.clear()
+            known_records.update(current)
+            records = list(current.values())
+    if first_error is not None:
+        raise first_error
+    return records, publishing
+
+
+def live_records(
+    directory: Path,
+    *,
+    expected_marker: str,
+    not_before_ns: int,
+    temporary_deadline: float | None = None,
+    known_records: dict[int, ProcessRecord] | None = None,
+) -> list[ProcessRecord]:
+    while True:
+        records, publishing = scan_records(
+            directory, expected_marker=expected_marker,
+            not_before_ns=not_before_ns, deadline=temporary_deadline,
+            known_records=known_records)
+        if not publishing:
+            return records
+        if temporary_deadline is None:
+            raise RuntimeError("process-record publication is incomplete")
+        remaining = temporary_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("process-record publication exceeded cleanup deadline")
+        time.sleep(min(0.01, remaining))
+
+
+def cleanup_registry(
+    directory: Path,
+    *,
+    expected_marker: str,
+    not_before_ns: int,
+    deadline: float,
+    term_grace: float = 3.0,
+    settle_grace: float = 0.5,
+    known_records: dict[int, ProcessRecord] | None = None,
+) -> None:
+    settle_deadline = min(deadline, time.monotonic() + settle_grace)
+    known = {} if known_records is None else known_records
+
+    def final_kill_known() -> None:
+        signal_live_records(known.values(), signal.SIGKILL)
+
+    def refresh() -> list[ProcessRecord]:
+        try:
+            return live_records(
+                directory, expected_marker=expected_marker,
+                not_before_ns=not_before_ns, temporary_deadline=deadline,
+                known_records=known)
+        except Exception:
+            final_kill_known()
+            raise
+
+    while time.monotonic() < settle_deadline:
+        refresh()
+        time.sleep(min(0.05, max(0.0, settle_deadline - time.monotonic())))
+    records = refresh()
+    if time.monotonic() >= deadline:
+        final_kill_known()
+        raise TimeoutError("process registry cleanup deadline expired before TERM")
+    try:
+        signal_live_records(records, signal.SIGTERM)
+    except Exception:
+        final_kill_known()
+        raise
+    term_deadline = min(deadline, time.monotonic() + term_grace)
+    while time.monotonic() < term_deadline:
+        if not refresh():
+            return
+        time.sleep(min(0.05, max(0.0, term_deadline - time.monotonic())))
+    records = refresh()
+    if time.monotonic() >= deadline:
+        final_kill_known()
+        raise TimeoutError("process registry cleanup deadline expired before KILL")
+    signal_live_records(records, signal.SIGKILL)
+    while time.monotonic() < deadline:
+        if not refresh():
+            return
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    remaining = refresh()
+    if remaining:
+        raise RuntimeError(
+            f"unreaped process groups: {[record.pgid for record in remaining]}")
+
+
+def _bootstrap(argv: list[str]) -> int:
+    if len(argv) < 7 or argv[0] not in (SENTINEL_MODE, REPLACE_MODE):
+        raise ValueError("recorded bootstrap command is malformed")
+    mode = argv[0]
+    record_path, reservation = Path(argv[1]), Path(argv[2])
+    device, inode, marker = int(argv[3]), int(argv[4]), argv[5]
+    command = argv[6:]
+    publish_current_process(record_path, marker)
+    finish_publication_reservation(reservation, device, inode)
+    if mode == REPLACE_MODE:
+        os.execvpe(command[0], command, os.environ)
+        raise AssertionError("recorded exec unexpectedly returned")
+
+    def relay(signum: int, _frame: object) -> None:
+        signal.signal(signum, signal.SIG_DFL)
+        os.killpg(os.getpgrp(), signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, relay)
+    child = subprocess.Popen(command)
+    return child.wait()
+
+
+if __name__ == "__main__":
+    raise SystemExit(_bootstrap(sys.argv[1:]))
+```
 
 ```python
 # smoke/runner.py
 """blender --factory-startup --python smoke/runner.py
 L3：timer 驱动 tick / revision 递增 / 真场景字段 / **hash scope 盲区真机证明** / 20 次会话循环无泄漏。
-状态机：每步在一次 timer 回调内完成并立即返回——绝不在回调内 join/sleep 等待
+正常状态机：每步在一次 timer 回调内完成并立即返回；只有最终失败清理可作有界 wait/sleep
 需要 tick 的结果：_tick_guard 与本 runner 同为主线程 timer，回调内阻塞会自饿死（r3 审计）。
 结果写 $BLENDERCODEX_SMOKE_OUT（默认 /tmp/bcx_smoke.json），末行打印 SMOKE_{OK,FAIL}。"""
 import json
 import math
 import os
+import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -10850,26 +11770,49 @@ import bpy  # noqa: E402
 import bmesh  # noqa: E402
 from bridge.blender import driver, panel  # noqa: E402
 from server.core.bridge_client import BridgeClient, BridgeError  # noqa: E402
+from smoke.process_registry import (  # noqa: E402
+    group_id_is_live,
+    new_marker,
+    poll_before_deadline,
+    scan_records,
+    signal_group_id,
+    signal_live_records,
+)
 
 OUT = os.environ.get("BLENDERCODEX_SMOKE_OUT", "/tmp/bcx_smoke.json")
+NFR_OUT = os.environ.get("BLENDERCODEX_NFR_OUT")
+RECOVERY_READY = os.environ.get("BLENDERCODEX_RECOVERY_READY")
+RECOVERY_STOP = os.environ.get("BLENDERCODEX_RECOVERY_STOP")
 LARGE_OBJECTS = max(0, int(os.environ.get("BLENDERCODEX_LARGE_OBJECTS", "0")))
 LARGE_BATCH = 1024
 LARGE_MAX_WALL_MS = 2000.0       # NFR-P1 candidate on the fixed baseline machine
 LARGE_MAX_TICK_MS = 100.0        # 50 ms budget + bounded source step/jitter; not a hard wall
 LARGE_QUERY_TIMEOUT = 30.0       # bounded observation window; separate from pass/fail budget
 LARGE_QUERY_RUNS = 20            # nearest-rank P95 needs at least twenty observations
+NFR_TIMEOUT = 180.0              # 60 calls; observation window, not the <2 s pass threshold
+NFR_CLEANUP_MARGIN = 15.0        # single bounded cleanup reserve
+NFR_TERM_GRACE = 8.0             # let helper cancellation unwind the SDK Client context
+NFR_GROUP_GRACE = 3.0            # emergency TERM window for a recorded MCP process group
 RES: dict = {"timer_tick": None, "revision_bump": None, "fields": None,
              "hash_scope": None, "cycles_leak_free": None, "large_scene": None,
-             "large_scene_budget_ok": None, "large_scene_metrics": None, "errors": []}
+             "large_scene_budget_ok": None, "large_scene_metrics": None,
+             "nfr_p1": None, "nfr_p1_metrics": None, "errors": []}
 ST: dict = {"phase": "start", "box": None, "thread": None, "deadline": 0.0,
-            "rev0": -1, "cycle": 0, "base_threads": 0, "run_dir": None,
+            "rev0": -1, "cycle": 0, "base_threads": set(), "run_dir": None,
             "hash_before": None, "hash_after_vertex": None, "large_index": 0,
             "large_mesh": None, "large_query_started": 0.0, "large_build_started": 0.0,
             "large_orig_tick": None, "large_max_tick_ms": 0.0, "large_tick_count": 0,
             "large_max_callback_ms": 0.0, "large_callback_count": 0,
             "large_max_build_callback_ms": 0.0, "large_build_callback_count": 0,
             "large_build_wall_ms": 0.0, "large_query_samples": [],
-            "large_observer_samples": [], "large_structural_ok": True}
+            "large_observer_samples": [], "large_structural_ok": True,
+            "nfr_proc": None, "nfr_error": None, "nfr_process_dir": None,
+            "nfr_offline_root": None, "nfr_returncode": None,
+            "nfr_registry_marker": None, "nfr_registry_not_before_ns": 0,
+            "nfr_registry_pending": False,
+            "nfr_known_records": {},
+            "nfr_helper_pgid": None, "nfr_work_deadline": 0.0,
+            "nfr_final_deadline": 0.0}
 
 
 def _register():
@@ -10958,8 +11901,198 @@ def _connect_probe() -> bool:
         return False
 
 
+def _close_large_session() -> None:
+    _restore_large_tick()
+    bpy.ops.bcx.disconnect()
+    _unregister()
+    ST["phase"] = "cycle"
+
+
+def _nfr_error_once(message: str) -> None:
+    if message not in RES["errors"]:
+        RES["errors"].append(message)
+
+
+def _live_nfr_groups() -> list[int]:
+    ST["nfr_registry_pending"] = False
+    directory = ST.get("nfr_process_dir")
+    marker = ST.get("nfr_registry_marker")
+    not_before_ns = ST.get("nfr_registry_not_before_ns")
+    known = ST.get("nfr_known_records")
+    if not isinstance(known, dict):
+        known = {}
+        ST["nfr_known_records"] = known
+    if (not isinstance(directory, Path) or not directory.exists()
+            or not isinstance(marker, str) or type(not_before_ns) is not int):
+        ST["nfr_registry_pending"] = True
+        message = "nfr process registry identity is missing or unavailable"
+        if ST.get("nfr_error") is None:
+            ST["nfr_error"] = message
+        _nfr_error_once(message)
+        return []
+    try:
+        final_deadline = ST.get("nfr_final_deadline")
+        if type(final_deadline) is not float:
+            raise RuntimeError("NFR process registry deadline missing")
+        records, publishing = scan_records(
+            directory, expected_marker=marker, not_before_ns=not_before_ns,
+            deadline=final_deadline, known_records=known, retire_dead=False)
+        ST["nfr_registry_pending"] = publishing
+        return sorted({record.pgid for record in records})
+    except Exception as exc:  # evidence failure must fail closed
+        ST["nfr_registry_pending"] = True
+        message = f"nfr process registry: {type(exc).__name__}: {exc}"
+        if ST.get("nfr_error") is None:
+            ST["nfr_error"] = message
+        _nfr_error_once(message)
+        return []
+
+
+def _nfr_groups_clean(groups: list[int]) -> bool:
+    return not groups and ST.get("nfr_registry_pending") is False
+
+
+def _nfr_registry_is_clean() -> bool:
+    return _nfr_groups_clean(_live_nfr_groups())
+
+
+def _signal_nfr_groups(sig: int) -> None:
+    _live_nfr_groups()
+    known = ST.get("nfr_known_records")
+    if isinstance(known, dict):
+        try:
+            signal_live_records(known.values(), sig)
+        except Exception as exc:
+            ST["nfr_registry_pending"] = True
+            message = f"nfr process group signal: {type(exc).__name__}: {exc}"
+            if ST.get("nfr_error") is None:
+                ST["nfr_error"] = message
+            _nfr_error_once(message)
+
+
+def _nfr_helper_is_live() -> bool:
+    pgid = ST.get("nfr_helper_pgid")
+    return type(pgid) is int and pgid > 1 and group_id_is_live(pgid)
+
+
+def _signal_nfr_helper(sig: int) -> None:
+    pgid = ST.get("nfr_helper_pgid")
+    if type(pgid) is int and pgid > 1:
+        signal_group_id(pgid, sig)
+
+
+def _nfr_stage_deadline(seconds: float) -> float:
+    return min(ST["nfr_final_deadline"], time.monotonic() + seconds)
+
+
+def _remove_nfr_process_dir() -> None:
+    directory = ST.get("nfr_process_dir")
+    if not isinstance(directory, Path) or not directory.exists():
+        return
+    if any(directory.iterdir()):
+        return
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
+
+
+def _settle_nfr(returncode: int | None) -> None:
+    artifact = None
+    if NFR_OUT:
+        try:
+            artifact = json.loads(Path(NFR_OUT).read_text())
+        except (OSError, ValueError) as exc:
+            RES["errors"].append(f"nfr_p1 artifact: {type(exc).__name__}: {exc}")
+    metrics = (artifact or {}).get("results") if isinstance(artifact, dict) else None
+    final_tick_ms = ST["large_max_tick_ms"]
+    large_metrics = RES.get("large_scene_metrics")
+    if isinstance(large_metrics, dict):
+        large_metrics["max_tick_ms"] = final_tick_ms
+        large_metrics["tick_count"] = ST["large_tick_count"]
+    RES["large_scene_budget_ok"] = (
+        RES.get("large_scene_budget_ok") is True
+        and final_tick_ms < LARGE_MAX_TICK_MS
+    )
+    helper_live = _nfr_helper_is_live()
+    live_groups = _live_nfr_groups()
+    registry_clean = _nfr_groups_clean(live_groups)
+    processes_clean = not helper_live and registry_clean
+    if helper_live:
+        _nfr_error_once(
+            f"nfr leaked helper process group: {ST.get('nfr_helper_pgid')}")
+    if not processes_clean:
+        if live_groups:
+            _nfr_error_once(f"nfr leaked MCP process groups: {live_groups}")
+        elif not registry_clean:
+            _nfr_error_once("nfr process registry publication did not settle")
+    RES["nfr_p1"] = (
+        returncode == 0 and ST.get("nfr_error") is None
+        and isinstance(artifact, dict) and artifact.get("success") is True
+        and RES["large_scene_budget_ok"] is True and processes_clean
+    )
+    RES["nfr_p1_metrics"] = {
+        "results": metrics,
+        "max_tick_ms": final_tick_ms,
+        "returncode": returncode,
+        "processes_clean": processes_clean,
+        "helper_group_clean": not helper_live,
+        "registry_groups_clean": registry_clean,
+    }
+    if not RES["nfr_p1"]:
+        RES["errors"].append(
+            f"nfr_p1 failed: returncode={returncode}, error={ST.get('nfr_error')}, "
+            f"artifact_success={(artifact or {}).get('success') if isinstance(artifact, dict) else None}, "
+            f"max_tick_ms={final_tick_ms}")
+    if not helper_live:
+        ST["nfr_helper_pgid"] = None
+    _remove_nfr_process_dir()
+    _close_large_session()
+
+
 def _finish() -> None:
     _restore_large_tick()
+    nfr_proc = ST.get("nfr_proc")
+    final_deadline = ST.get("nfr_final_deadline")
+    if nfr_proc is not None and type(final_deadline) is float:
+        helper_was_live = _nfr_helper_is_live()
+        if final_deadline <= time.monotonic():
+            if helper_was_live:
+                _signal_nfr_helper(signal.SIGKILL)
+                _nfr_error_once("finish: terminated live NFR helper")
+            _signal_nfr_groups(signal.SIGKILL)
+        else:
+            if helper_was_live:
+                _signal_nfr_helper(signal.SIGTERM)
+                deadline = _nfr_stage_deadline(NFR_TERM_GRACE)
+                while _nfr_helper_is_live() and time.monotonic() < deadline:
+                    nfr_proc.poll()
+                    time.sleep(0.05)
+                if _nfr_helper_is_live():
+                    _signal_nfr_helper(signal.SIGKILL)
+                _nfr_error_once("finish: terminated live NFR helper")
+            if not _nfr_registry_is_clean():
+                deadline = _nfr_stage_deadline(NFR_GROUP_GRACE)
+                while not _nfr_registry_is_clean() and time.monotonic() < deadline:
+                    _signal_nfr_groups(signal.SIGTERM)
+                    time.sleep(0.05)
+            if _nfr_helper_is_live() or not _nfr_registry_is_clean():
+                _signal_nfr_helper(signal.SIGKILL)
+                deadline = _nfr_stage_deadline(2.0)
+                while time.monotonic() < deadline:
+                    nfr_proc.poll()
+                    _signal_nfr_groups(signal.SIGKILL)
+                    if not _nfr_helper_is_live() and _nfr_registry_is_clean():
+                        break
+                    time.sleep(0.05)
+        nfr_proc.poll()
+        if _nfr_helper_is_live():
+            _nfr_error_once(
+                f"finish: unreaped helper process group: {ST['nfr_helper_pgid']}")
+        groups = _live_nfr_groups()
+        if not _nfr_groups_clean(groups):
+            _nfr_error_once(f"finish: unreaped MCP process groups: {groups}")
+    _remove_nfr_process_dir()
     thread = ST.get("thread")
     if thread is not None and thread.is_alive():
         thread.join(timeout=0.25)
@@ -10968,6 +12101,8 @@ def _finish() -> None:
     keys = ("timer_tick", "revision_bump", "fields", "hash_scope", "cycles_leak_free")
     if LARGE_OBJECTS:
         keys += ("large_scene", "large_scene_budget_ok")
+    if NFR_OUT:
+        keys += ("nfr_p1",)
     ok = all(RES[k] is True for k in keys) and not RES["errors"]
     Path(OUT).write_text(json.dumps(RES, ensure_ascii=False, indent=1))
     print("SMOKE_OK" if ok else f"SMOKE_FAIL {RES}")
@@ -10978,7 +12113,10 @@ def _step() -> float | None:
     ph = ST["phase"]
     try:
         if ph == "start":
-            ST["base_threads"] = threading.active_count()
+            ST["base_threads"] = {
+                thread for thread in threading.enumerate()
+                if thread.name == "bcx-io" and thread.is_alive()
+            }
             _register()
             bpy.ops.bcx.allow_connect()
             _query_async()                       # 只有 GUI timer 在驱动 tick
@@ -11151,12 +12289,125 @@ def _step() -> float | None:
                 RES["errors"].append(f"large_scene: {metrics}")
             elif not RES["large_scene_budget_ok"]:
                 RES["errors"].append(f"large_scene budget: {metrics}")
-            session = driver.session()
-            session.tick = ST["large_orig_tick"]
-            ST["large_orig_tick"] = None
-            bpy.ops.bcx.disconnect()
-            _unregister()
-            ST["phase"] = "cycle"
+            if NFR_OUT:
+                session = driver.session()
+                root = session.session_dir.parents[1]
+                process_dir = Path(str(NFR_OUT) + ".processes")
+                process_dir.mkdir(mode=0o700)
+                os.chmod(process_dir, 0o700)
+                offline_root = Path(str(NFR_OUT) + ".offline-root")
+                offline_root.mkdir(mode=0o700)
+                os.chmod(offline_root, 0o700)
+                registry_marker = new_marker()
+                registry_not_before_ns = time.monotonic_ns()
+                ST["nfr_process_dir"] = process_dir
+                ST["nfr_offline_root"] = offline_root
+                ST["nfr_registry_marker"] = registry_marker
+                ST["nfr_registry_not_before_ns"] = registry_not_before_ns
+                command = [
+                    "/Users/yeminjie/.local/bin/uv", "run", "--frozen", "python",
+                    "smoke/e2e.py", "nfr", "--root", str(root),
+                    "--instance", session.instance_id, "--output", NFR_OUT,
+                    "--process-registry", str(process_dir),
+                    "--offline-root", str(offline_root),
+                    "--timeout-seconds", str(NFR_TIMEOUT - NFR_CLEANUP_MARGIN),
+                    "--registry-marker", registry_marker,
+                    "--registry-not-before-ns", str(registry_not_before_ns),
+                ]
+                spawned_at = time.monotonic()
+                process = subprocess.Popen(
+                    command, cwd=Path(__file__).resolve().parents[1],
+                    start_new_session=True)
+                work_deadline = spawned_at + NFR_TIMEOUT - NFR_CLEANUP_MARGIN
+                final_deadline = spawned_at + NFR_TIMEOUT
+                ST.update(
+                    nfr_proc=process,
+                    nfr_helper_pgid=process.pid,
+                    nfr_work_deadline=work_deadline,
+                    nfr_final_deadline=final_deadline,
+                    phase="nfr_wait",
+                    deadline=work_deadline,
+                )
+            else:
+                _close_large_session()
+        elif ph == "nfr_wait":
+            proc = ST["nfr_proc"]
+            returncode, deadline_expired = poll_before_deadline(
+                proc.poll, ST["nfr_work_deadline"])
+            if deadline_expired:
+                ST["nfr_error"] = "NFR helper deadline exceeded"
+                _signal_nfr_helper(signal.SIGTERM)
+                ST.update(phase="nfr_helper_term",
+                          deadline=_nfr_stage_deadline(NFR_TERM_GRACE))
+            elif returncode is not None:
+                ST["nfr_returncode"] = returncode
+                groups = _live_nfr_groups()
+                if _nfr_helper_is_live() or not _nfr_groups_clean(groups):
+                    _signal_nfr_helper(signal.SIGTERM)
+                    _signal_nfr_groups(signal.SIGTERM)
+                    ST.update(phase="nfr_group_term",
+                              deadline=_nfr_stage_deadline(NFR_GROUP_GRACE))
+                else:
+                    _settle_nfr(returncode)
+            else:
+                return 0.05
+        elif ph == "nfr_helper_term":
+            proc = ST["nfr_proc"]
+            returncode = proc.poll()
+            if returncode is not None and ST.get("nfr_returncode") is None:
+                ST["nfr_returncode"] = returncode
+            if returncode is not None and not _nfr_helper_is_live():
+                if not _nfr_registry_is_clean():
+                    _signal_nfr_groups(signal.SIGTERM)
+                    ST.update(phase="nfr_group_term",
+                              deadline=_nfr_stage_deadline(NFR_GROUP_GRACE))
+                else:
+                    _settle_nfr(ST.get("nfr_returncode"))
+            elif time.monotonic() < ST["deadline"]:
+                return 0.05
+            else:
+                _signal_nfr_helper(signal.SIGKILL)
+                _signal_nfr_groups(signal.SIGTERM)
+                ST.update(phase="nfr_group_term",
+                          deadline=_nfr_stage_deadline(NFR_GROUP_GRACE))
+        elif ph == "nfr_group_term":
+            proc = ST["nfr_proc"]
+            returncode = proc.poll()
+            if returncode is not None and ST.get("nfr_returncode") is None:
+                ST["nfr_returncode"] = returncode
+            groups = _live_nfr_groups()
+            if (returncode is not None and not _nfr_helper_is_live()
+                    and _nfr_groups_clean(groups)):
+                _settle_nfr(ST.get("nfr_returncode"))
+            elif time.monotonic() < ST["deadline"]:
+                _signal_nfr_groups(signal.SIGTERM)
+                return 0.05
+            else:
+                _signal_nfr_helper(signal.SIGKILL)
+                _signal_nfr_groups(signal.SIGKILL)
+                ST.update(phase="nfr_reap", deadline=_nfr_stage_deadline(2.0))
+        elif ph == "nfr_reap":
+            proc = ST["nfr_proc"]
+            returncode = proc.poll()
+            if returncode is not None and ST.get("nfr_returncode") is None:
+                ST["nfr_returncode"] = returncode
+            groups = _live_nfr_groups()
+            if (returncode is not None and not _nfr_helper_is_live()
+                    and _nfr_groups_clean(groups)):
+                saved = ST.get("nfr_returncode")
+                _settle_nfr(returncode if saved is None else saved)
+            elif time.monotonic() < ST["deadline"]:
+                _signal_nfr_groups(signal.SIGKILL)
+                return 0.05
+            else:
+                if _nfr_helper_is_live():
+                    _nfr_error_once(
+                        "nfr unreaped helper process group: "
+                        f"{ST.get('nfr_helper_pgid')}")
+                groups = _live_nfr_groups()
+                if groups:
+                    _nfr_error_once(f"nfr unreaped MCP process groups: {groups}")
+                _settle_nfr(ST.get("nfr_returncode"))
         elif ph == "cycle":                       # 每次回调跑一整圈会话循环
             _register()
             bpy.ops.bcx.allow_connect()
@@ -11171,13 +12422,19 @@ def _step() -> float | None:
         elif ph == "settle":                      # 留 1 秒让 join 完的线程退场
             if time.monotonic() < ST["deadline"]:
                 return 0.1
-            leaked = threading.active_count() - ST["base_threads"]
+            leaked = [
+                thread for thread in threading.enumerate()
+                if thread.name == "bcx-io" and thread.is_alive()
+                and thread not in ST["base_threads"]
+            ]
             run_dir = ST["run_dir"]
             leftover = (list(run_dir.glob("gui-*"))
                         if run_dir and run_dir.exists() else [])
-            RES["cycles_leak_free"] = leaked <= 0 and leftover == []
+            RES["cycles_leak_free"] = leaked == [] and leftover == []
             if not RES["cycles_leak_free"]:
-                RES["errors"].append(f"threads+{leaked}, leftover={leftover}")
+                thread_names = [f"{thread.name}:{thread.ident}" for thread in leaked]
+                RES["errors"].append(
+                    f"leaked_threads={thread_names}, leftover={leftover}")
             _finish()
             return None
     except Exception as e:  # noqa: BLE001
@@ -11207,13 +12464,3173 @@ def _timed_step():
             )
 
 
-bpy.app.timers.register(_timed_step, first_interval=0.5)
+def _recovery_step() -> float | None:
+    try:
+        if ST["phase"] == "start":
+            _register()
+            bpy.ops.bcx.allow_connect()
+            session = driver.session()
+            if session is None:
+                raise RuntimeError("recovery session failed to start")
+            ready = Path(RECOVERY_READY)
+            temporary = ready.with_suffix(ready.suffix + ".tmp")
+            temporary.write_text(json.dumps({
+                "instance_id": session.instance_id,
+                "pid": os.getpid(),
+            }))
+            os.replace(temporary, ready)
+            ST["phase"] = "recovery_wait"
+        elif ST["phase"] == "recovery_wait" and Path(RECOVERY_STOP).exists():
+            bpy.ops.bcx.disconnect()
+            _unregister()
+            bpy.ops.wm.quit_blender()
+            return None
+    except Exception as exc:  # noqa: BLE001
+        print(f"RECOVERY_FAIL {type(exc).__name__}: {exc}")
+        bpy.ops.wm.quit_blender()
+        return None
+    return 0.05
+
+
+if bool(RECOVERY_READY) != bool(RECOVERY_STOP):
+    raise RuntimeError("recovery mode requires both ready and stop paths")
+if RECOVERY_READY:
+    bpy.app.timers.register(_recovery_step, first_interval=0.5)
+else:
+    bpy.app.timers.register(_timed_step, first_interval=0.5)
 ```
 
-- [ ] **Step 2: 运行**
+正式端到端门使用外部 helper 与共享 stdlib process-registry 护栏：`nfr` hidden worker 由 GUI runner 非阻塞监督；public `recovery` 先启动 OS supervisor，hidden worker 才持有唯一 MCP Client 并编排真 Blender SIGKILL/重启。所有独立 process group 均由 parent 先建 reservation，再经最小 stdlib bootstrap 在重依赖前发布完整身份；runner/public observer 不抢 owner 的 unlink 权，cache/overflow/final-KILL 走同一有界身份复核。两种模式都写有界 JSON artifact，不记录 token/socket 凭据；worker 内 `asyncio.timeout()` 不冒充外层进程监督。
+
+```python
+# smoke/e2e.py
+"""Formal Phase 0 E2E gates: 60-call NFR-P1 and real Blender kill/restart."""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import collections
+import datetime
+import hashlib
+import importlib.metadata
+import json
+import math
+import os
+import platform
+import re
+import secrets
+import selectors
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, cast
+
+from mcp import Client, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from mcp.shared.exceptions import MCPError
+
+from protocol import envelope
+from server.mcp.adapter import CapabilitiesResult, SceneSummaryResult, StatusResult
+try:
+    from smoke.process_registry import (
+        ProcessRecord,
+        REPLACE_MODE,
+        SENTINEL_MODE,
+        cleanup_registry,
+        finish_publication_reservation,
+        group_id_is_live,
+        new_marker,
+        poll_before_deadline,
+        read_record,
+        require_private_directory,
+        reserve_publication,
+        retire_record,
+        scan_records,
+        signal_group_id,
+    )
+except ModuleNotFoundError:  # absolute script execution puts smoke/ on sys.path
+    from process_registry import (  # type: ignore[no-redef]
+        ProcessRecord,
+        REPLACE_MODE,
+        SENTINEL_MODE,
+        cleanup_registry,
+        finish_publication_reservation,
+        group_id_is_live,
+        new_marker,
+        poll_before_deadline,
+        read_record,
+        require_private_directory,
+        reserve_publication,
+        retire_record,
+        scan_records,
+        signal_group_id,
+    )
+
+ROOT = Path(__file__).resolve().parents[1]
+UV = "/Users/yeminjie/.local/bin/uv"
+BLENDER = "/Applications/Blender.app/Contents/MacOS/Blender"
+RUNS = 20
+P95_LIMIT_MS = 2000.0
+READ_TIMEOUT_SECONDS = 30.0
+WORKER_MODE = "__worker"
+RECOVERY_CLEANUP_MARGIN = 15.0
+RECOVERY_WORKER_TERM_GRACE = 8.0
+RECOVERY_GROUP_TERM_GRACE = 3.0
+RECOVERY_REGISTRY_RESERVE = 5.0
+MAX_SOURCE_FILES = 512
+MAX_SOURCE_FILE_BYTES = 16 * 1024 * 1024
+MAX_SOURCE_TOTAL_BYTES = 128 * 1024 * 1024
+MAX_TRACKED_PATH_BYTES = 4096
+MAX_GIT_LIST_BYTES = (MAX_SOURCE_FILES + 1) * (MAX_TRACKED_PATH_BYTES + 1)
+MAX_SAMPLE_RESULT_BYTES = 256 * 1024
+MAX_SAMPLE_RESULTS_BYTES = 16 * 1024 * 1024
+MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
+MAX_AUDIT_FILES = 8
+MAX_AUDIT_FILE_BYTES = 4 * 1024 * 1024
+MAX_AUDIT_TOTAL_BYTES = 16 * 1024 * 1024
+MAX_AUDIT_LINE_BYTES = 64 * 1024
+MAX_AUDIT_ROWS = 256
+MAX_RECOVERY_STATUS_ATTEMPTS = 64
+PLAN_PATH = ROOT / "docs/superpowers/plans/2026-07-23-phase0-readonly-channel.md"
+ATTESTATION_PATH = (
+    ROOT / "docs/audits/evidence/2026-08-08-r17-post-freeze-attestation.json")
+APPROVED_DOCUMENTS = {
+    "plan_sha256": PLAN_PATH,
+    "urs_sha256": ROOT / "Blender-Codex-需求规格说明书-v1.md",
+    "spec_sha256": (
+        ROOT / "docs/superpowers/specs/2026-07-23-phase0-readonly-channel-design.md"),
+    "roadmap_sha256": ROOT / "docs/ROADMAP.md",
+}
+APPROVED_GATE_COUNTS = {
+    "unit_tests": 337,
+    "contract_tests": 32,
+    "full_tests": 369,
+    "adapter_tests": 35,
+    "adapter_substantive_lines": 373,
+}
+AUDIT_KEYS = {
+    "ts", "request_id", "tool", "instance_id", "transaction_id",
+    "params_digest", "ok", "duration_ms", "paths", "error",
+}
+EXPECTED_TOOLS = [
+    "get_blender_status", "get_scene_summary", "describe_capabilities",
+]
+FROZEN_CATALOG_BYTES = 6389
+FROZEN_CATALOG_SHA256 = "b2a833a9415363be1db0c9092f46505cb7125f978801ab57fc486448b6c842d8"
+FROZEN_SCHEMA_BYTES = 5829
+FROZEN_COMBINED_SCHEMA_SHA256 = "52e4b386e581976644ac4f8ef760bae334e11fcc78790ad1adc7ebf3540b3f5c"
+FROZEN_INSTRUCTIONS_BYTES = 322
+FROZEN_INSTRUCTIONS_SHA256 = "3810714ab9be87e9203432e446fc7ba261737153f4c85f2103a7ec983239cedb"
+FROZEN_SERVER_NAME = "blender-codex"
+FROZEN_SERVER_VERSION = "0.1.0"
+
+
+def _server_params(
+    runtime_root: Path, process_record: Path, registry_marker: str,
+) -> tuple[StdioServerParameters, tuple[Path, int, int]]:
+    reservation, device, inode = reserve_publication(process_record)
+    try:
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=[
+                str(Path(__file__).with_name("process_registry.py")), SENTINEL_MODE,
+                str(process_record), str(reservation), str(device), str(inode),
+                registry_marker, UV,
+                "--directory", str(ROOT), "run", "--frozen", "blender-codex-server",
+            ],
+            env=os.environ | {
+                "BLENDERCODEX_ROOT": str(runtime_root),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+        )
+    except BaseException:
+        finish_publication_reservation(reservation, device, inode)
+        raise
+    return params, (reservation, device, inode)
+
+
+def _retire_record_or_reservation(
+    process_record: Path,
+    publication: tuple[Path, int, int],
+    *,
+    expected_marker: str,
+    not_before_ns: int,
+) -> None:
+    try:
+        process_record.lstat()
+    except FileNotFoundError:
+        finish_publication_reservation(*publication)
+    else:
+        retire_record(
+            process_record, expected_marker=expected_marker,
+            not_before_ns=not_before_ns)
+
+
+def _canonical(value: object) -> tuple[int, str]:
+    raw = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return len(raw), hashlib.sha256(raw).hexdigest()
+
+
+def _reject_json_constant(value: str) -> object:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"non-finite JSON number: {value}")
+    return parsed
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
+def _strict_json_loads(raw: str | bytes) -> object:
+    return cast(object, json.loads(
+        raw, parse_constant=_reject_json_constant, parse_float=_finite_json_float,
+        object_pairs_hook=_reject_duplicate_keys))
+
+
+def _exact_json_equal(left: object, right: object) -> bool:
+    if type(left) is not type(right):
+        return False
+    if type(left) is dict:
+        left_dict = cast(dict[object, object], left)
+        right_dict = cast(dict[object, object], right)
+        return (set(left_dict) == set(right_dict)
+                and all(_exact_json_equal(left_dict[key], right_dict[key])
+                        for key in left_dict))
+    if type(left) is list:
+        left_list = cast(list[object], left)
+        right_list = cast(list[object], right)
+        return (len(left_list) == len(right_list)
+                and all(_exact_json_equal(a, b)
+                        for a, b in zip(left_list, right_list, strict=True)))
+    return type(left) in (str, int, float, bool, type(None)) and left == right
+
+
+def _sha256_file(
+    path: Path,
+    *,
+    deadline: float | None = None,
+    max_bytes: int = MAX_ARTIFACT_BYTES,
+) -> str:
+    before = path.lstat()
+    if (not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes
+            or before.st_size < 0):
+        raise ValueError(f"bounded regular file required: {path}")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        opened = os.fstat(fd)
+        if ((opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or not stat.S_ISREG(opened.st_mode) or opened.st_size > max_bytes):
+            raise RuntimeError(f"source identity changed during open: {path}")
+        while total < opened.st_size:
+            if deadline is not None:
+                _remaining(deadline)
+            chunk = os.read(fd, min(1024 * 1024, opened.st_size - total))
+            if not chunk:
+                raise ValueError(f"source truncated during read: {path}")
+            digest.update(chunk)
+            total += len(chunk)
+        if deadline is not None:
+            _remaining(deadline)
+    finally:
+        os.close(fd)
+    return digest.hexdigest()
+
+
+def _require_private_directory(path: Path) -> None:
+    require_private_directory(path)
+
+
+def _write_private_json(output: Path, value: object) -> None:
+    _require_private_directory(output.parent)
+    raw = (json.dumps(
+        value, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    if len(raw) > MAX_ARTIFACT_BYTES:
+        raise ValueError("formal artifact exceeds the 32 MiB limit")
+    temporary = output.parent / (
+        f".{output.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd: int | None = None
+    try:
+        fd = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            fd = None
+            stream.write(raw)
+        os.replace(temporary, output)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        temporary.unlink(missing_ok=True)
+
+
+def _write_artifact(output: Path, artifact: dict[str, Any]) -> None:
+    _write_private_json(output, artifact)
+
+
+def _bounded_process_stdout(
+    command: list[str], *, cwd: Path, deadline: float, max_bytes: int,
+) -> bytes:
+    if max_bytes < 0:
+        raise ValueError("negative subprocess output limit")
+    process = subprocess.Popen(
+        command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    if process.stdout is None:
+        raise RuntimeError("bounded subprocess stdout pipe missing")
+    descriptor = process.stdout.fileno()
+    os.set_blocking(descriptor, False)
+    selector = selectors.DefaultSelector()
+    selector.register(descriptor, selectors.EVENT_READ)
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while True:
+            events = selector.select(min(1.0, _remaining(deadline)))
+            if not events:
+                continue
+            chunk = os.read(descriptor, min(64 * 1024, max_bytes - total + 1))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError("bounded subprocess output exceeds its limit")
+        returncode = process.wait(timeout=_remaining(deadline))
+        _remaining(deadline)
+        if returncode != 0:
+            raise subprocess.CalledProcessError(returncode, command)
+        return b"".join(chunks)
+    finally:
+        selector.close()
+        process.stdout.close()
+        if process.poll() is None:
+            process.kill()
+            try:
+                process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                pass
+
+
+def _git_bytes(
+    deadline: float, *args: str, max_bytes: int = MAX_SOURCE_FILE_BYTES,
+) -> bytes:
+    return _bounded_process_stdout(
+        ["git", *args], cwd=ROOT, deadline=deadline, max_bytes=max_bytes)
+
+
+def _git_text(
+    deadline: float, *args: str, max_bytes: int = MAX_SOURCE_FILE_BYTES,
+) -> str:
+    return _git_bytes(deadline, *args, max_bytes=max_bytes).decode().strip()
+
+
+def _git_blob_sha256(deadline: float, commit: str, path: str) -> str:
+    specifier = f"{commit}:{path}"
+    raw_size = _git_text(
+        deadline, "cat-file", "-s", specifier, max_bytes=64)
+    try:
+        size = int(raw_size)
+    except ValueError as exc:
+        raise ValueError(f"invalid git blob size for {path}: {raw_size}") from exc
+    if not 0 <= size <= MAX_SOURCE_FILE_BYTES:
+        raise ValueError(f"git blob exceeds source limit: {path}")
+    raw = _git_bytes(deadline, "show", specifier, max_bytes=size)
+    if len(raw) != size:
+        raise ValueError(f"git blob size changed: {path}")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _read_bounded_bytes(path: Path, deadline: float, max_bytes: int) -> bytes:
+    before = path.lstat()
+    if (not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes
+            or before.st_size < 0):
+        raise ValueError(f"bounded regular file required: {path}")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    chunks = []
+    total = 0
+    try:
+        opened = os.fstat(fd)
+        if ((opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or not stat.S_ISREG(opened.st_mode) or opened.st_size > max_bytes):
+            raise RuntimeError(f"file identity changed during open: {path}")
+        while total < opened.st_size:
+            _remaining(deadline)
+            chunk = os.read(fd, min(1024 * 1024, opened.st_size - total))
+            if not chunk:
+                raise ValueError(f"file truncated during read: {path}")
+            chunks.append(chunk)
+            total += len(chunk)
+        _remaining(deadline)
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
+def _bounded_directory_names(
+    path: Path, deadline: float, max_entries: int,
+) -> set[str]:
+    before = path.lstat()
+    if not stat.S_ISDIR(before.st_mode):
+        raise ValueError(f"bounded regular directory required: {path}")
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(descriptor)
+        if ((opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or not stat.S_ISDIR(opened.st_mode)):
+            raise RuntimeError(f"directory identity changed during open: {path}")
+        names = set()
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                _remaining(deadline)
+                names.add(entry.name)
+                if len(names) > max_entries:
+                    raise RuntimeError(f"directory entry limit exceeded: {path}")
+        return names
+    finally:
+        os.close(descriptor)
+
+
+def _tracked_sources(deadline: float, required: set[Path]) -> set[Path]:
+    scopes = [
+        "protocol", "bridge", "server", "smoke", "scripts", "tests",
+        "pyproject.toml", "uv.lock",
+        *(str(path.relative_to(ROOT)) for path in APPROVED_DOCUMENTS.values()),
+        str(ATTESTATION_PATH.relative_to(ROOT)),
+    ]
+    raw = _git_bytes(
+        deadline, "ls-files", "-z", "--", *scopes,
+        max_bytes=MAX_GIT_LIST_BYTES)
+    if raw and not raw.endswith(b"\0"):
+        raise ValueError("tracked source list is not NUL terminated")
+    items = [] if not raw else raw[:-1].split(b"\0")
+    if len(items) > MAX_SOURCE_FILES:
+        raise RuntimeError("tracked source path-count limit exceeded")
+    files = set(required)
+    if len(files) > MAX_SOURCE_FILES:
+        raise RuntimeError("required source file-count limit exceeded")
+    tracked: set[Path] = set()
+    for item in items:
+        if not item or len(item) > MAX_TRACKED_PATH_BYTES:
+            raise ValueError("invalid bounded tracked source path")
+        relative = Path(item.decode())
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"invalid tracked source path: {relative}")
+        path = ROOT / relative
+        tracked.add(path)
+        if path.suffix in (".py", ".sh", ".toml") or path in required:
+            files.add(path)
+    missing_required = sorted(str(path.relative_to(ROOT)) for path in required - tracked)
+    if missing_required:
+        raise RuntimeError(f"required provenance inputs are not tracked: {missing_required}")
+
+    protocol_files = {
+        path.name: path for path in files
+        if path.parent == ROOT / "protocol" and path.suffix == ".py"
+    }
+    vendor_root = ROOT / "bridge/_vendor"
+    vendor_protocol = vendor_root / "protocol"
+    vendor_init = vendor_root / "__init__.py"
+    if (not stat.S_ISDIR(vendor_root.lstat().st_mode)
+            or not stat.S_ISDIR(vendor_protocol.lstat().st_mode)
+            or not stat.S_ISREG(vendor_init.lstat().st_mode)
+            or vendor_init.lstat().st_size != 0):
+        raise FileNotFoundError("generated vendored protocol is missing")
+    if _bounded_directory_names(vendor_root, deadline, 8) != {"__init__.py", "protocol"}:
+        raise AssertionError("vendored root contains an unexpected entry")
+    if _bounded_directory_names(
+            vendor_protocol, deadline, len(protocol_files) + 1) != set(protocol_files):
+        raise AssertionError("vendored protocol file set differs from protocol/")
+    vendor_files = {name: vendor_protocol / name for name in protocol_files}
+    for name, source in protocol_files.items():
+        vendor = vendor_files[name]
+        vendor_stat = vendor.lstat()
+        if not stat.S_ISREG(vendor_stat.st_mode):
+            raise ValueError(f"vendored protocol source is not regular: {vendor}")
+        if (_sha256_file(source, deadline=deadline, max_bytes=MAX_SOURCE_FILE_BYTES)
+                != _sha256_file(
+                    vendor, deadline=deadline, max_bytes=MAX_SOURCE_FILE_BYTES)):
+            raise AssertionError(f"vendored protocol content differs: {name}")
+    files.add(vendor_init)
+    files.update(vendor_files.values())
+    if len(files) > MAX_SOURCE_FILES:
+        raise RuntimeError("source manifest file-count limit exceeded")
+    return files
+
+
+def _current_provenance(deadline: float) -> dict[str, Any]:
+    _remaining(deadline)
+    git_status = _git_text(
+        deadline, "status", "--porcelain=v1", "--untracked-files=all")
+    if git_status:
+        raise RuntimeError("formal evidence requires a clean Git worktree")
+
+    required = {
+        PLAN_PATH, ATTESTATION_PATH, ROOT / "pyproject.toml", ROOT / "uv.lock",
+        *APPROVED_DOCUMENTS.values(),
+    }
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"provenance inputs missing: {missing}")
+    files = _tracked_sources(deadline, required)
+    source_files = {}
+    total_bytes = 0
+    for path in sorted(files):
+        raw = _read_bounded_bytes(path, deadline, MAX_SOURCE_FILE_BYTES)
+        total_bytes += len(raw)
+        if total_bytes > MAX_SOURCE_TOTAL_BYTES:
+            raise RuntimeError("source manifest total-byte limit exceeded")
+        source_files[str(path.relative_to(ROOT))] = hashlib.sha256(raw).hexdigest()
+    _, manifest_sha = _canonical(source_files)
+
+    plan_text = _read_bounded_bytes(
+        PLAN_PATH, deadline, MAX_SOURCE_FILE_BYTES).decode()
+    python_paths = re.findall(r"(?m)^\`\`\`python\n# ([^\n]+\.py)$", plan_text)
+    plan_structure = {
+        "tasks": len(re.findall(r"(?m)^### Task [0-9]+:", plan_text)),
+        "open_checkboxes": len(re.findall(r"(?m)^- \[ \]", plan_text)),
+        "checked_checkboxes": len(re.findall(r"(?m)^- \[[xX]\]", plan_text)),
+        "python_fences": len(re.findall(r"(?m)^\`\`\`python$", plan_text)),
+        "path_bound_python": len(python_paths),
+        "unique_path_bound_python": len(set(python_paths)),
+    }
+    attestation = _strict_json_loads(_read_bounded_bytes(
+        ATTESTATION_PATH, deadline, MAX_SOURCE_FILE_BYTES))
+    if (type(attestation) is not dict
+            or set(attestation) != {
+                "schema_version", "generated_at", "source_commit", "approved_tuple",
+            } or type(attestation["schema_version"]) is not int
+            or attestation["schema_version"] != 1
+            or type(attestation["generated_at"]) is not str):
+        raise ValueError("post-freeze attestation schema differs")
+    source_commit = attestation["source_commit"]
+    approved = attestation["approved_tuple"]
+    if (type(source_commit) is not str
+            or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None
+            or type(approved) is not dict):
+        raise ValueError("post-freeze attestation values are malformed")
+    expected_keys = (
+        set(APPROVED_DOCUMENTS) | set(plan_structure) | set(APPROVED_GATE_COUNTS))
+    if set(approved) != expected_keys:
+        raise ValueError("post-freeze approved_tuple keys differ")
+
+    approved_documents = {}
+    for key, path in APPROVED_DOCUMENTS.items():
+        relative = str(path.relative_to(ROOT))
+        live_sha = source_files[relative]
+        blob_sha = _git_blob_sha256(deadline, source_commit, relative)
+        if (type(approved[key]) is not str
+                or approved[key] != live_sha or approved[key] != blob_sha):
+            raise AssertionError(f"approved document differs: {key}")
+        approved_documents[key] = {
+            "path": relative, "sha256": live_sha, "source_blob_sha256": blob_sha,
+        }
+    for key, value in plan_structure.items():
+        if type(approved[key]) is not type(value) or approved[key] != value:
+            raise AssertionError(f"approved Plan {key} differs")
+    for key, value in APPROVED_GATE_COUNTS.items():
+        if type(approved[key]) is not type(value) or approved[key] != value:
+            raise AssertionError(f"approved gate count {key} differs")
+
+    _git_text(deadline, "merge-base", "--is-ancestor", source_commit, "HEAD")
+    attestation_relative = str(ATTESTATION_PATH.relative_to(ROOT))
+    _git_text(deadline, "ls-files", "--error-unmatch", attestation_relative)
+    attestation_commit = _git_text(
+        deadline, "log", "-1", "--format=%H", "--", attestation_relative)
+    if source_commit == attestation_commit:
+        raise AssertionError("attestation must be committed after its source commit")
+    _git_text(
+        deadline, "merge-base", "--is-ancestor", source_commit, attestation_commit)
+    _git_text(deadline, "merge-base", "--is-ancestor", attestation_commit, "HEAD")
+
+    blender_version = subprocess.run(
+        [BLENDER, "--version"], check=True, text=True,
+        timeout=min(10.0, _remaining(deadline)),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    ).stdout.strip()
+    _remaining(deadline)
+    plan_relative = str(PLAN_PATH.relative_to(ROOT))
+    return {
+        "schema_version": 1,
+        "git": {
+            "head": _git_text(deadline, "rev-parse", "HEAD"),
+            "tree": _git_text(deadline, "rev-parse", "HEAD^{tree}"),
+            "dirty": False,
+            "status_sha256": hashlib.sha256(b"").hexdigest(),
+            "status_lines": 0,
+        },
+        "plan": {
+            "path": plan_relative,
+            "sha256": approved["plan_sha256"],
+            **plan_structure,
+            "approved_source_commit": source_commit,
+            "approved_tuple": approved,
+            "post_freeze_attestation": attestation_relative,
+            "post_freeze_attestation_sha256": source_files[attestation_relative],
+            "post_freeze_attestation_commit": attestation_commit,
+        },
+        "approved_documents": approved_documents,
+        "sources": {
+            "files": source_files,
+            "file_count": len(source_files),
+            "total_bytes": total_bytes,
+            "manifest_sha256": manifest_sha,
+            "uv_lock_sha256": source_files["uv.lock"],
+        },
+        "blender": {
+            "executable": BLENDER,
+            "version_output": blender_version,
+            "version_output_sha256": hashlib.sha256(
+                blender_version.encode()).hexdigest(),
+        },
+        "runtime": {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "machine": platform.machine(),
+            "mcp_sdk": importlib.metadata.version("mcp"),
+        },
+        "commands": {
+            "mcp_server": [UV, "--directory", str(ROOT), "run", "--frozen",
+                           "blender-codex-server"],
+            "blender_recovery": [BLENDER, "--factory-startup", "--python-exit-code",
+                                 "1", "--python", "smoke/runner.py"],
+        },
+    }
+
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("formal E2E deadline expired")
+    return remaining
+
+
+async def _call_tool(
+    client: Client, tool: str, arguments: dict[str, object], deadline: float,
+):
+    _remaining(deadline)
+    async with asyncio.timeout(_remaining(deadline)):
+        result = await client.call_tool(tool, arguments)
+    _remaining(deadline)
+    return result
+
+
+async def _catalog_baseline(client: Client, deadline: float) -> dict[str, Any]:
+    _remaining(deadline)
+    async with asyncio.timeout(_remaining(deadline)):
+        first = await client.list_tools()
+        second = await client.list_tools()
+    _remaining(deadline)
+    if (first.next_cursor is not None or second.next_cursor is not None
+            or first.result_type != "complete"
+            or second.result_type != "complete"):
+        raise AssertionError("tools/list must be one complete page")
+    server_info = client.server_info
+    if (server_info is None or server_info.name != FROZEN_SERVER_NAME
+            or server_info.version != FROZEN_SERVER_VERSION):
+        raise AssertionError("wire server version differs from freeze")
+    catalog = [tool.model_dump(
+        mode="json", by_alias=True, exclude_none=False) for tool in first.tools]
+    repeated = [tool.model_dump(
+        mode="json", by_alias=True, exclude_none=False) for tool in second.tools]
+    ordered_tools = [item.get("name") for item in catalog]
+    if (ordered_tools != EXPECTED_TOOLS
+            or not _exact_json_equal(catalog, repeated)):
+        raise AssertionError("tools/list catalog or order is not deterministic")
+    schemas = [
+        {"name": item["name"], "inputSchema": item["inputSchema"],
+         "outputSchema": item["outputSchema"]}
+        for item in catalog
+    ]
+    catalog_bytes, catalog_sha = _canonical(catalog)
+    schema_bytes, schema_sha = _canonical(schemas)
+    instructions = client.instructions
+    if type(instructions) is not str or not instructions:
+        raise AssertionError("server instructions missing from catalog baseline")
+    raw_instructions = instructions.encode("utf-8")
+    return {
+        "ordered_tools": ordered_tools,
+        "server_name": server_info.name,
+        "server_version": server_info.version,
+        "next_cursor": None,
+        "result_type": "complete",
+        "ordered_catalog": catalog,
+        "ordered_catalog_bytes": catalog_bytes,
+        "ordered_catalog_sha256": catalog_sha,
+        "schema_bytes": schema_bytes,
+        "schema_sha256": schema_sha,
+        "instructions": instructions,
+        "instructions_utf8_bytes": len(raw_instructions),
+        "instructions_sha256": hashlib.sha256(raw_instructions).hexdigest(),
+        "stable_repeated_list": True,
+    }
+
+
+def _verify_catalog_baseline(record: dict[str, Any]) -> None:
+    expected_keys = {
+        "ordered_tools", "server_name", "server_version", "next_cursor", "result_type",
+        "ordered_catalog", "ordered_catalog_bytes",
+        "ordered_catalog_sha256", "schema_bytes", "schema_sha256",
+        "instructions", "instructions_utf8_bytes", "instructions_sha256",
+        "stable_repeated_list",
+    }
+    if (set(record) != expected_keys or record["ordered_tools"] != EXPECTED_TOOLS
+            or record["server_name"] != FROZEN_SERVER_NAME
+            or record["server_version"] != FROZEN_SERVER_VERSION
+            or record["next_cursor"] is not None
+            or record["result_type"] != "complete"
+            or record["stable_repeated_list"] is not True):
+        raise AssertionError("catalog baseline shape or order differs")
+    catalog = record["ordered_catalog"]
+    if (type(catalog) is not list or len(catalog) != len(EXPECTED_TOOLS)
+            or any(type(item) is not dict for item in catalog)
+            or [item.get("name") for item in catalog] != EXPECTED_TOOLS
+            or any("inputSchema" not in item or "outputSchema" not in item
+                   for item in catalog)):
+        raise AssertionError("ordered catalog payload differs")
+    catalog_bytes, catalog_sha = _canonical(catalog)
+    schemas = [
+        {"name": item["name"], "inputSchema": item["inputSchema"],
+         "outputSchema": item["outputSchema"]}
+        for item in catalog
+    ]
+    schema_bytes, schema_sha = _canonical(schemas)
+    instructions = record["instructions"]
+    if type(instructions) is not str or not instructions:
+        raise AssertionError("catalog instructions missing")
+    raw_instructions = instructions.encode("utf-8")
+    if (record["ordered_catalog_bytes"] != catalog_bytes
+            or record["ordered_catalog_sha256"] != catalog_sha
+            or record["schema_bytes"] != schema_bytes
+            or record["schema_sha256"] != schema_sha
+            or record["instructions_utf8_bytes"] != len(raw_instructions)
+            or record["instructions_sha256"]
+            != hashlib.sha256(raw_instructions).hexdigest()):
+        raise AssertionError("catalog baseline digest differs")
+    if (catalog_bytes != FROZEN_CATALOG_BYTES
+            or catalog_sha != FROZEN_CATALOG_SHA256
+            or schema_bytes != FROZEN_SCHEMA_BYTES
+            or schema_sha != FROZEN_COMBINED_SCHEMA_SHA256
+            or len(raw_instructions) != FROZEN_INSTRUCTIONS_BYTES
+            or hashlib.sha256(raw_instructions).hexdigest()
+            != FROZEN_INSTRUCTIONS_SHA256):
+        raise AssertionError("catalog baseline differs from Task 17 freeze")
+
+
+def _compat_text_metrics(
+    result: object,
+    validated: dict[str, Any],
+    validate: Callable[[object], dict[str, Any]],
+) -> dict[str, Any]:
+    content = getattr(result, "content", None)
+    if (type(content) is not list or len(content) != 1
+            or getattr(content[0], "type", None) != "text"
+            or type(getattr(content[0], "text", None)) is not str):
+        raise AssertionError("exactly one compatibility TextContent is required")
+    text = content[0].text
+    try:
+        text_value = _strict_json_loads(text)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise AssertionError("compatibility TextContent is not JSON") from exc
+    text_validated = validate(text_value)
+    if (not _exact_json_equal(text_value, text_validated)
+            or not _exact_json_equal(text_validated, validated)):
+        raise AssertionError("TextContent and structuredContent differ")
+    raw_text = text.encode("utf-8")
+    structured_bytes, _structured_sha = _canonical(validated)
+    return {
+        "text_content": text,
+        "text_content_bytes": len(raw_text),
+        "text_content_sha256": hashlib.sha256(raw_text).hexdigest(),
+        "text_json_equivalent": True,
+        "duplication_ratio": round(
+            (structured_bytes + len(raw_text)) / structured_bytes, 6),
+    }
+
+
+def _audit_rows(runtime_root: Path, deadline: float) -> list[dict[str, Any]]:
+    logs = runtime_root / "logs"
+    try:
+        logs_stat = logs.lstat()
+    except FileNotFoundError:
+        return []
+    if (not stat.S_ISDIR(logs_stat.st_mode) or logs_stat.st_uid != os.geteuid()
+            or stat.S_IMODE(logs_stat.st_mode) != 0o700):
+        raise PermissionError(f"private audit directory required: {logs}")
+    names = _bounded_directory_names(logs, deadline, MAX_AUDIT_FILES)
+    if any(re.fullmatch(r"server-[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl", name) is None
+           for name in names):
+        raise ValueError("audit directory contains an unexpected entry")
+    rows: list[dict[str, Any]] = []
+    total_bytes = 0
+    for name in sorted(names):
+        path = logs / name
+        file_stat = path.lstat()
+        if (not stat.S_ISREG(file_stat.st_mode) or file_stat.st_uid != os.geteuid()
+                or stat.S_IMODE(file_stat.st_mode) != 0o600):
+            raise PermissionError(f"private audit file required: {path}")
+        raw = _read_bounded_bytes(path, deadline, MAX_AUDIT_FILE_BYTES)
+        total_bytes += len(raw)
+        if total_bytes > MAX_AUDIT_TOTAL_BYTES:
+            raise ValueError("audit bundle exceeds the total byte limit")
+        if raw and not raw.endswith(b"\n"):
+            raise ValueError(f"audit file has a partial final row: {path}")
+        for line in raw.splitlines():
+            if len(line) > MAX_AUDIT_LINE_BYTES:
+                raise ValueError(f"audit row exceeds its byte limit: {path}")
+            row = _strict_json_loads(line)
+            if type(row) is not dict:
+                raise ValueError(f"audit row is not an object: {path}")
+            rows.append(row)
+            if len(rows) > MAX_AUDIT_ROWS:
+                raise ValueError("audit bundle exceeds the row limit")
+    return rows
+
+
+def _audit_summary(
+    rows: list[dict[str, Any]],
+    expected: list[tuple[str, dict[str, object], bool, str | None, str | None]],
+) -> dict[str, Any]:
+    if len(rows) != len(expected):
+        raise AssertionError(f"audit row count differs: {len(rows)} != {len(expected)}")
+    request_ids = [row.get("request_id") for row in rows]
+    if any(value == "<missing>" or type(value) not in (str, int) for value in request_ids):
+        raise AssertionError("audit request id missing or malformed")
+    if len({(type(value).__name__, value) for value in request_ids}) != len(request_ids):
+        raise AssertionError("audit request ids are not unique")
+    for index, (row, event) in enumerate(zip(rows, expected, strict=True)):
+        tool, arguments, ok, error, instance_id = event
+        _, argument_sha = _canonical(arguments)
+        if (set(row) != AUDIT_KEYS or row.get("tool") != tool
+                or row.get("params_digest") != argument_sha[:16]
+                or row.get("ok") is not ok or row.get("error") != error
+                or row.get("instance_id") != instance_id
+                or row.get("transaction_id") is not None or row.get("paths") != []
+                or type(row.get("ts")) is not str
+                or type(row.get("duration_ms")) not in (int, float)
+                or not math.isfinite(row["duration_ms"])
+                or row["duration_ms"] < 0):
+            raise AssertionError(f"audit row {index} differs: {row!r} != {event!r}")
+    counts = collections.Counter(row["tool"] for row in rows)
+    return {
+        "rows": len(rows),
+        "unique_request_ids": len(request_ids),
+        "tool_counts": dict(sorted(counts.items())),
+        "ok_rows": sum(row["ok"] is True for row in rows),
+        "error_codes": sorted(
+            str(row["error"]) for row in rows if row["error"] is not None),
+    }
+
+
+def _validate_status(value: object, instance_id: str) -> dict[str, Any]:
+    model = StatusResult.model_validate(value)
+    if not model.ok or model.partial or model.skipped_count != 0:
+        raise AssertionError(f"status is partial: {model!r}")
+    matches = [row for row in model.instances if row.instance_id == instance_id]
+    if (len(model.instances) != 1 or len(matches) != 1
+            or matches[0].bridge_state != "connected"):
+        raise AssertionError(f"connected instance missing: {model!r}")
+    return model.model_dump(mode="json")
+
+
+def _validate_scene(value: object, instance_id: str) -> dict[str, Any]:
+    model = SceneSummaryResult.model_validate(value)
+    summary = model.summary
+    if (model.instance_id != instance_id or summary.object_count != 100_000
+            or summary.mesh_count != 100_000 or summary.camera_count != 0
+            or summary.light_count != 0 or summary.collections != []
+            or summary.managed_objects != []):
+        raise AssertionError(f"100k scene result differs: {model!r}")
+    return model.model_dump(mode="json")
+
+
+def _validate_capabilities(value: object) -> dict[str, Any]:
+    model = CapabilitiesResult.model_validate(value)
+    if (model.phase != "phase0" or model.connected_instances != []
+            or model.instances_partial or model.instances_skipped_count != 0
+            or model.supported_tools != [
+                "get_blender_status", "get_scene_summary", "describe_capabilities"]):
+        raise AssertionError(f"offline capabilities result differs: {model!r}")
+    return model.model_dump(mode="json")
+
+
+def _require_bridge_unavailable(data: object) -> dict[str, object]:
+    if (type(data) is not dict
+            or set(data) != {"code", "retryable"}
+            or type(data["code"]) is not str
+            or data["code"] != envelope.BRIDGE_UNAVAILABLE
+            or type(data["retryable"]) is not bool
+            or data["retryable"] is not True):
+        raise AssertionError(f"unexpected post-kill error data: {data!r}")
+    return {"code": data["code"], "retryable": data["retryable"]}
+
+
+async def _measure(
+    client: Client,
+    tool: str,
+    arguments: dict[str, object],
+    validate: Callable[[object], dict[str, Any]],
+    deadline: float,
+) -> dict[str, Any]:
+    samples = []
+    sample_results = []
+    representative: dict[str, Any] | None = None
+    for _index in range(RUNS):
+        _remaining(deadline)
+        started = time.perf_counter_ns()
+        result = await _call_tool(client, tool, arguments, deadline)
+        if result.is_error or result.structured_content is None:
+            raise RuntimeError(f"{tool} returned an error or no structuredContent")
+        representative = validate(result.structured_content)
+        _remaining(deadline)
+        duration_ms = round((time.perf_counter_ns() - started) / 1_000_000, 6)
+        samples.append(duration_ms)
+        result_bytes, result_sha = _canonical(representative)
+        if result_bytes > MAX_SAMPLE_RESULT_BYTES:
+            raise ValueError(f"{tool} sample result exceeds the 256 KiB limit")
+        sample_results.append({
+            "duration_ms": duration_ms,
+            "result_bytes": result_bytes,
+            "result_sha256": result_sha,
+            "validated_result": representative,
+            **_compat_text_metrics(result, representative, validate),
+        })
+    ordered = sorted(samples)
+    p95_ms = ordered[math.ceil(0.95 * len(ordered)) - 1]
+    argument_bytes, argument_sha = _canonical(arguments)
+    result_bytes, result_sha = _canonical(representative)
+    return {
+        "arguments": arguments,
+        "arguments_bytes": argument_bytes,
+        "arguments_sha256": argument_sha,
+        "samples_ms": samples,
+        "sample_results": sample_results,
+        "p95_method": "nearest_rank",
+        "p95_ms": p95_ms,
+        "max_ms": ordered[-1],
+        "validated": True,
+        "representative_result": representative,
+        "representative_result_bytes": result_bytes,
+        "representative_result_sha256": result_sha,
+    }
+
+
+def _sample_result_total(records: list[dict[str, Any]]) -> int:
+    sizes = [
+        item["result_bytes"]
+        for record in records
+        for item in record["sample_results"]
+    ]
+    if any(type(size) is not int or size < 0 for size in sizes):
+        raise AssertionError("measurement sample byte count is invalid")
+    total = sum(sizes)
+    if total > MAX_SAMPLE_RESULTS_BYTES:
+        raise AssertionError("all measurement preimages exceed the 16 MiB limit")
+    return total
+
+
+def _sample_text_total(records: list[dict[str, Any]]) -> int:
+    sizes = [
+        item["text_content_bytes"]
+        for record in records
+        for item in record["sample_results"]
+    ]
+    if any(type(size) is not int or size < 0 for size in sizes):
+        raise AssertionError("measurement TextContent byte count is invalid")
+    return sum(sizes)
+
+
+def _require_exact_measurement_results(value: object) -> dict[str, dict[str, Any]]:
+    if (type(value) is not dict or set(value) != set(EXPECTED_TOOLS)
+            or any(type(record) is not dict for record in value.values())):
+        raise AssertionError("measurement result tool set differs")
+    return cast(dict[str, dict[str, Any]], value)
+
+
+def _verify_measurement_record(
+    record: dict[str, Any],
+    arguments: dict[str, object],
+    validate: Callable[[object], dict[str, Any]],
+) -> None:
+    expected_keys = {
+        "arguments", "arguments_bytes", "arguments_sha256", "samples_ms",
+        "sample_results", "p95_method", "p95_ms", "max_ms", "validated",
+        "representative_result", "representative_result_bytes",
+        "representative_result_sha256",
+    }
+    if (set(record) != expected_keys
+            or not _exact_json_equal(record["arguments"], arguments)):
+        raise AssertionError("measurement record keys or arguments differ")
+    record_argument_bytes, record_argument_sha = _canonical(record["arguments"])
+    argument_bytes, argument_sha = _canonical(arguments)
+    if (record["arguments_bytes"] != record_argument_bytes
+            or record["arguments_sha256"] != record_argument_sha
+            or (record_argument_bytes, record_argument_sha)
+            != (argument_bytes, argument_sha)
+            or record["p95_method"] != "nearest_rank"
+            or record["validated"] is not True):
+        raise AssertionError("measurement record metadata differs")
+    samples = record["samples_ms"]
+    results = record["sample_results"]
+    if len(samples) != len(results) != RUNS or len(samples) != RUNS:
+        raise AssertionError("measurement sample count differs")
+    for duration, item in zip(samples, results, strict=True):
+        if (type(duration) not in (int, float) or not math.isfinite(duration)
+                or duration < 0 or set(item) != {
+                    "duration_ms", "result_bytes", "result_sha256", "validated_result",
+                    "text_content", "text_content_bytes", "text_content_sha256",
+                    "text_json_equivalent", "duplication_ratio",
+                } or item["duration_ms"] != duration):
+            raise AssertionError("measurement sample shape differs")
+        raw_validated = item["validated_result"]
+        validated = validate(raw_validated)
+        if not _exact_json_equal(raw_validated, validated):
+            raise AssertionError("measurement sample preimage differs after validation")
+        result_bytes, result_sha = _canonical(raw_validated)
+        if (result_bytes > MAX_SAMPLE_RESULT_BYTES
+                or item["result_bytes"] != result_bytes
+                or item["result_sha256"] != result_sha):
+            raise AssertionError("measurement sample digest differs")
+        text = item["text_content"]
+        if type(text) is not str:
+            raise AssertionError("measurement TextContent differs")
+        raw_text = text.encode("utf-8")
+        try:
+            text_value = _strict_json_loads(text)
+            text_validated = validate(text_value)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise AssertionError("measurement TextContent differs") from exc
+        expected_ratio = round(
+            (result_bytes + len(raw_text)) / result_bytes, 6)
+        if (not _exact_json_equal(text_value, text_validated)
+                or not _exact_json_equal(text_validated, validated)
+                or item["text_json_equivalent"] is not True
+                or item["text_content_bytes"] != len(raw_text)
+                or item["text_content_sha256"]
+                != hashlib.sha256(raw_text).hexdigest()
+                or type(item["duplication_ratio"]) not in (int, float)
+                or not math.isfinite(item["duplication_ratio"])
+                or item["duplication_ratio"] != expected_ratio):
+            raise AssertionError("measurement TextContent digest differs")
+    ordered = sorted(samples)
+    p95 = ordered[math.ceil(0.95 * len(ordered)) - 1]
+    aggregates = (record["p95_ms"], record["max_ms"])
+    if (any(type(value) not in (int, float)
+            or not math.isfinite(value) or value < 0 for value in aggregates)
+            or record["p95_ms"] != p95 or record["max_ms"] != ordered[-1]):
+        raise AssertionError("measurement aggregate differs")
+    raw_representative = record["representative_result"]
+    representative = validate(raw_representative)
+    if not _exact_json_equal(raw_representative, representative):
+        raise AssertionError("measurement representative preimage differs after validation")
+    representative_bytes, representative_sha = _canonical(raw_representative)
+    if (not _exact_json_equal(
+                raw_representative, results[-1]["validated_result"])
+            or record["representative_result_bytes"] != representative_bytes
+            or record["representative_result_sha256"] != representative_sha):
+        raise AssertionError("measurement representative result differs")
+
+
+async def _run_nfr(
+    runtime_root: Path, offline_root: Path, instance_id: str,
+    process_registry: Path, registry_marker: str,
+    registry_not_before_ns: int, deadline: float,
+) -> dict[str, Any]:
+    live_before = len(_audit_rows(runtime_root, deadline))
+    if live_before != 0:
+        raise AssertionError(f"formal NFR root already contains {live_before} audit rows")
+    status_args = {"instance_selector": instance_id}
+    scene_args = {
+        "instance_id": instance_id,
+        "include_collections": False,
+        "include_managed_objects": False,
+    }
+    live_record = process_registry / "nfr-live.json"
+    live_params, live_publication = _server_params(
+        runtime_root, live_record, registry_marker)
+    try:
+        async with Client(
+            stdio_client(live_params), mode="auto",
+            read_timeout_seconds=min(READ_TIMEOUT_SECONDS, _remaining(deadline)),
+        ) as client:
+            read_record(
+                live_record, expected_marker=registry_marker,
+                not_before_ns=registry_not_before_ns)
+            protocol_version = str(client.session.protocol_version)
+            live_catalog = await _catalog_baseline(client, deadline)
+            status = await _measure(
+                client, "get_blender_status", status_args,
+                lambda value: _validate_status(value, instance_id), deadline,
+            )
+            scene = await _measure(
+                client, "get_scene_summary", scene_args,
+                lambda value: _validate_scene(value, instance_id), deadline,
+            )
+    finally:
+        _retire_record_or_reservation(
+            live_record, live_publication, expected_marker=registry_marker,
+            not_before_ns=registry_not_before_ns)
+    _remaining(deadline)
+    live_rows = _audit_rows(runtime_root, deadline)[live_before:]
+    live_audit = _audit_summary(
+        live_rows,
+        ([
+            ("get_blender_status", status_args, True, None, None)
+            for _index in range(RUNS)
+        ] + [
+            ("get_scene_summary", scene_args, True, None, instance_id)
+            for _index in range(RUNS)
+        ]),
+    )
+    if live_audit["ok_rows"] != RUNS * 2:
+        raise AssertionError(f"live audit contains failures: {live_audit!r}")
+    _remaining(deadline)
+
+    _require_private_directory(offline_root)
+    if any(offline_root.iterdir()):
+        raise FileExistsError("formal offline root must start empty")
+    capabilities_args = {"include_instances": False}
+    offline_record = process_registry / "nfr-offline.json"
+    offline_params, offline_publication = _server_params(
+        offline_root, offline_record, registry_marker)
+    try:
+        async with Client(
+            stdio_client(offline_params), mode="auto",
+            read_timeout_seconds=min(READ_TIMEOUT_SECONDS, _remaining(deadline)),
+        ) as client:
+            read_record(
+                offline_record, expected_marker=registry_marker,
+                not_before_ns=registry_not_before_ns)
+            offline_protocol = str(client.session.protocol_version)
+            offline_catalog = await _catalog_baseline(client, deadline)
+            capabilities = await _measure(
+                client, "describe_capabilities", capabilities_args,
+                _validate_capabilities, deadline,
+            )
+    finally:
+        _retire_record_or_reservation(
+            offline_record, offline_publication, expected_marker=registry_marker,
+            not_before_ns=registry_not_before_ns)
+    _remaining(deadline)
+    offline_audit = _audit_summary(
+        _audit_rows(offline_root, deadline), [
+            ("describe_capabilities", capabilities_args, True, None, None)
+            for _index in range(RUNS)
+        ])
+    if offline_audit["ok_rows"] != RUNS:
+        raise AssertionError(f"offline audit contains failures: {offline_audit!r}")
+    _remaining(deadline)
+
+    results = {
+        "get_blender_status": status,
+        "get_scene_summary": scene,
+        "describe_capabilities": capabilities,
+    }
+    if not _exact_json_equal(live_catalog, offline_catalog):
+        raise AssertionError("live/offline ordered catalog baseline differs")
+    _verify_catalog_baseline(live_catalog)
+    _verify_catalog_baseline(offline_catalog)
+    sample_result_bytes = _sample_result_total(list(results.values()))
+    sample_text_bytes = _sample_text_total(list(results.values()))
+    failures = [
+        name for name, record in results.items()
+        if len(record["samples_ms"]) != RUNS or record["p95_ms"] >= P95_LIMIT_MS
+    ]
+    return {
+        "success": failures == [],
+        "protocol_versions": {"live": protocol_version, "offline": offline_protocol},
+        "instance_id": instance_id,
+        "sample_count": sum(len(record["samples_ms"]) for record in results.values()),
+        "sample_result_bytes": sample_result_bytes,
+        "sample_text_content_bytes": sample_text_bytes,
+        "sample_dual_content_payload_bytes": sample_result_bytes + sample_text_bytes,
+        "p95_limit_ms": P95_LIMIT_MS,
+        "failed_tools": failures,
+        "catalog": live_catalog,
+        "audit": {"live": live_audit, "offline": offline_audit},
+        "results": results,
+    }
+
+
+def _start_blender(
+    runtime_root: Path,
+    ready: Path,
+    stop: Path,
+    process_record: Path,
+    registry_marker: str,
+) -> tuple[subprocess.Popen[bytes], tuple[Path, int, int]]:
+    reservation, device, inode = reserve_publication(process_record)
+    env = os.environ | {
+        "BLENDERCODEX_ROOT": str(runtime_root),
+        "BLENDERCODEX_RECOVERY_READY": str(ready),
+        "BLENDERCODEX_RECOVERY_STOP": str(stop),
+    }
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(Path(__file__).with_name("process_registry.py")),
+             REPLACE_MODE,
+             str(process_record), str(reservation), str(device), str(inode),
+             registry_marker,
+             BLENDER, "--factory-startup", "--python-exit-code", "1",
+             "--python", "smoke/runner.py"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except BaseException:
+        finish_publication_reservation(reservation, device, inode)
+        raise
+    return process, (reservation, device, inode)
+
+
+async def _wait_process(process: subprocess.Popen[bytes], deadline: float) -> int:
+    while process.poll() is None:
+        if _remaining(deadline) <= 0:
+            raise TimeoutError(f"process {process.pid} did not exit")
+        await asyncio.sleep(min(0.05, _remaining(deadline)))
+    return process.returncode
+
+
+async def _wait_ready(
+    path: Path, process: subprocess.Popen[bytes], deadline: float,
+) -> dict[str, Any]:
+    while True:
+        _remaining(deadline)
+        if process.poll() is not None:
+            raise RuntimeError(f"Blender exited before ready: {process.returncode}")
+        try:
+            ready = _strict_json_loads(path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            await asyncio.sleep(min(0.05, _remaining(deadline)))
+            continue
+        if (type(ready.get("instance_id")) is str
+                and ready.get("pid") == process.pid):
+            return ready
+        raise ValueError(f"malformed recovery ready file: {ready!r}")
+
+
+def _signal_process_group(process: subprocess.Popen[bytes], sig: int) -> None:
+    if process.poll() is not None:
+        return
+    if os.getpgid(process.pid) != process.pid:
+        raise RuntimeError(f"process {process.pid} is not its group leader")
+    os.killpg(process.pid, sig)
+
+
+async def _stop_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    _signal_process_group(process, signal.SIGTERM)
+    try:
+        await _wait_process(process, time.monotonic() + 2.0)
+    except TimeoutError:
+        _signal_process_group(process, signal.SIGKILL)
+        await _wait_process(process, time.monotonic() + 2.0)
+
+
+async def _run_recovery(
+    runtime_root: Path, process_registry: Path, registry_marker: str,
+    registry_not_before_ns: int, deadline: float,
+) -> dict[str, Any]:
+    first: subprocess.Popen[bytes] | None = None
+    second: subprocess.Popen[bytes] | None = None
+    first_publication: tuple[Path, int, int] | None = None
+    second_publication: tuple[Path, int, int] | None = None
+    mcp_record = process_registry / "recovery.json"
+    first_record = process_registry / "recovery-blender-first.json"
+    second_record = process_registry / "recovery-blender-second.json"
+    with tempfile.TemporaryDirectory(prefix="bcx-recovery-control-") as temporary:
+        control = Path(temporary)
+        control.chmod(0o700)
+        first_ready, second_ready = control / "first.json", control / "second.json"
+        first_stop, second_stop = control / "first.stop", control / "second.stop"
+        try:
+            first, first_publication = _start_blender(
+                runtime_root, first_ready, first_stop,
+                first_record, registry_marker)
+            initial = await _wait_ready(
+                first_ready, first, min(deadline, time.monotonic() + 30.0))
+            initial_id = initial["instance_id"]
+            audit_before = len(_audit_rows(runtime_root, deadline))
+            if audit_before != 0:
+                raise AssertionError(
+                    f"formal recovery root already contains {audit_before} audit rows")
+            initial_args = {"instance_selector": initial_id}
+            post_kill_args = {
+                "instance_id": initial_id,
+                "include_collections": False,
+                "include_managed_objects": False,
+            }
+            restart_attempts = 0
+            unavailable_error: dict[str, object] | None = None
+            mcp_params, mcp_publication = _server_params(
+                runtime_root, mcp_record, registry_marker)
+            try:
+                async with Client(
+                    stdio_client(mcp_params), mode="auto",
+                    read_timeout_seconds=min(READ_TIMEOUT_SECONDS, _remaining(deadline)),
+                ) as client:
+                    mcp_before = read_record(
+                        mcp_record, expected_marker=registry_marker,
+                        not_before_ns=registry_not_before_ns).evidence()
+                    initial_status = await _call_tool(
+                        client, "get_blender_status", initial_args, deadline)
+                    if initial_status.is_error or initial_status.structured_content is None:
+                        raise AssertionError("initial status returned an MCP error")
+                    initial_result = _validate_status(
+                        initial_status.structured_content, initial_id)
+
+                    _signal_process_group(first, signal.SIGKILL)
+                    first_exit = await _wait_process(
+                        first, min(deadline, time.monotonic() + 10.0))
+                    if first_exit != -signal.SIGKILL:
+                        raise AssertionError(
+                            f"Blender did not exit from SIGKILL: {first_exit}")
+                    try:
+                        await _call_tool(
+                            client, "get_scene_summary", post_kill_args, deadline)
+                    except MCPError as exc:
+                        unavailable_error = _require_bridge_unavailable(exc.data)
+                    else:
+                        raise AssertionError(
+                            "post-kill scene summary unexpectedly succeeded")
+                    mcp_after_kill = read_record(
+                        mcp_record, expected_marker=registry_marker,
+                        not_before_ns=registry_not_before_ns).evidence()
+                    if mcp_after_kill != mcp_before:
+                        raise AssertionError("MCP process identity changed after Blender kill")
+
+                    second, second_publication = _start_blender(
+                        runtime_root, second_ready, second_stop,
+                        second_record, registry_marker)
+                    restarted = await _wait_ready(
+                        second_ready, second, min(deadline, time.monotonic() + 30.0))
+                    restarted_id = restarted["instance_id"]
+                    if restarted_id == initial_id:
+                        raise AssertionError(
+                            "Blender restart reused the previous instance id")
+                    restarted_args = {"instance_selector": restarted_id}
+                    while True:
+                        _remaining(deadline)
+                        if restart_attempts >= MAX_RECOVERY_STATUS_ATTEMPTS:
+                            raise RuntimeError("recovery status attempt limit exceeded")
+                        restart_attempts += 1
+                        status = await _call_tool(
+                            client, "get_blender_status", restarted_args, deadline)
+                        if status.is_error or status.structured_content is None:
+                            raise AssertionError("restart status returned an MCP error")
+                        try:
+                            restarted_result = _validate_status(
+                                status.structured_content, restarted_id)
+                        except AssertionError:
+                            await asyncio.sleep(min(0.1, _remaining(deadline)))
+                            continue
+                        _remaining(deadline)
+                        break
+
+                    second_stop.touch()
+                    second_exit = await _wait_process(
+                        second, min(deadline, time.monotonic() + 15.0))
+                    if second_exit != 0:
+                        raise AssertionError(f"restarted Blender exited {second_exit}")
+                    mcp_after_restart = read_record(
+                        mcp_record, expected_marker=registry_marker,
+                        not_before_ns=registry_not_before_ns).evidence()
+                    if mcp_after_restart != mcp_before:
+                        raise AssertionError("MCP process identity changed after Blender restart")
+            finally:
+                _retire_record_or_reservation(
+                    mcp_record, mcp_publication, expected_marker=registry_marker,
+                    not_before_ns=registry_not_before_ns)
+            audit_rows = _audit_rows(runtime_root, deadline)[audit_before:]
+            recovery_audit = _audit_summary(
+                audit_rows,
+                [
+                    ("get_blender_status", initial_args, True, None, None),
+                    ("get_scene_summary", post_kill_args, False,
+                     envelope.BRIDGE_UNAVAILABLE, initial_id),
+                ] + [
+                    ("get_blender_status", restarted_args, True, None, None)
+                    for _index in range(restart_attempts)
+                ],
+            )
+            _remaining(deadline)
+            if unavailable_error is None:
+                raise AssertionError("post-kill retryable error evidence missing")
+            return {
+                "success": True,
+                "same_mcp_server_session": (
+                    mcp_before == mcp_after_kill == mcp_after_restart),
+                "mcp_server_identity_before_kill": mcp_before,
+                "mcp_server_identity_after_kill": mcp_after_kill,
+                "mcp_server_identity_after_restart": mcp_after_restart,
+                "initial_instance_id": initial_id,
+                "restarted_instance_id": restarted_id,
+                "initial_pid": first.pid,
+                "restarted_pid": second.pid,
+                "first_exit_code": first_exit,
+                "second_exit_code": second_exit,
+                "bridge_unavailable_error": unavailable_error,
+                "initial_status": initial_result,
+                "restarted_status": restarted_result,
+                "restart_status_attempts": restart_attempts,
+                "audit_rows": len(audit_rows),
+                "audit": recovery_audit,
+            }
+        finally:
+            if first is not None:
+                await _stop_process(first)
+                assert first_publication is not None
+                _retire_record_or_reservation(
+                    first_record, first_publication,
+                    expected_marker=registry_marker,
+                    not_before_ns=registry_not_before_ns)
+            if second is not None:
+                await _stop_process(second)
+                assert second_publication is not None
+                _retire_record_or_reservation(
+                    second_record, second_publication,
+                    expected_marker=registry_marker,
+                    not_before_ns=registry_not_before_ns)
+
+
+async def _run(
+    args: argparse.Namespace, process_registry: Path, deadline: float,
+) -> dict[str, Any]:
+    runtime_root = Path(args.root).resolve()
+    if not runtime_root.is_dir():
+        raise FileNotFoundError(f"runtime root does not exist: {runtime_root}")
+    if args.mode == "nfr":
+        return await _run_nfr(
+            runtime_root, Path(args.offline_root).resolve(), args.instance,
+            process_registry, args.registry_marker,
+            args.registry_not_before_ns, deadline)
+    return await _run_recovery(
+        runtime_root, process_registry, args.registry_marker,
+        args.registry_not_before_ns, deadline)
+
+
+async def _run_bounded(args: argparse.Namespace) -> dict[str, Any]:
+    process_registry = Path(args.process_registry).resolve()
+    _require_private_directory(process_registry)
+    if any(process_registry.iterdir()):
+        raise FileExistsError("MCP process registry must start empty")
+    deadline = args.deadline
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    if task is None:
+        raise RuntimeError("formal E2E task missing")
+    installed = []
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, task.cancel)
+        except NotImplementedError:  # pragma: no cover - macOS supports this
+            continue
+        installed.append(sig)
+    try:
+        async with asyncio.timeout(_remaining(deadline)):
+            result = await _run(args, process_registry, deadline)
+        _remaining(deadline)
+        if any(process_registry.iterdir()):
+            raise RuntimeError("MCP process registry is not empty after success")
+        return result
+    finally:
+        for sig in installed:
+            loop.remove_signal_handler(sig)
+
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("mode", choices=("nfr", "recovery"))
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--instance")
+    parser.add_argument("--offline-root")
+    parser.add_argument("--process-registry", required=True)
+    parser.add_argument("--timeout-seconds", required=True, type=float)
+    parser.add_argument("--registry-marker")
+    parser.add_argument("--registry-not-before-ns", type=int)
+    args = parser.parse_args(argv)
+    if args.mode == "nfr" and not args.instance:
+        parser.error("nfr mode requires --instance")
+    if args.mode == "nfr" and not args.offline_root:
+        parser.error("nfr mode requires --offline-root")
+    if not math.isfinite(args.timeout_seconds) or args.timeout_seconds < 15:
+        parser.error("--timeout-seconds must be finite and at least 15")
+    return args
+
+
+def _worker_main(args: argparse.Namespace) -> int:
+    if (type(args.registry_marker) is not str
+            or re.fullmatch(r"[0-9a-f]{32}", args.registry_marker) is None
+            or type(args.registry_not_before_ns) is not int
+            or args.registry_not_before_ns <= 0):
+        raise ValueError("worker requires a valid registry marker and start time")
+    artifact: dict[str, Any] = {
+        "schema_version": 1,
+        "mode": args.mode,
+        "started_at": datetime.datetime.now(datetime.UTC).isoformat(),
+        "environment": {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "machine": platform.machine(),
+            "mcp_sdk": importlib.metadata.version("mcp"),
+        },
+        "success": False,
+    }
+    args.deadline = time.monotonic() + args.timeout_seconds
+    try:
+        artifact["provenance"] = _current_provenance(args.deadline)
+        artifact.update(asyncio.run(_run_bounded(args)))
+    except asyncio.CancelledError:
+        artifact["error"] = "CancelledError: termination requested"
+    except Exception as exc:
+        artifact["error"] = f"{type(exc).__name__}: {exc}"
+    except BaseExceptionGroup as exc:
+        artifact["error"] = f"BaseExceptionGroup: {exc}"
+    artifact["completed_at"] = datetime.datetime.now(datetime.UTC).isoformat()
+    _write_artifact(Path(args.output), artifact)
+    return 0 if artifact["success"] else 1
+
+
+def _wait_worker_group_gone(
+    process: subprocess.Popen[bytes], deadline: float,
+) -> bool:
+    while True:
+        process.poll()
+        if not group_id_is_live(process.pid):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.05, remaining))
+
+
+def _recovery_worker_command(
+    args: argparse.Namespace, marker: str, not_before_ns: int,
+) -> list[str]:
+    return [
+        sys.executable, str(Path(__file__).resolve()), WORKER_MODE, "recovery",
+        "--root", args.root, "--output", args.output,
+        "--process-registry", args.process_registry,
+        "--timeout-seconds", str(args.timeout_seconds),
+        "--registry-marker", marker,
+        "--registry-not-before-ns", str(not_before_ns),
+    ]
+
+
+def _supervise_recovery(args: argparse.Namespace) -> int:
+    registry = Path(args.process_registry).resolve()
+    _require_private_directory(registry)
+    if any(registry.iterdir()):
+        raise FileExistsError("recovery process registry must start empty")
+    marker = new_marker()
+    not_before_ns = time.monotonic_ns()
+    started = time.monotonic()
+    worker_deadline = started + args.timeout_seconds
+    cleanup_deadline = worker_deadline + RECOVERY_CLEANUP_MARGIN
+    registry_reserve = min(RECOVERY_REGISTRY_RESERVE, RECOVERY_CLEANUP_MARGIN)
+    command = _recovery_worker_command(args, marker, not_before_ns)
+    process: subprocess.Popen[bytes] | None = None
+    returncode: int | None = None
+    supervisor_error: str | None = None
+    timed_out = False
+    cancelled_signal: int | None = None
+    previous_handlers: dict[int, Any] = {}
+    known_records: dict[int, ProcessRecord] = {}
+
+    def cancel(signum: int, _frame: object) -> None:
+        nonlocal cancelled_signal
+        if cancelled_signal is None:
+            cancelled_signal = signum
+
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, cancel)
+        if cancelled_signal is None:
+            process = subprocess.Popen(command, start_new_session=True)
+        while process is not None:
+            scan_records(
+                registry, expected_marker=marker, not_before_ns=not_before_ns,
+                deadline=cleanup_deadline, known_records=known_records,
+                retire_dead=False)
+            if cancelled_signal is not None:
+                supervisor_error = (
+                    f"recovery supervisor cancelled by signal {cancelled_signal}")
+                break
+            polled, deadline_expired = poll_before_deadline(
+                process.poll, worker_deadline)
+            if cancelled_signal is not None:
+                supervisor_error = (
+                    f"recovery supervisor cancelled by signal {cancelled_signal}")
+                break
+            if deadline_expired:
+                timed_out = True
+                supervisor_error = "recovery worker exceeded its absolute deadline"
+                returncode = polled
+                break
+            if polled is not None:
+                returncode = polled
+                if group_id_is_live(process.pid):
+                    supervisor_error = "recovery worker group survived its leader"
+                break
+            time.sleep(min(0.05, max(0.0, worker_deadline - time.monotonic())))
+        if process is None and cancelled_signal is not None:
+            supervisor_error = f"recovery supervisor cancelled by signal {cancelled_signal}"
+    except Exception as exc:
+        detail = f"worker supervision failed: {type(exc).__name__}: {exc}"
+        supervisor_error = (
+            detail if supervisor_error is None else f"{supervisor_error}; {detail}")
+    finally:
+        if process is not None:
+            try:
+                worker_cleanup_deadline = min(
+                    cleanup_deadline,
+                    cleanup_deadline - registry_reserve)
+                process.poll()
+                if group_id_is_live(process.pid):
+                    if supervisor_error is None:
+                        supervisor_error = "recovery worker group survived its leader"
+                    if time.monotonic() >= worker_cleanup_deadline:
+                        signal_group_id(process.pid, signal.SIGKILL)
+                        process.poll()
+                        if group_id_is_live(process.pid):
+                            supervisor_error += "; worker group still live after final KILL"
+                    else:
+                        signal_group_id(process.pid, signal.SIGTERM)
+                        term_deadline = min(
+                            worker_cleanup_deadline,
+                            time.monotonic() + RECOVERY_WORKER_TERM_GRACE)
+                        if not _wait_worker_group_gone(process, term_deadline):
+                            signal_group_id(process.pid, signal.SIGKILL)
+                            if time.monotonic() >= worker_cleanup_deadline:
+                                process.poll()
+                                if group_id_is_live(process.pid):
+                                    supervisor_error += "; worker group still live after final KILL"
+                            elif not _wait_worker_group_gone(
+                                    process, worker_cleanup_deadline):
+                                supervisor_error += "; worker group could not be reaped"
+                process.poll()
+                returncode = process.returncode
+            except Exception as exc:
+                detail = f"worker cleanup failed: {type(exc).__name__}: {exc}"
+                supervisor_error = (
+                    detail if supervisor_error is None
+                    else f"{supervisor_error}; {detail}")
+        try:
+            cleanup_registry(
+                registry, expected_marker=marker, not_before_ns=not_before_ns,
+                deadline=cleanup_deadline, term_grace=RECOVERY_GROUP_TERM_GRACE,
+                known_records=known_records)
+        except Exception as exc:
+            detail = f"registry cleanup failed: {type(exc).__name__}: {exc}"
+            supervisor_error = (
+                detail if supervisor_error is None else f"{supervisor_error}; {detail}")
+        finally:
+            for signum, previous in previous_handlers.items():
+                signal.signal(signum, previous)
+            if cancelled_signal is not None and supervisor_error is None:
+                supervisor_error = (
+                    f"recovery supervisor cancelled by signal {cancelled_signal}")
+    if supervisor_error is not None:
+        output = Path(args.output)
+        _write_artifact(output, {
+            "schema_version": 1,
+            "mode": "recovery",
+            "success": False,
+            "worker_timed_out": timed_out,
+            "worker_cancelled_signal": cancelled_signal,
+            "worker_returncode": returncode,
+            "error": f"supervisor failed: {supervisor_error}",
+            "completed_at": datetime.datetime.now(datetime.UTC).isoformat(),
+        })
+        return 1
+    return 1 if returncode is None else returncode
+
+
+def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == WORKER_MODE:
+        raise SystemExit(_worker_main(_parse_args(sys.argv[2:])))
+    args = _parse_args(sys.argv[1:])
+    if args.mode == "recovery":
+        raise SystemExit(_supervise_recovery(args))
+    if args.registry_marker is None or args.registry_not_before_ns is None:
+        raise ValueError("nfr mode requires runner-provided registry identity")
+    raise SystemExit(_worker_main(args))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+外部 helper 自身的 deadline、audit、sample preimage、完整 approved tuple 与进程组护栏也必须留下无 Blender 的直接反例；leader 已退出但 child 仍活、marker/stale 不符、resistant worker、ignored/symlink provenance 与 forged digest 都必须先红后绿：
+
+```python
+# tests/unit/test_e2e.py
+import ast
+import asyncio
+import hashlib
+import json
+import math
+import os
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from smoke import e2e
+from smoke import process_registry
+
+
+def _clear_vendor_bytecode() -> None:
+    vendor_root = e2e.ROOT / "bridge/_vendor"
+    for directory in vendor_root.rglob("__pycache__"):
+        shutil.rmtree(directory)
+    for pattern in ("*.pyc", "*.pyo"):
+        for path in vendor_root.rglob(pattern):
+            path.unlink()
+
+
+def _row(tool, arguments, ok=True, error=None, instance_id=None, request_id=1):
+    _, digest = e2e._canonical(arguments)
+    return {
+        "ts": "2026-08-08T00:00:00.000+00:00",
+        "request_id": request_id,
+        "tool": tool,
+        "instance_id": instance_id,
+        "transaction_id": None,
+        "params_digest": digest[:16],
+        "ok": ok,
+        "duration_ms": 1.0,
+        "paths": [],
+        "error": error,
+    }
+
+
+def test_audit_summary_rejects_forged_or_contradictory_rows():
+    arguments = {"instance_selector": "gui-1-deadbeef"}
+    expected = [("get_blender_status", arguments, True, None, None)]
+    valid = _row("get_blender_status", arguments)
+    assert e2e._audit_summary([valid], expected)["ok_rows"] == 1
+
+    forged = [
+        valid | {"params_digest": "FORGED"},
+        valid | {"error": "BRIDGE_UNAVAILABLE"},
+        valid | {"tool": "totally_wrong_tool"},
+        valid | {"instance_id": "unexpected"},
+    ]
+    for row in forged:
+        with pytest.raises(AssertionError):
+            e2e._audit_summary([row], expected)
+
+
+@pytest.mark.asyncio
+async def test_measure_call_uses_the_shared_deadline():
+    class SlowClient:
+        async def call_tool(self, _tool, _arguments):
+            await asyncio.sleep(0.05)
+            return SimpleNamespace(is_error=False, structured_content={"ok": True})
+
+    with pytest.raises(TimeoutError):
+        await e2e._measure(
+            SlowClient(), "tool", {}, lambda value: value,
+            time.monotonic() + 0.01,
+        )
+
+
+@pytest.mark.asyncio
+async def test_ready_file_pid_must_match_spawned_blender(tmp_path):
+    ready = tmp_path / "ready.json"
+    ready.write_text(json.dumps({"instance_id": "gui-1-deadbeef", "pid": 999}))
+    process = SimpleNamespace(pid=123, poll=lambda: None, returncode=None)
+    with pytest.raises(ValueError, match="malformed recovery ready"):
+        await e2e._wait_ready(ready, process, time.monotonic() + 1.0)
+
+
+def test_private_artifact_write_preserves_exact_0600(tmp_path, monkeypatch):
+    tmp_path.chmod(0o700)
+    output = tmp_path / "artifact.json"
+    e2e._write_artifact(output, {"success": True})
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    assert json.loads(output.read_text()) == {"success": True}
+    assert list(tmp_path.glob("*.tmp")) == []
+    monkeypatch.setattr(e2e, "MAX_ARTIFACT_BYTES", 8)
+    with pytest.raises(ValueError, match="32 MiB"):
+        e2e._write_artifact(output, {"success": True})
+
+
+def test_live_mcp_process_record_cannot_be_retired_as_clean(tmp_path):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    not_before_ns = time.monotonic_ns()
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+    record = tmp_path / "mcp.json"
+    try:
+        process_registry.publish_process(
+            record, marker, process.pid, process.pid)
+        with pytest.raises(RuntimeError, match="survived owner cleanup"):
+            process_registry.retire_record(
+                record, expected_marker=marker, not_before_ns=not_before_ns)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=2)
+    process_registry.retire_record(
+        record, expected_marker=marker, not_before_ns=not_before_ns)
+    assert not record.exists()
+
+
+def test_exited_group_leader_with_live_child_is_not_retired_as_clean(tmp_path):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    not_before_ns = time.monotonic_ns()
+    record = tmp_path / "orphan.json"
+    code = (
+        "import subprocess; from pathlib import Path; "
+        "from smoke.process_registry import publish_current_process; "
+        f"publish_current_process(Path({str(record)!r}), {marker!r}); "
+        "subprocess.Popen(['/bin/sleep', '30'])"
+    )
+    leader = subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
+    pgid = leader.pid
+    leader.wait(timeout=2)
+    try:
+        os.killpg(pgid, 0)
+        with pytest.raises(RuntimeError, match="survived owner cleanup"):
+            process_registry.retire_record(
+                record, expected_marker=marker, not_before_ns=not_before_ns)
+        process_registry.cleanup_registry(
+            tmp_path, expected_marker=marker, not_before_ns=not_before_ns,
+            deadline=time.monotonic() + 2.0, term_grace=0.1, settle_grace=0.0)
+        with pytest.raises(ProcessLookupError):
+            os.killpg(pgid, 0)
+        assert list(tmp_path.iterdir()) == []
+    finally:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def test_group_id_helpers_track_child_after_leader_exit():
+    code = "import subprocess; subprocess.Popen(['/bin/sleep', '30'])"
+    leader = subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
+    pgid = leader.pid
+    leader.wait(timeout=2)
+    try:
+        assert process_registry.group_id_is_live(pgid)
+        process_registry.signal_group_id(pgid, signal.SIGTERM)
+        deadline = time.monotonic() + 2.0
+        while process_registry.group_id_is_live(pgid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not process_registry.group_id_is_live(pgid)
+    finally:
+        process_registry.signal_group_id(pgid, signal.SIGKILL)
+
+
+def test_poll_before_deadline_rejects_completion_observed_at_boundary(monkeypatch):
+    clock = {"now": 10.0}
+    calls = []
+
+    def poll():
+        calls.append(True)
+        clock["now"] = 11.0
+        return 0
+
+    monkeypatch.setattr(
+        process_registry.time, "monotonic", lambda: clock["now"])
+    returncode, expired = process_registry.poll_before_deadline(poll, 11.0)
+    assert returncode == 0 and expired is True and calls == [True]
+    clock["now"] = 11.0
+    returncode, expired = process_registry.poll_before_deadline(poll, 11.0)
+    assert returncode is None and expired is True and calls == [True]
+
+
+def test_scan_caches_valid_record_before_later_entry_hits_deadline(
+    tmp_path, monkeypatch,
+):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    first = process_registry.ProcessRecord(
+        tmp_path / "first.json", 42, 42, marker, 1, 1, 1)
+    older = process_registry.ProcessRecord(
+        tmp_path / "older.json", 41, 41, marker, 1, 1, 1)
+
+    class Entries:
+        def __enter__(self):
+            return iter([
+                SimpleNamespace(name="first.json"),
+                SimpleNamespace(name="later.json"),
+            ])
+
+        def __exit__(self, *_args):
+            return False
+
+    clock = iter([0.0, 0.0, 2.0])
+    monkeypatch.setattr(process_registry.os, "scandir", lambda _path: Entries())
+    monkeypatch.setattr(process_registry.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(process_registry, "read_record", lambda *_args, **_kwargs: first)
+    monkeypatch.setattr(process_registry, "group_is_live", lambda _record: True)
+    known = {older.pgid: older}
+    with pytest.raises(TimeoutError, match="scan deadline"):
+        process_registry.scan_records(
+            tmp_path, expected_marker=marker, not_before_ns=1,
+            deadline=1.0, known_records=known)
+    assert known == {older.pgid: older, first.pgid: first}
+
+
+def test_scan_does_not_clear_cache_when_empty_scan_finishes_at_deadline(
+    tmp_path, monkeypatch,
+):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    older = process_registry.ProcessRecord(
+        tmp_path / "older.json", 41, 41, marker, 1, 1, 1)
+
+    class EmptyEntries:
+        def __enter__(self):
+            return iter(())
+
+        def __exit__(self, *_args):
+            return False
+
+    clock = iter([0.0, 2.0])
+    monkeypatch.setattr(
+        process_registry.os, "scandir", lambda _path: EmptyEntries())
+    monkeypatch.setattr(process_registry.time, "monotonic", lambda: next(clock))
+    known = {older.pgid: older}
+    with pytest.raises(TimeoutError, match="before completion"):
+        process_registry.scan_records(
+            tmp_path, expected_marker=marker, not_before_ns=1,
+            deadline=1.0, known_records=known)
+    assert known == {older.pgid: older}
+
+
+def test_scan_keeps_live_cache_if_publication_starts_after_empty_enumeration(
+    tmp_path, monkeypatch,
+):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    older = process_registry.ProcessRecord(
+        tmp_path / "older.json", 41, 41, marker, 1, 1, 1)
+    temporary = tmp_path / f".new.json.{os.getpid()}.deadbeef.tmp"
+
+    class RacingEntries:
+        def __enter__(self):
+            return iter(())
+
+        def __exit__(self, *_args):
+            temporary.write_bytes(b"publication started")
+            return False
+
+    monkeypatch.setattr(
+        process_registry.os, "scandir", lambda _path: RacingEntries())
+    monkeypatch.setattr(process_registry, "group_is_live", lambda _record: True)
+    known = {older.pgid: older}
+    records, publishing = process_registry.scan_records(
+        tmp_path, expected_marker=marker, not_before_ns=1,
+        known_records=known)
+    assert publishing is False and temporary.exists()
+    assert records == [older] and known == {older.pgid: older}
+
+
+def test_pending_publication_merges_cache_and_clean_scan_replaces_it(
+    tmp_path, monkeypatch,
+):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    started_ns = time.monotonic_ns()
+    first_path = tmp_path / "first.json"
+    process_registry._write_private_json(first_path, {
+        "schema_version": 1, "pid": 41, "pgid": 41, "marker": marker,
+        "started_monotonic_ns": started_ns,
+    })
+    live = {41, 42}
+    monkeypatch.setattr(
+        process_registry, "group_is_live",
+        lambda record: record.pgid in live)
+    known = {}
+    records, publishing = process_registry.scan_records(
+        tmp_path, expected_marker=marker, not_before_ns=started_ns,
+        known_records=known)
+    assert publishing is False and [record.pgid for record in records] == [41]
+    assert set(known) == {41}
+
+    first_path.unlink()
+    temporary = tmp_path / f".pending.json.{os.getpid()}.deadbeef.tmp"
+    process_registry._write_private_json(temporary, {
+        "schema_version": 1, "pid": 42, "pgid": 42, "marker": marker,
+        "started_monotonic_ns": started_ns,
+    })
+    records, publishing = process_registry.scan_records(
+        tmp_path, expected_marker=marker, not_before_ns=started_ns,
+        known_records=known)
+    assert publishing is True and [record.pgid for record in records] == [42]
+    assert set(known) == {41, 42}
+
+    temporary.unlink()
+    live.clear()
+    records, publishing = process_registry.scan_records(
+        tmp_path, expected_marker=marker, not_before_ns=started_ns,
+        known_records=known)
+    assert records == [] and publishing is False and known == {}
+
+
+def test_server_params_reserves_first_publication_before_spawn(
+    tmp_path, monkeypatch,
+):
+    runtime_root = tmp_path / "runtime"
+    registry = tmp_path / "registry"
+    runtime_root.mkdir(mode=0o700)
+    registry.mkdir(mode=0o700)
+    record = registry / "first.json"
+    marker = process_registry.new_marker()
+    not_before_ns = time.monotonic_ns()
+    params, publication = e2e._server_params(runtime_root, record, marker)
+    reservation, device, inode = publication
+    assert Path(params.args[0]).name == "process_registry.py"
+    assert params.args[1] == process_registry.SENTINEL_MODE
+    assert params.args[2] == str(record) and params.args[6] == marker
+    records, publishing = process_registry.scan_records(
+        registry, expected_marker=marker, not_before_ns=time.monotonic_ns())
+    assert records == [] and publishing is True and reservation.exists()
+    e2e._retire_record_or_reservation(
+        record, publication, expected_marker=marker,
+        not_before_ns=not_before_ns)
+    assert list(registry.iterdir()) == []
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("pre-spawn failure")
+
+    failed_record = registry / "failed.json"
+    monkeypatch.setattr(e2e, "StdioServerParameters", fail)
+    with pytest.raises(RuntimeError, match="pre-spawn failure"):
+        e2e._server_params(runtime_root, failed_record, marker)
+    monkeypatch.setattr(e2e.subprocess, "Popen", fail)
+    with pytest.raises(RuntimeError, match="pre-spawn failure"):
+        e2e._start_blender(
+            runtime_root, tmp_path / "ready", tmp_path / "stop",
+            failed_record, marker)
+    assert list(registry.iterdir()) == []
+
+
+def test_stdlib_bootstrap_publishes_identity_before_target_runs(tmp_path):
+    tmp_path.chmod(0o700)
+    record = tmp_path / "bootstrap.json"
+    marker = process_registry.new_marker()
+    started_ns = time.monotonic_ns()
+    reservation, device, inode = process_registry.reserve_publication(record)
+    process = subprocess.Popen([
+        sys.executable, process_registry.__file__, process_registry.SENTINEL_MODE,
+        str(record), str(reservation), str(device), str(inode), marker,
+        "/bin/sleep", "0.2",
+    ], start_new_session=True)
+    deadline = time.monotonic() + 2.0
+    while not record.exists() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    published = process_registry.read_record(
+        record, expected_marker=marker, not_before_ns=started_ns)
+    assert published.pid == process.pid and published.pgid == process.pid
+    process.wait(timeout=2)
+    process_registry.retire_record(
+        record, expected_marker=marker, not_before_ns=started_ns)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_known_cache_prunes_dead_records_while_publication_stays_pending(
+    tmp_path, monkeypatch,
+):
+    marker = process_registry.new_marker()
+    live = set()
+    signaled = []
+    monkeypatch.setattr(
+        process_registry, "group_is_live", lambda record: record.pgid in live)
+    monkeypatch.setattr(
+        process_registry, "signal_group_id",
+        lambda pgid, sig: signaled.append((pgid, sig)))
+    known = {}
+    for pgid in range(10, 10 + process_registry.MAX_RECORDS * 4):
+        live.clear()
+        live.add(pgid)
+        record = process_registry.ProcessRecord(
+            tmp_path / f"{pgid}.json", pgid, pgid, marker, 1, 1, pgid)
+        process_registry._remember_known_record(known, record)
+        assert known == {pgid: record}
+    live.clear()
+    known.clear()
+    for pgid in range(100, 100 + process_registry.MAX_RECORDS):
+        live.add(pgid)
+        record = process_registry.ProcessRecord(
+            tmp_path / f"{pgid}.json", pgid, pgid, marker, 1, 1, pgid)
+        process_registry._remember_known_record(known, record)
+    overflow = process_registry.ProcessRecord(
+        tmp_path / "overflow.json", 999, 999, marker, 1, 1, 999)
+    live.add(999)
+    with pytest.raises(RuntimeError, match="known process record limit"):
+        process_registry._remember_known_record(known, overflow)
+    assert len(known) == process_registry.MAX_RECORDS and 999 not in known
+    assert signaled == [(999, signal.SIGKILL)]
+
+
+def test_clean_scan_kills_overflow_without_growing_known_cache(
+    tmp_path, monkeypatch,
+):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    records_by_name = {
+        f"{pgid}.json": process_registry.ProcessRecord(
+            tmp_path / f"{pgid}.json", pgid, pgid, marker, 1, 1, pgid)
+        for pgid in range(100, 100 + process_registry.MAX_RECORDS + 1)
+    }
+    known = {}
+
+    class Entries:
+        def __enter__(self):
+            return iter(
+                SimpleNamespace(name=name) for name in records_by_name)
+
+        def __exit__(self, *_args):
+            return False
+
+    signaled = []
+    monkeypatch.setattr(process_registry.os, "scandir", lambda _path: Entries())
+    monkeypatch.setattr(
+        process_registry, "read_record",
+        lambda path, **_kwargs: records_by_name[path.name])
+    monkeypatch.setattr(process_registry, "group_is_live", lambda _record: True)
+    monkeypatch.setattr(
+        process_registry, "signal_group_id",
+        lambda pgid, sig: signaled.append((pgid, sig)))
+    with pytest.raises(RuntimeError, match="known process record limit"):
+        process_registry.scan_records(
+            tmp_path, expected_marker=marker, not_before_ns=1,
+            known_records=known)
+    assert set(known) == set(range(100, 100 + process_registry.MAX_RECORDS))
+    assert signaled == [(108, signal.SIGKILL)]
+
+
+def test_reused_cached_identity_does_not_block_later_valid_records(
+    tmp_path, monkeypatch,
+):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    reused = process_registry.ProcessRecord(
+        tmp_path / "reused.json", 41, 41, marker, 1, 1, 1)
+    valid = {
+        "first.json": process_registry.ProcessRecord(
+            tmp_path / "first.json", 42, 42, marker, 1, 1, 2),
+        "second.json": process_registry.ProcessRecord(
+            tmp_path / "second.json", 43, 43, marker, 1, 1, 3),
+    }
+    known = {41: reused}
+
+    def liveness(record):
+        if record.pgid == 41:
+            raise RuntimeError("recorded PID was reused: 41")
+        return True
+
+    class Entries:
+        def __enter__(self):
+            return iter(SimpleNamespace(name=name) for name in valid)
+
+        def __exit__(self, *_args):
+            return False
+
+    signaled = []
+    monkeypatch.setattr(process_registry.os, "scandir", lambda _path: Entries())
+    monkeypatch.setattr(
+        process_registry, "read_record",
+        lambda path, **_kwargs: valid[path.name])
+    monkeypatch.setattr(process_registry, "group_is_live", liveness)
+    monkeypatch.setattr(
+        process_registry, "signal_group_id",
+        lambda pgid, sig: signaled.append((pgid, sig)))
+    with pytest.raises(RuntimeError, match="recorded PID was reused"):
+        process_registry.scan_records(
+            tmp_path, expected_marker=marker, not_before_ns=1,
+            known_records=known)
+    assert set(known) == {42, 43}
+    process_registry.signal_live_records(known.values(), signal.SIGKILL)
+    assert signaled == [(42, signal.SIGKILL), (43, signal.SIGKILL)]
+
+
+def test_invalid_record_does_not_hide_later_valid_group(tmp_path, monkeypatch):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    valid = process_registry.ProcessRecord(
+        tmp_path / "valid.json", 42, 42, marker, 1, 1, 2)
+
+    class Entries:
+        def __enter__(self):
+            return iter([
+                SimpleNamespace(name="wrong.json"),
+                SimpleNamespace(name="unknown.txt"),
+                SimpleNamespace(name="valid.json"),
+            ])
+
+        def __exit__(self, *_args):
+            return False
+
+    def read(path, **_kwargs):
+        if path.name == "wrong.json":
+            raise ValueError("process record marker differs")
+        return valid
+
+    signaled = []
+    monkeypatch.setattr(process_registry.os, "scandir", lambda _path: Entries())
+    monkeypatch.setattr(process_registry, "read_record", read)
+    monkeypatch.setattr(process_registry, "group_is_live", lambda _record: True)
+    monkeypatch.setattr(
+        process_registry, "signal_group_id",
+        lambda pgid, sig: signaled.append((pgid, sig)))
+    known = {}
+    with pytest.raises(ValueError, match="marker differs"):
+        process_registry.scan_records(
+            tmp_path, expected_marker=marker, not_before_ns=1,
+            known_records=known)
+    assert known == {42: valid}
+    process_registry.signal_live_records(known.values(), signal.SIGKILL)
+    assert signaled == [(42, signal.SIGKILL)]
+
+
+def test_cleanup_final_kills_cached_group_after_pending_publication_deadline(
+    tmp_path, monkeypatch,
+):
+    record = process_registry.ProcessRecord(
+        tmp_path / "live.json", 42, 42,
+        process_registry.new_marker(), 1, 1, 1)
+    calls = 0
+    clock = {"now": 0.0}
+
+    def scan(*_args, known_records, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            known_records[record.pgid] = record
+            return [record], False
+        assert known_records == {record.pgid: record}
+        return [], True
+
+    signaled = []
+    monkeypatch.setattr(process_registry, "scan_records", scan)
+    monkeypatch.setattr(
+        process_registry.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        process_registry.time, "sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
+    monkeypatch.setattr(process_registry, "group_is_live", lambda _record: True)
+    monkeypatch.setattr(
+        process_registry, "signal_group_id",
+        lambda pgid, sig: signaled.append((pgid, sig)))
+    with pytest.raises(TimeoutError, match="publication exceeded"):
+        process_registry.cleanup_registry(
+            tmp_path, expected_marker=record.marker, not_before_ns=1,
+            deadline=0.03, term_grace=0.01, settle_grace=0.0)
+    assert signaled == [(42, signal.SIGTERM), (42, signal.SIGKILL)]
+
+
+def test_cleanup_uses_preobserved_cache_if_deadline_expired_before_scan(tmp_path):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    started_ns = time.monotonic_ns()
+    process = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+    path = tmp_path / "preobserved.json"
+    record = process_registry.publish_process(
+        path, marker, process.pid, process.pid,
+        started_monotonic_ns=started_ns)
+    with pytest.raises(TimeoutError, match="before start"):
+        process_registry.cleanup_registry(
+            tmp_path, expected_marker=marker, not_before_ns=started_ns,
+            deadline=time.monotonic() - 1.0,
+            known_records={record.pgid: record})
+    process.wait(timeout=2)
+    process_registry.retire_record(
+        path, expected_marker=marker, not_before_ns=started_ns)
+    assert not path.exists()
+
+
+def test_cached_signal_rechecks_pid_pgid_reuse(monkeypatch, tmp_path):
+    record = process_registry.ProcessRecord(
+        tmp_path / "cached.json", 42, 42,
+        process_registry.new_marker(), 1, 1, 1)
+    signaled = []
+    monkeypatch.setattr(process_registry.os, "getpgid", lambda _pid: 43)
+    monkeypatch.setattr(
+        process_registry, "signal_group_id",
+        lambda pgid, sig: signaled.append((pgid, sig)))
+    with pytest.raises(RuntimeError, match="recorded PID was reused"):
+        process_registry.signal_live_records([record], signal.SIGKILL)
+    assert signaled == []
+
+
+def test_cached_signal_continues_after_another_record_is_reused(
+    monkeypatch, tmp_path,
+):
+    marker = process_registry.new_marker()
+    reused = process_registry.ProcessRecord(
+        tmp_path / "reused.json", 41, 41, marker, 1, 1, 1)
+    valid = process_registry.ProcessRecord(
+        tmp_path / "valid.json", 42, 42, marker, 1, 1, 1)
+    signaled = []
+    monkeypatch.setattr(
+        process_registry.os, "getpgid", lambda pid: 99 if pid == 41 else pid)
+    monkeypatch.setattr(process_registry, "group_id_is_live", lambda _pgid: True)
+    monkeypatch.setattr(
+        process_registry, "signal_group_id",
+        lambda pgid, sig: signaled.append((pgid, sig)))
+    with pytest.raises(RuntimeError, match="recorded PID was reused"):
+        process_registry.signal_live_records([valid, reused], signal.SIGKILL)
+    assert signaled == [(42, signal.SIGKILL)]
+
+
+def test_runner_keeps_cached_records_when_registry_is_unavailable():
+    runner = Path(__file__).resolve().parents[2] / "smoke" / "runner.py"
+    tree = ast.parse(runner.read_text())
+    names = {"_nfr_error_once", "_live_nfr_groups", "_signal_nfr_groups"}
+    body = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in names
+    ]
+    record = SimpleNamespace(pgid=42)
+    known = {42: record}
+    signaled = []
+    namespace = {
+        "Path": Path,
+        "RES": {"errors": []},
+        "ST": {
+            "nfr_process_dir": None,
+            "nfr_registry_marker": process_registry.new_marker(),
+            "nfr_registry_not_before_ns": 1,
+            "nfr_registry_pending": False,
+            "nfr_known_records": known,
+            "nfr_error": None,
+        },
+        "scan_records": lambda *_args, **_kwargs: ([], False),
+        "signal_live_records": (
+            lambda records, sig: signaled.append((list(records), sig))),
+    }
+    module = ast.fix_missing_locations(ast.Module(body=body, type_ignores=[]))
+    exec(compile(module, str(runner), "exec"), namespace)
+    assert namespace["_live_nfr_groups"]() == []
+    assert namespace["ST"]["nfr_registry_pending"] is True
+    assert namespace["ST"]["nfr_known_records"] is known
+    namespace["_signal_nfr_groups"](signal.SIGKILL)
+    assert signaled == [([record], signal.SIGKILL)]
+    namespace["signal_live_records"] = (
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("reused")))
+    namespace["_signal_nfr_groups"](signal.SIGKILL)
+    assert any("process group signal: RuntimeError: reused" in message
+               for message in namespace["RES"]["errors"])
+
+
+def test_nonce_mismatch_is_never_signaled(tmp_path):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    not_before_ns = time.monotonic_ns()
+    process = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+    record = tmp_path / "wrong-marker.json"
+    process_registry.publish_process(record, marker, process.pid, process.pid)
+    try:
+        with pytest.raises(ValueError, match="marker differs"):
+            process_registry.cleanup_registry(
+                tmp_path, expected_marker=process_registry.new_marker(),
+                not_before_ns=not_before_ns, deadline=time.monotonic() + 0.2,
+                settle_grace=0.0)
+        assert process.poll() is None
+    finally:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=2)
+    process_registry.retire_record(
+        record, expected_marker=marker, not_before_ns=not_before_ns)
+
+
+def test_stale_record_is_never_signaled(tmp_path):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    not_before_ns = time.monotonic_ns()
+    process = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+    record = tmp_path / "stale.json"
+    process_registry.publish_process(
+        record, marker, process.pid, process.pid,
+        started_monotonic_ns=not_before_ns - 1)
+    try:
+        with pytest.raises(ValueError, match="stale process record"):
+            process_registry.cleanup_registry(
+                tmp_path, expected_marker=marker,
+                not_before_ns=not_before_ns, deadline=time.monotonic() + 0.2,
+                settle_grace=0.0)
+        assert process.poll() is None
+    finally:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=2)
+    process_registry.retire_record(record, expected_marker=marker)
+
+
+def test_process_record_rejects_boolean_schema_version(tmp_path):
+    tmp_path.chmod(0o700)
+    record = tmp_path / "bool-schema.json"
+    process_registry._write_private_json(record, {
+        "schema_version": True,
+        "pid": 424242,
+        "pgid": 424242,
+        "marker": process_registry.new_marker(),
+        "started_monotonic_ns": time.monotonic_ns(),
+    })
+    with pytest.raises(ValueError, match="malformed process record values"):
+        process_registry.read_record(record)
+    record.unlink()
+
+
+def test_pid_pgid_reuse_is_never_signaled_or_unlinked(tmp_path, monkeypatch):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    record = tmp_path / "reused.json"
+    pid = 424242
+    process_registry._write_private_json(record, {
+        "schema_version": 1,
+        "pid": pid,
+        "pgid": pid,
+        "marker": marker,
+        "started_monotonic_ns": time.monotonic_ns(),
+    })
+    signaled = []
+    monkeypatch.setattr(process_registry.os, "getpgid", lambda _pid: pid + 1)
+    monkeypatch.setattr(process_registry, "group_id_is_live", lambda _pgid: False)
+    monkeypatch.setattr(
+        process_registry, "signal_group_id",
+        lambda pgid, sig: signaled.append((pgid, sig)))
+    with pytest.raises(RuntimeError, match="recorded PID was reused"):
+        process_registry.cleanup_registry(
+            tmp_path, expected_marker=marker,
+            not_before_ns=1, deadline=time.monotonic() + 0.2,
+            settle_grace=0.0)
+    assert signaled == [] and record.exists()
+    record.unlink()
+
+
+def test_replaced_process_record_is_not_unlinked(tmp_path, monkeypatch):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    record = tmp_path / "replace.json"
+    backup = tmp_path / "original.json"
+    value = {
+        "schema_version": 1,
+        "pid": 424242,
+        "pgid": 424242,
+        "marker": marker,
+        "started_monotonic_ns": time.monotonic_ns(),
+    }
+    process_registry._write_private_json(record, value)
+    swapped = False
+
+    def replace_before_unlink(_record):
+        nonlocal swapped
+        if not swapped:
+            record.rename(backup)
+            process_registry._write_private_json(record, value)
+            swapped = True
+        return False
+
+    monkeypatch.setattr(process_registry, "group_is_live", replace_before_unlink)
+    with pytest.raises(RuntimeError, match="changed before unlink"):
+        process_registry.retire_record(record, expected_marker=marker)
+    assert record.exists() and backup.exists()
+    record.unlink()
+    backup.unlink()
+
+
+def test_registry_observer_never_unlinks_owner_record(tmp_path):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    started_ns = time.monotonic_ns()
+    process = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+    path = tmp_path / "owner.json"
+    process_registry.publish_process(
+        path, marker, process.pid, process.pid,
+        started_monotonic_ns=started_ns)
+    os.killpg(process.pid, signal.SIGKILL)
+    process.wait(timeout=2)
+    records, pending = process_registry.scan_records(
+        tmp_path, expected_marker=marker, not_before_ns=started_ns,
+        retire_dead=False)
+    assert records == [] and pending is True and path.exists()
+    process_registry.retire_record(
+        path, expected_marker=marker, not_before_ns=started_ns)
+    assert not path.exists()
+
+
+def test_registry_observer_tolerates_owner_unlink_after_enumeration(
+    tmp_path, monkeypatch,
+):
+    tmp_path.chmod(0o700)
+    path = tmp_path / "owner.json"
+    path.write_bytes(b"owner will retire")
+    path.chmod(0o600)
+
+    class RetiredEntry:
+        @property
+        def name(self):
+            path.unlink(missing_ok=True)
+            return path.name
+
+    class Entries:
+        def __enter__(self):
+            return iter([RetiredEntry()])
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(process_registry.os, "scandir", lambda _path: Entries())
+    records, pending = process_registry.scan_records(
+        tmp_path, expected_marker=process_registry.new_marker(),
+        not_before_ns=1, retire_dead=False)
+    assert records == [] and pending is True and not path.exists()
+
+
+def test_registry_observer_tolerates_reservation_finish_after_enumeration(
+    tmp_path, monkeypatch,
+):
+    tmp_path.chmod(0o700)
+    record = tmp_path / "future.json"
+    reservation, device, inode = process_registry.reserve_publication(record)
+
+    class FinishedEntry:
+        name = reservation.name
+
+        def stat(self, *, follow_symlinks):
+            assert follow_symlinks is False
+            process_registry.finish_publication_reservation(
+                reservation, device, inode)
+            raise FileNotFoundError(reservation)
+
+    class Entries:
+        def __enter__(self):
+            return iter([FinishedEntry()])
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(process_registry.os, "scandir", lambda _path: Entries())
+    records, pending = process_registry.scan_records(
+        tmp_path, expected_marker=process_registry.new_marker(),
+        not_before_ns=1, retire_dead=False)
+    assert records == [] and pending is True and not reservation.exists()
+
+
+def test_registry_waits_for_inflight_record_publication(tmp_path):
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    started_ns = time.monotonic_ns()
+    temporary = tmp_path / f".late.json.{os.getpid()}.deadbeef.tmp"
+    record = tmp_path / "late.json"
+    temporary.write_text(json.dumps({
+        "schema_version": 1,
+        "pid": 99999999,
+        "pgid": 99999999,
+        "marker": marker,
+        "started_monotonic_ns": started_ns,
+    }))
+    temporary.chmod(0o600)
+    records, publishing = process_registry.scan_records(
+        tmp_path, expected_marker=marker, not_before_ns=started_ns,
+        deadline=time.monotonic() + 1.0)
+    assert records == [] and publishing is True
+
+    def publish_later():
+        time.sleep(0.05)
+        os.replace(temporary, record)
+
+    publisher = threading.Thread(target=publish_later)
+    publisher.start()
+    process_registry.cleanup_registry(
+        tmp_path, expected_marker=marker, not_before_ns=started_ns,
+        deadline=time.monotonic() + 1.0, settle_grace=0.1)
+    publisher.join(timeout=1)
+    assert not publisher.is_alive() and list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sdk_client_reaps_its_recorded_process_group(tmp_path):
+    runtime_root = tmp_path / "runtime"
+    registry = tmp_path / "registry"
+    runtime_root.mkdir(mode=0o700)
+    registry.mkdir(mode=0o700)
+    record = registry / "cancelled.json"
+    marker = process_registry.new_marker()
+    not_before_ns = time.monotonic_ns()
+    params, publication = e2e._server_params(runtime_root, record, marker)
+    with pytest.raises(BaseExceptionGroup) as caught:
+        async with e2e.Client(
+            e2e.stdio_client(params),
+            mode="auto",
+            read_timeout_seconds=5.0,
+        ):
+            published = json.loads(record.read_text())
+            assert published["pid"] == published["pgid"]
+            assert published["marker"] == marker
+            assert os.getpgid(published["pid"]) == published["pgid"]
+            async with asyncio.timeout(0.01):
+                await asyncio.sleep(30)
+    assert caught.value.subgroup(TimeoutError) is not None
+    e2e._retire_record_or_reservation(
+        record, publication, expected_marker=marker,
+        not_before_ns=not_before_ns)
+    assert not record.exists()
+
+
+@pytest.mark.asyncio
+async def test_measure_records_a_digest_for_every_call(monkeypatch):
+    class FastClient:
+        def __init__(self):
+            self.index = 0
+
+        async def call_tool(self, _tool, _arguments):
+            self.index += 1
+            value = {"index": self.index, "scale": 1.0}
+            return SimpleNamespace(
+                is_error=False, structured_content=value,
+                content=[SimpleNamespace(
+                    type="text", text=json.dumps(value, indent=2))])
+
+    monkeypatch.setattr(e2e, "RUNS", 3)
+    ticks = iter([0, 1_000_000] * 3)
+    monkeypatch.setattr(e2e.time, "perf_counter_ns", lambda: next(ticks))
+    arguments = {"include": False}
+    def validate(value):
+        assert type(value) is dict and type(value.get("index")) is int
+        return {"index": value["index"], "scale": float(value["scale"])}
+
+    record = await e2e._measure(
+        FastClient(), "tool", arguments, validate,
+        time.monotonic() + 1.0,
+    )
+    assert len(record["sample_results"]) == 3
+    assert all(math.isfinite(item["duration_ms"])
+               for item in record["sample_results"])
+    assert len({item["result_sha256"]
+                for item in record["sample_results"]}) == 3
+    assert all(item["text_json_equivalent"] is True
+               and item["duplication_ratio"] > 1.0
+               for item in record["sample_results"])
+    e2e._verify_measurement_record(record, arguments, validate)
+    record["arguments"] = {"include": 0}
+    with pytest.raises(AssertionError, match="arguments differ"):
+        e2e._verify_measurement_record(record, arguments, validate)
+    record["arguments"] = arguments
+    record["p95_ms"] = True
+    record["max_ms"] = True
+    with pytest.raises(AssertionError, match="aggregate differs"):
+        e2e._verify_measurement_record(record, arguments, validate)
+    record["p95_ms"] = 1.0
+    record["max_ms"] = 1.0
+    record["sample_results"][1]["validated_result"]["scale"] = 1
+    with pytest.raises(AssertionError, match="preimage differs after validation"):
+        e2e._verify_measurement_record(record, arguments, validate)
+    record["sample_results"][1]["validated_result"]["scale"] = 1.0
+    record["sample_results"][1]["result_sha256"] = "0" * 64
+    with pytest.raises(AssertionError, match="sample digest differs"):
+        e2e._verify_measurement_record(record, arguments, validate)
+    record["sample_results"][1]["result_sha256"] = e2e._canonical(
+        record["sample_results"][1]["validated_result"])[1]
+    record["sample_results"][1]["text_content_sha256"] = "0" * 64
+    with pytest.raises(AssertionError, match="TextContent digest differs"):
+        e2e._verify_measurement_record(record, arguments, validate)
+    with pytest.raises(ValueError, match="Out of range float values"):
+        e2e._canonical({"value": float("inf")})
+    with pytest.raises(ValueError, match="non-standard JSON constant"):
+        e2e._strict_json_loads('{"value": Infinity}')
+    with pytest.raises(ValueError, match="non-finite JSON number"):
+        e2e._strict_json_loads('{"value": 1e999}')
+    with pytest.raises(ValueError, match="duplicate JSON object key"):
+        e2e._strict_json_loads('{"value": 1, "value": 2}')
+
+    class ExtraContentClient(FastClient):
+        async def call_tool(self, tool, extra_arguments):
+            result = await super().call_tool(tool, extra_arguments)
+            result.content.append(SimpleNamespace(type="image", data=b"x" * 100_000))
+            return result
+
+    monkeypatch.setattr(e2e, "RUNS", 1)
+    ticks = iter([0, 1_000_000])
+    monkeypatch.setattr(e2e.time, "perf_counter_ns", lambda: next(ticks))
+    with pytest.raises(AssertionError, match="exactly one compatibility"):
+        await e2e._measure(
+            ExtraContentClient(), "tool", arguments, validate,
+            time.monotonic() + 1.0)
+
+
+@pytest.mark.asyncio
+async def test_catalog_baseline_rejects_malformed_or_consistently_drifted_catalog():
+    from mcp import Client
+    from server.mcp.adapter import mcp as server_app
+
+    async with Client(server_app, mode="auto") as client:
+        valid_record = await e2e._catalog_baseline(
+            client, time.monotonic() + 5.0)
+    e2e._verify_catalog_baseline(valid_record)
+    assert valid_record["server_name"] == e2e.FROZEN_SERVER_NAME
+    assert valid_record["server_version"] == e2e.FROZEN_SERVER_VERSION
+
+    record = {
+        "ordered_tools": list(e2e.EXPECTED_TOOLS),
+        "server_name": e2e.FROZEN_SERVER_NAME,
+        "server_version": e2e.FROZEN_SERVER_VERSION,
+        "next_cursor": None,
+        "result_type": "complete",
+        "ordered_catalog": [
+            {"name": name, "inputSchema": {}, "outputSchema": {}}
+            for name in e2e.EXPECTED_TOOLS[:2]
+        ] + ["not-an-object"],
+        "ordered_catalog_bytes": 0,
+        "ordered_catalog_sha256": "0" * 64,
+        "schema_bytes": 0,
+        "schema_sha256": "0" * 64,
+        "instructions": "x",
+        "instructions_utf8_bytes": 1,
+        "instructions_sha256": hashlib.sha256(b"x").hexdigest(),
+        "stable_repeated_list": True,
+    }
+    record["next_cursor"] = "more"
+    with pytest.raises(AssertionError, match="shape or order differs"):
+        e2e._verify_catalog_baseline(record)
+    record["next_cursor"] = None
+    record["result_type"] = "input_required"
+    with pytest.raises(AssertionError, match="shape or order differs"):
+        e2e._verify_catalog_baseline(record)
+    record["result_type"] = "complete"
+    record["server_name"] = ""
+    with pytest.raises(AssertionError, match="shape or order differs"):
+        e2e._verify_catalog_baseline(record)
+    record["server_name"] = e2e.FROZEN_SERVER_NAME
+    record["server_version"] = ""
+    with pytest.raises(AssertionError, match="shape or order differs"):
+        e2e._verify_catalog_baseline(record)
+    record["server_version"] = e2e.FROZEN_SERVER_VERSION
+    with pytest.raises(AssertionError, match="ordered catalog payload differs"):
+        e2e._verify_catalog_baseline(record)
+    catalog = [
+        {"name": name, "inputSchema": {}, "outputSchema": {}}
+        for name in e2e.EXPECTED_TOOLS
+    ]
+    schemas = [
+        {"name": item["name"], "inputSchema": item["inputSchema"],
+         "outputSchema": item["outputSchema"]}
+        for item in catalog
+    ]
+    catalog_bytes, catalog_sha = e2e._canonical(catalog)
+    schema_bytes, schema_sha = e2e._canonical(schemas)
+    record.update({
+        "ordered_catalog": catalog,
+        "ordered_catalog_bytes": catalog_bytes,
+        "ordered_catalog_sha256": catalog_sha,
+        "schema_bytes": schema_bytes,
+        "schema_sha256": schema_sha,
+    })
+    with pytest.raises(AssertionError, match="differs from Task 17 freeze"):
+        e2e._verify_catalog_baseline(record)
+
+
+def test_sample_preimage_limit_is_global_across_three_tools(monkeypatch):
+    exact = {name: {} for name in e2e.EXPECTED_TOOLS}
+    assert e2e._require_exact_measurement_results(exact) == exact
+    with pytest.raises(AssertionError, match="tool set differs"):
+        e2e._require_exact_measurement_results({**exact, "extra": {}})
+    monkeypatch.setattr(e2e, "MAX_SAMPLE_RESULTS_BYTES", 5)
+    records = [
+        {"sample_results": [{"result_bytes": 2}]},
+        {"sample_results": [{"result_bytes": 2}]},
+        {"sample_results": [{"result_bytes": 2}]},
+    ]
+    with pytest.raises(AssertionError, match="all measurement preimages"):
+        e2e._sample_result_total(records)
+
+
+def test_bridge_unavailable_requires_exact_retryable_true():
+    expected = {"code": "BRIDGE_UNAVAILABLE", "retryable": True}
+    assert e2e._require_bridge_unavailable(expected) == expected
+    invalid = [
+        {"code": "BRIDGE_UNAVAILABLE", "retryable": False},
+        {"code": "BRIDGE_UNAVAILABLE", "retryable": 1},
+        {"code": "BRIDGE_UNAVAILABLE", "retryable": True, "extra": None},
+    ]
+    for value in invalid:
+        with pytest.raises(AssertionError, match="unexpected post-kill error data"):
+            e2e._require_bridge_unavailable(value)
+
+
+def test_bounded_subprocess_stdout_rejects_excess_output(tmp_path):
+    with pytest.raises(ValueError, match="subprocess output exceeds"):
+        e2e._bounded_process_stdout(
+            [sys.executable, "-c", "import os; os.write(1, b'x' * 1024)"],
+            cwd=tmp_path, deadline=time.monotonic() + 2.0, max_bytes=8)
+
+
+def test_recovery_supervisor_rejects_completion_observed_after_deadline(
+    tmp_path, monkeypatch,
+):
+    tmp_path.chmod(0o700)
+    registry = tmp_path / "registry"
+    registry.mkdir(mode=0o700)
+    output = tmp_path / "late.json"
+    clock = {"now": 10.0}
+
+    class LateProcess:
+        pid = 424242
+        returncode = 0
+
+        def poll(self):
+            clock["now"] = 11.0
+            return self.returncode
+
+    fake_time = SimpleNamespace(
+        monotonic=lambda: clock["now"],
+        monotonic_ns=lambda: int(clock["now"] * 1_000_000_000),
+        sleep=lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+    monkeypatch.setattr(e2e, "time", fake_time)
+    monkeypatch.setattr(e2e.subprocess, "Popen", lambda *_args, **_kwargs: LateProcess())
+    monkeypatch.setattr(e2e, "group_id_is_live", lambda _pgid: False)
+    monkeypatch.setattr(e2e, "scan_records", lambda *_args, **_kwargs: ([], False))
+    monkeypatch.setattr(e2e, "cleanup_registry", lambda *_args, **_kwargs: None)
+    args = SimpleNamespace(
+        root=str(tmp_path), output=str(output), process_registry=str(registry),
+        timeout_seconds=1.0,
+    )
+    assert e2e._supervise_recovery(args) == 1
+    artifact = json.loads(output.read_text())
+    assert artifact["worker_timed_out"] is True
+
+
+def test_recovery_supervisor_issues_final_kill_at_expired_cleanup_deadline(
+    tmp_path, monkeypatch,
+):
+    tmp_path.chmod(0o700)
+    registry = tmp_path / "registry"
+    registry.mkdir(mode=0o700)
+    output = tmp_path / "expired-cleanup.json"
+    clock = {"now": 10.0}
+    live = {"value": True}
+    signaled = []
+
+    class ResistantProcess:
+        pid = 424242
+        returncode = None
+
+        def poll(self):
+            clock["now"] = 11.0
+            return self.returncode
+
+    def signal_group(_pgid, sig):
+        signaled.append(sig)
+        if sig == signal.SIGKILL:
+            live["value"] = False
+
+    fake_time = SimpleNamespace(
+        monotonic=lambda: clock["now"],
+        monotonic_ns=lambda: int(clock["now"] * 1_000_000_000),
+        sleep=lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+    monkeypatch.setattr(e2e, "time", fake_time)
+    monkeypatch.setattr(e2e.subprocess, "Popen", lambda *_args, **_kwargs: ResistantProcess())
+    monkeypatch.setattr(e2e, "group_id_is_live", lambda _pgid: live["value"])
+    monkeypatch.setattr(e2e, "signal_group_id", signal_group)
+    monkeypatch.setattr(e2e, "scan_records", lambda *_args, **_kwargs: ([], False))
+    monkeypatch.setattr(e2e, "cleanup_registry", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(e2e, "RECOVERY_CLEANUP_MARGIN", 0.0)
+    args = SimpleNamespace(
+        root=str(tmp_path), output=str(output), process_registry=str(registry),
+        timeout_seconds=1.0,
+    )
+    assert e2e._supervise_recovery(args) == 1
+    assert signal.SIGKILL in signaled and live["value"] is False
+
+
+def test_recovery_supervisor_reaps_child_left_by_exited_worker(
+    tmp_path, monkeypatch,
+):
+    tmp_path.chmod(0o700)
+    registry = tmp_path / "registry"
+    registry.mkdir(mode=0o700)
+    output = tmp_path / "orphan.json"
+    pgid_file = tmp_path / "worker.pgid"
+    script = (
+        "import os,subprocess; from pathlib import Path; "
+        f"Path({str(pgid_file)!r}).write_text(str(os.getpgrp())); "
+        "subprocess.Popen(['/bin/sleep', '30'])"
+    )
+    monkeypatch.setattr(
+        e2e, "_recovery_worker_command",
+        lambda _args, _marker, _not_before_ns: [sys.executable, "-c", script])
+    monkeypatch.setattr(e2e, "RECOVERY_CLEANUP_MARGIN", 3.0)
+    monkeypatch.setattr(e2e, "RECOVERY_WORKER_TERM_GRACE", 1.0)
+    args = SimpleNamespace(
+        root=str(tmp_path), output=str(output), process_registry=str(registry),
+        timeout_seconds=2.0,
+    )
+    assert e2e._supervise_recovery(args) == 1
+    pgid = int(pgid_file.read_text())
+    try:
+        with pytest.raises(ProcessLookupError):
+            os.killpg(pgid, 0)
+    finally:
+        process_registry.signal_group_id(pgid, signal.SIGKILL)
+    assert "survived its leader" in json.loads(output.read_text())["error"]
+
+
+def test_recovery_supervisor_signal_is_safe_during_poll_and_registry_cleanup(
+    tmp_path, monkeypatch,
+):
+    tmp_path.chmod(0o700)
+    original = signal.getsignal(signal.SIGTERM)
+
+    class FakeProcess:
+        pid = 424242
+        returncode = 0
+
+        def __init__(self, cancel_during_poll):
+            self.cancel_during_poll = cancel_during_poll
+            self.fired = False
+
+        def poll(self):
+            if self.cancel_during_poll and not self.fired:
+                self.fired = True
+                os.kill(os.getpid(), signal.SIGTERM)
+            return self.returncode
+
+    monkeypatch.setattr(e2e, "group_id_is_live", lambda _pgid: False)
+    for window in ("poll", "registry"):
+        registry = tmp_path / f"registry-{window}"
+        registry.mkdir(mode=0o700)
+        output = tmp_path / f"cancel-{window}.json"
+        monkeypatch.setattr(
+            e2e.subprocess, "Popen",
+            lambda *_args, _window=window, **_kwargs: FakeProcess(_window == "poll"))
+
+        def cleanup(*_args, _window=window, **_kwargs):
+            if _window == "registry":
+                os.kill(os.getpid(), signal.SIGTERM)
+
+        monkeypatch.setattr(e2e, "cleanup_registry", cleanup)
+        args = SimpleNamespace(
+            root=str(tmp_path), output=str(output), process_registry=str(registry),
+            timeout_seconds=1.0,
+        )
+        assert e2e._supervise_recovery(args) == 1
+        artifact = json.loads(output.read_text())
+        assert artifact["worker_cancelled_signal"] == signal.SIGTERM
+        assert "cancelled by signal" in artifact["error"]
+        assert signal.getsignal(signal.SIGTERM) == original
+
+
+def test_recovery_supervisor_reaps_resistant_worker_and_registered_group(
+    tmp_path, monkeypatch,
+):
+    tmp_path.chmod(0o700)
+    runtime = tmp_path / "runtime"
+    registry = tmp_path / "registry"
+    runtime.mkdir(mode=0o700)
+    registry.mkdir(mode=0o700)
+    output = tmp_path / "recovery.json"
+    pid_file = tmp_path / "child.pid"
+    resistant = (
+        "import signal,time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"
+    )
+
+    def fake_worker(_args, marker, _not_before_ns):
+        record = registry / "late.json"
+        reservation, device, inode = process_registry.reserve_publication(record)
+        script = (
+            "import signal,subprocess,sys,time; from pathlib import Path; "
+            f"p=subprocess.Popen([sys.executable,{process_registry.__file__!r},"
+            f"{process_registry.REPLACE_MODE!r},sys.argv[1],sys.argv[2],"
+            f"sys.argv[3],sys.argv[4],sys.argv[5],sys.executable,'-c',"
+            f"{resistant!r}],start_new_session=True); "
+            "Path(sys.argv[6]).write_text(str(p.pid)); "
+            "deadline=time.monotonic()+2; "
+            "\nwhile not Path(sys.argv[1]).exists() and time.monotonic()<deadline: "
+            "time.sleep(0.01)\n"
+            "signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(30)"
+        )
+        return [
+            sys.executable, "-c", script,
+            str(record), str(reservation), str(device), str(inode), marker,
+            str(pid_file),
+        ]
+
+    monkeypatch.setattr(e2e, "_recovery_worker_command", fake_worker)
+    monkeypatch.setattr(e2e, "RECOVERY_CLEANUP_MARGIN", 2.0)
+    monkeypatch.setattr(e2e, "RECOVERY_WORKER_TERM_GRACE", 0.1)
+    monkeypatch.setattr(e2e, "RECOVERY_GROUP_TERM_GRACE", 0.1)
+    args = SimpleNamespace(
+        root=str(runtime), output=str(output), process_registry=str(registry),
+        timeout_seconds=0.2,
+    )
+    started = time.monotonic()
+    assert e2e._supervise_recovery(args) == 1
+    assert time.monotonic() - started < 4.0
+    child_pid = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.killpg(child_pid, 0)
+    assert list(registry.iterdir()) == []
+    artifact = json.loads(output.read_text())
+    assert artifact["success"] is False and artifact["worker_timed_out"] is True
+
+
+def test_provenance_ignores_ignored_untracked_python(monkeypatch):
+    ignored = e2e.ROOT / "tests/__pycache__/ignored-source.py"
+    ignored.parent.mkdir(exist_ok=True)
+    ignored.write_text("must not enter the source manifest")
+    monkeypatch.setattr(e2e, "BLENDER", "/bin/echo")
+    _clear_vendor_bytecode()
+    try:
+        provenance = e2e._current_provenance(time.monotonic() + 10.0)
+    finally:
+        ignored.unlink(missing_ok=True)
+    assert str(ignored.relative_to(e2e.ROOT)) not in provenance["sources"]["files"]
+
+
+def test_provenance_rejects_vendor_extra_or_content_drift(monkeypatch):
+    vendor = e2e.ROOT / "bridge/_vendor/protocol/envelope.py"
+    extra = vendor.with_suffix(".so")
+    original = vendor.read_bytes()
+    monkeypatch.setattr(e2e, "BLENDER", "/bin/echo")
+    _clear_vendor_bytecode()
+    try:
+        extra.write_bytes(b"executable blind spot")
+        with pytest.raises(AssertionError, match="vendored protocol file set"):
+            e2e._current_provenance(time.monotonic() + 10.0)
+        extra.unlink()
+        vendor.write_bytes(original + b"\n# drift\n")
+        with pytest.raises(AssertionError, match="vendored protocol content differs"):
+            e2e._current_provenance(time.monotonic() + 10.0)
+    finally:
+        extra.unlink(missing_ok=True)
+        vendor.write_bytes(original)
+
+
+def test_required_provenance_input_must_be_tracked(monkeypatch):
+    monkeypatch.setattr(
+        e2e, "_git_bytes",
+        lambda *_args, **_kwargs: b"pyproject.toml\0")
+    with pytest.raises(RuntimeError, match="required provenance inputs are not tracked"):
+        e2e._tracked_sources(
+            time.monotonic() + 1.0, {e2e.ROOT / "uv.lock"})
+
+
+def test_bounded_provenance_read_rejects_symlink_oversize_and_expired(tmp_path):
+    regular = tmp_path / "regular.py"
+    regular.write_bytes(b"12345")
+    symlink = tmp_path / "linked.py"
+    symlink.symlink_to(regular)
+    with pytest.raises(ValueError, match="bounded regular"):
+        e2e._read_bounded_bytes(symlink, time.monotonic() + 1.0, 16)
+    with pytest.raises(ValueError, match="bounded regular"):
+        e2e._read_bounded_bytes(regular, time.monotonic() + 1.0, 4)
+    with pytest.raises(TimeoutError, match="deadline expired"):
+        e2e._read_bounded_bytes(regular, time.monotonic() - 1.0, 16)
+
+
+def test_audit_reader_rejects_fifo_and_oversize_without_blocking(
+    tmp_path, monkeypatch,
+):
+    logs = tmp_path / "logs"
+    logs.mkdir(mode=0o700)
+    path = logs / "server-2026-08-08.jsonl"
+    os.mkfifo(path, mode=0o600)
+    started = time.monotonic()
+    with pytest.raises(PermissionError, match="private audit file"):
+        e2e._audit_rows(tmp_path, time.monotonic() + 0.5)
+    assert time.monotonic() - started < 0.5
+    path.unlink()
+    path.write_bytes(b"12345")
+    path.chmod(0o600)
+    monkeypatch.setattr(e2e, "MAX_AUDIT_FILE_BYTES", 4)
+    with pytest.raises(ValueError, match="bounded regular file"):
+        e2e._audit_rows(tmp_path, time.monotonic() + 0.5)
+
+
+@pytest.mark.parametrize("mutation", [
+    "document_drift", "gate_drift", "extra_key", "missing_key",
+    "bool_schema", "bool_checked",
+])
+def test_provenance_rejects_approved_tuple_drift(monkeypatch, mutation):
+    path = e2e.ATTESTATION_PATH
+    original_bytes = path.read_bytes()
+    attestation = json.loads(original_bytes)
+    approved = attestation["approved_tuple"]
+    if mutation == "document_drift":
+        approved["urs_sha256"] = "0" * 64
+    elif mutation == "gate_drift":
+        approved["unit_tests"] += 1
+    elif mutation == "extra_key":
+        approved["unexpected"] = 1
+    elif mutation == "missing_key":
+        del approved["plan_sha256"]
+    elif mutation == "bool_schema":
+        attestation["schema_version"] = True
+    else:
+        approved["checked_checkboxes"] = False
+    path.write_text(json.dumps(attestation))
+    original_git_text = e2e._git_text
+
+    def allow_fixture_edit(deadline, *args, **kwargs):
+        if args == ("status", "--porcelain=v1", "--untracked-files=all"):
+            return ""
+        return original_git_text(deadline, *args, **kwargs)
+
+    monkeypatch.setattr(e2e, "_git_text", allow_fixture_edit)
+    monkeypatch.setattr(e2e, "BLENDER", "/bin/echo")
+    _clear_vendor_bytecode()
+    try:
+        with pytest.raises((AssertionError, ValueError)):
+            e2e._current_provenance(time.monotonic() + 10.0)
+    finally:
+        path.write_bytes(original_bytes)
+```
+
+- [ ] **Step 2: 运行基础门并冻结 harness 源码**
 
 ```bash
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
+find protocol bridge server smoke scripts tests -type d -name __pycache__ \
+  -prune -exec rm -rf '{}' +
+find protocol bridge server smoke scripts tests -type f \
+  \( -name '*.pyc' -o -name '*.pyo' \) -delete
+test -z "$(find protocol bridge server smoke scripts tests -name __pycache__ -print -quit)"
+test -z "$(find protocol bridge server smoke scripts tests -type f \
+  \( -name '*.pyc' -o -name '*.pyo' \) -print -quit)"
+/Users/yeminjie/.local/bin/uv run --frozen pytest tests/unit/test_e2e.py -q
 smoke_out="$(mktemp /tmp/bcx_smoke.XXXXXX)"
 smoke_root="$(mktemp -d /tmp/bcx_smoke_root.XXXXXX)"
 chmod 700 "$smoke_root"
@@ -11223,33 +15640,299 @@ BLENDERCODEX_ROOT="$smoke_root" BLENDERCODEX_SMOKE_OUT="$smoke_out" \
 /Users/yeminjie/.local/bin/uv run --frozen python -c \
   'import json,sys; d=json.load(open(sys.argv[1])); keys=("timer_tick","revision_bump","fields","hash_scope","cycles_leak_free"); assert all(d.get(k) is True for k in keys) and d.get("errors")==[], d' \
   "$smoke_out"
+git add smoke/process_registry.py smoke/runner.py smoke/e2e.py tests/unit/test_e2e.py
+git commit -m "test(L3): 添加 GUI、NFR 与崩溃恢复 harness"
 ```
 
-Expected: `SMOKE_OK`，随后外部 JSON 验证器退出 0。任何一项 false、异常被 runner 捕获、结果缺失或管道左侧失败都会令本步非零；失败时读 `$smoke_out` 定位五项中的失败项。
+Expected: helper 护栏 **54 passed**；`SMOKE_OK`，随后外部 JSON 验证器退出 0；最后源码 commit 成功且工作树 clean。任何一项 false、异常被 runner 捕获、结果缺失或管道左侧失败都会令本步非零；失败时读 `$smoke_out` 定位五项中的失败项。正式证据必须从这个已提交源码树生成，不能先产 artifact 再补源码 commit。
 
-M-4 真 GUI 大场景复测（同一 runner、独立输出；不把 background source-step 当 GUI 证据）：
+- [ ] **Step 3: 正式 100k/NFR-P1 与 SIGKILL/restart 门**
 
 ```bash
 set -euo pipefail
-large_out="$(mktemp /tmp/bcx_smoke_large.XXXXXX)"
+umask 077
+export PYTHONDONTWRITEBYTECODE=1
+find protocol bridge server smoke scripts tests -type d -name __pycache__ \
+  -prune -exec rm -rf '{}' +
+find protocol bridge server smoke scripts tests -type f \
+  \( -name '*.pyc' -o -name '*.pyo' \) -delete
+test -z "$(find protocol bridge server smoke scripts tests -name __pycache__ -print -quit)"
+test -z "$(find protocol bridge server smoke scripts tests -type f \
+  \( -name '*.pyc' -o -name '*.pyo' \) -print -quit)"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+artifact_dir="$(mktemp -d /tmp/bcx_phase0_l3.XXXXXX)"
+chmod 700 "$artifact_dir"
+large_out="$artifact_dir/gui-nfr-smoke.json"
+nfr_out="$artifact_dir/nfr-p1.json"
+nfr_offline_root="${nfr_out}.offline-root"
+recovery_out="$artifact_dir/recovery.json"
+audit_bundle="$artifact_dir/audit-bundle.json"
+execution_manifest="$artifact_dir/execution-manifest.json"
+recovery_process_dir="$artifact_dir/recovery-processes"
+mkdir -m 700 "$recovery_process_dir"
 large_root="$(mktemp -d /tmp/bcx_smoke_large_root.XXXXXX)"
-chmod 700 "$large_root"
+recovery_root="$(mktemp -d /tmp/bcx_recovery_root.XXXXXX)"
+chmod 700 "$large_root" "$recovery_root"
 BLENDERCODEX_ROOT="$large_root" BLENDERCODEX_LARGE_OBJECTS=100000 \
-  BLENDERCODEX_SMOKE_OUT="$large_out" \
+  BLENDERCODEX_SMOKE_OUT="$large_out" BLENDERCODEX_NFR_OUT="$nfr_out" \
   /Applications/Blender.app/Contents/MacOS/Blender \
   --factory-startup --python-exit-code 1 --python smoke/runner.py 2>&1 | tail -2
-/Users/yeminjie/.local/bin/uv run --frozen python -c \
-  'import json,sys; d=json.load(open(sys.argv[1])); m=d.get("large_scene_metrics") or {}; assert d.get("large_scene") is True and d.get("large_scene_budget_ok") is True and m.get("target_objects")==100000 and m.get("object_count")==100000 and m.get("mesh_count")==100000 and m.get("camera_count")==0 and m.get("light_count")==0 and m.get("query_runs")==20 and len(m.get("query_wall_ms_samples", []))==20 and m.get("query_wall_ms_p95", 1e99)<2000.0 and m.get("max_tick_ms", 1e99)<100.0 and m.get("tick_count", 0)>0 and d.get("errors")==[], d' \
-  "$large_out"
+/Users/yeminjie/.local/bin/uv run --frozen python smoke/e2e.py recovery \
+  --root "$recovery_root" --output "$recovery_out" \
+  --process-registry "$recovery_process_dir" --timeout-seconds 120
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+/Users/yeminjie/.local/bin/uv run --frozen python - \
+  "$large_out" "$nfr_out" "$recovery_out" \
+  "$large_root" "$nfr_offline_root" "$recovery_root" \
+  "$audit_bundle" "$execution_manifest" <<'PY'
+import datetime
+import json
+import math
+import re
+import sys
+import time
+from pathlib import Path
+
+from protocol import envelope
+from smoke import e2e
+
+(smoke_path, nfr_path, recovery_path, live_root, offline_root, recovery_root,
+ audit_bundle_path, manifest_path) = map(Path, sys.argv[1:])
+verification_deadline = time.monotonic() + 60.0
+smoke, nfr, recovery = (
+    e2e._strict_json_loads(e2e._read_bounded_bytes(
+        path, verification_deadline, e2e.MAX_ARTIFACT_BYTES))
+    for path in (smoke_path, nfr_path, recovery_path)
+)
+assert type(smoke) is dict and type(nfr) is dict and type(recovery) is dict
+expected_nfr_keys = {
+    "schema_version", "mode", "started_at", "environment", "success",
+    "provenance", "protocol_versions", "instance_id", "sample_count",
+    "sample_result_bytes", "sample_text_content_bytes",
+    "sample_dual_content_payload_bytes", "p95_limit_ms", "failed_tools",
+    "catalog", "audit", "results", "completed_at",
+}
+assert set(nfr) == expected_nfr_keys, nfr.keys()
+current = e2e._current_provenance(verification_deadline)
+assert current["git"]["dirty"] is False, current
+assert (type(nfr["schema_version"]) is int and nfr["schema_version"] == 1
+        and nfr["mode"] == "nfr"
+        and type(nfr["started_at"]) is str
+        and type(nfr["completed_at"]) is str), nfr
+datetime.datetime.fromisoformat(nfr["started_at"])
+datetime.datetime.fromisoformat(nfr["completed_at"])
+assert e2e._exact_json_equal(nfr["environment"], current["runtime"]), nfr
+assert (type(recovery.get("schema_version")) is int
+        and recovery["schema_version"] == 1
+        and recovery.get("mode") == "recovery"
+        and type(recovery.get("started_at")) is str
+        and type(recovery.get("completed_at")) is str), recovery
+datetime.datetime.fromisoformat(recovery["started_at"])
+datetime.datetime.fromisoformat(recovery["completed_at"])
+assert e2e._exact_json_equal(
+    recovery.get("environment"), current["runtime"]), recovery
+assert e2e._exact_json_equal(nfr.get("provenance"), current), nfr.get("provenance")
+assert e2e._exact_json_equal(
+    recovery.get("provenance"), current), recovery.get("provenance")
+base = ("timer_tick", "revision_bump", "fields", "hash_scope",
+        "cycles_leak_free", "large_scene", "large_scene_budget_ok", "nfr_p1")
+assert all(smoke.get(key) is True for key in base) and smoke.get("errors") == [], smoke
+large = smoke.get("large_scene_metrics") or {}
+large_integer_keys = (
+    "target_objects", "object_count", "mesh_count", "camera_count",
+    "light_count", "query_runs", "tick_count")
+assert all(type(large.get(key)) is int for key in large_integer_keys), large
+large_samples = large.get("query_wall_ms_samples")
+assert (type(large_samples) is list and len(large_samples) == 20
+        and all(type(value) in (int, float) and math.isfinite(value) and value >= 0
+                for value in large_samples)), large
+assert (large.get("target_objects") == 100000
+        and large.get("object_count") == 100000
+        and large.get("mesh_count") == 100000
+        and large.get("camera_count") == 0
+        and large.get("light_count") == 0
+        and large.get("query_runs") == 20
+        and type(large.get("query_wall_ms_p95")) in (int, float)
+        and math.isfinite(large["query_wall_ms_p95"])
+        and large["query_wall_ms_p95"] < 2000.0
+        and type(large.get("max_tick_ms")) in (int, float)
+        and math.isfinite(large["max_tick_ms"])
+        and large["max_tick_ms"] < 100.0
+        and large.get("tick_count", 0) > 0), large
+assert (nfr.get("success") is True and type(nfr.get("sample_count")) is int
+        and nfr["sample_count"] == 60), nfr
+assert e2e._exact_json_equal(nfr.get("failed_tools"), []), nfr
+assert (type(nfr.get("p95_limit_ms")) is float
+        and nfr["p95_limit_ms"] == 2000.0), nfr
+assert e2e._exact_json_equal(nfr.get("protocol_versions"), {
+    "live": "2026-07-28", "offline": "2026-07-28"}), nfr
+e2e._verify_catalog_baseline(nfr["catalog"])
+instance_id = nfr["instance_id"]
+status_args = {"instance_selector": instance_id}
+scene_args = {"instance_id": instance_id, "include_collections": False,
+              "include_managed_objects": False}
+offline_args = {"include_instances": False}
+measurements = {
+    "get_blender_status": (
+        status_args, lambda value: e2e._validate_status(value, instance_id)),
+    "get_scene_summary": (
+        scene_args, lambda value: e2e._validate_scene(value, instance_id)),
+    "describe_capabilities": (offline_args, e2e._validate_capabilities),
+}
+results = e2e._require_exact_measurement_results(nfr["results"])
+verified_records = []
+for name, (arguments, validate) in measurements.items():
+    record = results[name]
+    e2e._verify_measurement_record(record, arguments, validate)
+    assert record["p95_ms"] < 2000.0
+    verified_records.append(record)
+assert (type(nfr.get("sample_result_bytes")) is int
+        and e2e._sample_result_total(verified_records)
+        == nfr["sample_result_bytes"] <= e2e.MAX_SAMPLE_RESULTS_BYTES), nfr
+assert (type(nfr.get("sample_text_content_bytes")) is int
+        and e2e._sample_text_total(verified_records)
+        == nfr["sample_text_content_bytes"]), nfr
+assert (type(nfr.get("sample_dual_content_payload_bytes")) is int
+        and nfr["sample_dual_content_payload_bytes"]
+        == nfr["sample_result_bytes"] + nfr["sample_text_content_bytes"]), nfr
+nfr_text = json.dumps(nfr, ensure_ascii=False).lower()
+assert "token" not in nfr_text and "socket_path" not in nfr_text
+recovery_text = json.dumps(recovery, ensure_ascii=False).lower()
+assert "token" not in recovery_text and "socket_path" not in recovery_text
+identity_keys = {"pid", "pgid", "marker", "started_monotonic_ns"}
+identities = [
+    recovery.get("mcp_server_identity_before_kill"),
+    recovery.get("mcp_server_identity_after_kill"),
+    recovery.get("mcp_server_identity_after_restart"),
+]
+for identity in identities:
+    assert type(identity) is dict and set(identity) == identity_keys, identity
+    assert (type(identity["pid"]) is int
+            and type(identity["pgid"]) is int
+            and identity["pid"] == identity["pgid"] > 1
+            and type(identity["started_monotonic_ns"]) is int
+            and identity["started_monotonic_ns"] > 0
+            and type(identity["marker"]) is str
+            and re.fullmatch(r"[0-9a-f]{32}", identity["marker"])), identity
+assert (e2e._exact_json_equal(identities[0], identities[1])
+        and e2e._exact_json_equal(identities[1], identities[2])), identities
+unavailable = recovery.get("bridge_unavailable_error")
+assert (type(unavailable) is dict and set(unavailable) == {"code", "retryable"}
+        and type(unavailable["code"]) is str
+        and unavailable["code"] == "BRIDGE_UNAVAILABLE"
+        and type(unavailable["retryable"]) is bool
+        and unavailable["retryable"] is True), unavailable
+assert (recovery.get("success") is True
+        and recovery.get("same_mcp_server_session") is True
+        and e2e._exact_json_equal(
+            recovery.get("bridge_unavailable_error"), unavailable)
+        and type(recovery.get("first_exit_code")) is int
+        and recovery["first_exit_code"] == -9
+        and type(recovery.get("second_exit_code")) is int
+        and recovery["second_exit_code"] == 0
+        and type(recovery.get("initial_pid")) is int
+        and type(recovery.get("restarted_pid")) is int
+        and type(recovery.get("initial_instance_id")) is str
+        and type(recovery.get("restarted_instance_id")) is str
+        and type(recovery.get("restart_status_attempts")) is int
+        and 1 <= recovery["restart_status_attempts"]
+        <= e2e.MAX_RECOVERY_STATUS_ATTEMPTS
+        and recovery.get("initial_instance_id") != recovery.get("restarted_instance_id")), recovery
+
+live_rows = e2e._audit_rows(live_root, verification_deadline)
+live_summary = e2e._audit_summary(
+    live_rows,
+    [("get_blender_status", status_args, True, None, None) for _ in range(20)]
+    + [("get_scene_summary", scene_args, True, None, instance_id)
+       for _ in range(20)],
+)
+offline_rows = e2e._audit_rows(offline_root, verification_deadline)
+offline_summary = e2e._audit_summary(
+    offline_rows,
+    [("describe_capabilities", offline_args, True, None, None)
+     for _ in range(20)],
+)
+initial_id = recovery["initial_instance_id"]
+restarted_id = recovery["restarted_instance_id"]
+initial_args = {"instance_selector": initial_id}
+post_kill_args = {"instance_id": initial_id, "include_collections": False,
+                  "include_managed_objects": False}
+restarted_args = {"instance_selector": restarted_id}
+recovery_rows = e2e._audit_rows(recovery_root, verification_deadline)
+recovery_summary = e2e._audit_summary(
+    recovery_rows,
+    [("get_blender_status", initial_args, True, None, None),
+     ("get_scene_summary", post_kill_args, False,
+      envelope.BRIDGE_UNAVAILABLE, initial_id)]
+    + [("get_blender_status", restarted_args, True, None, None)
+       for _ in range(recovery["restart_status_attempts"])],
+)
+assert e2e._exact_json_equal(
+    nfr["audit"], {"live": live_summary, "offline": offline_summary})
+assert e2e._exact_json_equal(recovery["audit"], recovery_summary)
+for directory in (Path(str(nfr_path) + ".processes"),
+                  manifest_path.parent / "recovery-processes"):
+    assert not directory.exists() or list(directory.iterdir()) == [], directory
+
+bundle = {
+    "schema_version": 1,
+    "provenance": current,
+    "live_nfr_rows": live_rows,
+    "offline_nfr_rows": offline_rows,
+    "recovery_rows": recovery_rows,
+}
+e2e._write_private_json(audit_bundle_path, bundle)
+artifacts = {}
+for name, path in {
+    "gui_nfr_smoke": smoke_path,
+    "nfr_p1": nfr_path,
+    "recovery": recovery_path,
+    "audit_bundle": audit_bundle_path,
+}.items():
+    artifacts[name] = {"bytes": path.stat().st_size,
+                       "sha256": e2e._sha256_file(path)}
+e2e._write_private_json(manifest_path, {
+    "schema_version": 1,
+    "completed_at": datetime.datetime.now(datetime.UTC).isoformat(),
+    "provenance": current,
+    "artifacts": artifacts,
+})
+PY
+install -m 600 "$large_out" docs/audits/evidence/phase0-gui-nfr-smoke.json
+install -m 600 "$nfr_out" docs/audits/evidence/phase0-nfr-p1.json
+install -m 600 "$recovery_out" docs/audits/evidence/phase0-recovery.json
+install -m 600 "$audit_bundle" docs/audits/evidence/phase0-l3-audit-bundle.json
+install -m 600 "$execution_manifest" docs/audits/evidence/phase0-l3-execution-manifest.json
+(cd docs/audits/evidence && \
+  shasum -a 256 phase0-gui-nfr-smoke.json > phase0-gui-nfr-smoke.json.sha256 && \
+  shasum -a 256 phase0-nfr-p1.json > phase0-nfr-p1.json.sha256 && \
+  shasum -a 256 phase0-recovery.json > phase0-recovery.json.sha256 && \
+  shasum -a 256 phase0-l3-audit-bundle.json > phase0-l3-audit-bundle.json.sha256 && \
+  shasum -a 256 phase0-l3-execution-manifest.json > phase0-l3-execution-manifest.json.sha256)
 ```
 
-该可选门记录 `target/object/mesh/camera/light_count`、构造耗时、20 次精确 worker-side query wall-clock 样本及 nearest-rank P95、`tick_count`、`max_tick_ms`，并另记 observer/build callback 峰值用于诊断。产品门只判 query P95 与被包装的 `BridgeSession.tick()`；fixture 的 100k 对象构造和最终 `view_layer.update()` 不属于读取路径，不得造成假失败。`50 ms` 仍是 cooperative budget，不是跨机器或硬墙钟合同；30 s 观察窗口与 2 s 通过预算分离，查询线程与 GUI 等待共享同一观察 deadline，超时后只做有界 join 并 fail-closed。
+NFR 计时从每次 `Client.call_tool()` 前开始，到 SDK 返回且对应 Pydantic model 与语义断言完成后结束；因此覆盖 stdio、SDK middleware、adapter、Discovery（适用时）、UDS/Bridge、structuredContent 转换与 audit postlude。初始化不计入 P95。100k fixture 构造及其 20 次 Bridge-only 预查询发生在 NFR helper spawn 前，既不计入 P95，也不受 helper 165/180 s 窗口约束；本 Task 未实现整个 GUI 流程的另一个全局 OS supervisor，不得声称完整 Task 18 有硬墙钟上限。
 
-- [ ] **Step 3: Commit**
+NFR helper 使用 165 s work deadline；runner 从 helper spawn 起只给 180 s outer deadline，最后 15 s 是同一 cleanup 窗口（TERM worker 最多 8 s、TERM groups 最多 3 s、至少 2 s KILL/reap），不得逐阶段重开。NFR 与 recovery 都用 `poll_before_deadline()` 的 poll 前/后双检查拒绝 late completion。recovery public supervisor 为 135 s，hidden worker work deadline 为 120 s；public SIGINT/SIGTERM 只置 flag，任意窗口的取消、超时、leader-exit child 或截止点仍存活 group 都进入同一 TERM/KILL/registry cleanup。fresh `0700` registry 的 exact-type record 绑定 marker/time-window/dev/inode，inflight publish 明确为 pending；PID→不同 PGID reuse、marker/stale/identity 不符时 fail-closed 且不 signal，unlink 前重验 inode。
+
+三个工具各恰好 20 次，不重试、不删慢样本；nearest-rank P95 是排序后第 19 个值且严格 `<2000 ms`。`get_scene_summary` 固定 100k 真 GUI与两个 include flag=false；status 精确选择该实例；capabilities 在保留审计证据的独立空 root、`include_instances=false` 下证明离线。每个样本保存 ≤256 KiB canonical validated-result preimage（合计 ≤16 MiB，artifact ≤32 MiB），并保留 SDK 兼容 TextContent 原文；外部验证器使用 strict JSON 与 exact-type 比较重新执行 Pydantic/语义断言，证明 TextContent JSON 与 `structuredContent` 等价，复算两者各自 bytes/SHA、合计双内容 result payload 与 duplication ratio，再复算 arguments、P95/max/代表结果并逐行复核 40+20 行 NFR 与 recovery audit。该合计只证明 SDK/transport result 字节，不冒充 Codex Host model-visible 或 tokenizer token。SIGKILL 门以 kill 前、kill 后、重启后三次 `(pid, pgid, marker, started_monotonic_ns)` 全等证明同一 MCP Client/Server 会话，不信任写死布尔。
+
+provenance 先检查 clean Git，再只从 `git ls-files -z` 与显式 vendor 集读取至多 512 个 no-follow regular 源（单文件 ≤16 MiB、合计 ≤128 MiB），所有 Git/Blender subprocess 服从 invocation remaining。attestation/top tuple 都是 exact-key schema；Plan/URS/spec/ROADMAP 的 live SHA、approved SHA 与 `source_commit` blob SHA 三方全等，结构和最终 unit/contract/full/adapter 计数也逐项固定。正式 artifact 不记录 token/socket，并由 clean HEAD/tree、两提交 attestation 链、`uv.lock`、源码 manifest 与 Blender exact build 共同绑定；sidecar 只作文件完整性校验，不能替代 execution manifest。
+
+- [ ] **Step 4: Commit**
 
 ```bash
-git add smoke/runner.py
-git commit -m "test(L3): GUI 冒烟——timer 驱动、revision 递增、真场景字段、hash scope、会话循环"
+git add docs/audits/evidence/phase0-gui-nfr-smoke.json \
+  docs/audits/evidence/phase0-gui-nfr-smoke.json.sha256 \
+  docs/audits/evidence/phase0-nfr-p1.json \
+  docs/audits/evidence/phase0-nfr-p1.json.sha256 \
+  docs/audits/evidence/phase0-recovery.json \
+  docs/audits/evidence/phase0-recovery.json.sha256 \
+  docs/audits/evidence/phase0-l3-audit-bundle.json \
+  docs/audits/evidence/phase0-l3-audit-bundle.json.sha256 \
+  docs/audits/evidence/phase0-l3-execution-manifest.json \
+  docs/audits/evidence/phase0-l3-execution-manifest.json.sha256
+git commit -m "test(L3): 记录 GUI、NFR-P1 与崩溃恢复证据"
 ```
 
 ---
@@ -11258,6 +15941,7 @@ git commit -m "test(L3): GUI 冒烟——timer 驱动、revision 递增、真场
 
 **Files:**
 - Create: `docs/install.md`
+- Create: `docs/audits/phase0-validation-report.md`（从本 Task 的 5 个补充门 + 20 个稳定 ID 表复制；状态只在该执行报告中更新，不改获批 Plan）
 - Modify: `docs/superpowers/specs/2026-07-23-phase0-readonly-channel-design.md`（仅全部验收通过后，把“交付目标／隔离预检；Phase 0 未执行”改为已实现状态并记录正式证据）
 - Modify: `Blender-Codex-需求规格说明书-v1.md`（仅全部验收通过后记录 Phase 0 正式验收；不得把隔离预检当实施证据）
 
@@ -11301,7 +15985,7 @@ Blender → Edit → Preferences → Get Extensions → 右上角下拉 → Inst
 
 ## 6. 与官方 Blender Lab MCP 并存（若你也装了它）
 
-2026-08-07 按用户明确授权采用**显式固定的完整 26 工具、无 MCP 审批**配置。官方 MCP 仍含两个任意 Python 工具并使用无鉴权 localhost TCP 9876；它是自定义安全系统之外的兼容通道，不得拿它证明 URS G1–G3。以下 26 项是当前上游注册目录的 allowlist 快照，上游增删工具时必须先复核再更新：
+2026-08-08 按用户明确授权采用**显式固定的完整 26 工具、无 MCP 审批**配置，并选择“当前用户接受风险”。官方 MCP 仍含两个任意 Python 工具并使用无鉴权 localhost TCP 9876；它是自定义安全系统之外的兼容通道，不得拿它证明 URS G1–G3。当前风险接受关闭的是项目部署 Gate，不是上游稳定性修复：严格中段截图序列仍可返回截断 JSON，两个 deferred render 仍有 Blender 5.2 `SIGABRT` 证据且本轮未重跑。以下 26 项是当前上游注册目录的 allowlist 快照，上游增删工具时必须先复核再更新：
 
 ```toml
 [mcp_servers.blender]
@@ -11350,36 +16034,58 @@ direct_only_tool_namespaces = ["mcp__blender"]
 
 - `enabled_tools` 必须与上列 26 项逐集合全等，`omit_tools_from=[]`；不得出现 `disabled_tools` 或逐工具 override。显式 allowlist 是“当前完整目录”的固定快照，不等于自动接纳未来新增工具
 - `features.code_mode.direct_only_tool_namespaces` 必须包含且当前固定为 `mcp__blender`，确保该 namespace 只走直接工具调用路径
-- 独立 Codex app-server 的 `config/read` 与 `mcpServerStatus/list` 必须分别证明 effective filter 与目录均为 26/26；当前回合模型工具面可能仍绑定重启前快照，须重启 Codex 或进入新回合后另行确认，且不得用该快照反推 effective config
+- 独立 Codex app-server 的 `config/read` 与 `mcpServerStatus/list` 必须分别证明 effective filter 与目录均为 26/26；本轮重启后当前模型面也已直证为 26/26，未来正式执行或新任务仍须重新计数，不得用 effective config 单独替代模型面。截图置后的 A-4 摘要 transcript 为 24/24、approval=0，但不含 raw payload、不可重放，也不消除严格序列缺陷
 - 官方 Server 的启动命令必须显式钉 **`mcp[cli]>=1.2.0,<2`**：上游 commit `4309a39` 的依赖声明无上界，而它仍 `from mcp.server.fastmcp import FastMCP`——按默认解析到 SDK 2.0.0 会以 `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` 启动失败（复审 R-05 实测）。用 `uv --no-project --with-editable` 启动，避免在上游 checkout 里生成 `uv.lock`
 - **该 `<2` 上界只属于官方 Server 的隔离环境**，绝不可传播到本项目（本项目用 SDK v2）——两个 Server 由不同 `uv` 进程启动，不共享 Python 环境
 - 不启用官方 HTTP 模式（当前源码 CORS `*` 且关闭 DNS rebinding 防护）
 - 本项目 Bridge 与官方互不依赖：本项目走 UDS + token，官方走 TCP 9876
 ````
 
-- [ ] **Step 2: 对照 URS §10.1 逐条验收并记录**
+- [ ] **Step 2: 对照 URS §10.1 逐条验收，并写外部 validation report**
 
-| URS 验收项 | 验证方式 | 状态 |
+把以下两张表复制到 `docs/audits/phase0-validation-report.md`，连同获批 Plan/attestation SHA、Task 0–18 commit 列表和正式 execution manifest SHA 一并记录；状态只在该报告副本中更新。先核对五个 Phase 0 补充关闭门；它们不是 URS §10.1 checkbox，不得混入后面的 20 行：
+
+| 补充门 | 验证方式 | 状态 |
 |---|---|---|
-| 三工具符合 outputSchema | Task 17 递归断言所有 object 封闭、enum/required 精确，并以 structuredContent 实际调用验证 | ☐ |
-| **structure hash v1 语义边界成立** | Task 3 L1 字段结构断言 + Task 18 L3 `hash_scope`（顶点不可见 / transform 可见） | ☐ |
-| **当前/旧/新协议合同可用** | Task 17：当前 Codex 2025-06-18 与 legacy 2025-11-25 均精确 initialize；真实 stdio modern 精确断言 2026-07-28 + discover 非空 + initialize 为空；initialize 与 discover 两类路径的未知参数均 -32602 | ☐ |
-| 非基线只读可用、写工具拒绝 | Task 9 单测（`gate_write`）+ Task 15 warning 测试 | ☐ |
-| 杀 Blender → `BRIDGE_UNAVAILABLE`，重启自动重连 | Task 16 `test_bridge_kill_then_restart_recovers` + 手动杀真 Blender 复核 | ☐ |
-| 会话循环 20 次无泄漏 | Task 18 L3 | ☐ |
-| 5 MiB 分帧无截断 | Task 1 单测 + Task 16 端到端 | ☐ |
-| 权限位 + 无 token 拒绝 | Task 5/7/9/11 的目录、文件与 identity fail-closed 反例 + Task 16 at-rest/token 端到端断言 | ☐ |
-| stdout 纯净 | Task 17 | ☐ |
-| 冷启动 < 5 s | Task 17 | ☐ |
-| MCP stdio → adapter → UDS → Bridge 全链路 | Task 17 `test_stdio_mcp_to_fake_bridge_roundtrip` | ☐ |
-| 官方 MCP 完整目录且无审批 | 独立 Codex app-server `config/read`：显式 26 项 `enabled_tools` + `omit_tools_from=[]` + `mcp__blender` direct-only；`mcpServerStatus/list` 26/26，模式 `approve`，代表调用 `approval_events=0`；最新安全 host 长序列截图失败与 deferred render SIGABRT 另列为外部可靠性边界；重启/新回合后另确认模型工具面 | ☐ |
+| G2 三代协议合同 | Task 17：Codex `2025-06-18`、legacy `2025-11-25`、SDK modern `2026-07-28` 三条独立 wire path 精确断言 | ☐ |
+| G3 structure hash v1 边界 | Task 3 字段结构 + Task 18 真 Blender `hash_scope`（顶点不可见、transform 可见） | ☐ |
+| 完整 stdio → adapter → UDS → Bridge | Task 17 `test_stdio_mcp_to_fake_bridge_roundtrip`；Task 18 NFR 再走真 GUI | ☐ |
+| NFR-P1 正式门 | Task 18 `phase0-l3-execution-manifest.json` 为归因入口：clean Git/tree + 四文档 exact approved/source-blob tuple + 两提交 attestation 祖先链 + bounded tracked-source manifest/lock/Blender build；三工具各 20 个计时与 canonical result preimage，外部重做模型/语义、result+args digest、nearest-rank P95/max/代表结果且均 `<2000 ms`，并逐行复核 audit 40+20 行；sidecar 仅校验文件完整性 | ☐ |
+| G5 官方兼容通道 | 模型面/宿主目录 26/26、摘要 transcript 24 个非-render `ok`、approval=0；项目所有者已接受严格截图序列与 render SIGABRT 风险。只关闭部署 Gate，不宣称稳定 | ☐ |
 
-全部打勾后才可在 spec 头部把「状态」改为 **已实现（Phase 0）**，并在 URS 追加正式执行证据；在此之前两者必须继续明确“Phase 0 未执行”。
+随后按稳定 ID 与 URS §10.1 **同序逐行**核对，必须恰好 20 行：
+
+| ID | URS §10.1 验收项 | 验证方式 | 状态 |
+|---|---|---|---|
+| P0-01 | 三工具 outputSchema/structured result | Task 17 `test_tools_declare_closed_schemas`、`test_current_protocol_via_sdk_client`；Task 18 真 GUI NFR 的三模型验证 | ☐ |
+| P0-02 | 非基线只读可用、写拒绝 | Task 9 `test_check_matrix`/`test_gate_write_matrix` + Task 15 `test_non_baseline_version_warning_attached`；按 spec 单栈 fixture，不冒充另装 4.5 | ☐ |
+| P0-03 | SIGKILL 后 Server 存活、exact retryable `BRIDGE_UNAVAILABLE`、重启重连 | Task 16 FakeBridge 回归 + Task 18 public recovery supervisor/hidden worker 真 SIGKILL；kill 前/后/重启后三次 MCP identity 全等，并通过 public cancel/final-KILL、late poll、leader-exit/live-child、marker/stale/PID-PGID reuse、record 换入、pre-spawn reservation/stdlib bootstrap、read-only observer、bounded cache/overflow 与 inflight publication 直接反例 | ☐ |
+| P0-04 | 完整会话 20 次无泄漏/残留 | Task 18 `cycles_leak_free`；以 `threading.enumerate()` 精确比较新增存活 `bcx-io` 线程并检查 `run/gui-*` | ☐ |
+| P0-05 | ≥5 MiB 分帧无截断 | Task 1 `test_five_mib_roundtrip` + Task 16 `test_five_mib_payload_roundtrip` | ☐ |
+| P0-06 | 私有 socket/token | Task 7 `test_start_creates_private_files`、`test_socket_is_0600_before_listen_and_session_publish` + Task 16 permission/token/auth-log 回归 | ☐ |
+| P0-07 | stdout 仅 JSON-RPC | Task 17 cold-start、同块/延迟污染、半行/无换行/洪泛与 tail-drain 全组 | ☐ |
+| P0-08 | 冷启动 `<5 s` | Task 17 `test_cold_start_and_stdout_purity`，计时含进程启动到 initialize | ☐ |
+| P0-09 | cooperative continuation、总耗时/max tick | Task 4 大场景 wall-clock 回归 + Task 18 正式 100k `large_scene_metrics`/`max_tick_ms` | ☐ |
+| P0-10 | yield 无 bpy wrapper；load_pre 后结构化失败 | Task 13 snapshot wrapper/generation 与 scene-info race；注册后的 load_pre 行为测试；Task 4 `SCENE_QUERY_FAILED` 映射 | ☐ |
+| P0-11 | 2.2M collections 源端跳过 | Task 13 source-skip/item-cap + Task 16 `test_excluding_huge_collections_crops_before_frame_limit` | ☐ |
+| P0-12 | queued+active 容量，64→65 拒绝 | Task 4 capacity/active continuation + Task 12 完整 SDK conversion admission/release 三请求反例 | ☐ |
+| P0-13 | wake 合并与 1–10 停机顺序 | Task 7 wake storm/ordered hooks/final join + Task 16 N 连接回收与单写者回归 | ☐ |
+| P0-14 | file/parent/cleanup 换入不越界、不误删 | Task 7 socket/session replacement + Task 11 opened-fd、parent swap、dead cleanup、socket identity replacement 回归 | ☐ |
+| P0-15 | exact wire types、SDK coercion、结构化审计 | Task 2 malformed exact-type组 + Task 10 malformed response + Task 12 coercion/success/unknown/output-validation audit 组 | ☐ |
+| P0-16 | 线程/多 Host JSONL 完整 | Task 9 `test_concurrent_records_remain_complete_jsonl_lines` 的线程与 spawn 进程 split-write | ☐ |
+| P0-17 | runtime/run/logs 类型、uid、mode、祖先不改 | Task 7/9/11 wide/symlink 与新增 foreign-uid、真实 device FD、`test_start_preserves_permissions_above_runtime_root` 直接 fixture | ☐ |
+| P0-18 | sun_path 发布前/后崩溃恢复及换入保留 | Task 11 pre/post publication/fallback identity 回归 + Task 7 stop replacement | ☐ |
+| P0-19 | stale deadline、后续重试、instance ID | Task 11 expired/recheck/evidence-preservation + `test_expired_cleanup_is_retried_by_a_later_scan` + instance-id mismatch | ☐ |
+| P0-20 | 首次并发初始化；FIFO/device/symlink 不阻塞/不写 | Task 9 concurrent directory/file creation、FIFO 明确 `<0.5 s`、真实 `/dev/null` FD 换入与 symlink preservation | ☐ |
+
+只有 `docs/audits/phase0-validation-report.md` 中 5 个补充门与 `P0-01`～`P0-20` 全部标为通过后，才可在 spec 头部把「状态」改为 **已实现（Phase 0）**，并在 URS 追加正式执行证据；获批 Plan 的 93 个 checkbox 始终保持原字节不变。在此之前 spec/URS 必须继续明确“Phase 0 未执行”。
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add docs/install.md docs/superpowers/specs/2026-07-23-phase0-readonly-channel-design.md Blender-Codex-需求规格说明书-v1.md
+git add docs/install.md docs/audits/phase0-validation-report.md \
+  docs/superpowers/specs/2026-07-23-phase0-readonly-channel-design.md \
+  Blender-Codex-需求规格说明书-v1.md
 git commit -m "docs: 安装接入文档与 URS 验收核对表"
 ```
 
@@ -11388,6 +16094,10 @@ git commit -m "docs: 安装接入文档与 URS 验收核对表"
 ## 计划自审记录
 
 > 1–4 保留初版自审编号；后续修订从最新到最旧排列，编号保留证据来源，不再误称整表严格倒序。
+
+20. **r17 研究融合与基线复核（2026-08-08，proposed）**：外部报告三只作为 non-normative 研究输入，41 个不可移植引用与“未收到本仓库源码”的旧边界不进入证据链。经 MCP/OpenAI/Blender 官方资料与代表性 GitHub 项目复核，只纳入确定性 ordered catalog、catalog/instructions 与 structured/兼容 TextContent 的可复算 byte baseline、跨层单一职责；默认 observation contract、Resources/Tasks、projection/diff、progressive error、Recipe/visual budget 延后，任意 Python、客户端幂等键、自动 mint stable ID 与开放 batch schema 明确拒绝。Task 17 固定三工具顺序、catalog 6389 bytes/SHA 与 instructions 322 bytes/SHA，并在 raw 2025-06-18/2025-11-25 与 SDK 2026-07-28 三条路径直接断言双内容 JSON 等价、fresh stdio 完整 catalog 与重复 list 冻结一致；Task 18 记录 60 份双内容 preimage/等价性/bytes/SHA/duplication ratio，并以非对象和“自洽但偏离 Task 17 freeze”的反例收紧外部校验；真实 SDK `Client.server_info` 成功路径也由同一 helper 回归覆盖。最终 fresh-tree **369 passed（unit 337 + contract 32）**、adapter 35/373 行、Task 18 helper 54，`scripts/checks.sh`、ruff/mypy/compileall/lock/vendor/nested 全绿；Plan 为 20 Tasks、93 open/0 checked、50 Python fences、49 path-bound/49 unique，代码块 manifest `49867d461307b7273077359062896705019d5c5e2bc2ef258ac386919b46cb80`。未运行 Blender background/GUI/render、正式 NFR/recovery 或 Plan；r16 approval 已 supersede，须以 r17 最终 tuple 重新审批。
+
+19. **r16/B-5 执行前 E2E 对抗冻结（2026-08-08，proposed）**：A-1 三项平台候选全部接受；A-3 选择“当前用户接受风险”，G5 仅以风险接受关闭，严格截图序列与 deferred render `SIGABRT` 未修。URS/spec 升 v1.15，P0-01～P0-20 与 Task 19 同序 20 行；Task 18 固定三工具各 20 次完整 MCP NFR-P1、public recovery supervisor/hidden worker、165/180 与 120/135 s 两层 deadline、fresh marker process registry、leader-exit group liveness、三次 MCP identity、bounded tracked-source provenance、四文档 exact approved tuple/source blob 及 60 个 result preimage 外部复算，并补 foreign uid/device/ancestor/FIFO/stale/load_pre/socket-order、stdlib pre-spawn reservation/bootstrap 与失败清理、read-only observation、8-record cache 与 deadline-bound 全 entry scan、真实第 9 条 overflow、unknown-before-valid、partial scan/publication deadline 和标准命令 bytecode 污染直接反例。最终隔离预检 **368 passed（unit 336 + contract 32）**，adapter 35/373 行、Task 18 helper 53，`scripts/checks.sh` 整体及 ruff/mypy/compileall/lock/vendor/nested 全绿；Plan 为 20 Tasks、93 open/0 checked、50 Python fences、49 path-bound/49 unique，代码块 manifest `ed50f6f1dda32b2723d27f9d0f0d5a86eb27d8711690b3ec7d2f3a5a7f1d0f12`。未跑 Blender background/GUI/render、正式 NFR/recovery 或 Plan，Phase 0 未执行；v8 provenance SHA `90432ae43b705b8b366e0dfe237e387ab8e8ba8a03d523d6ade2b61bf1a1fe54` 保持不变，提交前未生成仓库内 post-freeze attestation。完整 proposed tuple 仍待项目所有者批准，批准后只走 `source_commit → attestation commit` 两提交链。
 
 18. **r15/v8 全量对抗复审（2026-08-08）**：红队构造 Blender addon 第二个 `register_class` 失败反例，证明旧 `register()` 会泄漏此前已注册 class；Blender `addon_utils` 不会在模块加载失败后调用 `unregister()`。新增注册部分失败回滚与回滚自身失败保留/报告测试，`register()` 仅逆序撤销本次新增 class；fresh-tree **307 passed（275+32）**、adapter 35/373 行、ruff/mypy/vendor/nested/lock 全绿；background/GUI smoke 及 100k Bridge-RPC 子门重新通过（worker P95 1605.18 ms、max 2560.86 ms、observer P95 1655.44 ms、max tick 62.50 ms）。官方 26 工具注册/安全 host 历史直调仍通过，但 deferred render 序列复现 Blender 5.2 `SIGABRT`，G5 不得写成稳定全绿；Plan 92+G0 全未执行。
 

@@ -2,9 +2,9 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 | v1.11 |
-| 日期 | 2026-07-23（v1.0）· 2026-08-08（v1.11：r15/v8 注册回滚复审、reader/双层准入/官方 render 风险边界） |
-| 状态 | 已评审；决策 D-1 / D-2 / D-3 / **D-4（官方 MCP 重评与边界澄清）** / **D-5（MCP SDK v2）** 已确认；当前为交付目标与隔离预检，Phase 0 尚未执行；变更记录见 §13。v8 fresh-tree 预检 307 passed，官方宿主注册 26/26，但最新安全 host 长序列失败、deferred render 崩溃风险与当前模型 10/26 仍使 G5/提交/Plan 执行等待用户批准 |
+| 版本 | v1.16 |
+| 日期 | 2026-07-23（v1.0）· 2026-08-08（v1.16：r17 确定性 catalog 与 payload 基线） |
+| 状态 | 已评审；决策 D-1 / D-2 / D-3 / **D-4（官方 MCP 重评与边界澄清）** / **D-5（MCP SDK v2）** 已确认；当前为交付目标与隔离预检，**Phase 0 尚未执行**；变更记录见 §13。项目所有者已接受三项平台候选；重启后当前模型面与宿主目录均为 26/26，并以“当前用户接受风险”关闭 G5。该关闭是对 screenshot 顺序敏感性与 deferred render `SIGABRT` 的知情风险接受，**不是缺陷已修复或 26 工具稳定性证明**。r16 tuple 虽已获批准，但在 source commit/attestation 前被本轮研究融合取代；当前 r17 仍为 proposed，须经新 SHA/计数审批后方可提交或执行 |
 | 适用范围 | macOS 桌面端本地部署 |
 
 ---
@@ -245,10 +245,20 @@
 
 | ID | 需求 |
 |---|---|
-| NFR-P1 | 只读工具 P95 < 2 s |
+| NFR-P1 | 在固定基线机上，三个只读工具各执行**恰好 20 次**完整 MCP `tools/call`，分别计算 nearest-rank P95（20 个排序样本中的第 19 个），每项均须严格 `< 2 s`；不得重试、删除慢样本或用 Bridge-only 指标替代。计时从每次 SDK `Client.call_tool()` 前开始，到 SDK 返回 `structuredContent` 且对应 Pydantic 模型与语义断言完成后结束，覆盖 stdio、SDK middleware、adapter、Discovery（适用时）、UDS/Bridge、结果转换与 audit postlude。`get_scene_summary` 固定使用 100k 真 GUI 场景且两个 include flag=false；`get_blender_status` 固定选择已连接真 GUI 实例；`describe_capabilities` 在独立空 root、`include_instances=false` 下证明离线。初始化和 fixture 构造不计入 P95；正式证据合同见下文，不得以 helper 自报布尔或 64-hex 外形检查代替外部复算 |
 | NFR-P2 | MCP Server 冷启动 < 5 s（Codex `startup_timeout_sec` 默认 10 s） |
 | NFR-P3 | 单次工具调用阻塞时长 < 60 s（Codex `tool_timeout_sec` 默认 60 s）。超出者一律走 job 模式 |
 | NFR-P4 | 长任务须有超时与内存上限；超限产生日志并终止，不得静默挂死 |
+| NFR-P5 | 同一 Server 版本与 capability profile 下，公开 `tools/list` 的名称、完整定义与顺序必须确定，固定为 `get_blender_status` → `get_scene_summary` → `describe_capabilities`；不得按实例状态、调用历史或回合动态增删/重排。Phase 0 正式 artifact 必须保存并可复算 wire Server identity/version、Server `instructions`、ordered catalog/schema 的 UTF-8/canonical bytes+SHA，以及 60 次调用中 `structuredContent` 与兼容 TextContent 的原文、JSON 等价性、各自 bytes/SHA、合计双内容 result payload 与 duplication ratio。该合计只证明 SDK/transport result 中两份内容的字节上界，不证明目标 Codex Host 把两份都注入模型；byte 不冒充 token。未经同模型/同推理配置/同 fixture 的 Host A/B，不设 Token 降幅或工具数量经验门槛 |
+
+#### NFR-P1 正式证据合同
+
+- **独立预算**：NFR helper 的 work deadline 为 `165 s`，从 helper spawn 后覆盖 provenance 与 60 次调用；GUI runner 从该次 spawn 起使用单一 `180 s` outer deadline，最后 `15 s` 是统一 cleanup 预算（TERM worker 最多 8 s、TERM 已登记 groups 最多 3 s，并至少保留 2 s 给 KILL/reap），各阶段不得重新开窗。NFR runner 与 recovery supervisor 均在 `poll()` 前后检查 absolute deadline，边界后才观察到的 `returncode=0` 仍失败。recovery 的 hidden worker work deadline 为 `120 s`，public OS supervisor 从安装 non-raising SIGINT/SIGTERM flag handler 前开始使用 `135 s` absolute deadline；取消、超时、leader-exit child 与截止点仍存活 group 均进入同一 TERM→KILL→worker/group liveness→registry cleanup，截止点 final KILL 不重开等待窗。worker 内 `asyncio.timeout()` 不是外层硬监督器。100k fixture 构造及其 20 次 Bridge-only 查询发生在 NFR helper spawn 前，既不计入 P95，也不受 165/180 s helper 窗口约束；本版不宣称完整 GUI Task 18 具有另一个全局墙钟上限。
+- **进程证据**：每次 invocation 使用 fresh、当前 uid、精确 `0700` 的私有 registry 和 128-bit（32 lowercase hex）随机 marker。parent 在任何独立 process-group spawn 前先创建 identity-bound `0600` reservation；child 的首个项目脚本必须是纯 stdlib bootstrap，在加载 MCP/Blender 重依赖前发布 exact-key/exact-type `schema_version=1`、`pid`、`pgid`、`marker`、`started_monotonic_ns` 与 opened dev/inode record，再完成 reservation；若参数构造、SDK client enter 或 `Popen` 在 record 发布前失败，parent 必须按 reservation 的 opened dev/inode 清理。observer 只读，不得删除 owner record；owner retire/publication rename 导致枚举后的单 entry 消失时标 pending 并重扫。`MAX_RECORDS=8` **只限制已验证可信 record cache，不是目录 entry 枚举上限**；formal scanner 由调用方共享 absolute deadline、单 record 4096-byte 上限与私有目录边界限界，unknown/identity/schema 单项错误须记首错并继续枚举，所有第 9 条及后续有效 overflow 都必须在 identity 复核后立即 KILL，不得遗忘后续可信组。leader PID 退出不代表 group 清洁；检查 recorded PID 后，PID 已复用到不同 PGID必须 fail-closed，PID 消失才检查旧 PGID 是否仍有 orphan child。cleanup 固定 TERM→KILL→确认 group gone→unlink 前再次核 record inode；public recovery 在 work 期持续预观察，并从 15 s cleanup margin 中固定保留 5 s 给 registry。marker/stale/PID-PGID reuse/record 换入/reservation/inflight publication/observer-owner race/cache overflow 均须有直接反例且不得误 signal/unlink。旧 group 完全消失后同数值 PID+PGID 被完整复用，以及最后一次 liveness/identity 检查后的同 UID 主动换入，仍是 POSIX 无法由裸 PGID/path 消除的明确边界。
+- **provenance 与批准链**：先证明 Git worktree clean，再从具有 stdout byte cap 与 absolute deadline 的 `git ls-files -z` 枚举至多 512 个 tracked 源；`pyproject.toml`、`uv.lock`、attestation 与四份批准文档等 required 输入必须确为 tracked。ignored vendor 只允许生成器声明的 exact 目录/文件集合，不得有 `.so`/pyc/symlink/额外项，且每个 vendored Python 文件须与 `protocol/` 同 hash。所有读取使用 no-follow/nonblocking fd，`fstat` 必须为 regular file；单源文件 ≤16 MiB、实际读取合计 ≤128 MiB。post-freeze attestation 使用 exact-key/exact-type schema；Plan/URS/spec/ROADMAP 的 live SHA、approved tuple SHA 与 `source_commit` blob SHA 必须三者全等，同时精确固定 20 Tasks、open/checked checkbox、Python fence、path-bound/unique Python 及最终 unit/contract/full/adapter 门禁计数。missing/extra key、bool 冒充 int、任一文档漂移或祖先链不符均拒绝。
+- **catalog、样本与 audit 可复算性**：live/offline 两个 fresh Server 均重复请求 `tools/list`，保存并证明 ordered catalog 完整定义/顺序相同；artifact 保留 catalog/schema canonical preimage、`instructions` 原文及其 bytes/SHA，并与 Task 17 的冻结值全等。另保留 60 个 canonical validated-result preimage及对应兼容 TextContent 原文；structured preimage 每项 ≤256 KiB、跨三个工具合计 ≤16 MiB，单个正式 artifact JSON ≤32 MiB。外部验证器必须重新运行对应 Pydantic model 与语义断言，证明 TextContent JSON 与 `structuredContent` 等价，复算两者各自 bytes/SHA、合计双内容 result payload、duplication ratio，并核对 exact-type arguments 及其自身 digest、20 个原始 duration、非 bool finite/non-negative P95/max、`p95_method=nearest_rank`、第 19 个样本、代表结果与全局 byte total；helper 自报 `validated=true` 或 digest 的 64-hex 外形不构成证据。双内容 result 合计不等于实际 model-visible 字节，后者须经目标 Codex Host/prompt capture 另行验证。主 root 40 行、离线 root 20 行及 recovery audit 使用 shared deadline、no-follow regular file、文件数/单文件/总量/单行/行数上限逐行复核；FIFO、symlink、partial line 与 oversize 均拒绝。
+- **同一会话**：recovery 在 Blender A kill 前、kill 后及 Blender B 重启成功后，分别重新读取唯一 MCP record；`(pid, pgid, marker, started_monotonic_ns)` 必须完全一致并写入 artifact，外部验证器再次比较。常量 `same_mcp_server_session=true` 不构成证据。
+- **归因入口**：正式 artifact 绑定 clean Git HEAD/tree、上述获批 tuple 与两提交 attestation 链、`uv.lock`、关键源码 manifest、Blender exact build 和 execution manifest；SHA sidecar 只证明文件完整性，不能替代 provenance。
 
 ### 6.4 可观测（O）
 
@@ -267,12 +277,13 @@
 | NFR-C3 | Server 解释器声明 **`>=3.13,<3.14`**，与 Blender 5.2.0 内置 Python 3.13.13 对齐；不得让 uv 自动漂移到 3.14（深层 JSON/递归失败行为已实测不同）。**Python SDK 钉 `mcp>=2.0,<3`（决策 D-5）**；SDK v2 必须同时服务当前 Codex 实测的 `2025-06-18`、legacy 合同 `2025-11-25` 与 SDK 直连 `2026-07-28`，协议 rollout 与 SDK 版本解耦。协议适配收敛于 ≤ 375 行 adapter 层；v7 隔离实现实质代码为 373 行 |
 | NFR-C4 | Server / Bridge / IR 三者独立版本号，握手时协商；不匹配则拒绝并返回可读原因 |
 | NFR-C5 | Codex Skill 置于 `.agents/skills/<name>/`；`agents/openai.yaml` 中设 `policy.allow_implicit_invocation: false`；`description` ≤ 200 字符、触发词前置；schema 与策略正文置于 `references/`。Skill 交付物**另含 `AGENTS.md` 模板片段**（Blender 版本矩阵、先检查后修改、禁任意 Python、长任务须走 job）供用户仓库采用（Phase 1 与 Skill 同批交付） |
+| NFR-C6 | `AGENTS.md` 只承载仓库/测试约定；Skill 承载 Agent 决策与按需 reference 路由；MCP `instructions` 只承载跨工具运行合同；单工具 schema/description 只承载选择与调用语义；可机器强制的 Blender context/validation 规则落在 Server/Addon。规范性规则只设一个权威定义，其余层引用，不复制成多份易漂移正文 |
 
 ---
 
 ## 7. 外部约束（已核实）
 
-以下事实约束本设计，与实现选择无关。核实日期 2026-07-23，**§7.1 于 2026-08-07、§7.2 于 2026-08-06 复核更新**；来源见附录 A。
+以下事实约束本设计，与实现选择无关。核实日期 2026-07-23，**§7.1/§7.2 于 2026-08-08 复核更新**；来源见附录 A。
 
 ### 7.1 Codex
 
@@ -283,12 +294,15 @@
 - `policy.allow_implicit_invocation` 默认 `true`。
 - Skill 列表占用上下文预算上限 2%（未知时约 8000 字符），超出则 description 被截断、skill 可能被省略。
 - 官方文档**未承诺**支持 MCP 的 Resources / Prompts / Roots / Sampling / Elicitation / Tasks。
+- Codex 会读取 Server `instructions`，且官方要求前 512 字符自包含；OpenAI prompt-caching 指南把 tool definitions/schema/顺序列入可缓存前缀，顺序或定义变化会破坏 exact-prefix 命中。该结论只支持“稳定 catalog”，不证明某次请求必然命中 cache。
 
 ### 7.2 MCP 协议
 
 - **当前正式版 `2026-07-28`**（2026-07-28 发布；`2025-11-25` 为上一版）。但 Codex 0.147.0 宿主实测：默认与启用 `mcp_2026_07_28` 时均实际协商 `2025-06-18`；feature flag 变化不等于 wire 已切换。Phase 0 因而精确覆盖当前宿主 `2025-06-18`、legacy `2025-11-25` 与 SDK v2 直连 `2026-07-28`，Phase 1.5 只负责 Codex 宿主实际切换与旧协议退役。
 - `2026-07-28` 的破坏性变更：移除 `initialize` 握手与 `Mcp-Session-Id`（协议层无状态）；新增必须实现的 `server/discover`；Tasks 移出核心成为扩展 `io.modelcontextprotocol/tasks`（轮询式 `tasks/get`）；**Roots / Sampling / Logging 弃用**；服务端发起请求改由 MRTR 模式取代；结果新增必填 `resultType`；`inputSchema` / `outputSchema` 放开为完整 JSON Schema 2020-12。
 - 规范明确：需要跨调用状态的服务器应使用**服务端自铸句柄作为普通工具参数** —— 本设计的 `transaction_id` / `job_id` / `instance_id` 与此一致。
+- Tools 规范明确要求工具集合不变时 `tools/list` **SHOULD** 返回确定顺序，并说明这有利于客户端 tool-list cache 与 LLM prompt cache；返回 `structuredContent` 时为向后兼容 **SHOULD** 同时返回序列化 JSON TextContent，故两份 result 内容的 transport 字节必须实测而不能假定其中一份“免费”。MCP 不规定 Host 如何把两字段放进模型上下文，真实 model-visible/token 成本仍须目标 Codex Host 实测。
+- Resources 在协议层是 application-driven；Host 决定如何列出、读取或纳入上下文。Codex 当前 supported-features 文档未承诺 Resource 必然 lazy 或不进入模型上下文，因此本项目在目标 Host 实测前不能依赖 Resources 节省 Token，且必须保留 projected Tool fallback。
 - Python SDK **v2.0.0 已于 2026-07 末发布稳定版**；**v1.x 进入维护期，仅接收安全修复**；`pip install mcp` 现默认安装 2.x。**本项目采用 v2（D-5）**——本仓库实测：v2 `MCPServer` 与 `protocolVersion: 2025-11-25` 客户端握手成功并协商为该版本，`tools/list`、`tools/call`、`structuredContent`、`instructions` 全部正常；`mcp.server.fastmcp` 在 v2 中已移除。
 - stdio 服务器向 stdout 写日志会破坏 JSON-RPC 消息流。
 
@@ -407,29 +421,31 @@
 
 ### 10.1 Phase 0 —— 只读通道
 
-- [ ] 在 5.2 LTS（钉定补丁版本）/ Apple Silicon 上，`get_blender_status` / `get_scene_summary` / `describe_capabilities` 均返回符合 outputSchema 的结果
-- [ ] 连接非基线版本 Blender 时，只读工具可用、写工具被拒并返回 `UNSUPPORTED_BLENDER_VERSION`
-- [ ] 强制终止 Blender 进程后 MCP Server 不崩溃，返回 `BRIDGE_UNAVAILABLE`；Blender 重启后自动重连
-- [ ] 完整会话循环（enable → 允许连接 → 建连验证 → 断开 → disable）20 次，无线程泄漏、无残留 socket 文件——P0-D1 下裸 enable/disable 不建 socket，必须含会话启停才测到实体
-- [ ] 传输 ≥5 MiB 的 framed scene-summary / wire payload，分帧正确、无截断（Phase 0 不交付 IR）
-- [ ] socket 自创建瞬间即位于 `0700` 目录下且自身为 `0600`；无 token 的连接被立即断开并记日志
-- [ ] 全程 stdout 仅含 JSON-RPC
-- [ ] MCP Server 冷启动 < 5 s
+- [ ] **P0-01** 在 5.2 LTS（钉定补丁版本）/ Apple Silicon 上，`get_blender_status` / `get_scene_summary` / `describe_capabilities` 均返回符合 outputSchema 的结果
+- [ ] **P0-02** 连接非基线版本 Blender 时，只读工具可用、写工具被拒并返回 `UNSUPPORTED_BLENDER_VERSION`
+- [ ] **P0-03** 强制终止 Blender 进程后 MCP Server 不崩溃，返回 exact `{"code":"BRIDGE_UNAVAILABLE","retryable":true}`；同一 MCP Server 会话内 Blender 重启后自动重连。正式 recovery 由 public OS supervisor 包住 hidden worker，且 kill 前/后/重启后的 MCP `(pid, pgid, marker, started_monotonic_ns)` 三次观察完全一致；public cancel/final-KILL、poll deadline 边界、leader 退出但 group child 存活、marker/stale/PID-PGID reuse、record 换入、pre-spawn reservation/stdlib bootstrap/launch-before-publish failure、read-only observer/owner race、unknown-before-valid、第 9 条 overflow/inflight publication 与强杀 worker 后的 group 回收均有直接反例
+- [ ] **P0-04** 完整会话循环（enable → 允许连接 → 建连验证 → 断开 → disable）20 次，无线程泄漏、无残留 socket 文件——P0-D1 下裸 enable/disable 不建 socket，必须含会话启停才测到实体
+- [ ] **P0-05** 传输 ≥5 MiB 的 framed scene-summary / wire payload，分帧正确、无截断（Phase 0 不交付 IR）
+- [ ] **P0-06** socket inode 自创建起位于 `0700` 私有目录；`bind` 后、`listen` / I/O 线程启动 / `session.json` 发布前立即 `chmod 0600`；无 token 的连接被立即断开并记日志
+- [ ] **P0-07** 全程 stdout 仅含 JSON-RPC
+- [ ] **P0-08** MCP Server 冷启动 < 5 s
 
 Phase 0 的性能与生命周期反例门禁还必须逐项通过：
 
-- [ ] 大场景 `scene_summary` 使用 cooperative continuation；一次 GUI timer tick 不得因整体遍历/编码同步物化而超出测量上限，并记录总耗时与最大 tick
-- [ ] continuation yield 间无 `bpy` wrapper；`load_pre` 递增 generation 后，旧 continuation 以 `SCENE_QUERY_FAILED` 结构化终止
-- [ ] 2.2M collections 场景传 `include_collections=false` 时 reader 源端不枚举 collections，响应保持在 16 MiB 限制内
-- [ ] 队列容量同时计 queued + active continuation；满载返回 `BRIDGE_BUSY`，不出现 64 → 65 的超额提交
-- [ ] 唤醒 socket 非阻塞且 wake storm 被合并；停止时生命周期回调与活跃连接按 §3.7 的 1–10 顺序完成
-- [ ] 文件/父目录/清理目标在读取或探活期间被换入时，dir-fd 与 dev/inode 绑定阻止越界读取和误删；socket/session 路径被替换时 stop 保留替换物
-- [ ] `v=true`、非布尔 `ok`、畸形 `error` 与会被 SDK 强制转换的参数类型均被拒；错误保持结构化且进入审计
-- [ ] 线程并发与多个 MCP Host 进程并发写审计日志时，每行仍是完整、可解析的单条 JSON
-- [ ] 应用自有 runtime/run/logs 若既存且非当前 uid、非目录/regular file、为 symlink 或权限不是 `0700/0600`，必须 fail-closed；`BLENDERCODEX_ROOT` 上方既存祖先权限保持不变
-- [ ] `sun_path` 回退在 session 发布前或发布后崩溃均能回收外置 socket/空目录；回退或 session 目录 identity 被换入时保留替换物与诊断元数据
-- [ ] stale cleanup 每次 I/O 前检查共享 deadline，预算耗尽保留证据并在后续扫描重试；目录名与 `session.json.instance_id` 不一致时隔离
-- [ ] 日志目录/当天文件由多线程、多进程首次并发创建时无 `FileExistsError`，FIFO/device/symlink 审计目标不得阻塞或被写入
+- [ ] **P0-09** 大场景 `scene_summary` 使用 cooperative continuation；一次 GUI timer tick 不得因整体遍历/编码同步物化而超出测量上限，并记录总耗时与最大 tick
+- [ ] **P0-10** continuation yield 间无 `bpy` wrapper；已注册的 `load_pre` handler 递增 generation 后，旧 continuation 以 `SCENE_QUERY_FAILED` 结构化终止
+- [ ] **P0-11** 2.2M collections 场景传 `include_collections=false` 时 reader 源端不枚举 collections，响应保持在 16 MiB 限制内
+- [ ] **P0-12** 队列容量同时计 queued + active continuation；满载返回 `BRIDGE_BUSY`，不出现 64 → 65 的超额提交
+- [ ] **P0-13** 唤醒 socket 非阻塞且 wake storm 被合并；停止时生命周期回调与活跃连接按 §3.7 的 1–10 顺序完成
+- [ ] **P0-14** 文件/父目录/清理目标在读取或探活期间被换入时，dir-fd 与 dev/inode 绑定阻止越界读取和误删；socket/session 路径被替换时 stop 保留替换物
+- [ ] **P0-15** `v=true`、非布尔 `ok`、畸形 `error` 与会被 SDK 强制转换的参数类型均被拒；错误保持结构化且进入审计
+- [ ] **P0-16** 线程并发与多个 MCP Host 进程并发写审计日志时，每行仍是完整、可解析的单条 JSON
+- [ ] **P0-17** 应用自有 runtime/run/logs 若既存且非当前 uid、非目录/regular file、为 symlink 或权限不是 `0700/0600`，必须 fail-closed；`BLENDERCODEX_ROOT` 上方既存祖先权限保持不变
+- [ ] **P0-18** `sun_path` 回退在 session 发布前或发布后崩溃均能回收外置 socket/空目录；回退或 session 目录 identity 被换入时保留替换物与诊断元数据
+- [ ] **P0-19** stale cleanup 每次 I/O 前检查共享 deadline，预算耗尽保留证据并在后续扫描重试；目录名与 `session.json.instance_id` 不一致时隔离
+- [ ] **P0-20** 日志目录/当天文件由多线程、多进程首次并发创建时无 `FileExistsError`；FIFO 目标须在 `<0.5 s` 内 fail-closed，device/symlink 目标不得被写入
+
+除上述 20 项外，Phase 0 关闭还必须通过 NFR-P1 正式门；其精确计时、样本与 artifact 合同见 §6.3，不得以历史 100k Bridge-RPC 候选数据代替。
 
 ### 10.2 Phase 1 —— 事务化最小写入
 
@@ -526,6 +542,7 @@ Phase 0 的性能与生命周期反例门禁还必须逐项通过：
 | **V-02** | Codex 启动的第三方 MCP Server 子进程是否继承 Codex sandbox | 不影响实现——NFR-S2 要求路径策略独立成立。仅影响安全文档措辞 |
 | **V-03** | Cycles Metal 在 `blender --background` 下的 GPU 设备枚举与选择行为（基线 Apple M4 / Blender 5.2.0 已复现；真实渲染成功性与跨硬件 fallback 不在本次枚举证据内） | Phase 0 固定枚举/选择证据；Phase 2 仍须真实 render 与 CPU fallback 验收，不能因一次枚举关闭降级路径 |
 | **V-04** | `bpy.app.timers` 与 persistent handlers 在 `open_mainfile` 路径上的最终验收（`read_homefile` 机制 spike 已完成） | 机制已由 GUI spike 验证：persistent timer 与 handlers 存活；Phase 1 仅补直接 `open_mainfile` hard-rollback 验收与重载后可用性，不再把 timer 持久性列为未决 |
+| **V-05** | 默认 `get_scene_summary` 仍令两个 include flag=true，而 NFR-P1 100k 基线固定 false，未覆盖“默认结果可能返回大 collections/managed arrays”的模型上下文成本 | Phase 1 开始前裁决 observation contract；不得只把默认改 false 并用空数组制造“真实为空/未取回”歧义。若采用 compact default，必须同步设计 `included/omitted/complete/truncated` 元数据与 selector/fields/limit/cursor，并保留原完整查询的显式路径；raw mesh/完整 node graph 不得成为默认结果 |
 
 ---
 
@@ -635,16 +652,52 @@ Phase 0 的性能与生命周期反例门禁还必须逐项通过：
 
 **v8 隔离预检（不是 Phase 0 执行）**：最终 Plan fresh-tree **307 passed（unit 275 + contract 32）**、adapter 专项 35、ruff/mypy/vendor/nested/lock 全绿；fresh Blender background/GUI smoke 通过。100k shared-mesh Bridge-RPC 20-query worker P95 1605.18 ms、max 2560.86 ms、observer P95 1655.44 ms、max tick 62.50 ms，只证明 Bridge/continuation 子门，不能关闭端到端 NFR-P1。v8 manifests/provenance/raw artifacts 见 `docs/audits/evidence/`；92 个 checkbox + 1 个 G0 preflight 全未执行/未勾选。
 
-**官方 MCP 限定**：上游 checkout 注册目录与独立 app-server 目录为 26/26；历史单轮直调曾报告 26 项，但最新安全 host 24 项长序列在第 15 项 `get_screenshot_of_area_as_image` 出现截断 JSON（单独重试成功），因此不能把 24/24 写成当前稳定性证明。连续 deferred render 序列在 Blender 5.2 复现 `SIGABRT`，与 [Blender issue #157084](https://projects.blender.org/blender/blender/issues/157084)、[PR #156953](https://projects.blender.org/blender/blender/pulls/156953) 及 [blender_mcp issue #12](https://projects.blender.org/lab/blender_mcp/issues/12) 的异步 RenderData/depsgraph race 方向一致。官方通道不能写成“26 项稳定无问题”，也不计入本系统 G1–G3；当前 Codex 模型面仍为 10/26，需新任务确认宿主刷新。
+**官方 MCP 限定（v1.11 当时状态）**：上游 checkout 注册目录与独立 app-server 目录为 26/26；历史单轮直调曾报告 26 项，但最新安全 host 24 项长序列在第 15 项 `get_screenshot_of_area_as_image` 出现截断 JSON（单独重试成功），因此不能把 24/24 写成当前稳定性证明。连续 deferred render 序列在 Blender 5.2 复现 `SIGABRT`，与 [Blender issue #157084](https://projects.blender.org/blender/blender/issues/157084)、[PR #156953](https://projects.blender.org/blender/blender/pulls/156953) 及 [blender_mcp issue #12](https://projects.blender.org/lab/blender_mcp/issues/12) 的异步 RenderData/depsgraph race 方向一致。官方通道不能写成“26 项稳定无问题”，也不计入本系统 G1–G3；当时 Codex 模型面为 10/26，后续刷新与风险裁决见 v1.12。
+
+### v1.12（2026-08-08，r16 proposed 与所有者裁决）
+
+触发：ROADMAP B-5 对抗复核发现 URS §10.1 的 20 项验收与 Plan/Spec 映射不完整、NFR-P1 只有一句目标而没有正式测量合同、socket 出生权限措辞不可实现；Codex 完全重启后模型面已刷新为 26/26，项目所有者随后裁决 A-1 三项平台候选全部接受，并为 A-3 选择“当前用户接受风险”。
+
+**合同修订**：§10.1 为 20 项验收增加稳定 ID `P0-01`～`P0-20`；P0-06 固定 `bind → chmod 0600 → listen → I/O thread → session publish`；P0-03 固定同一 MCP Server 会话内真 Blender SIGKILL/restart；NFR-P1 固定三工具各 20 次完整 MCP 调用、nearest-rank P95、100k/在线/离线三种 fixture、不可删样本及可复算 artifact。新增 foreign uid/device、边界上方祖先权限不变、FIFO `<0.5 s`、stale 后续重试和已注册 `load_pre` handler 的直接反例要求。
+
+**裁决边界**：三项平台候选正式接受，不再保留代码回退动作；`IDLE_INTERVAL=0.02` 的电量影响仍是非阻断测量。官方 MCP 当前模型面与宿主目录均为 26/26，A-4 有界摘要 transcript 记录 24 个非-render `ok`、2 个 render `not_called`、审批事件 0；G5 由项目所有者知情接受 screenshot 顺序敏感性与 deferred render `SIGABRT` 风险而关闭。该关闭不改变已知缺陷事实，也不构成 raw payload 可重放性或 26 工具稳定性证明。r16 在本次隔离复核与 proposed SHA 获批前仍不得提交或执行，Phase 0 保持未执行。
+
+### v1.13（2026-08-08，r16 E2E 证据链对抗加固）
+
+触发：r16 二轮红队实际复现 SDK process-group leader 退出后仍有同 PGID child、recovery worker 缺外层监督、provenance 在 shared deadline 外递归读取 ignored/symlink，以及 approved tuple/result digest/same-session 的假阳性。
+
+**合同修订**：NFR-P1 拆出正式证据合同，固定 NFR 165/180 s 与 recovery 120/135 s 两层 deadline、poll 前后边界判定、non-raising public cancel、fresh marker-bound exact-type process registry、PID/PGID/inode/inflight-publication fail-closed、bounded Git/vendor/audit provenance、四文档 exact-type approved tuple/source blob、60 个 bounded result preimage 跨工具总量外部复算、exact retryable `BRIDGE_UNAVAILABLE` 及三次 MCP identity 全等。100k fixture 与 Bridge-only 预查询明确发生在 helper spawn 前，不再声称服从 helper deadline。Phase 0 仍未执行，所有数字须以最终 r16 机械物化和 B-5 审计为准。
+
+### v1.14（2026-08-08，r16 process-registry 生命周期闭合）
+
+触发：第三轮红队连续复现 cached group 在 pending/deadline 时被清空、partial scan 丢失、unknown first publisher、observer 抢 owner unlink、PID reuse 截断后续 valid group、cache 跨 pending scan 无界增长，以及 public worker cleanup 耗尽 registry deadline。
+
+**合同修订**：所有独立 group 改为 parent pre-spawn reservation + `process_registry.py` 最小 stdlib bootstrap；observer 与 cleanup 明确分权，枚举后的 owner retire/publication rename 作为 pending 重扫；cache 固定上限 8，逐 entry 错误聚合后报告，overflow 经 identity 复核立即 KILL；public recovery work 期持续预观察并保留 5 s registry cleanup。r16 隔离门禁、manifest 与 proposed tuple 由最终机械复核固化；正式 GUI/NFR/recovery 与 Plan 仍未执行。
+
+### v1.15（2026-08-08，r16 最终门禁反例闭合）
+
+触发：独立机械复核在未设置 `PYTHONDONTWRITEBYTECODE` 的标准 unit 命令中复现 vendor `__pycache__` 令 provenance exact-set 失败；第四轮红队又复现目录第 9 条有效 record 在 identity 读取前被 entry cap 截断、unknown entry 直接抛错遮蔽后续可信组，以及 launch-before-publish 失败遗留 reservation。
+
+**合同修订**：保持 vendor exact-set 严格，不把 pyc 加入白名单；标准检查显式禁写并预清 bytecode，provenance 直接夹具清理由测试 imports 产生的 vendor cache。`MAX_RECORDS=8` 仅作为可信 cache 上限，formal 枚举由 shared deadline 限界；unknown/坏 entry 聚合后报告，第 9 条及后续 overflow 均须 identity-rechecked KILL。parent 对尚未完成的 reservation 负责，在参数构造、SDK enter 或 `Popen` 失败路径按 dev/inode 清理。正式 GUI/NFR/recovery 与 Plan 仍未执行。
+
+### v1.16（2026-08-08，r17 研究报告三融合）
+
+触发：对外部研究输入《面向 Codex / AI Agent 的 Token-Efficient Blender Skill、MCP 与 Addon 闭环架构研究》逐行核查，并以 OpenAI、MCP、Blender 官方资料和五个代表性 GitHub 仓库重新取证。原报告的 `turn…/filecite…` 标记不可移植，且自述未收到本仓库源码，故只作为非规范输入，不作为当前实现审计证据。
+
+**采纳**：NFR-P5 固定三工具的完整 catalog 与确定顺序；Task 17/18 保存并外部复算 catalog/schema/instructions bytes+SHA，以及 60 次 `structuredContent`/TextContent 原文、JSON 等价性、bytes/SHA、双内容 result payload 与 duplication ratio。NFR-C6 固定 AGENTS/Skill/instructions/schema/Addon 单一职责。所有 byte 只作 transport/result 基线，不冒充 model-visible 或 token，不采用固定“8–15 tools / 5–30 operations”等经验数字。
+
+**延期或拒绝**：Resources/Tasks 只在目标 Codex Host 实测后重评且始终保留 Tool fallback；scene projection/diff、progressive error detail、Recipe、visual budget 进入 ROADMAP 的证据触发型后续项，不扩张 Phase 0 产品面；不引入 SQLite 或巨型 Batch schema，不重写已验证 UDS；报告中的客户端 `idempotency_key`、自动 mint 重复 stable ID 与 arbitrary Python 分别违反 FR-12、FR-10 与 G3/FR-04，明确拒绝。默认 summary 两个 include flag=true 而 NFR-P1=false 的 observation 成本盲点列入 V-05，不能以静默改默认制造语义歧义。
+
+**审批时态**：r16 完整 tuple 曾获所有者批准，但尚未形成 source commit/attestation 即被本次规范与 Plan 变更取代；批准不能跨未知哈希继承。当前只能以 r17 最终审计产生的新 tuple 重新审批，Phase 0 仍未执行。
 
 ---
 
 ## 附录 A：来源
 
-**MCP**：[2026-07-28 正式版公告](https://blog.modelcontextprotocol.io/posts/2026-07-28/) · [Python SDK v2.0.0 Release](https://github.com/modelcontextprotocol/python-sdk/releases/tag/v2.0.0) · [Versioning](https://modelcontextprotocol.io/specification/versioning) · [Draft Changelog](https://modelcontextprotocol.io/specification/draft/changelog) · [2026-07-28 RC](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/) · [SDK Betas](https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/) · [Python SDK](https://github.com/modelcontextprotocol/python-sdk)
+**MCP**：[2026-07-28 正式版公告](https://blog.modelcontextprotocol.io/posts/2026-07-28/) · [Python SDK v2.0.0 Release](https://github.com/modelcontextprotocol/python-sdk/releases/tag/v2.0.0) · [Versioning](https://modelcontextprotocol.io/specification/versioning) · [Tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools) · [Resources](https://modelcontextprotocol.io/specification/2026-07-28/server/resources) · [Draft Changelog](https://modelcontextprotocol.io/specification/draft/changelog) · [Python SDK](https://github.com/modelcontextprotocol/python-sdk)
 
-**Codex**：[配置参考](https://learn.chatgpt.com/docs/config-file/config-reference) · [MCP 配置](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) · [Build skills](https://learn.chatgpt.com/docs/build-skills.md) · [Customization](https://developers.openai.com/codex/concepts/customization)
+**Codex**：[配置参考](https://learn.chatgpt.com/docs/config-file/config-reference) · [MCP 配置与 supported features](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) · [Build skills](https://learn.chatgpt.com/docs/build-skills) · [AGENTS.md discovery](https://learn.chatgpt.com/docs/agent-configuration/agents-md) · [Prompt Caching 201](https://developers.openai.com/cookbook/examples/prompt_caching_201#42-stabilize-the-prefix) · [Customization](https://developers.openai.com/codex/concepts/customization)
 
-**Blender**：[5.2 LTS 发布](https://www.blender.org/press/blender-5-2-lts-release/) · [LTS 计划](https://www.blender.org/download/lts/) · [系统要求](https://www.blender.org/download/requirements/) · [5.0 Python API](https://developer.blender.org/docs/release_notes/5.0/python_api/) · [5.2 Python API](https://developer.blender.org/docs/release_notes/5.2/python_api/) · [Intel 构建移除](https://devtalk.blender.org/t/deprecation-and-removal-of-macos-intel-builds-in-blender-5-0/38835) · [bpy.app.timers](https://docs.blender.org/api/current/bpy.app.timers.html) · [GPU Rendering](https://docs.blender.org/manual/en/latest/render/cycles/gpu_rendering.html) · [创建扩展](https://docs.blender.org/manual/en/latest/advanced/extensions/getting_started.html) · [Add-on 指南](https://developer.blender.org/docs/handbook/extensions/addon_guidelines/) · [MCP Server (Lab)](https://www.blender.org/lab/mcp-server/) · [Blender #157084](https://projects.blender.org/blender/blender/issues/157084) · [Blender PR #156953](https://projects.blender.org/blender/blender/pulls/156953) · [blender_mcp #12](https://projects.blender.org/lab/blender_mcp/issues/12) · [save_as_mainfile 相对路径缺陷](https://developer.blender.org/T33108)
+**Blender**：[5.2 LTS 发布](https://www.blender.org/press/blender-5-2-lts-release/) · [LTS 计划](https://www.blender.org/download/lts/) · [系统要求](https://www.blender.org/download/requirements/) · [5.0 Python API](https://developer.blender.org/docs/release_notes/5.0/python_api/) · [5.2 Python API](https://developer.blender.org/docs/release_notes/5.2/python_api/) · [Python threads are not supported](https://docs.blender.org/api/current/info_gotchas_threading.html) · [DepsgraphUpdate](https://docs.blender.org/api/current/bpy.types.DepsgraphUpdate.html) · [bpy.app.timers](https://docs.blender.org/api/current/bpy.app.timers.html) · [GPU Rendering](https://docs.blender.org/manual/en/latest/render/cycles/gpu_rendering.html) · [创建扩展](https://docs.blender.org/manual/en/latest/advanced/extensions/getting_started.html) · [Add-on 指南](https://developer.blender.org/docs/handbook/extensions/addon_guidelines/) · [MCP Server (Lab)](https://www.blender.org/lab/mcp-server/) · [Blender #157084](https://projects.blender.org/blender/blender/issues/157084) · [Blender PR #156953](https://projects.blender.org/blender/blender/pulls/156953) · [blender_mcp #12](https://projects.blender.org/lab/blender_mcp/issues/12) · [save_as_mainfile 相对路径缺陷](https://developer.blender.org/T33108)
 
 **Apple**：[Notarization](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution) · [Keychain](https://developer.apple.com/documentation/security/storing-keys-in-the-keychain) · [文件访问控制](https://support.apple.com/guide/mac-help/control-access-to-files-and-folders-on-mac-mchld5a35146/mac)

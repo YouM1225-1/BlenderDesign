@@ -1,8 +1,6 @@
 # BlenderDesign 最终全量对抗审计（修复闭环后）
 
-> **SUPERSEDED（2026-08-08）**：本文件保留早期 166-test/r10 结论；当前裁决见 [closeout v3](2026-08-07-closeout-v3.md) 与 [r15/v8 融合审计](2026-08-07-platform-optimization-handoff-adversarial-audit.md)。
-
-> **历史快照，已被取代**：本报告保留当时的 166-test、旧 L3 与无 allowlist 结论，不再代表当前状态。最新裁决与证据见 [2026-08-07-closeout-v2.md](2026-08-07-closeout-v2.md)。
+> **固定时点快照（2026-08-07）**：本报告保留当时的 166-test/r10、旧 L3 与无 allowlist 结论，不追踪后续修订，也不再充当当前裁决入口。当前状态统一见 [ROADMAP](../ROADMAP.md)。
 
 > 日期：2026-08-07  
 > Git 分支 / 基线：`main` / `578f49e52f818dd0f01745c6b0a5ba7c4558e2dd`  

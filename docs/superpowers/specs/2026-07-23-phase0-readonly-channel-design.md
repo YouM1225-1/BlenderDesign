@@ -2,17 +2,27 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 | v1.11 |
-| 日期 | 2026-07-23（初版）· 2026-08-08（r15/v8 全量对抗复审、SDK conversion 准入与 addon 注册回滚修订；v1.11） |
+| 版本 | v1.16 |
+| 日期 | 2026-07-23（初版）· 2026-08-08（r17 确定性 catalog 与 payload 基线；v1.16） |
 | 状态 | 交付目标／隔离预检；**Phase 0 未执行**（隔离树只用于组合性与对抗性验证；决策见 URS ADR-3/D-4 与 `docs/decisions/2026-08-07-mcp-sdk-v2-selection.md`） |
-| 上游需求 | `Blender-Codex-需求规格说明书-v1.md`（**URS v1.11**；含最终对抗修订、官方 MCP 独立边界、continuation/崩溃恢复、文件 identity 红线、资源上限与 conversion 准入契约及决策 D-4/D-5） |
+| 上游需求 | `Blender-Codex-需求规格说明书-v1.md`（**URS v1.16**；含 20 项稳定验收 ID、三工具 NFR-P1 正式门与可复算证据合同、确定性 catalog / 双内容 result payload 基线、官方 MCP 风险接受边界、continuation/崩溃恢复、process-registry 生命周期、文件 identity 红线、资源上限与 conversion 准入契约及决策 D-4/D-5） |
 | 覆盖子系统 | S1 传输与 Bridge 骨架 · S2 MCP Server 骨架 · S4 标识与一致性（读取部分） |
 
 **v1.9 隔离预检快照（历史、非实施证据）**：Plan 代码块提取到隔离树后候选门禁为 **262 passed（L1/unit 235 + L2/contract 27）**、ruff clean、mypy strict 22 个配置内源文件零错误；adapter 实质代码 375 行。真 Blender 大场景反例促使 SceneReader 从数值索引改为有界 slice 分块；本机 100k 共享网格候选预检约 1.2 s，最大 source step 约 22 ms。v1.10 又加入 run cursor fd identity 复核、socket identity 全有/全无约束与验证器有界读取；新的计数、SHA 与 v6 provenance 必须在最终冻结后生成，不能沿用 v1.9 数字。
 
 **v1.10/r13 最终隔离预检（非实施证据）**：46 个 path-bound Python 文件块物化后为 **280 passed（unit 249 + contract 31）**、ruff clean、mypy strict 22 文件零错误，vendor/nested/lock/background/基础 GUI 全绿。100k shared-mesh GUI 的 20-query worker-side nearest-rank P95 约 **1439.21 ms**（max 约 2071.10 ms），`max_tick≈62.12 ms`；固定基线候选门通过。证据由 v6 manifest/provenance 与原始 GUI JSON 固定；Phase 0 仍未执行，92 个执行 checkbox + 1 个 G0 preflight 均未执行。
 
-**v1.11/r15/v8 当前隔离预检（非实施证据）**：旧 v5/v6/v7 数字仅作历史；最终 Plan fresh-tree 物化为 **307 passed（unit 275 + contract 32）**、adapter 35 passed/373 实质代码行，ruff/mypy/vendor/nested/lock 全绿。fresh Blender background 与 GUI smoke 五项全 true；100k shared-mesh Bridge-RPC 20-query worker P95 **1605.18 ms**、max **2560.86 ms**、observer P95 **1655.44 ms**、max tick **62.50 ms**，只关闭 Bridge/continuation 子门，不外推端到端 NFR-P1。v8 manifest/provenance/raw artifacts 见 `docs/audits/evidence/`；Phase 0 仍未执行，92 个 checkbox + 1 个 G0 preflight 均未执行。
+**v1.11/r15/v8 历史隔离预检（非实施证据）**：旧 v5/v6/v7 数字仅作历史；当时 Plan fresh-tree 物化为 **307 passed（unit 275 + contract 32）**、adapter 35 passed/373 实质代码行，ruff/mypy/vendor/nested/lock 全绿。fresh Blender background 与 GUI smoke 五项全 true；100k shared-mesh Bridge-RPC 20-query worker P95 **1605.18 ms**、max **2560.86 ms**、observer P95 **1655.44 ms**、max tick **62.50 ms**，只关闭 Bridge/continuation 子门，不外推端到端 NFR-P1。v8 manifest/provenance/raw artifacts 见 `docs/audits/evidence/`；Phase 0 仍未执行，92 个 checkbox + 1 个 G0 preflight 均未执行。
+
+**v1.12/r16 proposed（非实施证据）**：A-1 三项平台候选已由项目所有者全部接受；官方 MCP 的模型面与宿主目录均为 26/26，G5 由项目所有者以“当前用户接受风险”关闭，**不是 screenshot/render 缺陷修复或 26 工具稳定性证明**。本轮只修订 Plan-as-code 与文档合同并重新做隔离预检；正式 GUI/NFR/SIGKILL 门仍留给 Phase 0 执行，proposed SHA/计数须在最终机械复核后由用户批准。
+
+**v1.13/r16 E2E 对抗加固（非实施证据）**：二轮红队复现 process-group leader 假清洁、recovery 缺 OS supervisor、provenance 越过共享 deadline，以及 approved tuple/result digest/same-session 的假阳性。合同已同步 fresh marker registry、group-level liveness、bounded provenance、四文档 exact tuple、result preimage 外部复算与真实 MCP identity；最终数字须由新 Plan SHA 的机械物化复核给出。正式 GUI/NFR/recovery 仍未运行，Phase 0 未执行。
+
+**v1.14/r16 process-registry 生命周期闭合（非实施证据）**：三轮红队继续复现 pending/partial scan cache 丢失、unknown first publisher、observer/owner unlink race、PID reuse 截断后续 valid group、cache 无界增长及 public cleanup deadline 被前序 worker cleanup 耗尽。合同改为 parent pre-spawn reservation + 最小 stdlib bootstrap；observer 只读并把并发 entry 消失视为 pending；cache 上限 8、逐 entry 错误聚合、overflow identity-rechecked KILL；public recovery work 期持续预观察并保留 5 s registry cleanup。最终数字须由新 Plan SHA 的 fresh-tree 机械复核给出；正式 GUI/NFR/recovery 仍未运行，Phase 0 未执行。
+
+**v1.15/r16 最终门禁反例闭合（非实施证据）**：独立复核发现标准 unit 的 bytecode 污染、目录第 9 条 record 在 identity 前被截断、unknown entry 隐藏后续可信组及 pre-spawn failure 遗留 reservation。vendor exact-set 不放宽；checks/fixture 清理 bytecode。cache 上限 8 与 deadline-bound 枚举分离，逐 entry 错误继续扫描、所有 overflow 复核后 KILL；parent 在参数构造、SDK enter/`Popen` 未发布 record 的失败路径清理 reservation。正式 GUI/NFR/recovery 仍未运行，Phase 0 未执行。
+
+**v1.16/r17 研究融合（非实施证据）**：MCP `2026-07-28` Tools 规范已明确要求集合不变时返回确定顺序，并说明它改善 tool-list 与 LLM prompt cache。三工具 catalog 因而固定名称/顺序/完整定义；Task 17 冻结 ordered catalog 与 instructions 的 canonical/UTF-8 bytes+SHA，Task 18 进一步保留 60 次 `structuredContent` 与兼容 TextContent 的原文、等价性、字节与 duplication ratio。byte 只作可复算基线，不冒充 token，也不引入 tokenizer 依赖或未经 A/B 的经验阈值。r16 tuple 虽已获所有者批准，但在 source commit/attestation 前被本轮 r17 修订取代；Phase 0 仍未执行。
 
 ---
 
@@ -20,7 +30,7 @@
 
 ### 1.1 本 spec 交付
 
-目标是让 Codex → MCP Server（stdio）→ UDS → Bridge Add-on → Blender 主线程 → 结构化返回的链路端到端成立，并满足 URS §10.1 的八条验收标准；当前只有隔离预检，尚未完成正式 Phase 0 验收。
+目标是让 Codex → MCP Server（stdio）→ UDS → Bridge Add-on → Blender 主线程 → 结构化返回的链路端到端成立，并满足 URS §10.1 的 20 项验收与 NFR-P1 正式门；当前只有隔离预检，尚未完成正式 Phase 0 验收。
 
 三个只读工具：`get_blender_status`、`get_scene_summary`、`describe_capabilities`。
 
@@ -46,6 +56,7 @@
 | **P0-D4** | **`protocol/` 用 vendoring 而非 wheel**，配 `scripts/checks.sh` hash 一致性门禁 |
 | **P0-D5** | **实例存活以握手 `instance_id` 比对为权威判定**，`os.kill(pid, 0)` 仅作预筛 |
 | **P0-D6** | **MCP SDK v2（声明 `mcp>=2.0,<3`，`uv.lock` 精确锁定 `mcp==2.0.0`，使用 `MCPServer`）**；SDK v2 同时服务 2025-era 与 2026-07-28 客户端，协议 rollout 与 SDK 版本解耦（URS D-5）。当前 Codex 0.147 宿主的精确合同仍是 `2025-06-18`，不能由 feature flag 名称推断 wire 版本 |
+| **P0-D7** | **确定性公开 catalog**：同一 Server 版本与 capability profile 的三工具名称、完整定义与顺序固定为 `get_blender_status` → `get_scene_summary` → `describe_capabilities`；不得按实例状态、调用历史或回合动态增删/重排，易变能力经工具结果表达 |
 
 ---
 
@@ -64,7 +75,7 @@ Blender GUI（用户长驻）              MCP Server（Codex 按需拉起）   
   │                                        │
   ├ 用户点「允许 Codex 连接」              │
   │   → mkdir 0700 会话目录                │
-  │   → 生成 token → bind socket → I/O 线程│
+  │   → token → bind → chmod → listen → I/O│
   │   → session.json (0600) 最后发布       │
   │   → register timer + 两个 handlers     │
   │   → 面板转为「已开启 / 断开」          │
@@ -478,7 +489,7 @@ Session.start() 内部：
 
 **sun_path 长度校验与崩溃可恢复回退**：macOS 的 UDS 路径受 `sun_path` **104 字节**硬限制。完整默认路径超过 100 字节时，短目录固定为 `/tmp/bcx-<sha256(instance_id)[:16]>`，exclusive 创建为 0700。不能使用进程各自的 `$TMPDIR` 或不可推导的 `tempfile.mkdtemp(prefix="bcx-")`：Blender 与 MCP Host 的环境变量可能不同，且 Blender 若在 `session.json` 发布前硬崩溃，Server 会失去随机路径的定位信息。`session.json.socket_path` 仍是发布后权威路径，并同时记录 `socket_external`、socket 与父目录 dev/inode。发布前崩溃则由会话目录 basename 推导短路径，只在会话/回退目录均超过 60 秒、当前 uid、0700、且只含已知 socket 时清理。
 
-**`session.json` 最后发布（2026-08-07 审计 F-04 修订）**：bind、listen、chmod、socketpair、I/O 线程全部就绪后才原子写入 session.json；先发布再初始化会留下被 Discovery 长期误识别的「假会话」。任一步失败执行 identity-bound 回滚；临时文件若由本次创建，则写入/关闭/replace 任一失败都删除。被换入或无法证明 ownership 的对象不删，保留供后续扫描/人工检查，因此这里不再使用无条件「全量删除」措辞。
+**`session.json` 最后发布（2026-08-07 审计 F-04 修订）**：严格按 bind → 记录 identity → chmod `0600` → listen → socketpair → I/O 线程 → 原子发布 session.json；先发布再初始化会留下被 Discovery 长期误识别的「假会话」。任一步失败执行 identity-bound 回滚；临时文件若由本次创建，则写入/关闭/replace 任一失败都删除。被换入或无法证明 ownership 的对象不删，保留供后续扫描/人工检查，因此这里不再使用无条件「全量删除」措辞。
 
 **token 随每个请求校验，不是只在握手时。** 用 `secrets.compare_digest` 常数时间比较。Server 可能中途重启重连，一次性握手态在此不成立。
 
@@ -805,7 +816,15 @@ MCP Server 的协议发现元数据必须携带 `instructions`（Codex 消费该
 
 > Blender 只读控制通道（Phase 0）。调用任何工具前先 `get_blender_status`；若无实例，引导用户在 Blender 3D 视口按 N → 「Codex」页签 → 点击「允许 Codex 连接」。本 Server 无写工具，不要尝试让 Blender 执行代码。`describe_capabilities` 可在 Blender 离线时回答。
 
-实现：`MCPServer(name, instructions=...)`。L2 分别验证：legacy 客户端的 `initialize` 响应携带该文案；2026-07-28 客户端走 `server/discover`，不得产生 `initialize` fallback，并从新协议的发现结果读取同一 Server instructions。该文案与 `GUIDANCE` 常量口径一致——两处都指向同一个 N 面板操作路径。
+实现：`MCPServer(name, version=SERVER_VERSION, instructions=...)`。L2 分别验证：legacy 客户端的 `initialize` 响应携带该文案与 `serverInfo.version=0.1.0`；2026-07-28 客户端走 `server/discover`，不得产生 `initialize` fallback，并通过 SDK `Client.server_info` 读取同一版本、通过发现结果读取同一 Server instructions。该文案与 `GUIDANCE` 常量口径一致——两处都指向同一个 N 面板操作路径。
+
+### 6.5 确定性 catalog 与双内容 result payload 基线
+
+MCP `2026-07-28` Tools 规范要求工具集合不变时 `tools/list` 使用确定顺序，并明确指出这有助客户端缓存与 LLM prompt cache。本阶段三工具是静态公开面：同一 Server 版本与 capability profile 下，重复请求及 fresh Server 的 ordered catalog 必须逐字段一致；实例连接状态只能出现在工具结果中，不能改变公开工具集合或顺序。
+
+Task 17 固定并复算：完整 ordered catalog canonical JSON、三工具 input/output schema canonical 总字节、Server `instructions` UTF-8 字节及各自 SHA-256；in-process 重复 list 与 fresh stdio Server 均须匹配冻结值。Task 18 在正式 60-call artifact 中再次保存同一 catalog/schema/instructions preimage并绑定 Task 17 冻结值，对每个调用同时保留 validated `structuredContent` canonical preimage 与 SDK 兼容 TextContent 原文；外部验证器必须证明两者 JSON 语义全等，再分别复算 bytes/SHA、合计双内容 result payload 与 duplication ratio。
+
+这些量是**SDK/transport result 字节基线，不是 model-visible 或 Token 合同**。MCP 不规定目标 Codex Host 是否把两份内容都注入模型；本阶段不引入 tokenizer 依赖，不以固定“工具数/操作数/Token 降幅”作为门槛。任何后续模型上下文优化必须在同 Host/模型/推理配置、同 Blender/fixture/任务集下做 A/B，并同时报告正确率、往返次数与 wall time。
 
 ## 7. 测试策略
 
@@ -818,11 +837,12 @@ MCP Server 的协议发现元数据必须携带 `instructions`（Codex 消费该
 | `session` | token 生成熵、常数时间比较、会话状态机 |
 | `router` | 分发、未知 method |
 | `queue` | cooperative continuation、每 step/deadline 检查、批量处理、queued + active 容量、队列满、并发提交线程安全 |
-| `lifecycle` | 非阻塞/合并 wake、loop-boundary stop recheck、transport close 后第二次 1 s join、停止幂等与失败重试、真实 timer/`depsgraph_update_post`/`load_pre` 回调、失败步骤不中断后续；64 连接 / 32 MiB 全局入站 / 64 KiB 请求 / 32 MiB 单连接与 64 MiB 全局出站上限、fd reuse、accept/close ownership；应用目录权限 fail-closed、会话叶目录 exclusive、确定性 fallback、transport 未关闭时路径保留及 socket/session/session-dir/fallback-dir replacement 保留 |
+| `lifecycle` | 非阻塞/合并 wake、loop-boundary stop recheck、transport close 后第二次 1 s join、停止幂等与失败重试、真实 timer/`depsgraph_update_post`/`load_pre` 回调及注册后的 `load_pre` generation 行为、失败步骤不中断后续；64 连接 / 32 MiB 全局入站 / 64 KiB 请求 / 32 MiB 单连接与 64 MiB 全局出站上限、fd reuse、accept/close ownership；应用目录权限 fail-closed、foreign uid 拒绝、边界上方祖先权限不变、会话叶目录 exclusive、bind→chmod→listen→thread→publish、确定性 fallback、transport 未关闭时路径保留及 socket/session/session-dir/fallback-dir replacement 保留 |
 | `path_policy` | `..`、符号链接、`~` 展开越界、NUL/不可解析路径、扩展名白名单 |
 | `versions` | 完整版本号门禁矩阵：仅 `5.2.0` supported；`5.2.1` / `5.2.3` 只读放行并 warning、未来写工具拒绝 |
-| `discovery` / `status` | `tmp_path` 造假会话目录与 stale 判定；慢枚举/FIFO/symlink/父目录换入；目录名与 instance ID 不一致；socket identity 缺失/部分字段；partial cleanup/deadline；discovery lock deadline；instances 与 ScanStats 原子配对；session 发布前/后 fallback 崩溃回收、identity replacement 与 cursor/run 换入；status 单一绝对 deadline、响应 instance ID 目标绑定、共享固定 8-worker pool + aggregation lock；256 项 cursor 与第 17 候选公平推进；cache invalidate 与停止→重启恢复 |
-| `audit` | JSONL 格式、入站 JSON-RPC numeric/string id 原样配对、参数脱敏、独立 ≤1 s postlude 与 write/flush/close 后 deadline 检查及 `AUDIT_UNAVAILABLE` fail-closed；应用目录/既存文件权限与 FIFO fail-closed；多线程/多进程首次初始化无竞态；强制 split-write 下线程/进程行不交错 |
+| `discovery` / `status` | `tmp_path` 造假会话目录与 stale 判定；慢枚举/FIFO/symlink/父目录换入；foreign uid run 拒绝；目录名与 instance ID 不一致；socket identity 缺失/部分字段；partial cleanup/deadline 及预算耗尽后的后续扫描重试；discovery lock deadline；instances 与 ScanStats 原子配对；session 发布前/后 fallback 崩溃回收、identity replacement 与 cursor/run 换入；status 单一绝对 deadline、响应 instance ID 目标绑定、共享固定 8-worker pool + aggregation lock；256 项 cursor 与第 17 候选公平推进；cache invalidate 与停止→重启恢复 |
+| `audit` | JSONL 格式、入站 JSON-RPC numeric/string id 原样配对、参数脱敏、独立 ≤1 s postlude 与 write/flush/close 后 deadline 检查及 `AUDIT_UNAVAILABLE` fail-closed；应用目录/既存文件权限、foreign uid、FIFO `<0.5 s`、真实 device FD 换入与 symlink fail-closed；多线程/多进程首次初始化无竞态；强制 split-write 下线程/进程行不交错 |
+| `smoke/e2e` | NFR 165/180 s 与 recovery 120/135 s 两层 absolute deadline；public recovery OS supervisor + hidden worker；fresh marker-bound `0700` registry、pre-spawn reservation + stdlib bootstrap、parent-owned failure cleanup、read-only observer、8-record cache 与 deadline-bound 全 entry 扫描/overflow、5 s public registry reserve、leader-exit group liveness（仅 `killpg(pgid, 0)` 的 `ESRCH` 表示清洁）与 TERM→KILL→reap；ready PID 绑定及 kill 前/后/重启后三次 MCP identity 全等；有界 tracked-source provenance、四文档 exact approved tuple/source blob；ordered catalog/instructions 与 60 个 bounded structured/TextContent preimage 的模型/语义/canonical digest 外部复算；逐行 audit 与 0600/size-capped artifact |
 
 逻辑预算与 deadline 单测由 `FakeClock` 驱动，不使用真实 sleep；另设独立 RealClock wall-clock 反例测量大场景 continuation，二者不得混称。
 
@@ -856,7 +876,7 @@ L1 还必须有反例：大场景响应在多个 tick 间推进且最大 tick �
 - **外层 envelope mismatch**：伪造响应 `v` 不匹配时返回 `ENVELOPE_VERSION_MISMATCH`；伪造响应 `id` 不匹配时走 retryable `BRIDGE_UNAVAILABLE`，两条 wire path 都覆盖
 - **malformed wire exact types**：`v=true`、非布尔 `ok/retryable`、非 object `result/error` 均拒绝；除 `v` mismatch 外统一 retryable `BRIDGE_UNAVAILABLE`
 - **UTF-8 / 深层 JSON / 同批尾随帧**：非法 UTF-8、超过深度上限的 request/response 不得逸出异常；同一次 recv 中首帧被拒并关闭连接后，后续完整帧不得进入 router/queue
-- **schema 与参数边界**：三工具 schema 与冻结期望值全等，所有 object 封闭；raw 2025-11-25 与 SDK 2026-07-28 两条 Server wire path 都验证合法调用的 `structuredContent`、结果模型校验与未知参数 `-32602`；Codex 2025-06-18 宿主合同另验证工具目录/调用可用及精确协商版本
+- **schema、catalog 与参数边界**：三工具 schema 与冻结期望值全等，所有 object 封闭；同会话重复 list 与 fresh stdio Server 的名称/顺序/完整定义、ordered catalog/schema/instructions bytes+SHA 全等；raw 2025-11-25 与 SDK 2026-07-28 两条 Server wire path都验证合法调用的 `structuredContent`、兼容 TextContent JSON 等价、结果模型校验与未知参数 `-32602`；Codex 2025-06-18 宿主合同另验证工具目录/调用可用及精确协商版本
 - **审计 postlude**：三工具成功/失败/未知参数都只写一条日志，`request_id` 精确对应入站 JSON-RPC id；postlude 获得独立且 ≤1 s 的 absolute deadline，初始化/锁/写入失败均返回 retryable `AUDIT_UNAVAILABLE`，允许覆盖业务结果
 - **聚合与快照并发**：并发 status 调用仍只使用共享 8-worker pool 且聚合区互斥；锁等待、submit 与 as_completed 共用业务 deadline。并发扫描下，status / scene summary / capabilities 的实例结果与 ScanStats 必须来自同一原子快照
 - **发现缓存恢复**：同一 Discovery 先发现实例、模拟 Bridge 停止并触发 `invalidate()`、再重启实例，断言后续 MCP 调用重新发现而非持续命中 stale cache
@@ -879,9 +899,9 @@ L1 还必须有反例：大场景响应在多个 tick 间推进且最大 tick �
 
 **Server 的 runtime 根注入**：`server/core` 从环境变量 `BLENDERCODEX_ROOT` 读取根目录（默认 `~/Library/Application Support/BlenderCodex`），`run/` 与 `logs/` 由此派生。这是 stdout 纯净性与冷启动计时两条子进程级测试的前提——没有注入点，它们只能污染真实用户目录。
 
-### 7.3 L3 冒烟测试（真 GUI Blender）
+### 7.3 L3 冒烟与正式真机门（真 GUI Blender）
 
-只覆盖 L1/L2 在原理上无法证明的五件事：
+基础 GUI smoke 覆盖 L1/L2 在原理上无法证明的五件事：
 
 1. `bpy.app.timers` 真的在主线程驱动 tick
 2. `depsgraph_update_post` 真的递增 `scene_revision`
@@ -891,20 +911,39 @@ L1 还必须有反例：大场景响应在多个 tick 间推进且最大 tick �
 
 执行方式：`blender --python smoke/runner.py`（GUI，**不是** `--background`）。线程 baseline 必须在首次 register/允许连接之前记录，避免把既有线程误当作 Bridge 泄漏或反向漏计。runner 写出包含五个布尔字段与 `errors` 的 JSON；外部验证器重新解析该文件，要求五项**逐项为 `true`**、字段无缺失且 `errors=[]`，否则以非零退出。命令同时启用 `pipefail`，确保 Blender 自身失败不会被 `tail` 等管道尾部命令掩盖；`SMOKE_OK`/`SMOKE_FAIL` 文本只供人读，不是唯一判据。
 
+Phase 0 关闭还必须在独立临时 root 上执行两项正式真机门，均由 `smoke/e2e.py` 生成有界 JSON artifact，且不得把本节基础 smoke 或历史 Bridge-only 数字当作替代：
+
+6. **NFR-P1**：在同一 100k 真 GUI 会话上，由外部 MCP SDK Client 经 stdio/adapter/Discovery/UDS 调用 `get_scene_summary` 与 `get_blender_status` 各 20 次；再在保留原始 audit 的独立空 root、`include_instances=false` 下调用 `describe_capabilities` 20 次。计时、165/180 s invocation 边界、poll 前后 deadline 判定、样本与大小上限严格采用 URS §6.3；100k fixture 与其 Bridge-only 预查询发生在 helper spawn 前，不得声称服从该窗口。artifact 先固定 live/offline 完全一致且与 Task 17 freeze 全等的 ordered catalog、schema 与 instructions preimage/bytes/SHA，再保存全部 60 个 ≤256 KiB canonical validated-result preimage及兼容 TextContent 原文（跨三工具 structured preimage 合计 ≤16 MiB、artifact ≤32 MiB）；外部验证器重新执行 Pydantic/语义断言，以 exact-type 比较拒绝 Pydantic 归一化前的伪造 preimage，证明 TextContent JSON 与 `structuredContent` 等价并复算两者 bytes/SHA、合计双内容 result payload、duplication ratio、exact-type arguments、全局 byte total、nearest-rank 第 19 项、非 bool finite/non-negative max 与代表结果，同时以 shared deadline 和文件数/字节/行上限逐行核对主 root 40 行与离线 root 20 行 audit。该双内容合计不冒充 Host model-visible 字节。provenance 先证 clean Git，再以 bounded stdout 枚举至多 512 个 tracked 源，required 输入不得是 ignored/untracked；ignored vendor 必须 exact-set、无额外 executable artifact 且逐文件与 `protocol/` 同 hash；四文档 exact-type approved tuple/source blob、lock/源码 manifest 与 Blender exact build 绑定。execution manifest 是归因入口，SHA sidecar 只证明文件完整性。
+7. **真 SIGKILL/restart**：public `recovery` 是 135 s OS supervisor，hidden worker 在其中使用单一 120 s work deadline并只创建一个 MCP SDK `Client`；启动真 Blender A 并成功调用后向 A 的独立 process group 发送 `SIGKILL`，同一 Client 必须得到 exact `{"code":"BRIDGE_UNAVAILABLE","retryable":true}`，再启动真 Blender B 并由同一 Client 自动发现/调用成功。两个 Blender 使用同一隔离 runtime root，ready PID 必须等于实际 `Popen.pid`。fresh `0700` registry 的所有独立 group 均由 parent 在 spawn 前创建 identity-bound `0600` reservation，并先运行纯 stdlib bootstrap，在加载 MCP/Blender 重依赖前发布绑定同一 128-bit marker、spawn 时间窗及 opened dev/inode 的完整 record；若参数构造、SDK client enter 或 `Popen` 在 record 发布前失败，parent 按 reservation dev/inode 清理。observer 只读，owner retire/publication rename 的并发 entry 消失标 pending；cache 上限 8 只约束已验证记录，formal scanner 由 shared deadline 限界。unknown/坏 entry 记首错后继续扫描，第 9 条及后续有效 overflow 全部 identity-rechecked KILL。public work 期持续预观察并从 15 s cleanup margin 固定保留 5 s 给 registry。recorded PID 已复用至不同 PGID、marker/stale/identity/record 换入均 fail-closed 且不得误 signal/unlink；unlink 紧前重验 inode。public SIGINT/SIGTERM handler 只置 flag，超时、任意窗口取消、leader-exit child 与截止点仍存活 group 均进入同一 TERM/KILL/registry cleanup；截止点 final KILL 不重开 wait 窗口。kill 前、kill 后与重启后三次观察的 MCP `(pid, pgid, marker, started_monotonic_ns)` 必须全等并由外部验证器复核，不能写死 `same_mcp_server_session=true`。
+
 ### 7.4 验收映射（URS §10.1）
 
-| 验收项 | 层 |
-|---|---|
-| 三个只读工具返回符合 outputSchema，且 `structuredContent` 可按契约验证 | L2（含完整 MCP → UDS → FakeBridge 链路） |
-| 非基线版本：只读可用、写工具被拒 | L1（Phase 0 无写工具，测判定函数本身） |
-| 强制终止 Blender → `BRIDGE_UNAVAILABLE`，重启后重连 | L2（模拟断开）；真 kill 在验收核对时人工复核一次（不在 §7.3 的 L3 五项内） |
-| 完整会话循环（enable → 允许连接 → 断开 → disable）20 次无泄漏、无残留 socket | **L3 独有**（循环定义见 §7.3 第 5 条） |
-| 5 MiB 载荷分帧无截断 | L2 |
-| socket 自创建即 0700/0600；无 token 连接被拒 | L2 |
-| stdout 全程仅含 JSON-RPC | L2 |
-| 冷启动 < 5 s | L2 |
+下表按 URS v1.16 的稳定 ID **恰好 20 行且同序**；NFR-P1、确定性 catalog/payload 基线、G2/G3 与官方兼容通道属于补充关闭门，不得伪装成其中某一行，也不得反向把 20 行压回旧“八条”口径。
 
-URS §10.1 的八条中七条可由 L1/L2 自动回归，会话循环必须用真 Blender；此外审计门 G3 的 `hash_scope` 也必须进入同一次 L3 GUI runner。也就是说需要真 Blender 的是**一趟执行中的两项判据**，不能因 URS 原表只有一行 L3 就漏掉 hash 语义验证。
+| ID | 验收项 | 自动化层 |
+|---|---|---|
+| P0-01 | 三工具 outputSchema/structured result | L2 schema/wire 全等 + L3 NFR 三模型验证 |
+| P0-02 | 非基线只读可用、写拒绝 | L1 版本矩阵 + L2 FakeBridge warning；单栈 fixture，不冒充另装 Blender |
+| P0-03 | SIGKILL 后 Server 存活、exact retryable `BRIDGE_UNAVAILABLE`、重启重连 | L2 断开回归 + §7.3 public supervisor/hidden worker、三次 MCP identity 全等及 public cancel/final-KILL、late poll、leader-exit/live-child、marker/stale/PID-PGID reuse、record 换入、pre-spawn reservation/stdlib bootstrap、read-only observer/owner race、bounded cache overflow/inflight publication 直接反例 |
+| P0-04 | 完整会话 20 次无泄漏/残留 | L3；`threading.enumerate()` 精确追踪新增存活 `bcx-io` + `run/gui-*` |
+| P0-05 | ≥5 MiB 分帧无截断 | L1 framing + L2 wire roundtrip |
+| P0-06 | 私有 socket/token | L1/L2；bind→chmod `0600`→listen→thread→publish 的顺序反例 + auth log |
+| P0-07 | stdout 仅 JSON-RPC | L2 子进程及 bounded tail-drain 全组 |
+| P0-08 | 冷启动 `<5 s` | L2；进程启动至 initialize |
+| P0-09 | cooperative continuation、总耗时/max tick | L1 wall-clock 回归 + L3 正式 100k artifact |
+| P0-10 | yield 无 bpy wrapper；已注册 load_pre 后旧 continuation 失败 | L1/background snapshot + driver 注册后 handler 直接反例 |
+| P0-11 | 2.2M collections 源端跳过 | L1 reader source-skip/item-cap + L2 frame-limit 回归 |
+| P0-12 | queued+active 容量，64→65 拒绝 | L1 Bridge capacity + L2 SDK conversion admission 三请求反例 |
+| P0-13 | wake 合并与 1–10 停机顺序 | L1 lifecycle hooks/final join + L2 N 连接/单写者 |
+| P0-14 | file/parent/cleanup 换入不越界、不误删 | L1 lifecycle/discovery identity replacement 全组 |
+| P0-15 | exact wire types、SDK coercion、结构化审计 | L1 envelope/client + L2 adapter coercion/output/audit |
+| P0-16 | 线程/多 Host JSONL 完整 | L1 线程与 spawn 进程 split-write |
+| P0-17 | runtime/run/logs 类型、uid、mode、祖先不改 | L1 wide/symlink/foreign-uid/真实 device FD/祖先权限直接反例 |
+| P0-18 | sun_path 发布前/后崩溃恢复及换入保留 | L1 discovery fallback pre/post publish + lifecycle replacement |
+| P0-19 | stale deadline、后续重试、instance ID | L1 expired/recheck/evidence preservation + 后续 scan 重试 + mismatch |
+| P0-20 | 首次并发初始化；FIFO/device/symlink 不阻塞/不写 | L1 concurrent create + FIFO `<0.5 s` + `/dev/null` FD 换入 + symlink preservation |
+
+补充关闭门固定为：G2 三条独立 wire 协议合同、G3 structure-hash 真 Blender 边界、完整 stdio→adapter→UDS→Bridge、NFR-P1 正式 artifact、G5 官方兼容通道风险接受记录。G5 当前仅因项目所有者知情接受 screenshot 顺序敏感性与 render `SIGABRT` 而关闭；26/26 目录和 24 个非-render 摘要成功不等于缺陷已修复或全目录稳定。
 
 ### 7.5 不做
 
@@ -945,7 +984,7 @@ URS §10.1 的八条中七条可由 L1/L2 自动回归，会话循环必须用�
 | Server 依赖管理 | `uv`，项目声明 Python `>=3.13,<3.14` 且命令显式 `--python 3.13`（与 Bridge 对齐，SPIKE-2）；项目声明 `mcp>=2.0,<3`，提交的 `uv.lock` 精确锁定 `mcp==2.0.0`（URS NFR-C3 / 决策 D-5） |
 | 测试 | `pytest` + `pytest-timeout` |
 | 静态检查 | `ruff`（`target-version = py313`，SPIKE-2）+ `mypy`（`core/` 开 strict） |
-| 自动化门禁 | `scripts/checks.sh` 跑 L1 + L2；L3 本地执行。该脚本可接入 CI，但在实际 workflow 落地前不宣称仓库已有 CI |
+| 自动化门禁 | `scripts/checks.sh` 先禁写并清理项目 bytecode，再跑 L1 + L2；L3 本地执行。该脚本可接入 CI，但在实际 workflow 落地前不宣称仓库已有 CI |
 
 `scripts/checks.sh` 的四条强制检查（未来 CI workflow 必须调用同一脚本）：
 
@@ -989,7 +1028,7 @@ URS §10.1 的八条中七条可由 L1/L2 自动回归，会话循环必须用�
 | **R-P0-11** | cooperative budget 无法抢占单个 Python/bpy/native/bytes 原子 step；无界 step 仍可超出 50 ms | 每个 step 前后检查 deadline；对象、hash、collection、encoder piece 分片；合同明确 `50 ms + 有界原子 step 成本 + 调度抖动`；无界工作转 Headless Worker，并以大场景 wall-clock 回归监测 |
 | **R-P0-12** | 文件重载在 continuation yield 之间释放旧 bpy 数据；仅靠 revision 可能漏掉“计数恰好相同”的新文件 | persistent `load_pre` 在释放前递增 generation；continuation 同时校验 revision + generation，失败映射 `SCENE_QUERY_FAILED`；跨 yield 只保存纯 Python 状态 |
 | **R-P0-13** | 用户既存且主动放宽 `BLENDERCODEX_ROOT` 上方祖先目录；强制 chmod 会越权，完全忽略又会让应用目录/日志公开 | 权限边界精确定在 runtime root：边界外祖先不改；runtime_root/run/logs 必须为当前 uid、非 symlink、0700，否则 fail-closed；会话叶目录 exclusive 0700，日志/session/socket 0600 |
-| **R-P0-14** | 空闲 timer 从 0.1 s 改为 0.02 s 可降低首个请求等待，但本机实测唤醒/回调 CPU 约增 4.4×；电池和深度 idle 影响未测 | 仅作为 macOS 基线候选实现；不写电量承诺。Phase 0 执行记录真实工作负载，若电池影响不可接受，再设计并单独证明无锁迟滞，禁止复用已死锁的嵌套取锁方案 |
+| **R-P0-14** | 空闲 timer 从 0.1 s 改为 0.02 s 可降低首个请求等待，但本机实测唤醒/回调 CPU 约增 4.4×；电池和深度 idle 影响未测 | 项目所有者已于 2026-08-08 正式接受为 macOS 基线实现；仍不写电量承诺。Phase 0 执行记录真实工作负载，若电池影响不可接受，再设计并单独证明无锁迟滞，禁止复用已死锁的嵌套取锁方案 |
 
 ---
 

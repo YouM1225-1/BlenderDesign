@@ -1,12 +1,15 @@
 """Verify MCP discovery and tool calls through the local Codex app-server."""
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
 import select
 import selectors
+import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -263,6 +266,32 @@ def _assert_tool_catalog(server: dict[str, Any], expected: set[str]) -> None:
         assert tool["inputSchema"].get("type") == "object", tool
 
 
+def _canonical_summary(value: object) -> dict[str, object]:
+    raw = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+    ).encode("utf-8")
+    return {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _response_summary(response: dict[str, Any]) -> dict[str, object]:
+    summary = _canonical_summary(response)
+    content = response.get("content")
+    items = content if isinstance(content, list) else []
+    summary.update({
+        "content_types": [item.get("type") for item in items if isinstance(item, dict)],
+        "is_error": bool(response.get("isError")),
+        "structured_content_present": response.get("structuredContent") is not None,
+    })
+    if response.get("isError"):
+        text = next(
+            (item.get("text") for item in items
+             if isinstance(item, dict) and isinstance(item.get("text"), str)),
+            "",
+        )
+        summary["error_preview"] = text[:512]
+    return summary
+
+
 def verify_sdk_v2(enable_2026: bool = True) -> None:
     args = _sdk_server_args()
     mcp_config = (
@@ -322,8 +351,18 @@ def verify_sdk_v2(enable_2026: bool = True) -> None:
         app.close()
 
 
-def verify_blender_policy(include_render_tools: bool = False) -> None:
+def verify_blender_policy(
+    include_render_tools: bool = False,
+    capture_transcript: bool = False,
+) -> None:
+    if capture_transcript and include_render_tools:
+        raise ValueError("transcript capture never runs deferred render tools")
     app = AppServer()
+    fixture_dir: tempfile.TemporaryDirectory[str] | None = None
+
+    def emit(record: dict[str, object]) -> None:
+        print(json.dumps(record, ensure_ascii=False, sort_keys=True), flush=True)
+
     try:
         thread_id = start_thread(app, "BlenderDesign Blender policy verifier")
         config = app.request(3, "config/read", {})["config"]
@@ -359,25 +398,58 @@ def verify_blender_policy(include_render_tools: bool = False) -> None:
         server = next(item for item in status["data"] if item["name"] == "blender")
         assert server["serverInfo"]["name"] == "blender-mcp", server
         _assert_tool_catalog(server, BLENDER_TOOLS)
+        blend_file = BLEND_FILE
+        if capture_transcript:
+            fixture_dir = tempfile.TemporaryDirectory(prefix="bcx-official-a4-")
+            fixture = Path(fixture_dir.name) / "fixture.blend"
+            shutil.copy2(BLEND_FILE, fixture)
+            blend_file = str(fixture)
+            emit({
+                "type": "run",
+                "schema_version": 1,
+                "catalog_tools": len(server["tools"]),
+                "approval_mode": effective["default_tools_approval_mode"],
+                "fixture": {
+                    "kind": "temporary_copy",
+                    "source_sha256": hashlib.sha256(Path(BLEND_FILE).read_bytes()).hexdigest(),
+                },
+                "render_policy": "not_called_known_sigabrt",
+            })
         prefix = f"bcx-host-verify-{os.getpid()}-{secrets.token_hex(4)}"
         generated: list[Path] = []
+        initial_arguments = {"code": (
+            "import bpy\n"
+            "obj=bpy.context.view_layer.objects.active\n"
+            "result={'probe':'ok','workspace':bpy.context.workspace.name,"
+            "'active':obj.name if obj else None,"
+            "'data_name':obj.data.name if obj and obj.data else None}"
+        )}
+        initial_approval_before = len(app.approval_events())
+        started = time.perf_counter_ns()
         initial = app.request(
             10,
             "mcpServer/tool/call",
             {
                 "server": "blender",
                 "tool": "execute_blender_code",
-                "arguments": {"code": (
-                    "import bpy\n"
-                    "obj=bpy.context.view_layer.objects.active\n"
-                    "result={'probe':'ok','workspace':bpy.context.workspace.name,"
-                    "'active':obj.name if obj else None,"
-                    "'data_name':obj.data.name if obj and obj.data else None}"
-                )},
+                "arguments": initial_arguments,
                 "threadId": thread_id,
             },
             timeout=60,
         )
+        if capture_transcript:
+            emit({
+                "type": "tool_call",
+                "sequence": 1,
+                "tool": "execute_blender_code",
+                "argument_keys": sorted(initial_arguments),
+                "arguments": _canonical_summary(initial_arguments),
+                "duration_ms": round((time.perf_counter_ns() - started) / 1_000_000, 3),
+                "outcome": "error" if initial.get("isError") else "ok",
+                "response": _response_summary(initial),
+                "approval_events_during_call": (
+                    len(app.approval_events()) - initial_approval_before),
+            })
         assert not initial.get("isError"), initial
         state = initial["structuredContent"]["result"]
         assert state["probe"] == "ok", initial
@@ -385,20 +457,20 @@ def verify_blender_policy(include_render_tools: bool = False) -> None:
                    for key in ("workspace", "active", "data_name")), state
         calls = {
             "execute_blender_code_for_cli": {
-                "blend_file": BLEND_FILE,
+                "blend_file": blend_file,
                 "code": ("import bpy\nresult={'version': bpy.app.version_string, "
                          "'object_count': len(bpy.data.objects)}"),
             },
             "get_blendfile_summary_datablocks": {},
-            "get_blendfile_summary_datablocks_for_cli": {"blend_file": BLEND_FILE},
+            "get_blendfile_summary_datablocks_for_cli": {"blend_file": blend_file},
             "get_blendfile_summary_missing_files": {},
-            "get_blendfile_summary_missing_files_for_cli": {"blend_file": BLEND_FILE},
+            "get_blendfile_summary_missing_files_for_cli": {"blend_file": blend_file},
             "get_blendfile_summary_of_linked_libraries": {},
-            "get_blendfile_summary_of_linked_libraries_for_cli": {"blend_file": BLEND_FILE},
+            "get_blendfile_summary_of_linked_libraries_for_cli": {"blend_file": blend_file},
             "get_blendfile_summary_path_info": {},
-            "get_blendfile_summary_path_info_for_cli": {"blend_file": BLEND_FILE},
+            "get_blendfile_summary_path_info_for_cli": {"blend_file": blend_file},
             "get_blendfile_summary_usage_guess": {},
-            "get_blendfile_summary_usage_guess_for_cli": {"blend_file": BLEND_FILE},
+            "get_blendfile_summary_usage_guess_for_cli": {"blend_file": blend_file},
             "get_object_detail_summary": {"name": state["active"]},
             "get_objects_summary": {},
             "get_python_api_docs": {"identifier": "bpy.app"},
@@ -414,6 +486,19 @@ def verify_blender_policy(include_render_tools: bool = False) -> None:
             "search_api_docs": {"query": "bpy app version", "max_results": 3},
             "search_manual_docs": {"query": "render image", "max_results": 3},
         }
+        if capture_transcript:
+            # Preserve the original strict verifier order above. Only evidence
+            # capture moves screenshots last so a known truncation cannot hide
+            # results from the other non-render tools.
+            screenshots = {
+                tool: calls.pop(tool)
+                for tool in (
+                    "get_screenshot_of_window_as_json",
+                    "get_screenshot_of_window_as_image",
+                    "get_screenshot_of_area_as_image",
+                )
+            }
+            calls.update(screenshots)
         if include_render_tools:
             calls.update({
                 "render_thumbnail_to_path": {"output_path": f"/{prefix}-thumbnail.png"},
@@ -424,21 +509,62 @@ def verify_blender_policy(include_render_tools: bool = False) -> None:
         }
         assert set(calls) | {"execute_blender_code"} == expected_called
         call_results: dict[str, dict[str, Any]] = {"execute_blender_code": initial}
+        transport_failure: str | None = None
+        remaining: list[tuple[str, dict[str, Any]]] = []
         try:
-            for request_id, (tool, arguments) in enumerate(calls.items(), start=11):
+            call_items = list(calls.items())
+            for offset, (tool, arguments) in enumerate(call_items):
+                request_id = offset + 11
                 timeout = 180 if tool.endswith("_for_cli") or tool.startswith("render_") else 60
-                response = app.request(
-                    request_id,
-                    "mcpServer/tool/call",
-                    {
-                        "server": "blender",
+                approval_before = len(app.approval_events())
+                started = time.perf_counter_ns()
+                try:
+                    response = app.request(
+                        request_id,
+                        "mcpServer/tool/call",
+                        {
+                            "server": "blender",
+                            "tool": tool,
+                            "arguments": arguments,
+                            "threadId": thread_id,
+                        },
+                        timeout=timeout,
+                    )
+                except Exception as exc:
+                    if not capture_transcript:
+                        raise
+                    transport_failure = f"{type(exc).__name__}: {exc}"[:512]
+                    emit({
+                        "type": "tool_call",
+                        "sequence": request_id - 9,
                         "tool": tool,
-                        "arguments": arguments,
-                        "threadId": thread_id,
-                    },
-                    timeout=timeout,
-                )
-                assert not response.get("isError"), response
+                        "argument_keys": sorted(arguments),
+                        "arguments": _canonical_summary(arguments),
+                        "duration_ms": round(
+                            (time.perf_counter_ns() - started) / 1_000_000, 3),
+                        "outcome": "exception",
+                        "exception": transport_failure,
+                        "approval_events_during_call": (
+                            len(app.approval_events()) - approval_before),
+                    })
+                    remaining = call_items[offset + 1:]
+                    break
+                if capture_transcript:
+                    emit({
+                        "type": "tool_call",
+                        "sequence": request_id - 9,
+                        "tool": tool,
+                        "argument_keys": sorted(arguments),
+                        "arguments": _canonical_summary(arguments),
+                        "duration_ms": round(
+                            (time.perf_counter_ns() - started) / 1_000_000, 3),
+                        "outcome": "error" if response.get("isError") else "ok",
+                        "response": _response_summary(response),
+                        "approval_events_during_call": (
+                            len(app.approval_events()) - approval_before),
+                    })
+                else:
+                    assert not response.get("isError"), response
                 if tool.startswith("render_"):
                     output = Path(response["structuredContent"]["result"]["filepath"])
                     assert output.parent.name == "blender_mcp", response
@@ -451,32 +577,87 @@ def verify_blender_policy(include_render_tools: bool = False) -> None:
                 if output.is_file() and output.parent.name == "blender_mcp" \
                         and output.name.startswith(prefix):
                     output.unlink()
-        assert set(call_results) == expected_called
-        app.drain_events()
+        if capture_transcript and transport_failure is not None:
+            for tool, _arguments in remaining:
+                emit({
+                    "type": "tool_call",
+                    "tool": tool,
+                    "outcome": "not_called",
+                    "reason": f"fail_stop_after_transport_error: {transport_failure}",
+                })
+        elif not capture_transcript:
+            assert set(call_results) == expected_called
+        for tool in sorted(BLENDER_TOOLS - expected_called):
+            if capture_transcript:
+                emit({
+                    "type": "tool_call",
+                    "tool": tool,
+                    "outcome": "not_called",
+                    "reason": (
+                        "known_deferred_render_SIGABRT; existing crash SHA-256 "
+                        "cc8c7f4a4e0258dc064f30824406f2d77e0a758b0934e5d9afa8bfb97a7af7b1"
+                    ),
+                })
+        postlude_failure: str | None = None
+        try:
+            app.drain_events()
+        except Exception as exc:
+            if not capture_transcript:
+                raise
+            postlude_failure = f"{type(exc).__name__}: {exc}"[:512]
+            emit({
+                "type": "postlude",
+                "outcome": "event_drain_error",
+                "exception": postlude_failure,
+            })
         approval_events = app.approval_events()
-        assert approval_events == [], approval_events
-        print(
-            json.dumps(
-                {
-                    "approval_mode": effective["default_tools_approval_mode"],
-                    "approval_events": len(approval_events),
-                    "direct_only_tool_namespaces": config["features"]["code_mode"][
-                        "direct_only_tool_namespaces"
-                    ],
-                    "filters": {
-                        "enabled_tools": sorted(effective["enabled_tools"]),
-                        "omit_tools_from": effective["omit_tools_from"],
-                    },
-                    "functional_call_count": len(call_results),
-                    "functional_tools": sorted(call_results),
-                    "skipped_tools": sorted(BLENDER_TOOLS - set(call_results)),
-                    "tools": sorted(server["tools"]),
-                },
-                sort_keys=True,
+        if capture_transcript:
+            error_tools = sorted(
+                tool for tool, response in call_results.items()
+                if response.get("isError")
             )
-        )
+            emit({
+                "type": "summary",
+                "approval_events": len(approval_events),
+                "called_tools": len(call_results),
+                "catalog_tools": len(server["tools"]),
+                "error_tools": error_tools,
+                "render_tools_not_called": sorted(BLENDER_TOOLS - expected_called),
+                "transport_failure": transport_failure,
+            })
+            assert set(call_results) == expected_called, set(call_results)
+            assert error_tools == [], error_tools
+            assert transport_failure is None, transport_failure
+            assert postlude_failure is None, postlude_failure
+            assert approval_events == [], approval_events
+        else:
+            assert approval_events == [], approval_events
+            print(
+                json.dumps(
+                    {
+                        "approval_mode": effective["default_tools_approval_mode"],
+                        "approval_events": len(approval_events),
+                        "direct_only_tool_namespaces": config["features"]["code_mode"][
+                            "direct_only_tool_namespaces"
+                        ],
+                        "filters": {
+                            "enabled_tools": sorted(effective["enabled_tools"]),
+                            "omit_tools_from": effective["omit_tools_from"],
+                        },
+                        "functional_call_count": len(call_results),
+                        "functional_tools": sorted(call_results),
+                        "skipped_tools": sorted(BLENDER_TOOLS - set(call_results)),
+                        "tools": sorted(server["tools"]),
+                    },
+                    sort_keys=True,
+                )
+            )
     finally:
-        app.close()
+        try:
+            app.close()
+        finally:
+            if fixture_dir is not None:
+                fixture_dir.cleanup()
 
 
 def serve_sdk_v2() -> None:
@@ -493,6 +674,7 @@ def serve_sdk_v2() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--configured-blender", action="store_true")
+    parser.add_argument("--capture-blender-transcript", action="store_true")
     parser.add_argument(
         "--include-render-tools", action="store_true",
         help="also call both deferred GUI render tools (may expose upstream Blender races)",
@@ -502,8 +684,13 @@ def main() -> None:
     args = parser.parse_args()
     if args.serve_sdk_v2:
         serve_sdk_v2()
-    elif args.configured_blender:
-        verify_blender_policy(include_render_tools=args.include_render_tools)
+    elif args.configured_blender or args.capture_blender_transcript:
+        if args.capture_blender_transcript and args.include_render_tools:
+            parser.error("transcript capture never runs deferred render tools")
+        verify_blender_policy(
+            include_render_tools=args.include_render_tools,
+            capture_transcript=args.capture_blender_transcript,
+        )
     else:
         verify_sdk_v2(enable_2026=not args.legacy_codex)
 

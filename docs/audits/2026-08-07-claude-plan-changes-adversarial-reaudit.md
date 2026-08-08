@@ -1,8 +1,6 @@
 # Claude 修改的对抗性复审与 SDK 版本裁决
 
-> **SUPERSEDED（2026-08-08）**：本文件是早期 SDK/反例快照；当前裁决见 [closeout v3](2026-08-07-closeout-v3.md) 与 [r15/v8 融合审计](2026-08-07-platform-optimization-handoff-adversarial-audit.md)。
-
-> **历史快照**：本报告记录 SDK 决策与早期反例，当前状态以 [2026-08-07-closeout-v2.md](2026-08-07-closeout-v2.md) 为准。
+> **固定时点快照（2026-08-07）**：本报告保留早期 SDK 裁决与反例，不追踪后续规范、Plan 或审批状态，也不再充当当前裁决入口。当前状态统一见 [ROADMAP](../ROADMAP.md)。
 
 > 日期：2026-08-07
 > 对象：Claude 对 URS、Phase 0 spec、Phase 0 plan 的未提交修改

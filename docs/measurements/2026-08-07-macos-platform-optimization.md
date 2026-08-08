@@ -2,7 +2,7 @@
 
 > 日期：2026-08-07
 > 性质：实测数据 + 补丁规格。
-> **当前审计状态（2026-08-08 r15/v8 / URS v1.11 / spec v1.11）：本报告是单机测量记录，不是规范合同。§3.1 / §3.3 作为 Plan 候选实现保留；§3.4 的 inode 方向成立，但 `same_file()` 仅为查询辅助，不能关闭 FR-21/TOCTOU；§3.2（blake2b）已撤回；§3.5–§3.7 仍是待决策/待真实验收事项。r12/v5/v6/v7 数字与门禁均为历史证据；v8 真 GUI 100k 结果（worker P95 1605.18 ms、max 2560.86 ms、observer P95 1655.44 ms、max tick 62.50 ms）只关闭 Bridge-RPC/continuation 子门，端到端 MCP NFR-P1 仍开放且不外推跨机。交接审计见 [`docs/audits/2026-08-07-platform-optimization-handoff-adversarial-audit.md`](../audits/2026-08-07-platform-optimization-handoff-adversarial-audit.md)。**
+> **固定时点测量快照（capture：2026-08-08，r15/v8 / URS v1.11 / spec v1.11）**：本报告是单机测量记录，不是规范合同。§3.1 / §3.3 作为当时的 Plan 候选实现保留；§3.4 的 inode 方向成立，但 `same_file()` 仅为查询辅助，不能关闭 FR-21/TOCTOU；§3.2（blake2b）已撤回；§3.5–§3.7 在 capture 时仍待决策或真实验收。r12/v5/v6/v7 数字与门禁均为历史证据；v8 真 GUI 100k 结果（worker P95 1605.18 ms、max 2560.86 ms、observer P95 1655.44 ms、max tick 62.50 ms）只关闭 Bridge-RPC/continuation 子门，端到端 MCP NFR-P1 仍开放且不外推跨机。本文不追踪后续修订；当前状态统一见 [ROADMAP](../ROADMAP.md)。**
 > 背景：报告产出期间 plan 由另一方并行推进至 r11。首次应用因基线过时造成冲突并被覆盖；本次应用前先取基线 SHA-256 并在补丁脚本中做前置校验。
 
 ## 0. 阅读须知

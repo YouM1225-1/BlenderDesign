@@ -1,10 +1,9 @@
 # Phase 0 冻结后平台优化补丁·对抗性复审
 
-> **SUPERSEDED（2026-08-08）**：本文件是 r12/v5 平台补丁历史记录；当前裁决见 [closeout v3](2026-08-07-closeout-v3.md) 与 [r15/v8 融合审计](2026-08-07-platform-optimization-handoff-adversarial-audit.md)。其中旧 Plan SHA、queue 数字和 260-test 门禁不得作为当前状态。
+> **固定时点快照（2026-08-07，r12/v5）**：本报告保留平台补丁红队记录；旧 Plan SHA、queue 数字和 260-test 门禁仅描述该时点，不追踪后续修订。当前状态统一见 [ROADMAP](../ROADMAP.md)。
 
 > 日期：2026-08-07  
 > 审计边界：只读审计、隔离树复现与文档回滚；**未执行 Phase 0 Plan，未暂存，未提交**。  
-> 当前裁决以 [2026-08-07-closeout-v2.md](2026-08-07-closeout-v2.md) 及本报告为准。
 
 ## 结论
 

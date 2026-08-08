@@ -1,8 +1,6 @@
 # BlenderDesign 全量对抗性复审（文档与 Plan 修订后）
 
-> **SUPERSEDED（2026-08-08）**：本文件记录修复前阻断项；当前裁决见 [closeout v3](2026-08-07-closeout-v3.md) 与 [r15/v8 融合审计](2026-08-07-platform-optimization-handoff-adversarial-audit.md)。
-
-> **历史快照（修复前）**：本报告记录的是 `578f49e` 基线上一轮修复前状态，其中“不得执行”、10 工具 allowlist 与 Gate 未关闭等裁决已被后续修复和实测取代。当前结论以 [2026-08-07-closeout-v2.md](2026-08-07-closeout-v2.md) 为准；以下历史证据不回写、不篡改。
+> **固定时点快照（2026-08-07，修复前）**：本报告记录 `578f49e` 基线上的阻断项；其中“不得执行”、10 工具 allowlist 与 Gate 未关闭等均只描述该时点。历史证据保留且不回写；当前状态统一见 [ROADMAP](../ROADMAP.md)。
 
 > 日期：2026-08-07
 > 审计对象：当前工作树中的 URS、Phase 0 design spec、Phase 0 plan、研究输入、既有审计、SDK 决策、spikes、官方 Blender MCP 与 Codex 配置
