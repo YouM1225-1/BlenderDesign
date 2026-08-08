@@ -339,17 +339,26 @@ def test_concurrent_first_initialization_is_race_safe_with_restrictive_umask(
     chmod_entered = threading.Event()
     release_chmod = threading.Event()
     errors = []
+    real_chmod = audit_module.os.chmod
     real_fchmod = audit_module.os.fchmod
     real_umask = audit_module.os.umask
     umask_calls = []
+    directory_fchmod_calls = []
 
-    def delayed_first_fchmod(fd, mode):
+    def delayed_first_chmod(path, mode, *, dir_fd=None, follow_symlinks=True):
         if mode == 0o700 and not chmod_entered.is_set():
             chmod_entered.set()
             assert release_chmod.wait(1.0)
+        return real_chmod(path, mode, dir_fd=dir_fd,
+                          follow_symlinks=follow_symlinks)
+
+    def track_directory_fchmod(fd, mode):
+        if mode == 0o700:
+            directory_fchmod_calls.append(fd)
         return real_fchmod(fd, mode)
 
-    monkeypatch.setattr(audit_module.os, "fchmod", delayed_first_fchmod)
+    monkeypatch.setattr(audit_module.os, "chmod", delayed_first_chmod)
+    monkeypatch.setattr(audit_module.os, "fchmod", track_directory_fchmod)
 
     def reject_audit_umask(mode):
         umask_calls.append(mode)
@@ -386,38 +395,64 @@ def test_concurrent_first_initialization_is_race_safe_with_restrictive_umask(
     assert errors == []
     assert umask_calls == []
 
+    monkeypatch.setattr(audit_module.os, "chmod", real_chmod)
     monkeypatch.setattr(audit_module.os, "fchmod", real_fchmod)
-    attack_runtime = tmp_path / "attack-runtime"
-    attack_runtime.mkdir(mode=0o700)
-    attack_runtime.chmod(0o700)
-    attack_logs = attack_runtime / "logs"
-    original = tmp_path / "created-original"
-    replacement = tmp_path / "restrictive-replacement"
-    replacement.mkdir(mode=0o700)
-    replacement.chmod(0o700)
-    real_open = audit_module.os.open
-    swapped = False
+    real_stat = audit_module.os.stat
 
-    def replace_created_before_open(name, flags, mode=0o777, *, dir_fd=None):
-        nonlocal swapped
-        if (name == attack_logs.name and dir_fd is not None
-                and flags & os.O_DIRECTORY and not swapped):
-            swapped = True
-            attack_logs.rename(original)
-            replacement.rename(attack_logs)
-            attack_logs.chmod(0o500)
-        return real_open(name, flags, mode, dir_fd=dir_fd)
+    def assert_first_status_replacement_rejected(label, replacement_mode):
+        attack_runtime = tmp_path / f"attack-runtime-{label}"
+        attack_runtime.mkdir(mode=0o700)
+        attack_runtime.chmod(0o700)
+        attack_logs = attack_runtime / "logs"
+        original = tmp_path / f"created-original-{label}"
+        replacement = tmp_path / f"replacement-{label}"
+        replacement.mkdir(mode=0o700)
+        replacement.chmod(0o700)
+        swapped = False
 
-    monkeypatch.setattr(audit_module.os, "open", replace_created_before_open)
-    previous_umask = real_umask(0o777)
-    try:
-        with pytest.raises(PermissionError, match="private directory"):
-            AuditLog(attack_logs)
-    finally:
-        real_umask(previous_umask)
-    assert swapped
-    assert stat.S_IMODE(attack_logs.stat().st_mode) == 0o500
-    attack_logs.chmod(0o700)
+        def replace_created_before_first_status(
+                name, *, dir_fd=None, follow_symlinks=True):
+            nonlocal swapped
+            if name == attack_logs.name and dir_fd is not None and not swapped:
+                try:
+                    real_stat(attack_logs, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    swapped = True
+                    attack_logs.chmod(0o700)
+                    attack_logs.rename(original)
+                    replacement.rename(attack_logs)
+                    attack_logs.chmod(replacement_mode)
+            return real_stat(name, dir_fd=dir_fd,
+                             follow_symlinks=follow_symlinks)
+
+        monkeypatch.setattr(audit_module.os, "stat",
+                            replace_created_before_first_status)
+        previous_umask = real_umask(0o777)
+        rejected = False
+        try:
+            try:
+                AuditLog(attack_logs)
+            except PermissionError as exc:
+                assert "private directory" in str(exc)
+                rejected = True
+        finally:
+            real_umask(previous_umask)
+            monkeypatch.setattr(audit_module.os, "stat", real_stat)
+        assert swapped
+        observed_mode = stat.S_IMODE(real_stat(attack_logs).st_mode)
+        attack_logs.chmod(0o700)
+        if original.exists():
+            original.chmod(0o700)
+        return swapped, observed_mode, rejected
+
+    replacement_results = [
+        assert_first_status_replacement_rejected("0500", 0o500),
+        assert_first_status_replacement_rejected("0700", 0o700),
+    ]
+    assert (directory_fchmod_calls, replacement_results) == (
+        [], [(True, 0o500, True), (True, 0o700, True)])
 
 
 def test_concurrent_first_file_creation_waits_for_fchmod(tmp_path, monkeypatch):

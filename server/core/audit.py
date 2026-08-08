@@ -66,8 +66,11 @@ def _wait_private_directory_path(
     deadline = time.monotonic() + PRIVATE_INIT_TIMEOUT
     while True:
         current = _private_directory_status(name, path, parent_fd, expected)
-        if stat.S_IMODE(current.st_mode) == 0o700:
+        mode = stat.S_IMODE(current.st_mode)
+        if mode == 0o700:
             return current
+        if mode != 0:
+            raise PermissionError(f"private directory required: {path}")
         if time.monotonic() >= deadline:
             raise PermissionError(f"private directory required: {path}")
         time.sleep(0.005)
@@ -79,27 +82,37 @@ def _initialize_private_directory(
     created = False
     try:
         if parent_fd is None:
-            path.mkdir(mode=0o700, parents=True)
+            path.mkdir(mode=0o000, parents=False)
         else:
-            os.mkdir(path.name, mode=0o700, dir_fd=parent_fd)
+            os.mkdir(path.name, mode=0o000, dir_fd=parent_fd)
     except FileExistsError:
         before = _private_directory_status(name, path, parent_fd)
+    except OSError as exc:
+        raise PermissionError(f"private directory required: {path}") from exc
     else:
         created = True
-        # Capture the created inode immediately; later operations must retain it.
+        # POSIX mkdir returns no fd. A same-UID attacker replacing this node with
+        # another exact mode-000 directory before the first capture remains a
+        # creation -> first-capture threat boundary; 0500/0700 replacements fail.
         before = _private_directory_status(name, path, parent_fd)
+        if stat.S_IMODE(before.st_mode) != 0:
+            raise PermissionError(f"private directory required: {path}")
     expected = before.st_dev, before.st_ino
-    if created and stat.S_IMODE(before.st_mode) != 0o700:
-        _private_directory_status(name, path, parent_fd, expected)
+    if created:
+        confirmed = _private_directory_status(name, path, parent_fd, expected)
+        if stat.S_IMODE(confirmed.st_mode) != 0:
+            raise PermissionError(f"private directory required: {path}")
         # macOS cannot open a mode-000 directory for fd-bound chmod. A replacement
         # landing in this finite final identity-check -> chmod pathname boundary may
-        # receive the bootstrap mode; open/fstat still rejects it before fd fchmod.
+        # receive the bootstrap mode; subsequent status/open checks still reject it.
         try:
             os.chmod(name, 0o700, dir_fd=parent_fd, follow_symlinks=False)
         except OSError as exc:
             raise PermissionError(f"private directory required: {path}") from exc
         before = _private_directory_status(name, path, parent_fd, expected)
-    elif not created:
+        if stat.S_IMODE(before.st_mode) != 0o700:
+            raise PermissionError(f"private directory required: {path}")
+    else:
         before = _wait_private_directory_path(name, path, parent_fd, expected)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
@@ -112,14 +125,6 @@ def _initialize_private_directory(
                 or stat.S_IMODE(opened.st_mode) != 0o700
                 or (opened.st_dev, opened.st_ino) != expected):
             raise PermissionError(f"private directory required: {path}")
-        if created:
-            os.fchmod(fd, 0o700)
-            opened = os.fstat(fd)
-            if (not stat.S_ISDIR(opened.st_mode) or opened.st_uid != os.geteuid()
-                    or stat.S_IMODE(opened.st_mode) != 0o700
-                    or (opened.st_dev, opened.st_ino) != expected):
-                raise PermissionError(f"private directory required: {path}")
-            return opened
         return opened
     finally:
         os.close(fd)
