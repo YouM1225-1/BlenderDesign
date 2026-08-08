@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-09T00:31:08+08:00",
+  "source_commit": "69559acf90a51c6611b0cb8dc5e5a97983317395",
+  "approved_tuple": {
+    "plan_sha256": "56bfc2db42b51b7b4b679b07cb04109074076248d7990175a84a3253d4fe396a",
+    "urs_sha256": "edd66512da0d5493d530c24c3df1785eab6dec8e1e35b736a2a48d96615fbf38",
+    "spec_sha256": "62829d086a71742be9781a1ead5283b4e04c208ecb2282934abeb62073781fd9",
+    "roadmap_sha256": "a23291a53099213e387c4bf63068ea8e0e6c4ac2e71ab25afdb630cf9ec51309",
+    "tasks": 20,
+    "open_checkboxes": 93,
+    "checked_checkboxes": 0,
+    "python_fences": 50,
+    "path_bound_python": 49,
+    "unique_path_bound_python": 49,
+    "unit_tests": 337,
+    "contract_tests": 32,
+    "full_tests": 369,
+    "adapter_tests": 35,
+    "adapter_substantive_lines": 373
+  }
+}
