@@ -32,7 +32,7 @@ PARAMS_TRUNCATED_DIGEST = hashlib.sha256(
     _PARAMS_TRUNCATED_SENTINEL).hexdigest()[:16]
 PARAMS_UNENCODABLE_DIGEST = hashlib.sha256(
     _PARAMS_UNENCODABLE_SENTINEL).hexdigest()[:16]
-_DIRECTORY_CREATE_LOCK = threading.Lock()
+_AUDIT_TEXT_CHUNK_CHARS = 1024
 
 
 class _ParamsTruncated(Exception):
@@ -43,18 +43,31 @@ class _ParamsUnencodable(Exception):
     pass
 
 
-def _wait_private_directory_fd(
-        fd: int, path: Path, expected: tuple[int, int]) -> os.stat_result:
+def _private_directory_status(
+        name: str | Path, path: Path, parent_fd: int | None,
+        expected: tuple[int, int] | None = None) -> os.stat_result:
+    try:
+        current = (path.lstat() if parent_fd is None else
+                   os.stat(name, dir_fd=parent_fd, follow_symlinks=False))
+    except OSError as exc:
+        raise PermissionError(f"private directory required: {path}") from exc
+    mode = stat.S_IMODE(current.st_mode)
+    if (not stat.S_ISDIR(current.st_mode) or current.st_uid != os.geteuid()
+            or mode & ~0o700
+            or (expected is not None
+                and (current.st_dev, current.st_ino) != expected)):
+        raise PermissionError(f"private directory required: {path}")
+    return current
+
+
+def _wait_private_directory_path(
+        name: str | Path, path: Path, parent_fd: int | None,
+        expected: tuple[int, int]) -> os.stat_result:
     deadline = time.monotonic() + PRIVATE_INIT_TIMEOUT
     while True:
-        st = os.fstat(fd)
-        identity = st.st_dev, st.st_ino
-        mode = stat.S_IMODE(st.st_mode)
-        if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid()
-                or mode & ~0o700 or identity != expected):
-            raise PermissionError(f"private directory required: {path}")
-        if mode == 0o700:
-            return st
+        current = _private_directory_status(name, path, parent_fd, expected)
+        if stat.S_IMODE(current.st_mode) == 0o700:
+            return current
         if time.monotonic() >= deadline:
             raise PermissionError(f"private directory required: {path}")
         time.sleep(0.005)
@@ -64,33 +77,30 @@ def _initialize_private_directory(
         path: Path, parent_fd: int | None = None) -> os.stat_result:
     name: str | Path = path if parent_fd is None else path.name
     created = False
-    # mkdir applies the process umask before an fd exists. A private temporary
-    # umask makes the new directory openable for identity-bound fchmod while
-    # keeping any concurrent process creation owner-only.
-    with _DIRECTORY_CREATE_LOCK:
-        previous_umask = os.umask(0o077)
-        try:
-            try:
-                if parent_fd is None:
-                    path.mkdir(mode=0o700, parents=True)
-                else:
-                    os.mkdir(path.name, mode=0o700, dir_fd=parent_fd)
-            except FileExistsError:
-                pass
-            else:
-                created = True
-        finally:
-            os.umask(previous_umask)
     try:
-        before = (path.lstat() if parent_fd is None else
-                  os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False))
-    except OSError as exc:
-        raise PermissionError(f"private directory required: {path}") from exc
+        if parent_fd is None:
+            path.mkdir(mode=0o700, parents=True)
+        else:
+            os.mkdir(path.name, mode=0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        before = _private_directory_status(name, path, parent_fd)
+    else:
+        created = True
+        # Capture the created inode immediately; later operations must retain it.
+        before = _private_directory_status(name, path, parent_fd)
     expected = before.st_dev, before.st_ino
-    mode = stat.S_IMODE(before.st_mode)
-    if (not stat.S_ISDIR(before.st_mode) or before.st_uid != os.geteuid()
-            or mode & ~0o700):
-        raise PermissionError(f"private directory required: {path}")
+    if created and stat.S_IMODE(before.st_mode) != 0o700:
+        _private_directory_status(name, path, parent_fd, expected)
+        # macOS cannot open a mode-000 directory for fd-bound chmod. A replacement
+        # landing in this finite final identity-check -> chmod pathname boundary may
+        # receive the bootstrap mode; open/fstat still rejects it before fd fchmod.
+        try:
+            os.chmod(name, 0o700, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise PermissionError(f"private directory required: {path}") from exc
+        before = _private_directory_status(name, path, parent_fd, expected)
+    elif not created:
+        before = _wait_private_directory_path(name, path, parent_fd, expected)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
         fd = os.open(name, flags, dir_fd=parent_fd)
@@ -98,9 +108,8 @@ def _initialize_private_directory(
         raise PermissionError(f"private directory required: {path}") from exc
     try:
         opened = os.fstat(fd)
-        opened_mode = stat.S_IMODE(opened.st_mode)
         if (not stat.S_ISDIR(opened.st_mode) or opened.st_uid != os.geteuid()
-                or opened_mode & ~0o700
+                or stat.S_IMODE(opened.st_mode) != 0o700
                 or (opened.st_dev, opened.st_ino) != expected):
             raise PermissionError(f"private directory required: {path}")
         if created:
@@ -111,7 +120,7 @@ def _initialize_private_directory(
                     or (opened.st_dev, opened.st_ino) != expected):
                 raise PermissionError(f"private directory required: {path}")
             return opened
-        return _wait_private_directory_fd(fd, path, expected)
+        return opened
     finally:
         os.close(fd)
 
@@ -205,13 +214,18 @@ def _check_params_shape(value: object, deadline: float | None) -> None:
     def count_text(value: str) -> None:
         nonlocal encoded_bytes
         _check_deadline(deadline)
-        try:
-            encoded_bytes += len(value.encode("utf-8"))
-        except UnicodeEncodeError as exc:
-            raise _ParamsUnencodable from exc
-        _check_deadline(deadline)
-        if encoded_bytes > MAX_AUDIT_PARAMS_BYTES:
+        if len(value) > MAX_AUDIT_PARAMS_BYTES - encoded_bytes:
             raise _ParamsTruncated
+        for start in range(0, len(value), _AUDIT_TEXT_CHUNK_CHARS):
+            _check_deadline(deadline)
+            try:
+                chunk = value[start:start + _AUDIT_TEXT_CHUNK_CHARS].encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise _ParamsUnencodable from exc
+            if len(chunk) > MAX_AUDIT_PARAMS_BYTES - encoded_bytes:
+                raise _ParamsTruncated
+            encoded_bytes += len(chunk)
+            _check_deadline(deadline)
 
     def visit(current: object, depth: int) -> None:
         nonlocal items

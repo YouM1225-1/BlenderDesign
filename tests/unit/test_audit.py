@@ -7,6 +7,7 @@ import os
 import stat
 import threading
 import time
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,9 @@ def test_record_appends_jsonl_with_digest_not_raw_params(tmp_path):
     assert stat.S_IMODE(files[0].stat().st_mode) == 0o600
     assert stat.S_IMODE((tmp_path / "logs").stat().st_mode) == 0o700
     row = json.loads(files[0].read_text().splitlines()[0])
+    assert set(row) == {"ts", "request_id", "tool", "instance_id",
+                        "transaction_id", "params_digest", "ok", "duration_ms",
+                        "paths", "error"}
     assert row["tool"] == "get_scene_summary"
     assert row["transaction_id"] is None          # Phase 0 占位（§5.2）
     assert row["paths"] == []
@@ -97,11 +101,19 @@ def test_huge_params_use_fixed_bounded_digest_without_full_dumps(
     assert "sensitive" not in path.read_text()
 
     aggregate = {f"aggregate-secret-{index:05d}": "" for index in range(4_096)}
+    huge_secret = "huge-secret-" + "x" * (audit_module.MAX_AUDIT_PARAMS_BYTES * 128)
+    huge_key = {huge_secret: None}
+    huge_value = {"value": huge_secret}
+    invalid_unicode = {"value": "invalid-secret-\ud800"}
+    multibyte_text_over = {
+        "": "界" * (audit_module.MAX_AUDIT_PARAMS_BYTES // 3 + 1)}
     real_iterencode = audit_module.json.JSONEncoder.iterencode
 
     def reject_aggregate_encoder(self, value, *args, **kwargs):
-        if value is aggregate:
-            raise AssertionError("aggregate params reached encoder/sort path")
+        if value is aggregate or any(value is blocked for blocked in
+                                     (huge_key, huge_value, invalid_unicode,
+                                      multibyte_text_over)):
+            raise AssertionError("rejected params reached encoder/sort path")
         return real_iterencode(self, value, *args, **kwargs)
 
     monkeypatch.setattr(audit_module.json.JSONEncoder, "iterencode",
@@ -113,6 +125,50 @@ def test_huge_params_use_fixed_bounded_digest_without_full_dumps(
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     assert rows[-1]["params_digest"] == audit_module.PARAMS_TRUNCATED_DIGEST
     assert "aggregate-secret" not in path.read_text()
+
+    peaks = []
+    tracemalloc.start()
+    try:
+        for request_id, value in (("huge-key", huge_key),
+                                  ("huge-value", huge_value)):
+            tracemalloc.reset_peak()
+            log.record("tool", request_id, ok=True, duration_ms=1.0, params=value,
+                       deadline=time.monotonic() + 1.0)
+            peaks.append(tracemalloc.get_traced_memory()[1])
+    finally:
+        tracemalloc.stop()
+    assert max(peaks) < audit_module.MAX_AUDIT_PARAMS_BYTES * 4
+
+    boundary_chars = (audit_module.MAX_AUDIT_PARAMS_BYTES - 8) // 3
+    multibyte_boundary = {"k": "界" * boundary_chars}
+    multibyte_over = {"k": "界" * (boundary_chars + 1)}
+    boundary_canonical = json.dumps(
+        multibyte_boundary, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False).encode()
+    assert len(boundary_canonical) <= audit_module.MAX_AUDIT_PARAMS_BYTES
+    assert len(json.dumps(multibyte_over, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False).encode()) \
+        > audit_module.MAX_AUDIT_PARAMS_BYTES
+    log.record("tool", "multibyte-boundary", ok=True, duration_ms=1.0,
+               params=multibyte_boundary)
+    log.record("tool", "multibyte-over", ok=True, duration_ms=1.0,
+               params=multibyte_over)
+    log.record("tool", "multibyte-text-over", ok=True, duration_ms=1.0,
+               params=multibyte_text_over)
+    log.record("tool", "invalid-unicode", ok=True, duration_ms=1.0,
+               params=invalid_unicode)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [row["params_digest"] for row in rows[-6:]] == [
+        audit_module.PARAMS_TRUNCATED_DIGEST,
+        audit_module.PARAMS_TRUNCATED_DIGEST,
+        hashlib.sha256(boundary_canonical).hexdigest()[:16],
+        audit_module.PARAMS_TRUNCATED_DIGEST,
+        audit_module.PARAMS_TRUNCATED_DIGEST,
+        audit_module.PARAMS_UNENCODABLE_DIGEST,
+    ]
+    text = path.read_text()
+    assert "huge-secret" not in text
+    assert "invalid-secret" not in text
 
 
 def test_deep_and_unencodable_params_use_bounded_sentinel(tmp_path):
@@ -284,6 +340,8 @@ def test_concurrent_first_initialization_is_race_safe_with_restrictive_umask(
     release_chmod = threading.Event()
     errors = []
     real_fchmod = audit_module.os.fchmod
+    real_umask = audit_module.os.umask
+    umask_calls = []
 
     def delayed_first_fchmod(fd, mode):
         if mode == 0o700 and not chmod_entered.is_set():
@@ -293,6 +351,13 @@ def test_concurrent_first_initialization_is_race_safe_with_restrictive_umask(
 
     monkeypatch.setattr(audit_module.os, "fchmod", delayed_first_fchmod)
 
+    def reject_audit_umask(mode):
+        umask_calls.append(mode)
+        raise AssertionError("AuditLog changed the process umask")
+
+    previous_umask = real_umask(0o777)
+    monkeypatch.setattr(audit_module.os, "umask", reject_audit_umask)
+
     def initialize():
         try:
             start.wait()
@@ -300,21 +365,26 @@ def test_concurrent_first_initialization_is_race_safe_with_restrictive_umask(
         except BaseException as exc:
             errors.append(exc)
 
-    previous_umask = os.umask(0o777)
     try:
         workers = [threading.Thread(target=initialize) for _ in range(16)]
         for worker in workers:
             worker.start()
         assert chmod_entered.wait(1.0)
+        unrelated = tmp_path / "unrelated.txt"
+        unrelated_fd = os.open(unrelated, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                               0o666)
+        os.close(unrelated_fd)
+        assert stat.S_IMODE(unrelated.stat().st_mode) == 0
         time.sleep(0.02)
         release_chmod.set()
         for worker in workers:
             worker.join(timeout=2.0)
     finally:
         release_chmod.set()
-        os.umask(previous_umask)
+        real_umask(previous_umask)
     assert all(not worker.is_alive() for worker in workers)
     assert errors == []
+    assert umask_calls == []
 
     monkeypatch.setattr(audit_module.os, "fchmod", real_fchmod)
     attack_runtime = tmp_path / "attack-runtime"
@@ -322,9 +392,9 @@ def test_concurrent_first_initialization_is_race_safe_with_restrictive_umask(
     attack_runtime.chmod(0o700)
     attack_logs = attack_runtime / "logs"
     original = tmp_path / "created-original"
-    replacement = tmp_path / "wide-replacement"
-    replacement.mkdir(mode=0o755)
-    replacement.chmod(0o755)
+    replacement = tmp_path / "restrictive-replacement"
+    replacement.mkdir(mode=0o700)
+    replacement.chmod(0o700)
     real_open = audit_module.os.open
     swapped = False
 
@@ -335,17 +405,19 @@ def test_concurrent_first_initialization_is_race_safe_with_restrictive_umask(
             swapped = True
             attack_logs.rename(original)
             replacement.rename(attack_logs)
+            attack_logs.chmod(0o500)
         return real_open(name, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(audit_module.os, "open", replace_created_before_open)
-    previous_umask = os.umask(0o777)
+    previous_umask = real_umask(0o777)
     try:
         with pytest.raises(PermissionError, match="private directory"):
             AuditLog(attack_logs)
     finally:
-        os.umask(previous_umask)
+        real_umask(previous_umask)
     assert swapped
-    assert stat.S_IMODE(attack_logs.stat().st_mode) == 0o755
+    assert stat.S_IMODE(attack_logs.stat().st_mode) == 0o500
+    attack_logs.chmod(0o700)
 
 
 def test_concurrent_first_file_creation_waits_for_fchmod(tmp_path, monkeypatch):
