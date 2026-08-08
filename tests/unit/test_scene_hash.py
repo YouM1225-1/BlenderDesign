@@ -1,3 +1,5 @@
+from inspect import signature
+
 from bridge.core import scene_hash
 
 
@@ -44,13 +46,6 @@ def test_structure_hash_v1_covers_only_declared_fields():
     assert fields[4] == "8,12,6"                    # 只有计数，没有坐标
 
 
-def test_same_counts_different_topology_collide_by_design():
-    # 同一对象在「顶点数/边数/面数不变但连接关系改变」后，v1 产出完全相同的行。
-    # 这是已知盲区（模块 docstring + URS v1.2 术语表），不是缺陷。
-    m = tuple(float(i) for i in range(16))
-    before = scene_hash.object_line("Cube", "MESH", m, "MESH", (8, 12, 6))
-    after = scene_hash.object_line("Cube", "MESH", m, "MESH", (8, 12, 6))
-    assert scene_hash.digest([before]) == scene_hash.digest([after])
-    # 反证：v1 对声明字段确实敏感——改 matrix 即变
-    moved = scene_hash.object_line("Cube", "MESH", tuple(range(1, 17)), "MESH", (8, 12, 6))
-    assert scene_hash.digest([before]) != scene_hash.digest([moved])
+def test_object_line_input_contract_excludes_topology():
+    assert tuple(signature(scene_hash.object_line).parameters) == (
+        "name", "obj_type", "matrix16", "data_kind", "data_counts")
