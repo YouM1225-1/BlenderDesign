@@ -1,6 +1,6 @@
 # BlenderDesign 文档导航与权威层级
 
-> 更新：2026-08-08 · 当前状态：`main@e5ac559` 上的 **r17 proposed** 文档基线；Phase 0 未执行、未提交、未生成 r17 attestation。r16 tuple 曾获批准但被研究融合取代；随后一次 r17 批准又因 live 四文档已漂移而未能绑定。当前只认融合审计 §9 的精确 tuple。
+> 更新：2026-08-08 · 当前状态：隔离候选 worktree 中**基于 `main@6b936ad` 的未提交 r18 proposed 候选**；这些 r18 字节尚不在 main/HEAD。Phase 0 未执行，未生成正式 r18 attestation。r17 已 attested，但因 Task 3 空洞同输入测试的评审发现被 supersede；当前只认 B-7 r18 基线审计的精确 tuple。
 
 本页是文档入口，不复制规范正文。发生冲突时按下表的权威层级处理；任何历史 capture、研究输入或单机测量都不能覆盖 live ROADMAP 与当前规范。
 
@@ -8,11 +8,12 @@
 
 | 角色 | 文件 | 状态与用法 |
 |---|---|---|
-| Live 状态与 Gate | [ROADMAP](ROADMAP.md) | 唯一 live 状态入口；当前由 B-6 阻断 Task 0 |
-| 需求合同 | [URS](../Blender-Codex-需求规格说明书-v1.md) | Normative v1.16 |
-| Phase 0 设计合同 | [design spec](superpowers/specs/2026-07-23-phase0-readonly-channel-design.md) | Normative v1.16 |
-| 执行输入 | [Phase 0 Plan](superpowers/plans/2026-07-23-phase0-readonly-channel.md) | r17 proposed；新 tuple 批准并完成两提交 attestation 前不可执行 |
-| 当前研究/基线审计 | [研究报告三融合审计](audits/2026-08-08-deep-research-report-3-integration-audit.md) | r17 当前审批证据；不等于实施结果 |
+| Live 状态与 Gate | [ROADMAP](ROADMAP.md) | 唯一 live 状态入口；当前由 B-7 阻断 Task 0 |
+| 需求合同 | [URS](../Blender-Codex-需求规格说明书-v1.md) | Normative v1.17 |
+| Phase 0 设计合同 | [design spec](superpowers/specs/2026-07-23-phase0-readonly-channel-design.md) | Normative v1.17 |
+| 执行输入 | [Phase 0 Plan](superpowers/plans/2026-07-23-phase0-readonly-channel.md) | r18 proposed；精确 tuple 批准并完成新的两提交 attestation 前不可执行 |
+| 当前基线审计 | [r18 Task 3 测试/来源修正审计](audits/2026-08-08-r18-topology-test-baseline-audit.md) | B-7 r18 当前审批证据；不等于实施结果 |
+| 上一候选审计 | [研究报告三融合审计](audits/2026-08-08-deep-research-report-3-integration-audit.md) | r17 已 attested、后被评审发现 supersede；只作历史追溯 |
 | 上一候选审计 | [r16/B-5 审计](audits/2026-08-08-r16-b5-adversarial-audit.md) | Approved but superseded；只作历史追溯 |
 | SDK 决策 | [MCP SDK v2 ADR](decisions/2026-08-07-mcp-sdk-v2-selection.md) | Accepted；本系统使用 `mcp>=2,<3` |
 

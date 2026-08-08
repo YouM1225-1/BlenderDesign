@@ -1,6 +1,6 @@
 # Phase 0 只读端到端链路 · 实施计划
 
-> 修订：**r17 proposed**（2026-08-08，研究报告三的确定性 catalog 与双内容 result payload 基线修订；Phase 0 未执行；新 proposed tuple 待用户批准）
+> 修订：**r18 proposed**（2026-08-08，修正 Task 3 拓扑碰撞测试的空洞同输入断言；Phase 0 未执行；精确 proposed tuple 待项目所有者批准）
 
 > **For agentic workers:** 推荐用 superpowers:subagent-driven-development 或 superpowers:executing-plans 按任务执行本计划；**若环境未安装 superpowers 插件，按任务序直接执行并逐 Step 核对即可——插件是加速项，不是前置依赖**（audit F-08）。Steps use checkbox (`- [ ]`) syntax as stable step identifiers；逐步进度记录在 executor 的外部 task log，Task 19 再写入 `docs/audits/phase0-validation-report.md`。获批后本文件本身是不可变执行输入，**不得直接勾选或改写 checkbox**，否则 Plan SHA 与 post-freeze attestation 立即失效。
 
@@ -10,7 +10,7 @@
 
 **Tech Stack:** Python 3.13（Blender 5.2.0 内置 3.13.13，SPIKE-2 实测）· **`mcp>=2.0,<3`（`MCPServer`）** · uv · pytest + pytest-timeout · ruff（target py313）· mypy strict（core）
 
-**上游文档：** spec = `docs/superpowers/specs/2026-07-23-phase0-readonly-channel-design.md`（v1.16，引用记为 §N）；URS = `Blender-Codex-需求规格说明书-v1.md`（v1.16）。本 Plan 仍是交付目标；Phase 0 未执行。
+**上游文档：** spec = `docs/superpowers/specs/2026-07-23-phase0-readonly-channel-design.md`（v1.17，引用记为 §N）；URS = `Blender-Codex-需求规格说明书-v1.md`（v1.17）。本 Plan 仍是交付目标；Phase 0 未执行。
 
 ## Global Constraints
 
@@ -51,13 +51,15 @@
 
 **计划代码块预检（不是 Plan 执行）**：r12 的 **262 passed（L1/unit 235 + L2/contract 27）** 仅是历史快照；r13 最终门禁计数以 v6 provenance 为准。真 GUI 100k shared-mesh 连续 20 次 `BridgeClient → UDS → Bridge` 查询的 worker-side nearest-rank P95 为约 **1439.21 ms**（max 约 2071.10 ms），`max_tick≈62.12 ms`，只关闭 M-4 的真 GUI Bridge-RPC/continuation 子门；该 runner 未经过 MCP stdio、SDK middleware、Discovery、Pydantic output validation 与 audit postlude，不能单独关闭端到端 NFR-P1。v6 manifest/provenance 与原始 GUI artifact 以最终 Plan SHA 单独固定；47 个 Python fences 中只有 46 个带 path 的文件块。50 ms 仍仅是 cooperative checking budget，不外推为硬墙钟保证。机械计数为 **92 个可执行 Markdown checkbox + 1 个不带 checkbox 的 G0 preflight**，全部未执行/未勾选；原报告的 raw token=93 包含文首 checkbox 语法示例，不能再称“93 个 Step”。
 
-> **历史数字说明**：紧接上一段只保留不可改写的旧快照；v8 固定历史 r15，r16 tuple 虽于 2026-08-08 获所有者批准，但在 source commit / attestation 前被本轮研究融合主动 supersede。当前审批只能认最终 r17 对抗审计与新 proposed tuple，不能沿用 r16 或更早的计数/SHA。
+> **历史数字说明**：紧接上一段只保留不可改写的旧快照；v8 固定历史 r15，r16 tuple 虽于 2026-08-08 获所有者批准，但在 source commit / attestation 前被 r17 研究融合 supersede；r17 随后完成 attestation，但因 Task 3 空洞同输入测试的评审发现被 r18 supersede。当前审批只能认 r18 基线审计与新 proposed tuple，不能沿用 r17 或更早的计数/SHA。
 
 **v8 历史预检（不是 Plan 执行）**：r15 Plan prose/code SHA 以 v8 provenance 为锚点；fresh-tree 门禁为 **307 passed（L1/unit 275 + L2/contract 32）**，adapter 专项 35、实质代码 373 行，ruff/mypy/vendor/nested/`uv lock --check` 全绿。100k shared-mesh 真 GUI Bridge-RPC 20-query worker P95 **1605.18 ms**（max **2560.86 ms**）、observer P95 **1655.44 ms**、`max_tick=62.50 ms`；只关闭 Bridge 子门，不代表端到端 MCP NFR-P1。机械计数为 **92 个可执行 checkbox + 1 个无 checkbox 的 G0 preflight，全部未执行/未勾选**。
 
 **r16 proposed 隔离预检（历史，未执行 Plan）**：从当时 Plan 的 49 个 path-bound Python 块与 8 个显式空 `__init__.py` 新建独立树，标准 unit **336 passed**、contract 32、全套 **368 passed**、adapter 35/373 行、Task 18 helper 53；manifest SHA-256 为 `ed50f6f1dda32b2723d27f9d0f0d5a86eb27d8711690b3ec7d2f3a5a7f1d0f12`。其完整 tuple 后来获所有者批准，但尚未形成 source commit 或 attestation 即被 r17 研究融合取代；不得作为当前执行输入。
 
-**r17 proposed 隔离预检（当前候选，未执行 Plan）**：从当前 Plan 的 49 个 path-bound Python 块与 8 个显式空 `__init__.py` 新建独立 Git 树，并只在临时树构造 source/attestation 两提交 fixture。标准 unit **337 passed**、contract **32 passed**、全套 **369 passed**；adapter **35/373** 行、Task 18 helper **54 passed**，`scripts/checks.sh` 明确输出 `ALL CHECKS PASSED`，ruff/mypy/compileall/`uv lock --check`/vendor/nested import 全绿。结构为 20 Tasks、93 open/0 checked、50 Python fences、49 path-bound/49 unique；manifest SHA-256 为 `49867d461307b7273077359062896705019d5c5e2bc2ef258ac386919b46cb80`。本轮未运行 Blender background/GUI/render、正式 NFR/recovery 或任何 Plan Task；临时 attestation 仅使 provenance 单测具备完整 fixture，不得复制为正式证据。
+**r17 proposed 隔离预检（历史，未执行 Plan）**：从当时 Plan 的 49 个 path-bound Python 块与 8 个显式空 `__init__.py` 新建独立 Git 树，并只在临时树构造 source/attestation 两提交 fixture。标准 unit **337 passed**、contract **32 passed**、全套 **369 passed**；adapter **35/373** 行、Task 18 helper **54 passed**，`scripts/checks.sh` 明确输出 `ALL CHECKS PASSED`，ruff/mypy/compileall/`uv lock --check`/vendor/nested import 全绿。结构为 20 Tasks、93 open/0 checked、50 Python fences、49 path-bound/49 unique；manifest SHA-256 为 `49867d461307b7273077359062896705019d5c5e2bc2ef258ac386919b46cb80`。其正式 attestation 已形成，但 Task 3 的同输入拓扑碰撞测试不能证明拓扑被输入合同排除，故该基线只作不可变历史。
+
+**r18 proposed 隔离预检（当前候选，未执行 Plan）**：项目所有者选择评审选项 1，以 `inspect.signature` 精确固定 `object_line` 的五参数输入合同，一对一替换 r17 的空洞同输入测试；保留既有结构字段测试，真实拓扑-only Blender 语义仍由 Task 18 L3 `hash_scope` 覆盖，产品行为不变。从当前 Plan 的 49 个 path-bound Python 块与 8 个显式空 `__init__.py` 新建独立 Git 树，并只在临时树构造 source/attestation 两提交 fixture。标准 unit **337 passed**、contract **32 passed**、全套 **369 passed**；adapter **35/373** 行、Task 18 helper **54 passed**，`scripts/checks.sh` 明确输出 `ALL CHECKS PASSED`，ruff/mypy/compileall/`uv lock --check`/vendor/nested import 全绿。结构为 20 Tasks、93 open/0 checked、50 Python fences、49 path-bound/49 unique；manifest SHA-256 为 `14cc45aab2809c8bbd9c425a7d402b272b41e295d0d7f7833f3d26a7a493d67b`。本轮未运行 Blender background/GUI/render、正式 NFR/recovery 或任何 Plan Task；临时 attestation 仅使 provenance 单测具备完整 fixture，不得复制为正式证据。
 
 ## File Structure
 
@@ -136,14 +138,14 @@ docs/
 
 **Step 1（核对项，不计入执行复选框）：确认 Git 基线（仓库已初始化，本步只做核对）**
 
-> G0 已关闭：历史中应保留 `f81ee3c`（基线）、`578f49e`（v8 capture）与 `e5ac559`（post-capture anchor）。r17 采用明确两提交链：先提交获批文档形成 `source_commit`，再从该 commit 的 Plan blob 生成 attestation 并另行提交；实际执行 HEAD 必须是 attestation commit 的后代，不要求等于前一个 freeze commit。**不要再执行 `git init`**；若仓库根、commit/blob、完整 approved tuple 或祖先关系不匹配，停下重审。
+> G0 已关闭：历史中应保留 `f81ee3c`（基线）、`578f49e`（v8 capture）与 `e5ac559`（post-capture anchor）。r18 采用明确两提交链：先提交获批文档形成 `source_commit`，再从该 commit 的 Plan blob 生成 attestation 并另行提交；实际执行 HEAD 必须是 attestation commit 的后代，不要求等于前一个 freeze commit。**不要再执行 `git init`**；若仓库根、commit/blob、完整 approved tuple 或祖先关系不匹配，停下重审。
 
 ```bash
 cd /Users/yeminjie/Documents/BlenderDesign
 git log --oneline | head -3
 git rev-parse --show-toplevel
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
-test -f docs/audits/evidence/2026-08-08-r17-post-freeze-attestation.json
+test -f docs/audits/evidence/2026-08-08-r18-post-freeze-attestation.json
 python3 - <<'PY'
 import hashlib, json, re, subprocess
 from pathlib import Path
@@ -156,7 +158,7 @@ documents = {
 }
 plan = documents["plan"]
 attestation_path = Path(
-    "docs/audits/evidence/2026-08-08-r17-post-freeze-attestation.json")
+    "docs/audits/evidence/2026-08-08-r18-post-freeze-attestation.json")
 attestation = json.loads(attestation_path.read_text())
 assert type(attestation) is dict and set(attestation) == {
     "schema_version", "generated_at", "source_commit", "approved_tuple"}
@@ -764,6 +766,8 @@ git commit -m "feat(protocol): 信封编解码、错误码、method 超时表、
 
 ```python
 # tests/unit/test_scene_hash.py
+from inspect import signature
+
 from bridge.core import scene_hash
 
 
@@ -810,16 +814,9 @@ def test_structure_hash_v1_covers_only_declared_fields():
     assert fields[4] == "8,12,6"                    # 只有计数，没有坐标
 
 
-def test_same_counts_different_topology_collide_by_design():
-    # 同一对象在「顶点数/边数/面数不变但连接关系改变」后，v1 产出完全相同的行。
-    # 这是已知盲区（模块 docstring + URS v1.2 术语表），不是缺陷。
-    m = tuple(float(i) for i in range(16))
-    before = scene_hash.object_line("Cube", "MESH", m, "MESH", (8, 12, 6))
-    after = scene_hash.object_line("Cube", "MESH", m, "MESH", (8, 12, 6))
-    assert scene_hash.digest([before]) == scene_hash.digest([after])
-    # 反证：v1 对声明字段确实敏感——改 matrix 即变
-    moved = scene_hash.object_line("Cube", "MESH", tuple(range(1, 17)), "MESH", (8, 12, 6))
-    assert scene_hash.digest([before]) != scene_hash.digest([moved])
+def test_object_line_input_contract_excludes_topology():
+    assert tuple(signature(scene_hash.object_line).parameters) == (
+        "name", "obj_type", "matrix16", "data_kind", "data_counts")
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -8836,7 +8833,7 @@ if __name__ == "__main__":
 
 `pyproject.toml` 不在本任务追加内容；执行者只核对 Task 0 的既有 console entry point。若缺失，应回到 Task 0 修正单一 `[project.scripts]` 表，不能在此重复定义。
 
-- [ ] **Step 5: 跑测试确认通过** → frozen 环境下 `pytest tests/unit/test_adapter.py -q` 为 **35 passed**，r17 全量物化树 `pytest tests/unit/ -q` 为 **337 passed**、全套为 **369 passed（unit 337 + contract 32）**；`awk 'NF && $1 !~ /^#/ {n++} END{exit n>375}' server/mcp/adapter.py`（实质代码 ≤ 375 行；r17 隔离实现 373 行）
+- [ ] **Step 5: 跑测试确认通过** → frozen 环境下 `pytest tests/unit/test_adapter.py -q` 为 **35 passed**，r18 全量物化树 `pytest tests/unit/ -q` 为 **337 passed**、全套为 **369 passed（unit 337 + contract 32）**；`awk 'NF && $1 !~ /^#/ {n++} END{exit n>375}' server/mcp/adapter.py`（实质代码 ≤ 375 行；r18 隔离实现 373 行）
 
 - [ ] **Step 6: Commit**
 
@@ -12598,7 +12595,7 @@ MAX_AUDIT_ROWS = 256
 MAX_RECOVERY_STATUS_ATTEMPTS = 64
 PLAN_PATH = ROOT / "docs/superpowers/plans/2026-07-23-phase0-readonly-channel.md"
 ATTESTATION_PATH = (
-    ROOT / "docs/audits/evidence/2026-08-08-r17-post-freeze-attestation.json")
+    ROOT / "docs/audits/evidence/2026-08-08-r18-post-freeze-attestation.json")
 APPROVED_DOCUMENTS = {
     "plan_sha256": PLAN_PATH,
     "urs_sha256": ROOT / "Blender-Codex-需求规格说明书-v1.md",
@@ -16095,7 +16092,9 @@ git commit -m "docs: 安装接入文档与 URS 验收核对表"
 
 > 1–4 保留初版自审编号；后续修订从最新到最旧排列，编号保留证据来源，不再误称整表严格倒序。
 
-20. **r17 研究融合与基线复核（2026-08-08，proposed）**：外部报告三只作为 non-normative 研究输入，41 个不可移植引用与“未收到本仓库源码”的旧边界不进入证据链。经 MCP/OpenAI/Blender 官方资料与代表性 GitHub 项目复核，只纳入确定性 ordered catalog、catalog/instructions 与 structured/兼容 TextContent 的可复算 byte baseline、跨层单一职责；默认 observation contract、Resources/Tasks、projection/diff、progressive error、Recipe/visual budget 延后，任意 Python、客户端幂等键、自动 mint stable ID 与开放 batch schema 明确拒绝。Task 17 固定三工具顺序、catalog 6389 bytes/SHA 与 instructions 322 bytes/SHA，并在 raw 2025-06-18/2025-11-25 与 SDK 2026-07-28 三条路径直接断言双内容 JSON 等价、fresh stdio 完整 catalog 与重复 list 冻结一致；Task 18 记录 60 份双内容 preimage/等价性/bytes/SHA/duplication ratio，并以非对象和“自洽但偏离 Task 17 freeze”的反例收紧外部校验；真实 SDK `Client.server_info` 成功路径也由同一 helper 回归覆盖。最终 fresh-tree **369 passed（unit 337 + contract 32）**、adapter 35/373 行、Task 18 helper 54，`scripts/checks.sh`、ruff/mypy/compileall/lock/vendor/nested 全绿；Plan 为 20 Tasks、93 open/0 checked、50 Python fences、49 path-bound/49 unique，代码块 manifest `49867d461307b7273077359062896705019d5c5e2bc2ef258ac386919b46cb80`。未运行 Blender background/GUI/render、正式 NFR/recovery 或 Plan；r16 approval 已 supersede，须以 r17 最终 tuple 重新审批。
+21. **r18 Task 3 测试/来源修正（2026-08-08，proposed）**：评审发现 r17 `test_same_counts_different_topology_collide_by_design` 用完全相同输入比较完全相同输出，不能证明拓扑被 `object_line` 输入合同排除。项目所有者选择选项 1：一对一替换为 `inspect.signature` 五参数精确断言，保留结构字段测试，真实 topology-only Blender 语义继续由 Task 18 L3 `hash_scope` 证明；不修改 `scene_hash` 产品行为或测试总数。fresh-tree 仍为 **369 passed（unit 337 + contract 32）**、adapter 35/373 行、Task 18 helper 54，`scripts/checks.sh`、ruff/mypy/compileall/lock/vendor/nested 全绿；Plan 仍为 20 Tasks、93 open/0 checked、50 Python fences、49 path-bound/49 unique，代码块 manifest `14cc45aab2809c8bbd9c425a7d402b272b41e295d0d7f7833f3d26a7a493d67b`。未运行 Blender background/GUI/render、正式 NFR/recovery 或 Plan；r17 evidence 保持不可变，须以 r18 精确 tuple 重新审批。
+
+20. **r17 研究融合与基线复核（2026-08-08，历史）**：外部报告三只作为 non-normative 研究输入，41 个不可移植引用与“未收到本仓库源码”的旧边界不进入证据链。经 MCP/OpenAI/Blender 官方资料与代表性 GitHub 项目复核，只纳入确定性 ordered catalog、catalog/instructions 与 structured/兼容 TextContent 的可复算 byte baseline、跨层单一职责；默认 observation contract、Resources/Tasks、projection/diff、progressive error、Recipe/visual budget 延后，任意 Python、客户端幂等键、自动 mint stable ID 与开放 batch schema 明确拒绝。Task 17 固定三工具顺序、catalog 6389 bytes/SHA 与 instructions 322 bytes/SHA，并在 raw 2025-06-18/2025-11-25 与 SDK 2026-07-28 三条路径直接断言双内容 JSON 等价、fresh stdio 完整 catalog 与重复 list 冻结一致；Task 18 记录 60 份双内容 preimage/等价性/bytes/SHA/duplication ratio，并以非对象和“自洽但偏离 Task 17 freeze”的反例收紧外部校验；真实 SDK `Client.server_info` 成功路径也由同一 helper 回归覆盖。最终 fresh-tree **369 passed（unit 337 + contract 32）**、adapter 35/373 行、Task 18 helper 54，`scripts/checks.sh`、ruff/mypy/compileall/lock/vendor/nested 全绿；Plan 为 20 Tasks、93 open/0 checked、50 Python fences、49 path-bound/49 unique，代码块 manifest `49867d461307b7273077359062896705019d5c5e2bc2ef258ac386919b46cb80`。未运行 Blender background/GUI/render、正式 NFR/recovery 或 Plan；该 revision 后由正式 r17 attestation 固定，现因 Task 3 测试评审发现被 r18 supersede。
 
 19. **r16/B-5 执行前 E2E 对抗冻结（2026-08-08，proposed）**：A-1 三项平台候选全部接受；A-3 选择“当前用户接受风险”，G5 仅以风险接受关闭，严格截图序列与 deferred render `SIGABRT` 未修。URS/spec 升 v1.15，P0-01～P0-20 与 Task 19 同序 20 行；Task 18 固定三工具各 20 次完整 MCP NFR-P1、public recovery supervisor/hidden worker、165/180 与 120/135 s 两层 deadline、fresh marker process registry、leader-exit group liveness、三次 MCP identity、bounded tracked-source provenance、四文档 exact approved tuple/source blob 及 60 个 result preimage 外部复算，并补 foreign uid/device/ancestor/FIFO/stale/load_pre/socket-order、stdlib pre-spawn reservation/bootstrap 与失败清理、read-only observation、8-record cache 与 deadline-bound 全 entry scan、真实第 9 条 overflow、unknown-before-valid、partial scan/publication deadline 和标准命令 bytecode 污染直接反例。最终隔离预检 **368 passed（unit 336 + contract 32）**，adapter 35/373 行、Task 18 helper 53，`scripts/checks.sh` 整体及 ruff/mypy/compileall/lock/vendor/nested 全绿；Plan 为 20 Tasks、93 open/0 checked、50 Python fences、49 path-bound/49 unique，代码块 manifest `ed50f6f1dda32b2723d27f9d0f0d5a86eb27d8711690b3ec7d2f3a5a7f1d0f12`。未跑 Blender background/GUI/render、正式 NFR/recovery 或 Plan，Phase 0 未执行；v8 provenance SHA `90432ae43b705b8b366e0dfe237e387ab8e8ba8a03d523d6ade2b61bf1a1fe54` 保持不变，提交前未生成仓库内 post-freeze attestation。完整 proposed tuple 仍待项目所有者批准，批准后只走 `source_commit → attestation commit` 两提交链。
 

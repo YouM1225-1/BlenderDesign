@@ -2,9 +2,9 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 | v1.16 |
-| 日期 | 2026-07-23（v1.0）· 2026-08-08（v1.16：r17 确定性 catalog 与 payload 基线） |
-| 状态 | 已评审；决策 D-1 / D-2 / D-3 / **D-4（官方 MCP 重评与边界澄清）** / **D-5（MCP SDK v2）** 已确认；当前为交付目标与隔离预检，**Phase 0 尚未执行**；变更记录见 §13。项目所有者已接受三项平台候选；重启后当前模型面与宿主目录均为 26/26，并以“当前用户接受风险”关闭 G5。该关闭是对 screenshot 顺序敏感性与 deferred render `SIGABRT` 的知情风险接受，**不是缺陷已修复或 26 工具稳定性证明**。r16 tuple 虽已获批准，但在 source commit/attestation 前被本轮研究融合取代；当前 r17 仍为 proposed，须经新 SHA/计数审批后方可提交或执行 |
+| 版本 | v1.17 |
+| 日期 | 2026-07-23（v1.0）· 2026-08-08（v1.17：r18 Task 3 测试/来源修正） |
+| 状态 | 已评审；决策 D-1 / D-2 / D-3 / **D-4（官方 MCP 重评与边界澄清）** / **D-5（MCP SDK v2）** 已确认；当前为交付目标与隔离预检，**Phase 0 尚未执行**；变更记录见 §13。项目所有者已接受三项平台候选；重启后当前模型面与宿主目录均为 26/26，并以“当前用户接受风险”关闭 G5。该关闭是对 screenshot 顺序敏感性与 deferred render `SIGABRT` 的知情风险接受，**不是缺陷已修复或 26 工具稳定性证明**。r17 已 attested，但因 Task 3 空洞同输入测试的评审发现被 r18 supersede；当前 r18 仍为 proposed，须经精确 SHA/计数审批后方可提交或执行 |
 | 适用范围 | macOS 桌面端本地部署 |
 
 ---
@@ -689,6 +689,12 @@ Phase 0 的性能与生命周期反例门禁还必须逐项通过：
 **延期或拒绝**：Resources/Tasks 只在目标 Codex Host 实测后重评且始终保留 Tool fallback；scene projection/diff、progressive error detail、Recipe、visual budget 进入 ROADMAP 的证据触发型后续项，不扩张 Phase 0 产品面；不引入 SQLite 或巨型 Batch schema，不重写已验证 UDS；报告中的客户端 `idempotency_key`、自动 mint 重复 stable ID 与 arbitrary Python 分别违反 FR-12、FR-10 与 G3/FR-04，明确拒绝。默认 summary 两个 include flag=true 而 NFR-P1=false 的 observation 成本盲点列入 V-05，不能以静默改默认制造语义歧义。
 
 **审批时态**：r16 完整 tuple 曾获所有者批准，但尚未形成 source commit/attestation 即被本次规范与 Plan 变更取代；批准不能跨未知哈希继承。当前只能以 r17 最终审计产生的新 tuple 重新审批，Phase 0 仍未执行。
+
+### v1.17（2026-08-08，r18 Task 3 测试/来源修正）
+
+评审发现 r17 Plan 的 `test_same_counts_different_topology_collide_by_design` 对完全相同的输入断言完全相同的输出，不能证明 topology 被 `scene_hash.object_line` 输入合同排除。项目所有者选择选项 1：以 `inspect.signature` 精确断言五参数输入合同，一对一替换该测试；保留结构字段测试，真实 topology-only Blender 语义仍由 Task 18 L3 `hash_scope` 覆盖。
+
+本次仅修正测试与 provenance 基线，不改变 `scene_hash` 产品合同、实现、公开工具面、验收数量或门禁计数。r17 evidence 保持不可变历史；r18 exact tuple 获批并完成 `source_commit → attestation commit` 两提交链前，Phase 0 仍不得执行。
 
 ---
 

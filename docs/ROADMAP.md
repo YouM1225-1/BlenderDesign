@@ -1,8 +1,8 @@
 # BlenderDesign 待办与执行路线
 
 > 生成日期：2026-08-08
-> 当前 revision 基线：`main@e5ac559`（post-capture anchor）· Plan **r17 proposed**（研究融合后的机械复核已完成，完整 tuple 见 [B-6 审计](audits/2026-08-08-deep-research-report-3-integration-audit.md)）· URS/spec v1.16
-> **Phase 0 未执行**：全部执行项保持未勾选。r16 tuple 虽已获项目所有者批准，但在 source commit/attestation 前被 r17 研究融合取代，不能继承到未知新哈希。只有 B-6 对抗审计完成、项目所有者批准 r17 完整 proposed tuple，并完成 `source_commit → attestation commit` 两提交链及机械验证后，才可执行 Task 0；执行期间 Plan 文件保持不可变，进度进入 executor task log，正式 5+20 门进入 Task 19 的 `docs/audits/phase0-validation-report.md`
+> 当前 revision 基线：隔离候选 worktree 中**基于 `main@6b936ad` 的未提交 r18 proposed 候选**；这些 r18 字节尚不在 main/HEAD。Plan 的 Task 3 测试/来源修正机械复核完成后，完整 tuple 见 [B-7 审计](audits/2026-08-08-r18-topology-test-baseline-audit.md)；URS/spec v1.17
+> **Phase 0 未执行**：全部执行项保持未勾选。r17 已完成 `source_commit 4a7083d… → attestation commit 4f13451…`，但评审发现 Task 3 拓扑碰撞测试以完全相同输入比较完全相同输出，不能证明 topology 被输入合同排除，故该已 attested 基线被 r18 supersede。只有 B-7 机械复核完成、项目所有者批准 r18 完整 proposed tuple，并完成新的 `source_commit → attestation commit` 两提交链及机械验证后，才可执行 Task 0；执行期间 Plan 文件保持不可变，进度进入 executor task log，正式 5+20 门进入 Task 19 的 `docs/audits/phase0-validation-report.md`
 > 本文是**live 状态与 Gate 入口**。 [closeout v3](audits/2026-08-07-closeout-v3.md) 与 [v8 provenance](audits/evidence/2026-08-08-phase0-closeout-v8-provenance.json) 只固定 r15/v8 历史 capture，不是 live 裁决；重启后 A-2/A-4 的限定结果见 [ROADMAP 执行审计](audits/2026-08-08-roadmap-execution-and-post-restart-audit.md)。
 > v8 provenance 是 `578f49e` 工作区的不可变 capture，`e5ac559` 是 post-capture commit anchor；本清单不追逐叙述文档的 live SHA，也不反写 v8。
 
@@ -17,7 +17,7 @@ git status --short
 shasum -a 256 docs/superpowers/plans/2026-07-23-phase0-readonly-channel.md | cut -c1-16
 ```
 
-- r15 历史基线 SHA 为 `7160f61846e628f6`；r16 approved-but-superseded SHA 为 `0f7a96464ad408b5`。当前 r17 proposed 的完整 SHA/计数必须与 B-6 最终审计一致；用户批准并完成两提交链后才改用 post-freeze attestation。任何不一致都表示基线漂移，停下重审。
+- r15 历史基线 SHA 为 `7160f61846e628f6`；r16 approved-but-superseded SHA 为 `0f7a96464ad408b5`；r17 exact tuple 由历史 attestation 固定但已被评审发现 supersede。当前 r18 proposed 的完整 SHA/计数必须与 B-7 最终审计一致；用户批准并完成新的两提交链后才改用 r18 post-freeze attestation。任何不一致都表示基线漂移，停下重审。
 - 若要批量修改任一文档，补丁脚本里**必须内置基线 SHA 前置校验**（本仓库已因缺此步骤发生过两次覆盖事故）。
 
 ---
@@ -116,7 +116,7 @@ CLI 工具使用专用 `.blend` 副本，不使用生产工作文件。
 
 ---
 
-## B 组 · 文档一致性（B-6 阻断 Task 0）
+## B 组 · 文档一致性（B-7 阻断 Task 0）
 
 ### B-0 · SHA 锚点表的漂移治理（已确定策略）
 
@@ -127,7 +127,7 @@ CLI 工具使用专用 `.blend` 副本，不使用生产工作文件。
 - `2026-08-08-phase0-closeout-v8-provenance.json` 保持不可变，继续描述 `captured_at` 时的 `578f49e` 工作区；
 - `e5ac5590…` 作为 post-capture 的 commit/tree anchor，叙述文档用 `commit + path` 定位；
 - closeout §2 只把 SHA 解释为 `e5ac559` 冻结对象，不宣称匹配 live 工作区；
-- r17 获批后先提交精确范围形成 `source_commit`；只从该 commit 的 blobs 生成 `docs/audits/evidence/2026-08-08-r17-post-freeze-attestation.json`，其 top-level 与 `approved_tuple` 都使用 exact-key schema。tuple 精确固定 Plan/URS/spec/ROADMAP SHA、20 Tasks、open/checked checkbox、Python fence、path-bound/unique Python，以及最终 unit/contract/full/adapter tests 与 adapter 实质行计数；四份 live SHA 必须同时等于 tuple 值和 `source_commit` blob SHA。再用**第二个提交**纳入 attestation；`source_commit != attestation_commit`，实际执行 HEAD 必须是 attestation commit 的后代。missing/extra key、任一文档漂移或祖先链不符均停止；提交前不生成会再次漂移的“当前 clean/HEAD”证据。
+- r18 获批后先提交精确范围形成新的 `source_commit`；只从该 commit 的 blobs 生成 `docs/audits/evidence/2026-08-08-r18-post-freeze-attestation.json`，其 top-level 与 `approved_tuple` 都使用 exact-key schema。tuple 精确固定 Plan/URS/spec/ROADMAP SHA、20 Tasks、open/checked checkbox、Python fence、path-bound/unique Python，以及最终 unit/contract/full/adapter tests 与 adapter 实质行计数；四份 live SHA 必须同时等于 tuple 值和 `source_commit` blob SHA。再用**第二个提交**纳入 r18 attestation；`source_commit != attestation_commit`，实际执行 HEAD 必须是 attestation commit 的后代。missing/extra key、任一文档漂移或祖先链不符均停止；提交前不生成会再次漂移的“当前 clean/HEAD”证据。既有 r17 attestation 保持不可变历史。
 
 **验收**：v8 JSON 字节不变；当前叙述文档不再声称其 SHA/clean 状态是 live 值。
 
@@ -161,7 +161,7 @@ CLI 工具使用专用 `.blend` 副本，不使用生产工作文件。
 
 **历史停点**：第 1～8 项已完成，项目所有者已批准 r16 完整 tuple；证据见 `docs/audits/2026-08-08-r16-b5-adversarial-audit.md` 与 `docs/audits/evidence/2026-08-08-r16-proposed-plan-python-manifest.tsv`。第 9 项尚未发生时，研究报告三触发 r17 规范/Plan 变更，故 r16 approval 自动失效且未生成 attestation；不得回头用旧 tuple 执行。
 
-### B-6 · r17 研究融合与开工基线冻结（当前阻断）
+### B-6 · r17 研究融合与开工基线冻结（历史：已 attested、后被评审发现 supersede）
 
 1. 归档研究报告三为非规范输入，重新以 OpenAI、MCP、Blender 官方资料及代表性 GitHub 仓库核验主张；不可解析的 `turn…/filecite…` 不进入证据链；
 2. 只把确定性 catalog、双内容 SDK/transport result payload byte baseline 与跨层单一职责纳入 URS/spec/Plan；真实 model-visible/token 成本留给目标 Codex Host A/B。Resources、projection/diff、progressive error、Recipe/visual budget 按证据触发延期，不扩张 Phase 0 产品工具面；
@@ -170,11 +170,22 @@ CLI 工具使用专用 `.blend` 副本，不使用生产工作文件。
 5. 对 r17 重新做 fresh-tree unit/contract/full、adapter、Task 18 helper、ruff/mypy/compileall/lock/vendor/nested、manifest/parity、链接/JSON/NDJSON/TSV 与独立对抗复核；
 6. 发布新的完整 proposed tuple 并等待项目所有者逐值批准；获批后才允许 `source_commit → r17 attestation commit`，随后才可进入 C 组。
 
-**当前停点**：第 1～5 项已完成；完整机械结果、manifest 与 proposed tuple 已发布到 [B-6 研究融合审计](audits/2026-08-08-deep-research-report-3-integration-audit.md)。项目所有者随后批准了当时可见的一组 r17 tuple，但机械绑定发现四份 live 文档已被后续加固改写，故该批准与此前 r16 批准一样不能跨未知哈希继承。第 6 项现在只剩项目所有者对审计 §9 **当前精确 r17 tuple** 的逐值批准；批准前不得 stage/commit、生成正式 attestation 或进入 C 组。
+**历史停点**：第 1～6 项后来全部完成；项目所有者批准 [B-6 研究融合审计](audits/2026-08-08-deep-research-report-3-integration-audit.md) §9 的精确 r17 tuple，并形成 `source_commit 4a7083d… → attestation commit 4f13451…`。该证据链保持不可变；随后 Task 3 空洞同输入测试的评审发现使 r17 被 r18 supersede，不再授权进入 C 组。
 
-## C 组 · Phase 0 主线执行（A-1、G5 可靠性门与 B-6 全关后）
+### B-7 · r18 Task 3 测试/来源修正与精确 tuple 审批（当前阻断）
 
-当前 r17 proposed 保留 20 个 Task；SHA/checkbox/test 计数必须以 B-6 最终审计为准。实际执行只能使用项目所有者明确批准、提交后 r17 attestation 固定的新 SHA/计数，并逐 Task 核对 Expected。
+1. 项目所有者选择评审选项 1：在 Task 3 `tests/unit/test_scene_hash.py` 中用 `inspect.signature` 五参数精确断言一对一替换空洞同输入 topology 测试，保留结构字段测试与总测试数；
+2. `scene_hash` 产品行为与合同不变，真实 topology-only Blender 语义仍留在 Task 18 L3 `hash_scope`；
+3. r17 manifest、attestation、audit 与历史 artifact 全部保持原字节；新增 r18 manifest、审计与未来 attestation 身份；
+4. 从最终 r18 Plan 独立生成 49/49 manifest，并在 fresh 临时 Git 树构造 source→r18-attestation fixture，重跑 unit/contract/full、adapter/行数、Task 18 helper、checks/ruff/mypy/compileall/lock/vendor/nested 及结构/链接/机器文件复核；
+5. 发布完整 r18 proposed tuple，等待项目所有者逐值批准。批准前不得 commit、生成正式 r18 attestation 或进入 C 组；
+6. 获批后只走新的两提交路径：先提交获批精确范围形成 r18 `source_commit`，再从该 commit blobs 生成并以第二个提交纳入 `2026-08-08-r18-post-freeze-attestation.json`；机械验证 live/approved/source blob 三方全等、祖先链、manifest 与 Git clean 后，才可进入 C 组。
+
+**当前停点**：第 1～4 项完成后，以 [B-7 r18 基线审计](audits/2026-08-08-r18-topology-test-baseline-audit.md) 的完整 exact tuple 为唯一审批对象；当前停止在第 5 项，等待项目所有者逐值批准。
+
+## C 组 · Phase 0 主线执行（A-1、G5 可靠性门与 B-7 全关后）
+
+当前 r18 proposed 保留 20 个 Task；SHA/checkbox/test 计数必须以 B-7 最终审计为准。实际执行只能使用项目所有者明确批准、提交后 r18 attestation 固定的新 SHA/计数，并逐 Task 核对 Expected。
 
 ### C-1 · 环境前置（每次开工）
 
@@ -222,11 +233,11 @@ test -x /Applications/Blender.app/Contents/MacOS/Blender
 
 | Task | 内容 | 验收 |
 |---|---|---|
-| 18 | L3 GUI/NFR/recovery | 严格执行 B-6 后获批 r17 Plan：基础五项与 100k/NFR 走隔离 root；NFR helper 使用 165 s work + 从 spawn 起 180 s runner outer deadline，recovery 使用 public 135 s OS supervisor + hidden 120 s worker。fresh marker-bound registry、leader-exit/live-child cleanup、三次 MCP identity 全等、catalog/payload byte baseline 及外部 artifact 断言都必须成功；不得使用省略监督器或护栏的简化命令 |
+| 18 | L3 GUI/NFR/recovery | 严格执行 B-7 后获批 r18 Plan：基础五项与 100k/NFR 走隔离 root；NFR helper 使用 165 s work + 从 spawn 起 180 s runner outer deadline，recovery 使用 public 135 s OS supervisor + hidden 120 s worker。fresh marker-bound registry、leader-exit/live-child cleanup、三次 MCP identity 全等、catalog/payload byte baseline 及外部 artifact 断言都必须成功；不得使用省略监督器或护栏的简化命令 |
 
 ### C-6 · Phase 0 关闭前的端到端 NFR-P1 执行门
 
-进入 C 组时，B-6 应已冻结并 attestation 固定本门。此处只执行，不再修改 Plan：现有 100k 证据绕过 MCP stdio/adapter/Discovery/schema/audit，不能复用为端到端结果。
+进入 C 组时，B-7 应已冻结并由 r18 attestation 固定本门。此处只执行，不再修改 Plan：现有 100k 证据绕过 MCP stdio/adapter/Discovery/schema/audit，不能复用为端到端结果。
 
 按新 Plan 对三个只读工具各跑 20-query：`get_scene_summary` 使用 100k 真 GUI 压力场景，`get_blender_status` 使用已连接真 GUI，`describe_capabilities` 走完整 MCP stdio/adapter 且不得触网。每项从 `tools/call` 到 validated structured result 的 P95 都必须 `< 2 s`。外部验证器须从 60 个 bounded canonical preimage 重新执行模型/语义验证并复算 result/argument digest、nearest-rank 第 19 项、max/代表结果；provenance 须先证 clean Git，再验证 bounded tracked-source manifest、四文档 live/tuple/source-blob 三方全等、完整门禁计数与两提交祖先链。100k fixture/Bridge-only 预查询发生在 helper spawn 前，不得误写入 helper deadline。任一失败即停止，不得进入 Task 19。
 
@@ -252,7 +263,7 @@ test -x /Applications/Blender.app/Contents/MacOS/Blender
 | **D-d** | FR-15 `F_FULLFSYNC` durability ADR | Phase 1 | macOS `fsync` 不刷驱动器缓存；实测 5.7 ms vs 0.05 ms |
 | **D-e** | FR-24 APFS `clonefile` | Phase 1/2 | 512 MiB 337 ms → 1 ms；**只对文件→文件复制有效**，内存态快照不受益 |
 | **D-f** | V-03 剩余项：真实 render 与 CPU fallback | Phase 2 | Metal 枚举/选择子项已关闭，**不是完全关闭** |
-| **D-g** | Phase 1 前 observation contract 裁决 | Phase 1 preflight | 先用 r17 artifact 的 catalog/instructions/structured/TextContent bytes、调用次数、wall time 建基线；裁决 summary 是否改 compact default。若省略 collections/managed detail，必须同时加入 `included/omitted/complete/truncated` 元数据与 selector/fields/limit/cursor，不能以空数组混淆“真实为空” |
+| **D-g** | Phase 1 前 observation contract 裁决 | Phase 1 preflight | 先用 r18 artifact 的 catalog/instructions/structured/TextContent bytes、调用次数、wall time 建基线；裁决 summary 是否改 compact default。若省略 collections/managed detail，必须同时加入 `included/omitted/complete/truncated` 元数据与 selector/fields/limit/cursor，不能以空数组混淆“真实为空” |
 | **D-h** | projected query / semantic diff | Phase 1/2，证据触发 | 仅当真实 task logs 证明重复 full summary 是主要成本才实现；默认禁止 raw mesh/完整 node graph，结果必须有界。`changed_since` 需等待 revision/epoch 语义稳定，不重写已验证 UDS transport |
 | **D-i** | Progressive error detail 与 validation projection | Phase 2，证据触发 | 模型默认只收稳定错误码/失败摘要；完整 traceback/报告外置并按需取回。先复用现有审计/Validation Report，不预建 Error Store 或 SQLite |
 | **D-j** | Resources / Tasks 兼容试验 | Phase 1.5+ | 目标 Codex Host 必须实测 list/read、未 read 不自动注入、真实上下文行为；Resources/Tasks 永远有 projected Tool / 自铸 job fallback，不作为当前依赖 |
@@ -293,10 +304,11 @@ test -x /Applications/Blender.app/Contents/MacOS/Blender
 | A | A-3 官方 MCP 部署策略裁决 | ✅ | 所有者选择“当前用户接受风险” |
 | A | G5 官方 MCP 可靠性门 | ✅ 风险接受 | screenshot 顺序敏感性与 render `SIGABRT` 仍成立；不是稳定性修复 |
 | 证据 | A-4 有界逐调用摘要 transcript | ✅ 非阻断 | 24 ok；2 render not_called；approval=0；无 raw payload |
-| B | B-0 SHA 锚点治理 | ✅ 策略已定 | v8 immutable；当前用 commit/path；新 r17 attestation 待 B-6 获批提交后生成 |
+| B | B-0 SHA 锚点治理 | ✅ 策略已定 | v8/r17 evidence immutable；当前用 commit/path；新 r18 attestation 待 B-7 获批提交后生成 |
 | B | B-1 ~ B-4 报告处置 | ✅ | 已修 |
 | B | B-5 r16 20 项验收映射 | ✅ 历史完成 | tuple 已批准但未提交即被 r17 supersede，不授权当前执行 |
-| B | B-6 r17 研究融合/基线 | ◐ 等待审批 | 机械复核与当前 tuple 已发布；上一组 r17 批准因 live 字节不匹配而未绑定，不得生成 attestation 或进入 C 组 |
-| C | Phase 0 主线 | ☐ 未执行 | 仅待 B-6 新 tuple 获批并完成两提交链；本轮禁止执行 |
+| B | B-6 r17 研究融合/基线 | ✅ 历史完成 | exact tuple 已批准并 attested；因 Task 3 测试评审发现被 r18 supersede，不授权当前执行 |
+| B | B-7 r18 测试/来源修正基线 | ◐ 等待审批 | fresh-tree 与完整 exact tuple 发布后只待项目所有者逐值批准；不得 commit、生成正式 r18 attestation 或进入 C 组 |
+| C | Phase 0 主线 | ☐ 未执行 | 仅待 B-7 r18 tuple 获批并完成新的两提交链；本轮禁止执行 |
 | D | D-b ~ D-l | ☐ | Phase 0/1 后或证据触发；D-a 已前移 C-6 |
 | E | E-1 ~ E-3 | ☐ | 随时 |

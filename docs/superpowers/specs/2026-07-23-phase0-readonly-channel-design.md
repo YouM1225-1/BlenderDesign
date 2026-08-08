@@ -2,10 +2,10 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 | v1.16 |
-| 日期 | 2026-07-23（初版）· 2026-08-08（r17 确定性 catalog 与 payload 基线；v1.16） |
+| 版本 | v1.17 |
+| 日期 | 2026-07-23（初版）· 2026-08-08（r18 Task 3 测试/来源修正；v1.17） |
 | 状态 | 交付目标／隔离预检；**Phase 0 未执行**（隔离树只用于组合性与对抗性验证；决策见 URS ADR-3/D-4 与 `docs/decisions/2026-08-07-mcp-sdk-v2-selection.md`） |
-| 上游需求 | `Blender-Codex-需求规格说明书-v1.md`（**URS v1.16**；含 20 项稳定验收 ID、三工具 NFR-P1 正式门与可复算证据合同、确定性 catalog / 双内容 result payload 基线、官方 MCP 风险接受边界、continuation/崩溃恢复、process-registry 生命周期、文件 identity 红线、资源上限与 conversion 准入契约及决策 D-4/D-5） |
+| 上游需求 | `Blender-Codex-需求规格说明书-v1.md`（**URS v1.17**；含 20 项稳定验收 ID、三工具 NFR-P1 正式门与可复算证据合同、确定性 catalog / 双内容 result payload 基线、官方 MCP 风险接受边界、continuation/崩溃恢复、process-registry 生命周期、文件 identity 红线、资源上限与 conversion 准入契约及决策 D-4/D-5） |
 | 覆盖子系统 | S1 传输与 Bridge 骨架 · S2 MCP Server 骨架 · S4 标识与一致性（读取部分） |
 
 **v1.9 隔离预检快照（历史、非实施证据）**：Plan 代码块提取到隔离树后候选门禁为 **262 passed（L1/unit 235 + L2/contract 27）**、ruff clean、mypy strict 22 个配置内源文件零错误；adapter 实质代码 375 行。真 Blender 大场景反例促使 SceneReader 从数值索引改为有界 slice 分块；本机 100k 共享网格候选预检约 1.2 s，最大 source step 约 22 ms。v1.10 又加入 run cursor fd identity 复核、socket identity 全有/全无约束与验证器有界读取；新的计数、SHA 与 v6 provenance 必须在最终冻结后生成，不能沿用 v1.9 数字。
@@ -23,6 +23,8 @@
 **v1.15/r16 最终门禁反例闭合（非实施证据）**：独立复核发现标准 unit 的 bytecode 污染、目录第 9 条 record 在 identity 前被截断、unknown entry 隐藏后续可信组及 pre-spawn failure 遗留 reservation。vendor exact-set 不放宽；checks/fixture 清理 bytecode。cache 上限 8 与 deadline-bound 枚举分离，逐 entry 错误继续扫描、所有 overflow 复核后 KILL；parent 在参数构造、SDK enter/`Popen` 未发布 record 的失败路径清理 reservation。正式 GUI/NFR/recovery 仍未运行，Phase 0 未执行。
 
 **v1.16/r17 研究融合（非实施证据）**：MCP `2026-07-28` Tools 规范已明确要求集合不变时返回确定顺序，并说明它改善 tool-list 与 LLM prompt cache。三工具 catalog 因而固定名称/顺序/完整定义；Task 17 冻结 ordered catalog 与 instructions 的 canonical/UTF-8 bytes+SHA，Task 18 进一步保留 60 次 `structuredContent` 与兼容 TextContent 的原文、等价性、字节与 duplication ratio。byte 只作可复算基线，不冒充 token，也不引入 tokenizer 依赖或未经 A/B 的经验阈值。r16 tuple 虽已获所有者批准，但在 source commit/attestation 前被本轮 r17 修订取代；Phase 0 仍未执行。
+
+**v1.17/r18 测试/来源修正（非实施证据）**：r17 Plan 的同输入 topology 碰撞测试是空洞断言；r18 以 `inspect.signature` 精确固定 `scene_hash.object_line` 的五参数输入合同，一对一替换该测试并保留结构字段测试。真实 topology-only Blender 语义仍由 Task 18 L3 `hash_scope` 覆盖。此修正不改变任何产品行为、`scene_hash` 合同、公开工具面或测试总数；r17 evidence 保持不可变历史，r18 exact tuple 仍待批准。
 
 ---
 
@@ -918,7 +920,7 @@ Phase 0 关闭还必须在独立临时 root 上执行两项正式真机门，均
 
 ### 7.4 验收映射（URS §10.1）
 
-下表按 URS v1.16 的稳定 ID **恰好 20 行且同序**；NFR-P1、确定性 catalog/payload 基线、G2/G3 与官方兼容通道属于补充关闭门，不得伪装成其中某一行，也不得反向把 20 行压回旧“八条”口径。
+下表按 URS v1.17 的稳定 ID **恰好 20 行且同序**；NFR-P1、确定性 catalog/payload 基线、G2/G3 与官方兼容通道属于补充关闭门，不得伪装成其中某一行，也不得反向把 20 行压回旧“八条”口径。
 
 | ID | 验收项 | 自动化层 |
 |---|---|---|
