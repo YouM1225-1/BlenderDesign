@@ -1,0 +1,173 @@
+{
+  "schema_version": 3,
+  "evidence_revision": "r15/v8",
+  "captured_at": "2026-08-08T10:52:00+08:00",
+  "completed_at": "2026-08-08T11:15:11+08:00",
+  "timezone": "Asia/Shanghai",
+  "scope": "Plan-as-code adversarial preflight only; Phase 0 production Plan was not executed.",
+  "git": {
+    "branch": "main",
+    "head": "578f49e52f818dd0f01745c6b0a5ba7c4558e2dd",
+    "phase0_plan_executed": false,
+    "plan_step_checkboxes": 92,
+    "plan_step_checkboxes_checked": 0,
+    "g0_preflight_items_without_checkbox": 1,
+    "staged_changes": false,
+    "new_commit_created": false,
+    "push_performed": false,
+    "workspace_has_intentional_unstaged_changes": true
+  },
+  "documents": {
+    "plan_path": "docs/superpowers/plans/2026-07-23-phase0-readonly-channel.md",
+    "plan_sha256": "7160f61846e628f6c11fb29305064ad98ff49c16170804d283fc6c8fac750487",
+    "urs_path": "Blender-Codex-需求规格说明书-v1.md",
+    "urs_sha256": "428d00921992c4e9a63aa3143ef681f3467480c5080d8ae41e035f37eb8382c4",
+    "spec_path": "docs/superpowers/specs/2026-07-23-phase0-readonly-channel-design.md",
+    "spec_sha256": "2a07d4444ea6a4f26bccab94db654bc7941b1f6c2d595ba8236cc6dcc1296b15",
+    "sdk_decision_path": "docs/decisions/2026-08-07-mcp-sdk-v2-selection.md",
+    "sdk_decision_sha256": "611a6353d923652a3acb62c2505dfeada3c865a7c9a3f5a9b90b6344883c172a",
+    "handoff_path": "docs/handoff/2026-08-07-platform-optimization-handoff.md",
+    "handoff_sha256": "d03be7b1ab2d027b6d2f21eb915f9be0730390087bf8cd719348f8316a754822",
+    "handoff_audit_path": "docs/audits/2026-08-07-platform-optimization-handoff-adversarial-audit.md",
+    "handoff_audit_sha256": "a7ad55cf77b32a1a50213128bb3ba0b747ac9b7f17888c96cf8c9401b98e8e9d",
+    "closeout_path": "docs/audits/2026-08-07-closeout-v3.md",
+    "closeout_sha256": "a9cc741cda507b9ea7d13af4e980130735157897112c44064cb4c67853e94ccc",
+    "measurement_path": "docs/measurements/2026-08-07-macos-platform-optimization.md",
+    "measurement_sha256": "4cebc0d4469665ccd9ffe09422f4b714dac15c5cac6aafc67aaca0fca9f60c1a"
+  },
+  "isolation": {
+    "root": "/private/tmp/blenderdesign-v8-r15-audit.9595",
+    "extraction_marker": "EXTRACTION_PLAN_SHA256",
+    "extraction_marker_sha256": "e8de3279e19bc3e4a5a51485fafe50f561b552d35db40aa3c80bade9738873de",
+    "extracted_plan_sha256": "7160f61846e628f6c11fb29305064ad98ff49c16170804d283fc6c8fac750487",
+    "python_fences_total": 47,
+    "path_bound_python_fences": 46,
+    "plan_block_parity": "46/46"
+  },
+  "manifests": {
+    "plan_python": {
+      "path": "docs/audits/evidence/2026-08-07-phase0-plan-python-manifest-v8.tsv",
+      "file_count": 46,
+      "sha256": "6bf37fdb228e6eed0a9c7b4eb5bb3648ee6a83affb0cc9531ea9612a549ab902",
+      "algorithm": "Sorted exact LF ```python fences whose first line is # <relative-path>.py; each row is path TAB sha256(file bytes) LF; hash the TSV bytes."
+    },
+    "non_python_artifacts": {
+      "path": "docs/audits/evidence/2026-08-07-phase0-artifact-manifest-v8.tsv",
+      "file_count": 4,
+      "sha256": "6a1cea7d1e14ca80b0297b347a80226620be7df512425dceb1e09e3d16da0624",
+      "plan_literal_parity": {
+        "pyproject.toml": true,
+        "scripts/checks.sh": true,
+        "bridge/blender_manifest.toml": true
+      },
+      "uv_lock_generated_not_inlined": true
+    },
+    "vendor": {
+      "path": "docs/audits/evidence/2026-08-07-phase0-vendor-manifest-v8.tsv",
+      "file_count": 3,
+      "source_destination_equal": true,
+      "sha256": "fa45e6d679ab878adcdead189ea307853e54489b0f0c305ec55ae994c29cbcdb"
+    }
+  },
+  "quality_gates": {
+    "checks_sh": {
+      "command": "bash scripts/checks.sh",
+      "result": "ALL CHECKS PASSED"
+    },
+    "pytest": {
+      "passed": 307,
+      "unit": 275,
+      "contract": 32,
+      "warnings": 0
+    },
+    "adapter": {
+      "passed": 35,
+      "substantive_lines": 373,
+      "limit": 375
+    },
+    "ruff": "clean",
+    "mypy": {
+      "source_files": 22,
+      "errors": 0,
+      "mode": "strict"
+    },
+    "uv": {
+      "version": "0.12.2",
+      "lock_check": "passed",
+      "resolved_package_blocks": 44,
+      "sync_checked_packages": 42
+    },
+    "vendor_protocol": "vendor ok",
+    "nested_import": "nested import ok",
+    "blender_background": {
+      "version": "5.2.0 LTS",
+      "build_hash": "fbe6228777e7",
+      "result": "BG_CHECK_OK",
+      "exit_code": 0
+    },
+    "blender_gui_smoke": {
+      "result": "SMOKE_OK",
+      "exit_code": 0,
+      "criteria": {
+        "timer_tick": true,
+        "revision_bump": true,
+        "fields": true,
+        "hash_scope": true,
+        "cycles_leak_free": true
+      },
+      "errors": []
+    }
+  },
+  "gui_artifacts": {
+    "base": {
+      "path": "docs/audits/evidence/2026-08-07-phase0-gui-smoke-closeout-v8.json",
+      "repository_sha256": "bfd5292ae2b5beae8a0b7d5447d5059de634029e9ba3ee934132c7356dbe98ae",
+      "raw_run_sha256": "dda8796d2aba14e2eb04da1b99a125d4c88cbb741ed3951048e1a16925bf7900"
+    },
+    "large_scene_100k": {
+      "path": "docs/audits/evidence/2026-08-07-phase0-gui-100k-measurement-v8.json",
+      "repository_sha256": "309a1f7f8a9b0d54b929c985341533b2d3439085f884f4d176efc66b48a8a67c",
+      "raw_run_sha256": "07f94ad499622dc936e276d7632899d122376603d06ea520664418ee9fcb5597",
+      "metrics": {
+        "target_objects": 100000,
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "worker_p95_ms": 1605.1823339948896,
+        "worker_max_ms": 2560.8581669948762,
+        "observer_p95_ms": 1655.4410829994595,
+        "observer_max_ms": 2598.4218340017833,
+        "max_tick_ms": 62.50366700987797,
+        "large_scene": true,
+        "large_scene_budget_ok": true
+      },
+      "scope": "BridgeClient to UDS to Bridge only; not MCP stdio, SDK middleware, Discovery, schema, validation, or audit."
+    }
+  },
+  "official_blender_mcp": {
+    "evidence_path": "docs/audits/evidence/2026-08-08-official-blender-mcp-v2.json",
+    "evidence_sha256": "219cfe4d31ec8a835d94da42bfde7cece91744c4e4fbc46d6094bbb8c6f8877e",
+    "checkout": "/Users/yeminjie/blender_mcp",
+    "head": "4309a39646e644261624bfcd2bca669b343b7621",
+    "checkout_clean": true,
+    "registered_tools": 26,
+    "effective_catalog_tools": 26,
+    "historical_single_round_direct_calls": 26,
+    "latest_safe_host_requested": 24,
+    "latest_safe_host_completed_before_failure": 14,
+    "latest_safe_host_failure_tool": "get_screenshot_of_area_as_image",
+    "latest_safe_host_replay_status": "incomplete_external_failure",
+    "approval_events_observed": 0,
+    "current_task_model_surface": 10,
+    "deferred_render_status": "SIGABRT reproduced",
+    "crash_report": {
+      "path": "/Users/yeminjie/Library/Logs/DiagnosticReports/Blender-2026-08-08-021517.ips",
+      "sha256": "cc8c7f4a4e0258dc064f30824406f2d77e0a758b0934e5d9afa8bfb97a7af7b1"
+    }
+  },
+  "remaining_gates": {
+    "user_approval": true,
+    "current_model_surface_26_of_26": false,
+    "official_render_stability": false,
+    "phase0_execution_allowed": false
+  }
+}

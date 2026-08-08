@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-08-07T21:17:01+08:00",
+  "upstream": {
+    "checkout": "/Users/yeminjie/blender_mcp",
+    "branch": "main",
+    "head": "4309a39646e644261624bfcd2bca669b343b7621",
+    "origin_main": "4309a39646e644261624bfcd2bca669b343b7621",
+    "working_tree_clean": true,
+    "remote_main": "4309a39646e644261624bfcd2bca669b343b7621"
+  },
+  "registered_tools": [
+    "execute_blender_code",
+    "execute_blender_code_for_cli",
+    "get_blendfile_summary_datablocks",
+    "get_blendfile_summary_datablocks_for_cli",
+    "get_blendfile_summary_missing_files",
+    "get_blendfile_summary_missing_files_for_cli",
+    "get_blendfile_summary_of_linked_libraries",
+    "get_blendfile_summary_of_linked_libraries_for_cli",
+    "get_blendfile_summary_path_info",
+    "get_blendfile_summary_path_info_for_cli",
+    "get_blendfile_summary_usage_guess",
+    "get_blendfile_summary_usage_guess_for_cli",
+    "get_object_detail_summary",
+    "get_objects_summary",
+    "get_python_api_docs",
+    "get_screenshot_of_area_as_image",
+    "get_screenshot_of_window_as_image",
+    "get_screenshot_of_window_as_json",
+    "jump_to_tab_by_name",
+    "jump_to_tab_by_space_type",
+    "jump_to_view3d_object_by_name",
+    "jump_to_view3d_object_data_by_name",
+    "render_thumbnail_to_path",
+    "render_viewport_to_path",
+    "search_api_docs",
+    "search_manual_docs"
+  ],
+  "codex_effective_config": {
+    "enabled_tools_count": 26,
+    "enabled_tools_unique": 26,
+    "enabled_tools_equals_registered": true,
+    "omit_tools_from": [],
+    "disabled_tools_present": false,
+    "per_tool_override_present": false,
+    "default_tools_approval_mode": "approve",
+    "global_approval_policy": "never",
+    "direct_only_tool_namespaces": ["mcp__blender"],
+    "blender_path": "/Applications/Blender.app/Contents/MacOS/Blender"
+  },
+  "codex_app_server": {
+    "codex_version": "0.147.0-alpha.6.5",
+    "mcp_server_status_tool_count": 26,
+    "approval_events_observed": 0,
+    "representative_calls": {
+      "execute_blender_code": "ok",
+      "get_screenshot_of_window_as_json": "ok",
+      "get_blendfile_summary_path_info": "ok"
+    }
+  },
+  "upstream_tool_listing_test": {
+    "command": "uv run --no-project --python 3.13 --with pytest --with 'mcp[cli]>=1.2.0,<2' --with-editable /Users/yeminjie/blender_mcp/mcp python -m pytest /Users/yeminjie/blender_mcp/tests/test_tool_listing.py -v",
+    "passed": 1,
+    "warnings_observed": 0
+  },
+  "cli_smoke": {
+    "mcp_sdk": "1.29.0",
+    "representative_calls": {
+      "get_blendfile_summary_path_info_for_cli": "ok",
+      "get_blendfile_summary_datablocks_for_cli": "ok",
+      "execute_blender_code_for_cli": "ok"
+    },
+    "blender_version": "5.2.0 LTS",
+    "non_blocking_warning": "IncompleteFieldDefinitionWarning"
+  },
+  "current_task_model_surface": {
+    "tool_count": 10,
+    "tools_are_startup_snapshot": true,
+    "tools": [
+      "get_blendfile_summary_datablocks",
+      "get_blendfile_summary_missing_files",
+      "get_blendfile_summary_of_linked_libraries",
+      "get_blendfile_summary_path_info",
+      "get_blendfile_summary_usage_guess",
+      "get_object_detail_summary",
+      "get_objects_summary",
+      "get_python_api_docs",
+      "search_api_docs",
+      "search_manual_docs"
+    ]
+  }
+}

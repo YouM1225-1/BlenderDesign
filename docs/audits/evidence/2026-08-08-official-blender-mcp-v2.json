@@ -1,0 +1,150 @@
+{
+  "schema_version": 2,
+  "captured_at": "2026-08-08T11:05:46+08:00",
+  "scope": "Official Blender Lab blender_mcp registration, host calls, and current Codex model-surface distinction; this is external compatibility evidence, not Phase 0 implementation evidence.",
+  "upstream": {
+    "checkout": "/Users/yeminjie/blender_mcp",
+    "branch": "main",
+    "head": "4309a39646e644261624bfcd2bca669b343b7621",
+    "origin_main": "4309a39646e644261624bfcd2bca669b343b7621",
+    "remote_main": "4309a39646e644261624bfcd2bca669b343b7621",
+    "working_tree_clean": true,
+    "license": "GPL-3.0-or-later"
+  },
+  "registry": {
+    "source_ast_tool_count": 26,
+    "source_ast_exact_names": true,
+    "runtime_registration_count": 26,
+    "runtime_registration_exact_names": true,
+    "upstream_tool_listing_test": {
+      "passed": 1,
+      "warnings": 0
+    }
+  },
+  "codex_effective_config": {
+    "enabled_tools_count": 26,
+    "enabled_tools_unique": 26,
+    "enabled_tools_equals_registry": true,
+    "enabled_tools": [
+      "execute_blender_code",
+      "execute_blender_code_for_cli",
+      "get_blendfile_summary_datablocks",
+      "get_blendfile_summary_datablocks_for_cli",
+      "get_blendfile_summary_missing_files",
+      "get_blendfile_summary_missing_files_for_cli",
+      "get_blendfile_summary_of_linked_libraries",
+      "get_blendfile_summary_of_linked_libraries_for_cli",
+      "get_blendfile_summary_path_info",
+      "get_blendfile_summary_path_info_for_cli",
+      "get_blendfile_summary_usage_guess",
+      "get_blendfile_summary_usage_guess_for_cli",
+      "get_object_detail_summary",
+      "get_objects_summary",
+      "get_python_api_docs",
+      "get_screenshot_of_area_as_image",
+      "get_screenshot_of_window_as_image",
+      "get_screenshot_of_window_as_json",
+      "jump_to_tab_by_name",
+      "jump_to_tab_by_space_type",
+      "jump_to_view3d_object_by_name",
+      "jump_to_view3d_object_data_by_name",
+      "render_thumbnail_to_path",
+      "render_viewport_to_path",
+      "search_api_docs",
+      "search_manual_docs"
+    ],
+    "omit_tools_from": [],
+    "disabled_tools_present": false,
+    "per_tool_override_present": false,
+    "default_tools_approval_mode": "approve",
+    "global_approval_policy": "never",
+    "direct_only_tool_namespaces": [
+      "mcp__blender"
+    ],
+    "blender_path": "/Applications/Blender.app/Contents/MacOS/Blender"
+  },
+  "historical_single_round_direct_calls": {
+    "status": "historical_success_reported",
+    "tool_count": 26,
+    "raw_transcript_present": false,
+    "representative_calls": {
+      "execute_blender_code": "ok",
+      "get_screenshot_of_window_as_json": "ok",
+      "get_blendfile_summary_path_info": "ok"
+    },
+    "warning": "This historical result proves neither that every tool is reliable nor that the current model context exposes all 26."
+  },
+  "latest_safe_host_replay": {
+    "status": "incomplete_external_failure",
+    "requested_tool_count": 24,
+    "completed_before_failure": 14,
+    "failure_ordinal": 15,
+    "failing_tool": "get_screenshot_of_area_as_image",
+    "failure_class": "official add-on returned truncated/invalid JSON response in the long sequence",
+    "single_tool_retry": "ok",
+    "approval_events_observed": 0,
+    "note": "The isolated retry succeeding does not close the long-sequence reliability failure."
+  },
+  "deferred_render": {
+    "status": "sigabrt_reproduced",
+    "tools_involved": [
+      "render_thumbnail_to_path",
+      "render_viewport_to_path"
+    ],
+    "crash_report": {
+      "path": "/Users/yeminjie/Library/Logs/DiagnosticReports/Blender-2026-08-08-021517.ips",
+      "sha256": "cc8c7f4a4e0258dc064f30824406f2d77e0a758b0934e5d9afa8bfb97a7af7b1",
+      "signal": "SIGABRT",
+      "allocator_message": "pointer being freed was not allocated"
+    },
+    "repeat_policy": "Do not rerun paired deferred renders in the dirty user GUI.",
+    "upstream_cross_checks": [
+      "https://projects.blender.org/blender/blender/issues/157084",
+      "https://projects.blender.org/blender/blender/pulls/156953",
+      "https://projects.blender.org/lab/blender_mcp/issues/12"
+    ],
+    "interpretation": "External upstream stability risk; not evidence against the custom Phase 0 core."
+  },
+  "current_task_model_surface": {
+    "tool_count": 10,
+    "tools": [
+      "get_blendfile_summary_datablocks",
+      "get_blendfile_summary_missing_files",
+      "get_blendfile_summary_of_linked_libraries",
+      "get_blendfile_summary_path_info",
+      "get_blendfile_summary_usage_guess",
+      "get_object_detail_summary",
+      "get_objects_summary",
+      "get_python_api_docs",
+      "search_api_docs",
+      "search_manual_docs"
+    ],
+    "startup_snapshot": true,
+    "hot_reload_observed": false,
+    "missing_from_current_model_surface": [
+      "execute_blender_code",
+      "execute_blender_code_for_cli",
+      "get_blendfile_summary_datablocks_for_cli",
+      "get_blendfile_summary_missing_files_for_cli",
+      "get_blendfile_summary_of_linked_libraries_for_cli",
+      "get_blendfile_summary_path_info_for_cli",
+      "get_blendfile_summary_usage_guess_for_cli",
+      "get_screenshot_of_area_as_image",
+      "get_screenshot_of_window_as_image",
+      "get_screenshot_of_window_as_json",
+      "jump_to_tab_by_name",
+      "jump_to_tab_by_space_type",
+      "jump_to_view3d_object_by_name",
+      "jump_to_view3d_object_data_by_name",
+      "render_thumbnail_to_path",
+      "render_viewport_to_path"
+    ]
+  },
+  "conclusion": {
+    "registered_26_of_26": true,
+    "effective_host_catalog_26_of_26": true,
+    "current_model_surface_26_of_26": false,
+    "all_26_stable": false,
+    "reason": "latest safe host replay failure and reproduced deferred-render SIGABRT"
+  }
+}
