@@ -59,6 +59,20 @@ def test_nonpositive_budget_times_out_before_connect(tmp_path, timeout):
     server = socket.socket(socket.AF_UNIX)
     server.bind(str(sock_path))
     server.listen(1)
+    server.settimeout(0.1)
+    accepted = threading.Event()
+
+    def accept_once():
+        try:
+            conn, _ = server.accept()
+        except socket.timeout:
+            return
+        else:
+            accepted.set()
+            conn.close()
+
+    worker = threading.Thread(target=accept_once, daemon=True)
+    worker.start()
     started = time.monotonic()
     try:
         client = BridgeClient({"socket_path": str(sock_path), "token": "t"})
@@ -66,8 +80,11 @@ def test_nonpositive_budget_times_out_before_connect(tmp_path, timeout):
             client.call("ping", timeout=timeout)
         assert exc.value.code == envelope.BRIDGE_TIMEOUT
         assert time.monotonic() - started < 0.1
+        worker.join(timeout=0.2)
+        assert not worker.is_alive() and not accepted.is_set()
     finally:
         server.close()
+        worker.join(timeout=1.0)
         sock_path.unlink(missing_ok=True)
         socket_dir.rmdir()
 
@@ -181,12 +198,17 @@ def test_response_version_and_id_must_match_request(version, id_matches, expecte
         socket_dir.rmdir()
 
 
-@pytest.mark.parametrize("response_fields", [
-    {"ok": "false", "result": {}},
-    {"ok": False, "error": "not-an-object"},
-    {"ok": True, "result": []},
+@pytest.mark.parametrize("response_cases", [
+    [{"ok": "false", "result": {}}],
+    [{"ok": False, "error": "not-an-object"}],
+    [
+        {"ok": True, "result": []},
+        {"ok": True, "result": {}, "error": {"code": "X", "message": "x", "retryable": False}},
+        {"ok": False, "error": {"code": "X", "message": "x", "retryable": False}, "result": {}},
+        {"ok": True, "result": {}, "unexpected": None},
+    ],
 ])
-def test_malformed_response_shape_maps_to_bridge_unavailable(response_fields):
+def test_malformed_response_shape_maps_to_bridge_unavailable(response_cases):
     socket_dir = Path(tempfile.mkdtemp(prefix="bcx-"))
     sock_path = socket_dir / "malformed.sock"
     srv = socket.socket(socket.AF_UNIX)
@@ -194,24 +216,26 @@ def test_malformed_response_shape_maps_to_bridge_unavailable(response_fields):
     srv.listen(1)
 
     def serve():
-        conn, _ = srv.accept()
-        buf = framing.FrameBuffer()
-        frames = []
-        while not frames:
-            frames = buf.feed(conn.recv(65536))
-        req = envelope.decode_request(frames[0])
-        body = {"v": envelope.ENVELOPE_VERSION, "id": req.id, **response_fields}
-        conn.sendall(framing.encode_frame(json.dumps(body).encode()))
-        conn.close()
+        for response_fields in response_cases:
+            conn, _ = srv.accept()
+            buf = framing.FrameBuffer()
+            frames = []
+            while not frames:
+                frames = buf.feed(conn.recv(65536))
+            req = envelope.decode_request(frames[0])
+            body = {"v": envelope.ENVELOPE_VERSION, "id": req.id, **response_fields}
+            conn.sendall(framing.encode_frame(json.dumps(body).encode()))
+            conn.close()
 
     worker = threading.Thread(target=serve, daemon=True)
     worker.start()
     try:
         client = BridgeClient({"socket_path": str(sock_path), "token": "t"})
-        with pytest.raises(BridgeError) as exc:
-            client.call("ping")
-        assert exc.value.code == envelope.BRIDGE_UNAVAILABLE
-        assert exc.value.retryable is True
+        for _ in response_cases:
+            with pytest.raises(BridgeError) as exc:
+                client.call("ping")
+            assert exc.value.code == envelope.BRIDGE_UNAVAILABLE
+            assert exc.value.retryable is True
     finally:
         srv.close()
         worker.join(timeout=1.0)

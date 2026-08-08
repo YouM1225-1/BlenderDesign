@@ -88,11 +88,12 @@ class BridgeClient:
             raise BridgeError(envelope.BRIDGE_UNAVAILABLE, "malformed response", retryable=True)
         if response["ok"]:
             result = response.get("result")
-            if type(result) is not dict:
+            if set(response) != {"v", "id", "ok", "result"} or type(result) is not dict:
                 raise BridgeError(envelope.BRIDGE_UNAVAILABLE, "malformed response", retryable=True)
             return result
         error = response.get("error")
-        if (type(error) is not dict or type(error.get("code")) is not str
+        if (set(response) != {"v", "id", "ok", "error"} or type(error) is not dict
+                or type(error.get("code")) is not str
                 or type(error.get("message")) is not str
                 or type(error.get("retryable")) is not bool):
             raise BridgeError(envelope.BRIDGE_UNAVAILABLE, "malformed response", retryable=True)
