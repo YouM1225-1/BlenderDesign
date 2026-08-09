@@ -4,7 +4,7 @@
 
 **Goal:** 新增一份可由 LLM 安全执行的官方 Blender Lab MCP 安装手册，并在当前 macOS Apple Silicon 主机上完成备份、最小修复和只读端到端实测。
 
-**Architecture:** 保持本仓库技术版本 `0.1.0` 和冻结的自研 Phase 0 交付不变；新增的 operational 文档描述独立的官方链路 `Codex -> 官方 blender MCP Server（stdio）-> localhost:9876 -> Blender 官方 mcp Extension`。当前机器优先走 no-op/repair 分支：复用已安装且内容一致的官方扩展和 Codex stanza，只在备份后开启被关闭的 Blender Online Access。新安装和显式上游更新分支固定完整 commit，并从实际 Server catalog 生成精确 allowlist。
+**Architecture:** 保持本仓库技术版本 `0.1.0` 和冻结的自研 Phase 0 交付不变；新增的 operational 文档描述独立的官方链路 `Codex -> 官方 blender MCP Server（stdio）-> localhost:9876 -> Blender 官方 mcp Extension`。当前机器优先走 no-op/repair 分支：复用已安装且内容一致的官方扩展和 Codex stanza，在备份后开启被关闭的 Blender Online Access，并补齐 stanza 唯一缺失的 `--python`, `3.13` pin。新安装和显式上游更新分支固定完整 commit，并从实际 Server catalog 生成精确 allowlist。
 
 **Tech Stack:** Markdown · zsh · Git · uv · Python 3.13 · Blender 5.2+ Extension CLI/Python API · Codex CLI/App Server JSON-RPC · MCP SDK `>=1.2.0,<2`
 
@@ -205,8 +205,15 @@ import tomllib
 from pathlib import Path
 
 path = Path(os.environ["CODEX_CONFIG"])
-if path.exists():
+try:
     info = path.lstat()
+except FileNotFoundError:
+    root = Path(os.environ["CODEX_ROOT"])
+    info = root.lstat()
+    assert stat.S_ISDIR(info.st_mode) and not root.is_symlink()
+    assert info.st_uid == os.getuid()
+    print("config=absent")
+else:
     assert stat.S_ISREG(info.st_mode) and not path.is_symlink()
     assert info.st_uid == os.getuid()
     tomllib.loads(path.read_text(encoding="utf-8"))
@@ -221,7 +228,8 @@ PY
 - checkout 已处于固定 commit 且 clean：不 fetch、不 checkout；
 - 已安装 Extension 的 ID、version 和文件内容与固定来源一致且已启用：不重装；
 - Online Access、autostart、host 和 port 已正确：不写 `userpref.blend`；
-- `codex mcp get blender --json`、真实 Server catalog 和 direct namespace 已正确：
+- 第 9 节的安全 probe 将 MCP entry 分类为 `present`，且捕获的
+  `codex mcp get blender --json`、真实 Server catalog 和 direct namespace 已正确：
   不写 config，也不为该 no-op 创建重复备份。
 
 若 Blender 正在运行且必须写偏好，要求用户保存并正常退出，然后确认无 Blender
@@ -254,11 +262,17 @@ export BACKUP_ROOT
 
 ```bash
 if [ -f "$CODEX_CONFIG" ]; then
+  CONFIG_PRESTATE=present
   cp -p "$CODEX_CONFIG" "$BACKUP_ROOT/config.toml.pre"
   chmod 600 "$BACKUP_ROOT/config.toml.pre"
   stat -f '%d %i %p %u' "$CODEX_CONFIG" "$BACKUP_ROOT/config.toml.pre"
   shasum -a 256 "$CODEX_CONFIG" "$BACKUP_ROOT/config.toml.pre"
+else
+  CONFIG_PRESTATE=absent
+  CONFIG_PARENT_IDENTITY="$(stat -f '%d %i' "$CODEX_ROOT")"
+  printf '%s\n' "config=absent" >> "$BACKUP_ROOT/prestates"
 fi
+export CONFIG_PRESTATE CONFIG_PARENT_IDENTITY
 ```
 
 从 Blender 精确版本的用户资源路径解析 `userpref.blend`，不要假设版本目录名。
@@ -266,9 +280,106 @@ fi
 
 ```bash
 BLENDER_VERSION="$($BLENDER_BIN --background --factory-startup --python-expr 'import bpy; print("%d.%d" % bpy.app.version[:2])' 2>&1 | awk '/^[0-9]+\.[0-9]+$/{print; exit}')"
+BLENDER_RESOURCE_BOUNDARY="$HOME/Library/Application Support/Blender"
 BLENDER_USER_ROOT="$HOME/Library/Application Support/Blender/$BLENDER_VERSION"
 USERPREF="$BLENDER_USER_ROOT/config/userpref.blend"
-export BLENDER_VERSION BLENDER_USER_ROOT USERPREF
+EXT_INSTALLED="$BLENDER_USER_ROOT/extensions/user_default/mcp"
+export BLENDER_VERSION BLENDER_RESOURCE_BOUNDARY BLENDER_USER_ROOT USERPREF EXT_INSTALLED
+
+snapshot_blender_target() {
+  "$UV_BIN" run --quiet --no-project --python 3.13 python - "$BLENDER_RESOURCE_BOUNDARY" "$1" "$2" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+boundary = Path(os.path.abspath(sys.argv[1]))
+target = Path(os.path.abspath(sys.argv[2]))
+kind = sys.argv[3]
+uid = os.getuid()
+assert kind in {"file", "directory"}
+assert target != boundary and target.is_relative_to(boundary)
+
+def directory_info(path: Path):
+    info = os.lstat(path)
+    assert stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+    assert info.st_uid == uid
+    return info
+
+anchor = boundary
+directory_info(anchor)
+for part in target.relative_to(boundary).parts[:-1]:
+    candidate = anchor / part
+    try:
+        directory_info(candidate)
+    except FileNotFoundError:
+        break
+    anchor = candidate
+
+try:
+    info = os.lstat(target)
+except FileNotFoundError:
+    anchor_info = directory_info(anchor)
+    print(json.dumps({"state": "absent", "anchor": str(anchor),
+                      "anchor_identity": [anchor_info.st_dev, anchor_info.st_ino]}, sort_keys=True))
+    raise SystemExit
+
+assert not stat.S_ISLNK(info.st_mode) and info.st_uid == uid
+assert stat.S_ISREG(info.st_mode) if kind == "file" else stat.S_ISDIR(info.st_mode)
+record = {"state": "present", "target_identity": [info.st_dev, info.st_ino]}
+if kind == "file":
+    record["sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
+else:
+    digest = hashlib.sha256()
+    for root, directories, files in os.walk(target, followlinks=False):
+        directories.sort()
+        files.sort()
+        for name in directories + files:
+            path = Path(root, name)
+            item = os.lstat(path)
+            assert not stat.S_ISLNK(item.st_mode)
+            relative = path.relative_to(target).as_posix()
+            digest.update(f"{relative}\0{stat.S_IFMT(item.st_mode):o}\0".encode())
+            if stat.S_ISREG(item.st_mode):
+                digest.update(hashlib.sha256(path.read_bytes()).digest())
+    record["tree_sha256"] = digest.hexdigest()
+    manifest = target / "blender_manifest.toml"
+    if manifest.is_file() and not manifest.is_symlink():
+        record["manifest_sha256"] = hashlib.sha256(manifest.read_bytes()).hexdigest()
+print(json.dumps(record, sort_keys=True))
+PY
+}
+
+revalidate_blender_target() {
+  current="$(mktemp "$BACKUP_ROOT/$3.now.XXXXXX")"
+  expected="${4:-$BACKUP_ROOT/$3.pre.json}"
+  chmod 600 "$current"
+  snapshot_blender_target "$1" "$2" > "$current"
+  if ! cmp -s "$current" "$expected"; then
+    echo "STOP: $3 target identity/content drift" >&2
+    unlink "$current"
+    exit 1
+  fi
+  unlink "$current"
+}
+
+snapshot_blender_target "$USERPREF" file > "$BACKUP_ROOT/userpref.pre.json"
+snapshot_blender_target "$EXT_INSTALLED" directory > "$BACKUP_ROOT/extension.pre.json"
+chmod 600 "$BACKUP_ROOT/userpref.pre.json" "$BACKUP_ROOT/extension.pre.json"
+
+if [ -e "$USERPREF" ]; then
+  printf '%s\n' "userpref=present" >> "$BACKUP_ROOT/prestates"
+else
+  printf '%s\n' "userpref=absent" >> "$BACKUP_ROOT/prestates"
+fi
+if [ -e "$EXT_INSTALLED" ]; then
+  printf '%s\n' "extension=present" >> "$BACKUP_ROOT/prestates"
+else
+  printf '%s\n' "extension=absent" >> "$BACKUP_ROOT/prestates"
+fi
+chmod 600 "$BACKUP_ROOT/prestates"
 
 if [ -f "$USERPREF" ]; then
   cp -p "$USERPREF" "$BACKUP_ROOT/userpref.blend.pre"
@@ -280,12 +391,16 @@ fi
 
 只有真实安装/升级 Extension 时才备份现有扩展目录；内容一致的当前安装必须
 跳过重装。目录备份使用 `ditto`，并记录源目录与备份目录的逐文件 SHA 清单。
-若 Extension 目录或 `userpref.blend` 原本不存在，分别记录 `extension=absent` 或
-`userpref=absent`，并记录本次创建后的 identity/SHA，供失败时只移除本次创建且
-未被外部替换的对象。
+上面的 `os.lstat` 检查不跟随 symlink：存在的 `userpref.blend` 必须是当前 UID
+所有的普通文件，存在的 Extension 必须是当前 UID 所有的目录；目标不存在时，
+则验证 Blender 用户资源边界内直到最近现存父目录的整条路径都是当前 UID 所有的
+非 symlink 目录。快照记录目标或最近现存父目录的 device/inode；现有 Extension
+还记录 manifest 和完整文件树 digest。
 
-每次写入前重新读取目标 device/inode/SHA；与记录不一致时停止，不覆盖并发
-修改。
+每次备份后、安装或写入前，调用 `revalidate_blender_target` 重新读取 identity、
+SHA/manifest/tree digest；与对应 `.pre.json` 不一致时停止，不覆盖并发修改。若
+某条安装命令会同时写 Extension 和偏好，两者都必须在该命令前重验，并在命令后
+把各自新快照保存为下一次写入的基线。
 
 ## 7. 固定源码与隔离 Server
 
@@ -296,10 +411,28 @@ UPSTREAM_URL="https://projects.blender.org/lab/blender_mcp.git"
 PINNED_COMMIT="4309a39646e644261624bfcd2bca669b343b7621"
 export UPSTREAM_URL PINNED_COMMIT
 
-if [ ! -e "$MCP_SOURCE_DIR/.git" ]; then
-  install -d -m 700 "$(dirname "$MCP_SOURCE_DIR")"
+SOURCE_PARENT="$(dirname "$MCP_SOURCE_DIR")"
+if [ -L "$MCP_SOURCE_DIR" ]; then
+  echo "STOP: source checkout is a symlink" >&2
+  exit 1
+elif [ -e "$MCP_SOURCE_DIR" ]; then
+  SOURCE_PRESTATE=present
+  test -d "$MCP_SOURCE_DIR/.git"
+  SOURCE_OLD_COMMIT="$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)"
+else
+  SOURCE_PRESTATE=absent
+  printf '%s\n' "source=absent" >> "$BACKUP_ROOT/prestates"
+  if [ ! -e "$SOURCE_PARENT" ]; then
+    install -d -m 700 "$SOURCE_PARENT"
+  fi
+  test ! -L "$SOURCE_PARENT"
+  test -d "$SOURCE_PARENT"
+  test "$(stat -f '%u' "$SOURCE_PARENT")" = "$(id -u)"
+  SOURCE_PARENT_IDENTITY="$(stat -f '%d %i' "$SOURCE_PARENT")"
   git clone "$UPSTREAM_URL" "$MCP_SOURCE_DIR"
+  SOURCE_CREATED_IDENTITY="$(stat -f '%d %i' "$MCP_SOURCE_DIR")"
 fi
+export SOURCE_PRESTATE SOURCE_PARENT SOURCE_PARENT_IDENTITY SOURCE_CREATED_IDENTITY SOURCE_OLD_COMMIT
 
 test ! -L "$MCP_SOURCE_DIR"
 test "$(stat -f '%u' "$MCP_SOURCE_DIR")" = "$(id -u)"
@@ -311,9 +444,13 @@ if [ "$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)" != "$PINNED_COMMIT" ]; then
 fi
 
 test "$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)" = "$PINNED_COMMIT"
-test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain)"
+test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all)"
 test ! -e "$MCP_SOURCE_DIR/uv.lock"
 ```
+
+`source=absent` 分支在 clone 前记录父目录 identity，在 clone 后记录新目录 identity；
+`source=present` 分支记录原完整 commit。两条分支的回滚合同不同，不得把首次创建
+描述为“恢复旧 commit”。
 
 用真实 MCP handshake 读取 catalog；这一步不需要 Blender listener：
 
@@ -392,7 +529,13 @@ EXT_ZIP="$BUILD_DIR/mcp-1.0.0.zip"
 unzip -p "$EXT_ZIP" blender_manifest.toml | \
   "$UV_BIN" run --quiet --no-project --python 3.13 python -c \
   'import sys,tomllib; d=tomllib.loads(sys.stdin.read()); assert d["id"]=="mcp"; assert d["version"]=="1.0.0"; assert tuple(map(int,d["blender_version_min"].split("."))) <= (5,2,0); print("manifest=ok")'
+revalidate_blender_target "$EXT_INSTALLED" directory extension
+revalidate_blender_target "$USERPREF" file userpref
 "$BLENDER_BIN" --command extension install-file -r user_default -e "$EXT_ZIP"
+EXTENSION_MUTATED=1
+snapshot_blender_target "$EXT_INSTALLED" directory > "$BACKUP_ROOT/extension.install-post.json"
+snapshot_blender_target "$USERPREF" file > "$BACKUP_ROOT/userpref.install-post.json"
+chmod 600 "$BACKUP_ROOT/extension.install-post.json" "$BACKUP_ROOT/userpref.install-post.json"
 ```
 
 不要只信最后一条命令的 exit code。随后必须确认 installed manifest、Extension
@@ -402,6 +545,11 @@ unzip -p "$EXT_ZIP" blender_manifest.toml | \
 Online Access、固定 host/port、启用 autostart，并保存偏好：
 
 ```bash
+if [ "${EXTENSION_MUTATED:-0}" = 1 ]; then
+  revalidate_blender_target "$USERPREF" file userpref "$BACKUP_ROOT/userpref.install-post.json"
+else
+  revalidate_blender_target "$USERPREF" file userpref
+fi
 "$BLENDER_BIN" --background --python-expr '
 import bpy
 module = "bl_ext.user_default.mcp"
@@ -418,6 +566,8 @@ result = bpy.ops.wm.save_userpref()
 assert result == {"FINISHED"}, result
 print("preferences-saved=ok")
 '
+snapshot_blender_target "$USERPREF" file > "$BACKUP_ROOT/userpref.post.json"
+chmod 600 "$BACKUP_ROOT/userpref.post.json"
 ```
 
 重新启动一个正常读取用户偏好的 Blender 进程核验。`bpy.app.online_access` 只有
@@ -444,11 +594,118 @@ print("blender-preferences=ok")
 先执行：
 
 ```bash
-"$CODEX_BIN" mcp get blender --json
+MCP_PROBE_DIR="$(mktemp -d "$BACKUP_ROOT/mcp-get.XXXXXX")"
+chmod 700 "$MCP_PROBE_DIR"
+MCP_GET_JSON="$MCP_PROBE_DIR/blender.json"
+MCP_GET_ERR="$MCP_PROBE_DIR/blender.stderr"
+MCP_GET_EXPECTED="$MCP_PROBE_DIR/expected-missing.stderr"
+for file in "$MCP_GET_JSON" "$MCP_GET_ERR" "$MCP_GET_EXPECTED"; do
+  install -m 600 /dev/null "$file"
+done
+cleanup_mcp_probe() {
+  unlink "$MCP_GET_JSON" 2>/dev/null || true
+  unlink "$MCP_GET_ERR" 2>/dev/null || true
+  unlink "$MCP_GET_EXPECTED" 2>/dev/null || true
+  rmdir "$MCP_PROBE_DIR" 2>/dev/null || true
+}
+trap cleanup_mcp_probe EXIT
+
+if "$CODEX_BIN" mcp get blender --json > "$MCP_GET_JSON" 2> "$MCP_GET_ERR"; then
+  MCP_ENTRY_STATE=present
+else
+  printf '%s\n' "Error: No MCP server named 'blender' found." > "$MCP_GET_EXPECTED"
+  if cmp -s "$MCP_GET_ERR" "$MCP_GET_EXPECTED"; then
+    MCP_ENTRY_STATE=absent
+  else
+    cat "$MCP_GET_ERR" >&2
+    exit 1
+  fi
+fi
+printf '%s\n' "mcp-entry=$MCP_ENTRY_STATE"
+
+# 若 present，在清理前解析 MCP_GET_JSON 并进行下述精确语义比较；禁止输出原文。
+cleanup_mcp_probe
+trap - EXIT
+export MCP_ENTRY_STATE
 ```
 
-不存在 entry 时可用 `codex mcp add` 创建 transport 骨架；存在 entry 时不得先
-remove。LLM 必须解析 TOML、只修改 `[mcp_servers.blender]`、其 `env`，并集合式
+这个 conditional 在 `set -e` 下可执行：成功只记录 `present`；只有 stderr 与当前
+CLI 的 exact missing-entry 消息逐字节相等时记录 `absent`；任何其他失败都会把
+捕获的 stderr 原样写回 stderr 后停止。受限目录是 `0700`，文件是 `0600`，清理
+只 unlink 这三个确切文件并移除该确切目录；不打印完整 Codex config。
+
+本节的 absent skeleton、原子修改和精确验证全部完成后，再运行以下 focused
+probe。它只读验证当前真实 entry 和唯一缺失名称均被正确分类，并证明 config
+pre/post fingerprint 未变化；它同样不打印 JSON：
+
+```bash
+config_fingerprint() {
+  if [ -e "$CODEX_CONFIG" ]; then
+    shasum -a 256 "$CODEX_CONFIG" | awk '{print $1}'
+  else
+    printf '%s\n' absent
+  fi
+}
+CONFIG_PROBE_PRE="$(config_fingerprint)"
+READ_PROBE_DIR="$(mktemp -d "$BACKUP_ROOT/mcp-read-probe.XXXXXX")"
+chmod 700 "$READ_PROBE_DIR"
+for name in present.out present.err missing.out missing.err expected.err; do
+  install -m 600 /dev/null "$READ_PROBE_DIR/$name"
+done
+cleanup_read_probe() {
+  for name in present.out present.err missing.out missing.err expected.err; do
+    unlink "$READ_PROBE_DIR/$name" 2>/dev/null || true
+  done
+  rmdir "$READ_PROBE_DIR" 2>/dev/null || true
+}
+trap cleanup_read_probe EXIT
+"$CODEX_BIN" mcp get blender --json \
+  > "$READ_PROBE_DIR/present.out" 2> "$READ_PROBE_DIR/present.err"
+test ! -s "$READ_PROBE_DIR/present.err"
+MISSING_PROBE_NAME="blender-install-absent-probe-$$"
+if "$CODEX_BIN" mcp get "$MISSING_PROBE_NAME" --json \
+  > "$READ_PROBE_DIR/missing.out" 2> "$READ_PROBE_DIR/missing.err"; then
+  echo "STOP: unique missing probe unexpectedly exists" >&2
+  exit 1
+fi
+printf "Error: No MCP server named '%s' found.\n" "$MISSING_PROBE_NAME" \
+  > "$READ_PROBE_DIR/expected.err"
+cmp -s "$READ_PROBE_DIR/missing.err" "$READ_PROBE_DIR/expected.err"
+test "$(config_fingerprint)" = "$CONFIG_PROBE_PRE"
+printf '%s\n' "present=present missing=absent config=unchanged"
+cleanup_read_probe
+trap - EXIT
+```
+
+不存在 entry 时，在任何写入前按第 6 节记录 `config=absent` 或备份已有 config，
+并用以下精确命令创建 transport 骨架。若 config 原本不存在，先重验
+`CODEX_ROOT` 仍是当前 UID 的非 symlink 目录且 device/inode 等于
+`CONFIG_PARENT_IDENTITY`：
+
+```bash
+if [ "$MCP_ENTRY_STATE" = absent ]; then
+  if [ "$CONFIG_PRESTATE" = absent ]; then
+    test ! -L "$CODEX_ROOT"
+    test -d "$CODEX_ROOT"
+    test "$(stat -f '%u' "$CODEX_ROOT")" = "$(id -u)"
+    test "$(stat -f '%d %i' "$CODEX_ROOT")" = "$CONFIG_PARENT_IDENTITY"
+  fi
+  "$CODEX_BIN" mcp add blender \
+    --env "BLENDER_PATH=$BLENDER_BIN" \
+    -- "$UV_BIN" run --quiet --no-project --python 3.13 \
+    --with 'mcp[cli]>=1.2.0,<2' \
+    --with-editable "$MCP_SOURCE_DIR/mcp" blender-mcp
+  test ! -L "$CODEX_CONFIG"
+  test -f "$CODEX_CONFIG"
+  test "$(stat -f '%u' "$CODEX_CONFIG")" = "$(id -u)"
+  CONFIG_CREATED_IDENTITY="$(stat -f '%d %i' "$CODEX_CONFIG")"
+  CONFIG_CREATED_SHA="$(shasum -a 256 "$CODEX_CONFIG" | awk '{print $1}')"
+fi
+export CONFIG_CREATED_IDENTITY CONFIG_CREATED_SHA
+```
+
+存在 entry 时不得先 remove。LLM 必须解析 TOML、只修改
+`[mcp_servers.blender]`、其 `env`，并集合式
 合并 `features.code_mode.direct_only_tool_namespaces` 中的 `mcp__blender`。保留其他
 配置、注释和成员。
 
@@ -486,6 +743,10 @@ direct_only_tool_namespaces = ["mcp__blender"]
 7. 重读并再次解析，记录 post-SHA；
 8. 运行 `codex mcp get blender --json` 精确验证 transport、args、env、timeouts
    和工具集合。
+
+若 `CONFIG_PRESTATE=absent`，第 7 步还必须记录原子 replace 后最终普通文件的
+`CONFIG_POST_IDENTITY`（device/inode）与 `CONFIG_POST_SHA`；这两个最终值而不是
+骨架的中间 identity/SHA 是首次安装回滚的唯一整文件移动条件。
 
 检测到并发变化立即停止。不得使用
 `codex --strict-config mcp get`；当前 Codex CLI 不支持该组合。
@@ -613,14 +874,18 @@ Expected: 返回当前 Blender 文件的结构化 data-block summary。不得在
 ## 11. 当前机器快速修复分支
 
 若以下事实全部成立：固定 checkout clean、官方 Extension ID/version/文件内容
-一致且已启用、Codex stanza 和 26 工具集合准确，唯一失败为 Online Access
-关闭，则：
+一致且已启用、26 工具集合准确、偏好唯一 drift 是 Online Access 关闭，且 Codex
+stanza 或者完全精确，或者唯一 drift 是 `--no-project` 后缺少 `--python`, `3.13`
+这一对参数，则：
 
 1. 不 fetch checkout；
 2. 不重装 Extension；
-3. 不重写 Codex config，不创建 config 重复备份；
+3. stanza 完全精确时不写 config、不创建 config 重复备份；若是已验证的唯一
+   Python-pin drift，只备份一次 config，按第 9 节 identity/SHA 重验和 mode `0600`
+   同目录临时文件流程，原子地只在 `--no-project` 后插入一对
+   `--python`, `3.13`，并证明其他目标语义及非目标 TOML 均未变化；
 4. 用户保存并正常退出 Blender；
-5. 只备份 `userpref.blend`；
+5. 备份 `userpref.blend`；
 6. 执行第 8 节的 preference 写入和重读；
 7. 重启 Blender/Codex，完成第 10 节四层验收。
 
@@ -656,12 +921,26 @@ Expected: 返回当前 Blender 文件的结构化 data-block summary。不得在
 
 Codex config：
 
-- 当前 SHA 等于本次记录的 post-SHA：可在同目录 mode `0600` 临时文件中写入
-  完整 pre-image，解析后原子恢复；
+- `CONFIG_PRESTATE=present` 且当前 SHA 等于本次记录的 post-SHA：可在同目录
+  mode `0600` 临时文件中写入完整 pre-image，解析后原子恢复；
 - 当前 SHA 已变化：禁止整文件覆盖，只做三方/手术式恢复原 `blender` stanza 和
   本次新增的 `mcp__blender` membership；
 - 原 stanza 不存在：只删除本次创建的 stanza；原 stanza 存在：恢复原值，不能
   用简单 `mcp remove` 代替。
+- `CONFIG_PRESTATE=absent` 时，只有当前路径仍是当前 UID 所有的普通非 symlink
+  文件、device/inode 等于 `CONFIG_POST_IDENTITY` 且 SHA 等于
+  `CONFIG_POST_SHA`，才把它移动到 `BACKUP_ROOT` 内新建的唯一 `0700` recovery
+  目录并验证原路径恢复为 absent；这是可恢复移动，不是删除。identity/SHA 有
+  任一变化时停止整文件移动，改用上述手术式 rollback，绝不覆盖并发内容。
+
+例如 absent-config 分支先逐项重验，再执行：
+
+```bash
+RECOVERY_CONFIG="$(mktemp -d "$BACKUP_ROOT/recovery-config.XXXXXX")"
+chmod 700 "$RECOVERY_CONFIG"
+mv "$CODEX_CONFIG" "$RECOVERY_CONFIG/config.toml.installer-created"
+test ! -e "$CODEX_CONFIG"
+```
 
 Blender：
 
@@ -671,15 +950,33 @@ Blender：
   `"$BLENDER_BIN" --command extension remove --no-prefs user_default.mcp` 并验证目录和模块
   均不存在；若目录已被外部替换则停止，不删除；
 - 原 `userpref.blend` 存在时恢复已验证备份；原状态为 `absent` 时，仅当当前文件
-  identity/SHA 等于本次记录的 post-image 才删除该文件，变化时停止；
+  identity/SHA 等于本次记录的 post-image 才把它移动到 `BACKUP_ROOT` 内唯一
+  recovery 目录并恢复路径 absent，变化时停止；
 - 重新启动并核验旧 ID/version、启用状态和偏好；
 - 不删除或修改任何 `.blend` 文件。
 
 Source/runtime：
 
-- 恢复记录的旧完整 commit 和旧 catalog；
-- 不删除 checkout 中用户新增内容，不清理共享 uv cache；
+- `SOURCE_PRESTATE=present`：只有 source identity 未变、worktree clean 且 HEAD
+  仍是本流程写入的 pin/candidate 时，才 detached checkout 记录的旧完整 commit，
+  并恢复旧 catalog；否则停止；
+- `SOURCE_PRESTATE=absent`：重验 source 父目录和新 checkout 的 device/inode 均
+  等于 clone 前后记录值，HEAD 仍等于 `PINNED_COMMIT`，
+  `git status --porcelain --untracked-files=all` 为空且没有生成的 `uv.lock`。全部成立
+  才把整个 checkout 移动到 `BACKUP_ROOT` 内新建的唯一 `0700` recovery 目录，
+  验证原路径 absent；这不是“恢复旧 commit”。任一条件失败都停止，绝不移动或
+  删除用户新增内容；
+- 不递归删除 checkout，不清理共享 uv cache；
 - 回滚后重复第 10 节四层验收。
+
+例如 absent-source 分支通过上述全部重验后执行：
+
+```bash
+RECOVERY_SOURCE="$(mktemp -d "$BACKUP_ROOT/recovery-source.XXXXXX")"
+chmod 700 "$RECOVERY_SOURCE"
+mv "$MCP_SOURCE_DIR" "$RECOVERY_SOURCE/source.installer-created"
+test ! -e "$MCP_SOURCE_DIR"
+```
 
 ## 14. 常见问题判定
 
