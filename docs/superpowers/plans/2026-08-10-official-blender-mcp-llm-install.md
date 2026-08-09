@@ -776,8 +776,9 @@ planned writes:
 
 Expected current facts: arm64; Blender 5.2+; checkout at the fixed commit and clean; SDK major
 `<2`; 26 unique tools; official Extension already installed/enabled and source-equivalent;
-Codex entry already exact; Online Access false is the only required write. Any conflicting fact
-must be investigated before mutation and recorded as a concern.
+Codex entry has the expected catalog/direct namespace and may need only the pinned
+`--python`, `3.13` args added after `--no-project`; Online Access is false. Any additional
+conflicting fact must be investigated before mutation and recorded as a concern.
 
 - [ ] **Step 2: 若 Blender 正在运行，正常退出而不强制终止**
 
@@ -792,11 +793,13 @@ request normal quit. If Blender presents an unsaved-file dialog, stop and ask th
 do not discard, overwrite, or save a `.blend` file without an explicit file decision. Continue only
 after `pgrep` returns no Blender process.
 
-- [ ] **Step 3: 备份唯一待修改的 `userpref.blend` 并验证 pre-image**
+- [ ] **Step 3: 备份将修改的 `userpref.blend` 和非精确 Codex config**
 
 Use manual §6. The repair report must record backup directory, source and backup SHA-256, mode,
-device/inode, and the source pre-SHA immediately before write. Do not back up or rewrite Codex
-config because its no-op check is exact. Do not reinstall the source-equivalent Extension.
+device/inode, and the source pre-SHA immediately before write. Always back up the preference file
+because Online Access requires a write. If the only Codex drift is the missing `--python`, `3.13`
+pair, also back up the full config bytes and record its pre-SHA/device/inode without printing the
+file. Do not reinstall the source-equivalent Extension.
 
 Expected: backup directory mode `0700`, file backup mode `0600`, backup SHA equals source
 pre-SHA, and source identity/SHA is unchanged immediately before write.
@@ -816,12 +819,26 @@ blender-preferences=ok
 Record the new `userpref.blend` SHA. Confirm it differs from pre-SHA, backup remains byte-identical,
 official Extension is still enabled, `host=localhost`, `port=9876`, and autostart is true.
 
-- [ ] **Step 5: 失败时按 identity-aware 规则回滚**
+- [ ] **Step 5: 原子补齐 Codex 的 Python 3.13 pin**
+
+Only when preflight proves every other `blender` stanza field, 26-tool catalog and direct namespace
+is exact, add the two args `--python`, `3.13` immediately after `--no-project`. Follow manual §9:
+parse the pre-image, revalidate device/inode/SHA, write a same-directory mode `0600` temporary file,
+parse it, atomically replace the target, parse again, and record post-SHA. Preserve all unrelated
+tables, keys and existing array members. Do not remove/re-add the MCP entry.
+
+Run `"$CODEX_BIN" mcp get blender --json` and a Python 3.13 `tomllib` checker. Expected: the args
+contain exactly one `--python`, `3.13` pair in the required position; all other target values equal
+their pre-image; 26-tool catalog, approval, omit list and direct namespace remain exact.
+
+- [ ] **Step 6: 失败时按 identity-aware 规则回滚**
 
 If Step 4 fails and current `userpref.blend` SHA equals the recorded post-image or no successful
 post-image exists, restore the verified pre-image while Blender is closed, then rerun the preference
 read-only check. If current SHA changed unexpectedly, stop instead of overwriting it and report the
-concurrent modification.
+concurrent modification. If Step 5 fails and current config SHA equals the recorded post-image,
+atomically restore the verified config pre-image after parsing it; if the SHA changed, stop and use
+manual §13 surgical rollback rather than overwriting concurrent work.
 
 Expected after rollback: backup/source SHA relationship is documented and no user `.blend` file was
 touched.
