@@ -1,0 +1,10 @@
+schema_version = "1.0.0"
+id = "blender_codex_bridge"
+version = "0.1.0"
+name = "Blender Codex Bridge"
+tagline = "Session-gated read-only bridge for the local Codex MCP server"
+maintainer = "yeminjie <jinying020755@gmail.com>"
+type = "add-on"
+license = ["SPDX:GPL-3.0-or-later"]
+blender_version_min = "4.5.0"
+platforms = ["macos-arm64"]
