@@ -4,9 +4,11 @@
 |---|---|
 | 版本 | v1.17 |
 | 日期 | 2026-07-23（初版）· 2026-08-08（r18 Task 3 测试/来源修正；v1.17）· 2026-08-09（r18 live adapter provenance 重冻结） |
-| 状态 | 交付目标／approved provenance；**Task 18 尚未开始**（项目所有者选择选项 1，以 live 327 行 supersede 历史 373 tuple；决策见 URS ADR-3/D-4 与 `docs/decisions/2026-08-07-mcp-sdk-v2-selection.md`） |
+| 状态 | **已实现（Phase 0）**；正式执行证据见 `docs/audits/phase0-validation-report.md` 与 `docs/audits/evidence/phase0-l3-execution-manifest.json`。Task 18 历史执行 HEAD 为 `c3dff7f00ec9da2cc8cd40a106257f0db59bebf8`；其证据不描述后续 post-acceptance HEAD。 |
 | 上游需求 | `Blender-Codex-需求规格说明书-v1.md`（**URS v1.17**；含 20 项稳定验收 ID、三工具 NFR-P1 正式门与可复算证据合同、确定性 catalog / 双内容 result payload 基线、官方 MCP 风险接受边界、continuation/崩溃恢复、process-registry 生命周期、文件 identity 红线、资源上限与 conversion 准入契约及决策 D-4/D-5） |
 | 覆盖子系统 | S1 传输与 Bridge 骨架 · S2 MCP Server 骨架 · S4 标识与一致性（读取部分） |
+
+**正式 Phase 0 验收（2026-08-09）**：`docs/audits/phase0-validation-report.md` 已逐项标记 5 个补充关闭门和 URS §10.1 的 P0-01～P0-20 为通过。正式 L3 执行入口为 `docs/audits/evidence/phase0-l3-execution-manifest.json`（SHA-256 `463a2a6362d6251056c1efac0efbe1d65bec907a8e90db5e9c2d9a5941bac77a`），其 clean execution HEAD 是 `c3dff7f00ec9da2cc8cd40a106257f0db59bebf8`，不可外推为本段之后的 post-acceptance HEAD。历史 r18 source `b9651b509cf43b3b29f4eba6656dd335528e36d4` 与 attestation `b8f7e1dca4affbab7c1f76468e0aee0e35194012` 保持不可变。
 
 **v1.9 隔离预检快照（历史、非实施证据）**：Plan 代码块提取到隔离树后候选门禁为 **262 passed（L1/unit 235 + L2/contract 27）**、ruff clean、mypy strict 22 个配置内源文件零错误；adapter 实质代码 375 行。真 Blender 大场景反例促使 SceneReader 从数值索引改为有界 slice 分块；本机 100k 共享网格候选预检约 1.2 s，最大 source step 约 22 ms。v1.10 又加入 run cursor fd identity 复核、socket identity 全有/全无约束与验证器有界读取；新的计数、SHA 与 v6 provenance 必须在最终冻结后生成，不能沿用 v1.9 数字。
 

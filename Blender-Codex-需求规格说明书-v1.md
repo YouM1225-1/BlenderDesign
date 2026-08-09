@@ -4,7 +4,7 @@
 |---|---|
 | 版本 | v1.17 |
 | 日期 | 2026-07-23（v1.0）· 2026-08-08（v1.17：r18 Task 3 测试/来源修正）· 2026-08-09（r18 live adapter provenance 重冻结） |
-| 状态 | 已评审；决策 D-1 / D-2 / D-3 / **D-4（官方 MCP 重评与边界澄清）** / **D-5（MCP SDK v2）** 已确认；当前为交付目标与隔离预检，**Task 18 尚未开始**；变更记录见 §13。项目所有者已接受三项平台候选；重启后当前模型面与宿主目录均为 26/26，并以“当前用户接受风险”关闭 G5。该关闭是对 screenshot 顺序敏感性与 deferred render `SIGABRT` 的知情风险接受，**不是缺陷已修复或 26 工具稳定性证明**。r17 已 attested，但因 Task 3 空洞同输入测试的评审发现被 r18 supersede；项目所有者现已选择选项 1，以最终 live adapter 327 实质行 supersede 旧 r18 373 行 tuple，当前 approved provenance 由 `docs/audits/evidence/2026-08-09-r18-live-adapter-post-freeze-attestation.json` 固定 |
+| 状态 | **已实现（Phase 0）**；决策 D-1 / D-2 / D-3 / **D-4（官方 MCP 重评与边界澄清）** / **D-5（MCP SDK v2）** 已确认。正式验收记录见 `docs/audits/phase0-validation-report.md`；Task 18 execution manifest 的 clean execution HEAD 为 `c3dff7f00ec9da2cc8cd40a106257f0db59bebf8`，不描述后续 post-acceptance HEAD。项目所有者已接受三项平台候选；重启后当前模型面与宿主目录均为 26/26，并以“当前用户接受风险”关闭 G5。该关闭是对 screenshot 顺序敏感性与 deferred render `SIGABRT` 的知情风险接受，**不是缺陷已修复或 26 工具稳定性证明**。r17 已 attested，但因 Task 3 空洞同输入测试的评审发现被 r18 supersede；项目所有者现已选择选项 1，以最终 live adapter 327 实质行 supersede 旧 r18 373 行 tuple |
 | 适用范围 | macOS 桌面端本地部署 |
 
 ---
@@ -698,7 +698,11 @@ Phase 0 的性能与生命周期反例门禁还必须逐项通过：
 
 ### r18 live adapter provenance 重冻结（2026-08-09）
 
-项目所有者选择选项 1：不向生产 adapter 填充代码，以最终 live `server/mcp/adapter.py` 的 **327** 实质行 supersede 旧 r18 attestation 固定的 373 行 tuple。旧 attestation 与历史 preflight/manifest 保持原字节；新 approved tuple 仍固定 20 Tasks、93 open / 0 checked、50 Python fences、49 path-bound / 49 unique，以及最终预期 unit 337 / contract 32 / full 369 / adapter 35 / adapter 327 行。Task 18 尚未开始，当前 full 315 不得写成已执行 369 证据；新 `source_commit → attestation commit` 链由 `docs/audits/evidence/2026-08-09-r18-live-adapter-post-freeze-attestation.json` 固定。
+项目所有者选择选项 1：不向生产 adapter 填充代码，以最终 live `server/mcp/adapter.py` 的 **327** 实质行 supersede 旧 r18 attestation 固定的 373 行 tuple。旧 attestation 与历史 preflight/manifest 保持原字节；新 approved tuple 仍固定 20 Tasks、93 open / 0 checked、50 Python fences、49 path-bound / 49 unique，以及最终预期 unit 337 / contract 32 / full 369 / adapter 35 / adapter 327 行。该重冻结时 Task 18 尚未开始，当前 full 315 不得写成已执行 369 证据；新 `source_commit → attestation commit` 链由 `docs/audits/evidence/2026-08-09-r18-live-adapter-post-freeze-attestation.json` 固定。
+
+### Phase 0 正式验收（2026-08-09）
+
+`docs/audits/phase0-validation-report.md` 已依 URS §10.1 同序记录 P0-01～P0-20，并独立记录 G2、G3、完整 stdio → adapter → UDS → Bridge、NFR-P1 与 G5 五个补充关闭门；全部为通过。正式执行归因入口为 `docs/audits/evidence/phase0-l3-execution-manifest.json`，SHA-256 为 `463a2a6362d6251056c1efac0efbe1d65bec907a8e90db5e9c2d9a5941bac77a`，执行 HEAD 为 `c3dff7f00ec9da2cc8cd40a106257f0db59bebf8`。该历史 manifest、其 sidecars、Task 18 artifacts 与旧 r18 attestation 均保持原字节，且不得宣称它们描述后续 post-acceptance HEAD；Plan 保持 93 open / 0 checked。
 
 ---
 
