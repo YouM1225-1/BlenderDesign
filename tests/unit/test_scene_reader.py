@@ -13,12 +13,17 @@ class _BpyWrapper:
 
 
 class _NamedList(list):
+    def __init__(self, items=()) -> None:
+        super().__init__(items)
+        self.slice_calls = 0
+
     def get(self, name):
         return next((item for item in self if item.name == name), None)
 
     def __getitem__(self, key):
         if isinstance(key, int):
             raise AssertionError("scene reader must use bounded collection slices")
+        self.slice_calls += 1
         return super().__getitem__(key)
 
 
@@ -246,20 +251,42 @@ def test_scene_info_race_invalidates_before_snapshot_publish(monkeypatch):
 
 
 def test_snapshot_reader_rejects_object_text_before_unbounded_growth(monkeypatch):
-    module, _scene = _load_scene_reader(monkeypatch, object_count=2)
+    module, scene = _load_scene_reader(monkeypatch, object_count=2)
+    assert module.MAX_SNAPSHOT_ITEMS == 1_000_000
+    assert module.MAX_SNAPSHOT_TEXT_BYTES == 64 * 1024 * 1024
+
     monkeypatch.setattr(module, "MAX_SNAPSHOT_TEXT_BYTES", 1)
     with pytest.raises(module.SnapshotLimitExceeded, match="object text"):
         _finish(module.BpySceneReader(module.RevisionCounter()).snapshot_steps(
             include_collections=False))
+    assert scene.objects.slice_calls == 1
+
+    module, scene = _load_scene_reader(monkeypatch, object_count=2)
+    monkeypatch.setattr(module, "MAX_SNAPSHOT_ITEMS", 1)
+    with pytest.raises(module.SnapshotLimitExceeded, match="object item"):
+        _finish(module.BpySceneReader(module.RevisionCounter()).snapshot_steps(
+            include_collections=False))
+    assert scene.objects.slice_calls == 0
 
 
 def test_snapshot_reader_caps_collection_items_and_skips_unrequested_source(monkeypatch):
     module, _scene = _load_scene_reader(monkeypatch, object_count=0,
                                        collection_count=2)
+    collections = module.bpy.data.collections
     monkeypatch.setattr(module, "MAX_SNAPSHOT_ITEMS", 1)
     with pytest.raises(module.SnapshotLimitExceeded, match="collection item"):
         _finish(module.BpySceneReader(module.RevisionCounter()).snapshot_steps())
+    assert collections.slice_calls == 0
 
     snapshot = _finish(module.BpySceneReader(module.RevisionCounter()).snapshot_steps(
         include_collections=False))
     assert snapshot.collections == ()
+    assert collections.slice_calls == 0
+
+    module, _scene = _load_scene_reader(monkeypatch, object_count=0,
+                                       collection_count=2)
+    collections = module.bpy.data.collections
+    monkeypatch.setattr(module, "MAX_SNAPSHOT_TEXT_BYTES", 1)
+    with pytest.raises(module.SnapshotLimitExceeded, match="collection text"):
+        _finish(module.BpySceneReader(module.RevisionCounter()).snapshot_steps())
+    assert collections.slice_calls == 1

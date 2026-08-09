@@ -44,11 +44,22 @@ class _Session:
         self.stopped = False
         self.stop_calls = 0
         self.cleanup_results = [True]
+        self.stop_callbacks: list[tuple] = []
+        self.callback_order: list[str] = []
 
-    def stop(self, *_args) -> bool:
+    def stop(self, *callbacks) -> bool:
         self.stopped = True
         self.stop_calls += 1
-        return self.cleanup_results.pop(0) if self.cleanup_results else True
+        self.stop_callbacks.append(callbacks)
+        callbacks_complete = True
+        for callback in callbacks:
+            self.callback_order.append(callback.__name__)
+            try:
+                callback()
+            except Exception:
+                callbacks_complete = False
+        cleanup_complete = self.cleanup_results.pop(0) if self.cleanup_results else True
+        return cleanup_complete and callbacks_complete
 
 
 def _load_driver(monkeypatch, failure: str, preexisting: bool = False):
@@ -103,7 +114,6 @@ def test_driver_wires_load_invalidation_and_ordered_stop_hooks():
     panel_source = (Path(__file__).parents[2] / "bridge" / "blender" / "panel.py").read_text()
     assert "bpy.app.handlers.load_pre.append(_on_load_pre)" in source
     assert "c.bump_generation()" in source
-    assert "session.stop(_unregister_timer, _unregister_handlers)" in source
     assert 'else {"CANCELLED"}' in panel_source
     assert "清理未完成，点击重试" in panel_source
 
@@ -285,6 +295,31 @@ def test_start_self_heals_missing_callbacks_for_live_session(monkeypatch):
     assert session.stop_calls == 0 and driver._state["session"] is session
     driver._state.update(session=None, counter=None)
 
+    for failure, cleanup_results in (("handler", [True]), ("timer", [False, True])):
+        driver, depsgraph, load_pre, timers, session = _load_driver(monkeypatch, "none")
+        driver.start()
+        depsgraph.remove(driver._on_depsgraph)
+        load_pre.remove(driver._on_load_pre)
+        timers.unregister(driver._tick_guard)
+        load_pre._fail_after_append = failure == "handler"
+        timers._fail_after_register = failure == "timer"
+        session.cleanup_results = cleanup_results
+
+        with pytest.raises(RuntimeError, match=f"{failure} registration failed"):
+            driver.start()
+
+        expected_callbacks = (driver._unregister_timer, driver._unregister_handlers)
+        assert session.stop_callbacks == [expected_callbacks]
+        assert session.callback_order == ["_unregister_timer", "_unregister_handlers"]
+        assert depsgraph == [] and load_pre == [] and timers.callbacks == set()
+        assert session.stopped is True and driver.running() is False
+        if failure == "handler":
+            assert driver._state == {"session": None, "counter": None}
+        else:
+            assert driver._state["session"] is session
+            assert driver.stop() is True
+            assert driver._state == {"session": None, "counter": None}
+
 
 def test_start_state_probe_failure_stops_published_session(monkeypatch):
     driver, depsgraph, load_pre, timers, session = _load_driver(monkeypatch, "none")
@@ -298,6 +333,11 @@ def test_start_state_probe_failure_stops_published_session(monkeypatch):
 
     assert depsgraph == [] and load_pre == []
     assert session.stopped is True and session.stop_calls == 1
+    assert driver._state["session"] is session
+
+    monkeypatch.setattr(timers, "is_registered",
+                        lambda callback: callback in timers.callbacks)
+    assert driver.stop() is True
     assert driver._state == {"session": None, "counter": None}
 
 
@@ -319,14 +359,6 @@ def test_registration_rollback_retains_session_until_cleanup_retry_succeeds(
 def test_registration_rollback_uses_stop_hooks_and_retains_failed_cleanup(monkeypatch):
     driver, depsgraph, load_pre, timers, session = _load_driver(monkeypatch, "none")
     session.cleanup_results = [False, True]
-    real_stop = session.stop
-    stop_args = []
-
-    def stop_with_callbacks(*callbacks):
-        stop_args.append(callbacks)
-        for callback in callbacks:
-            callback()
-        return real_stop()
 
     def fail_after_callbacks_escape_local_rollback():
         depsgraph.append(driver._on_depsgraph)
@@ -334,13 +366,14 @@ def test_registration_rollback_uses_stop_hooks_and_retains_failed_cleanup(monkey
         timers.callbacks.add(driver._tick_guard)
         raise RuntimeError("callback rollback failed")
 
-    monkeypatch.setattr(session, "stop", stop_with_callbacks)
     monkeypatch.setattr(driver, "_ensure_callbacks",
                         fail_after_callbacks_escape_local_rollback)
     with pytest.raises(RuntimeError, match="callback rollback failed"):
         driver.start()
 
-    assert stop_args[0] == (driver._unregister_timer, driver._unregister_handlers)
+    assert session.stop_callbacks[0] == (driver._unregister_timer,
+                                         driver._unregister_handlers)
+    assert session.callback_order[:2] == ["_unregister_timer", "_unregister_handlers"]
     assert depsgraph == [] and load_pre == [] and timers.callbacks == set()
     assert driver._state["session"] is session and session.stopped is True
     assert driver.stop() is True
@@ -348,7 +381,14 @@ def test_registration_rollback_uses_stop_hooks_and_retains_failed_cleanup(monkey
 
 
 def test_disconnect_retains_session_until_cleanup_retry_succeeds(monkeypatch):
-    driver, _depsgraph, _load_pre, _timers, session = _load_driver(monkeypatch, "none")
+    driver, depsgraph, load_pre, timers, session = _load_driver(monkeypatch, "none")
+    driver.start()
+    assert driver.stop() is True
+    assert session.stop_callbacks[-1] == (driver._unregister_timer,
+                                          driver._unregister_handlers)
+    assert session.callback_order[-2:] == ["_unregister_timer", "_unregister_handlers"]
+    assert depsgraph == [] and load_pre == [] and timers.callbacks == set()
+
     driver.start()
     session.cleanup_results = [False, False, True]
 
@@ -359,6 +399,6 @@ def test_disconnect_retains_session_until_cleanup_retry_succeeds(monkeypatch):
     assert driver._state["session"] is session and driver.running() is False
 
     driver.start()
-    assert session.stop_calls == 3
+    assert session.stop_calls == 4
     assert driver._state["session"] is session and driver.running() is True
     driver._state.update(session=None, counter=None)

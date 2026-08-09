@@ -88,7 +88,18 @@ def start() -> None:
                 raise RuntimeError("previous session cleanup incomplete; retry disconnect")
             _state.update(session=None, counter=None)
         else:
-            _ensure_callbacks()  # self-heal after a persistent reload drops a callback
+            try:
+                _ensure_callbacks()  # self-heal after a persistent reload drops a callback
+            except BaseException:
+                try:
+                    cleanup_complete = existing.stop(_unregister_timer,
+                                                     _unregister_handlers)
+                except Exception:
+                    _diag.exception("failed to stop session during callback repair")
+                    cleanup_complete = False
+                if cleanup_complete:
+                    _state.update(session=None, counter=None)
+                raise
             return
     counter = RevisionCounter()
     reader = BpySceneReader(counter)
