@@ -107,13 +107,15 @@ MAX_FAILURE_MESSAGE_CHARS = 256
 MAX_FAILURE_ERROR_CHARS = 2048
 PLAN_PATH = ROOT / "docs/superpowers/plans/2026-07-23-phase0-readonly-channel.md"
 ATTESTATION_PATH = (
-    ROOT / "docs/audits/evidence/2026-08-09-r18-live-adapter-post-freeze-attestation.json")
+    ROOT / "docs/audits/evidence/2026-08-09-phase0-post-acceptance-attestation.json")
 APPROVED_DOCUMENTS = {
     "plan_sha256": PLAN_PATH,
     "urs_sha256": ROOT / "Blender-Codex-需求规格说明书-v1.md",
     "spec_sha256": (
         ROOT / "docs/superpowers/specs/2026-07-23-phase0-readonly-channel-design.md"),
     "roadmap_sha256": ROOT / "docs/ROADMAP.md",
+    "install_sha256": ROOT / "docs/install.md",
+    "validation_report_sha256": ROOT / "docs/audits/phase0-validation-report.md",
 }
 APPROVED_GATE_COUNTS = {
     "unit_tests": 337,
