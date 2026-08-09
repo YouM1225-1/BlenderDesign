@@ -155,7 +155,7 @@ print({
 })
 ```
 
-- [ ] **Step 4: Run and verify the provisioner**
+- [ ] **Step 4a: Run the provisioner once**
 
 Run:
 
@@ -170,19 +170,29 @@ python3 - "$START_EPOCH" "$END_EPOCH" <<'PY'
 import sys
 print(f"fixture_wall_ms={(int(sys.argv[2]) - int(sys.argv[1])) / 1_000_000:.3f}")
 PY
-for path in \
+```
+
+Expected: background Blender exits `0`. Once this provisioner has succeeded, do not rerun it during verification-only recovery because it would overwrite the existing fixture files.
+
+- [ ] **Step 4b: Verify the fixtures**
+
+Run:
+
+```bash
+set -euo pipefail
+for fixture_path in \
   /tmp/bcx-official-mcp-modeling-20260810/library_source.blend \
   /tmp/bcx-official-mcp-modeling-20260810/lamp_fixture.blend; do
-  test -f "$path"
-  test ! -L "$path"
-  test "$(stat -f '%u' "$path")" = "$(id -u)"
-  test "$(stat -f '%z' "$path")" -gt 0
-  shasum -a 256 "$path"
+  test -f "$fixture_path"
+  test ! -L "$fixture_path"
+  test "$(stat -f '%u' "$fixture_path")" = "$(id -u)"
+  test "$(stat -f '%z' "$fixture_path")" -gt 0
+  shasum -a 256 "$fixture_path"
 done
 test ! -e /tmp/bcx-official-mcp-modeling-20260810/assets/known-missing.png
 ```
 
-Expected: background Blender exits `0`; both `.blend` files are owned ordinary non-empty files; the missing asset is absent.
+Expected: both `.blend` files are owned ordinary non-empty files; the missing asset is absent.
 
 - [ ] **Step 5: Create the tracked audit skeleton and commit Task 1**
 

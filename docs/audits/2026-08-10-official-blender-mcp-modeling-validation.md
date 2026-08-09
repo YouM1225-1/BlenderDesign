@@ -19,6 +19,7 @@ No user `.blend` was opened or saved. Runtime binaries are untracked. All runtim
 - MCP preflight calls: 784.2 ms path info, 22.0 ms object summary, and 391.1 ms window summary (1,197.3 ms total).
 - Fixture process wall time: 1,305.094 ms.
 - Blender provisioner `elapsed_ms`: 98.274 ms.
+- Corrected Step 4b fixture-verification timing-wrapper wall time: 54.995 ms; the subsequently rerun literal 4b command exited `0`.
 
 ## 26-tool results
 
@@ -30,20 +31,22 @@ Not started; this Task establishes the isolated baseline only.
 
 ## Errors and recoveries
 
-The prescribed Step 4 shell loop used `path` as its loop variable. In `zsh`, that special parameter is tied to `PATH`, so the post-provision verification failed with `command not found: stat` and `command not found: id` after Blender exited successfully. The same non-mutating assertions were rerun with `fixture_path`; both fixtures passed and their SHA-256 hashes were recorded in the ignored run report.
+The original Task 1 plan prescribed `for path in ...` in what is now Step 4b. In `zsh`, that special parameter is tied to `PATH`, so the original post-provision verification failed after Step 4a Blender provisioning exited successfully with `zsh:16: command not found: stat`, `zsh:16: command not found: id`, and `zsh:17: command not found: stat`. This first failure remains part of the record.
+
+The controller split the plan into Step 4a (the already successful, non-repeatable provisioner) and Step 4b (fixture verification), then corrected every 4b loop-variable reference to `fixture_path`. The corrected literal 4b command exited `0` in `zsh`, printed the same SHA-256 values for both fixtures, and confirmed the missing image was absent.
 
 ## Root-cause analysis
 
-The failure was shell-variable shadowing in the verification harness, not a Blender or fixture-generation failure.
+The plan defect was shell-variable shadowing in the verification harness, not a Blender or fixture-generation failure. `path` is a special `zsh` parameter synchronized with `PATH`; assigning it in the loop removed command-search paths before `stat`, `id`, and subsequent commands ran.
 
 ## Remediation decision
 
-Keep the provisioner unchanged and use a non-special loop variable for subsequent fixture-file verification.
+The controller formally corrected the tracked Task 1 plan: Step 4a records the already successful provisioner and prohibits verification-only reruns that would overwrite fixtures; Step 4b contains the file checks and uses the non-special `fixture_path` loop variable in every reference. The provisioner and fixtures remain unchanged. This is a plan correction, not a waiver of the original failed command.
 
 ## Adversarial audit and retest
 
-Retest passed: both fixture files are regular, non-symlink, owned, non-empty files; the intentionally absent image file is still absent.
+The corrected literal Step 4b fixture-verification command was rerun in `zsh` and exited `0`; a separately timed equivalent invocation completed in 54.995 ms. Both fixture files remain regular, non-symlink, owned, non-empty files with their original recorded SHA-256 values; the intentionally absent image file is still absent. Step 4a was not rerun because it would overwrite existing fixtures, outside this correction's no-fixture-write scope.
 
 ## Final verdict
 
-Baseline preflight passed and fixtures are ready for the dependent validation tasks, with the Step 4 shell-loop recovery documented above.
+Baseline preflight and Step 4a provisioning passed. The original Step 4b plan was defective in `zsh`; the controller correction is tracked, and the corrected literal 4b command exited `0`. Task 1 is ready for dependent validation tasks; the original failure and its cause remain explicitly documented, and Step 4a is not represented as a rerun.
