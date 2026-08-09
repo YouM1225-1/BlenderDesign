@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import socket
 import stat
 import threading
@@ -35,11 +36,33 @@ def test_oversize_response_degrades_to_limit_error(tmp_path):
 def test_excluding_huge_collections_crops_before_frame_limit(tmp_path):
     # 2.2M names would exceed 16 MiB. false 必须贯穿 UDS params 并在 reader 源端跳过枚举。
     with live_bridge(tmp_path, n_collections=2_200_000) as (s, reader, run):
+        original = reader.snapshot_steps
+        flags: list[tuple[bool, bool]] = []
+        source_yields = 0
+
+        def observed(*, include_collections=True, include_managed_objects=True):
+            nonlocal source_yields
+            flags.append((include_collections, include_managed_objects))
+            steps = original(
+                include_collections=include_collections,
+                include_managed_objects=include_managed_objects,
+            )
+            while True:
+                try:
+                    next(steps)
+                except StopIteration as done:
+                    return done.value
+                source_yields += 1
+                yield
+
+        reader.snapshot_steps = observed  # type: ignore[method-assign]
         result = _client(s).call(
             "scene_summary",
             {"include_collections": False, "include_managed_objects": False},
             timeout=5.0,
         )
+        assert flags == [(False, False)]
+        assert source_yields == 0
         assert result["summary"]["collections"] == []
         assert result["summary"]["managed_objects"] == []
 
@@ -88,29 +111,96 @@ def test_tokenless_connection_closed_silently(tmp_path):
             assert client.recv(1) == b""  # 断开、无响应帧（§5）
 
 
-def test_pipeline_busy_and_reply_frames_never_interleave(tmp_path):
-    # 单连接流水线下 BUSY（I/O 入 outbox）与正常响应（tick 入 outbox）先后在途。
+def test_pipeline_busy_and_reply_frames_never_interleave(tmp_path, monkeypatch):
+    # 首个正常帧受控为 1-byte partial write；随后 I/O 产生 BUSY。单写者会把 BUSY
+    # 排在该帧后，双写者反例会把 BUSY 字节插入未完成的正常帧并损坏 framing。
+    partial_started = threading.Event()
+    advance_partial = threading.Event()
+    busy_queued = threading.Event()
+    release_writes = threading.Event()
+    normal_size = [0]
+    normal_sent = [0]
+
+    class PartialSocket:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def send(self, data):
+            if not release_writes.is_set():
+                if not normal_size[0]:
+                    normal_size[0] = len(data)
+                sent = self._wrapped.send(data[:1])
+                if sent:
+                    normal_sent[0] += sent
+                    if not partial_started.is_set():
+                        partial_started.set()
+                        assert advance_partial.wait(5.0), "partial-write barrier timed out"
+                return sent
+            return self._wrapped.send(data)
+
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+
     with live_bridge(tmp_path) as (s, reader, run):
+        original_flush = s._flush
+        original_send = s.send
+        wrapped = False
+
+        def controlled_flush(conn):
+            nonlocal wrapped
+            if not wrapped:
+                conn.sock = PartialSocket(conn.sock)
+                wrapped = True
+            original_flush(conn)
+
+        def observed_send(conn, frame):
+            payload = framing.FrameBuffer().feed(frame)[0]
+            body = json.loads(payload)
+            if not body["ok"] and body["error"]["code"] == envelope.BRIDGE_BUSY:
+                assert normal_sent[0] < normal_size[0]
+                busy_queued.set()
+            original_send(conn, frame)
+
+        monkeypatch.setattr(s, "_flush", controlled_flush)
+        monkeypatch.setattr(s, "send", observed_send)
         s.pause_pump()
         with socket.socket(socket.AF_UNIX) as client:
-            client.settimeout(15.0)
-            client.connect(str(s.socket_path))
-            request_count = 100  # 容量 64 → 至少 36 个 BUSY
-            for _ in range(request_count):
-                client.sendall(envelope.encode_request(envelope.Request.new(s.token, "ping", {})))
-            time.sleep(0.3)
-            s.resume_pump()
-            buffer = framing.FrameBuffer()
-            frames: list[bytes] = []
-            while len(frames) < request_count:
-                data = client.recv(65536)
-                assert data, f"connection closed after {len(frames)} frames"
-                frames.extend(buffer.feed(data))  # 抛异常 = 帧交错/损坏
+            try:
+                client.settimeout(15.0)
+                client.connect(str(s.socket_path))
+                first = envelope.Request.new(s.token, "ping", {})
+                client.sendall(envelope.encode_request(first))
+                s.resume_pump()
+                assert partial_started.wait(5.0), "normal reply never entered controlled partial write"
+                s.pause_pump()
+                requests = [envelope.Request.new(s.token, "ping", {}) for _ in range(100)]
+                for request in requests[:16]:
+                    client.sendall(envelope.encode_request(request))
+                advance_partial.set()
+                for request in requests[16:]:  # 容量 64 → 至少 36 个 BUSY
+                    client.sendall(envelope.encode_request(request))
+                assert busy_queued.wait(5.0), "I/O path never produced BUSY during partial reply"
+                release_writes.set()
+                s.resume_pump()
+                buffer = framing.FrameBuffer()
+                frames: list[bytes] = []
+                expected_ids = {first.id, *(request.id for request in requests)}
+                while len(frames) < len(expected_ids):
+                    data = client.recv(65536)
+                    assert data, f"connection closed after {len(frames)} frames"
+                    frames.extend(buffer.feed(data))  # 抛异常 = 帧交错/损坏
+            finally:
+                advance_partial.set()
+                release_writes.set()
+                s.resume_pump()
         bodies = [json.loads(frame) for frame in frames]
         busy = [body for body in bodies
                 if not body["ok"] and body["error"]["code"] == envelope.BRIDGE_BUSY]
         ok = [body for body in bodies if body["ok"]]
-        assert len(busy) + len(ok) == request_count and busy and ok
+        assert busy and ok
+        assert len(bodies) == len(expected_ids)
+        assert {body["id"] for body in bodies} == expected_ids
+        assert len({body["id"] for body in bodies}) == len(bodies)
 
 
 def test_serialization_failure_becomes_scene_query_failed(tmp_path):
@@ -161,7 +251,7 @@ def test_auth_failure_logged(tmp_path, caplog):
             with socket.socket(socket.AF_UNIX) as client:
                 client.settimeout(2.0)
                 client.connect(str(s.socket_path))
-                client.sendall(envelope.encode_request(envelope.Request.new("bad", "ping", {})))
+                client.sendall(envelope.encode_request(envelope.Request.new("", "ping", {})))
                 assert client.recv(1) == b""
         assert any("auth failed" in record.message for record in caplog.records)
 
@@ -204,54 +294,90 @@ def test_envelope_mismatch_reported_not_cleaned(tmp_path):
     run.chmod(0o700)
     socket_dir = Discovery._fallback_dir(instance_id)
     assert socket_dir is not None
-    socket_dir.mkdir(mode=0o700)
-    socket_dir.chmod(0o700)
     socket_path = socket_dir / "bridge.sock"  # 短路径防 sun_path 104B
-    server = socket.socket(socket.AF_UNIX)
-    server.bind(str(socket_path))
-    server.listen(1)
-    socket_path.chmod(0o600)
-    dir_stat, socket_stat = socket_dir.stat(), socket_path.stat()
+    directory_owned = socket_owned = False
+    directory_identity = socket_identity = None
+    server = None
+    thread = None
+    cleanup_errors = []
 
-    def serve():
+    def matches(path, identity, kind):
+        if identity is None:
+            return False
         try:
-            with server.accept()[0] as connection:
-                buffer = framing.FrameBuffer()
-                frames: list[bytes] = []
-                while not frames:
-                    frames = buffer.feed(connection.recv(65536))
-                request = envelope.decode_request(frames[0])
-                connection.sendall(framing.encode_frame(json.dumps({
-                    "v": 2, "id": request.id, "ok": True,
-                    "result": {"instance_id": instance_id, "bridge_version": "9.9",
-                               "blender_version": "5.2.0", "envelope_version": 2},
-                }).encode()))
+            current = path.lstat()
         except OSError:
-            pass  # cleanup can close a still-blocked listener after an assertion failure
+            return False
+        return (kind(current.st_mode) and current.st_uid == os.geteuid()
+                and (current.st_dev, current.st_ino) == identity)
 
-    thread = threading.Thread(target=serve, daemon=True)
-    thread.start()
-    session_file = run / "session.json"
-    session_file.write_text(json.dumps({
-        "instance_id": instance_id, "token": "t", "pid": 1,  # pid 1 恒存活 → 不清理
-        "socket_path": str(socket_path), "blender_version": "5.2.0",
-        "bridge_version": "9.9", "envelope_version": 2, "socket_external": True,
-        "socket_dev": socket_stat.st_dev, "socket_ino": socket_stat.st_ino,
-        "socket_dir_dev": dir_stat.st_dev, "socket_dir_ino": dir_stat.st_ino,
-    }))
-    session_file.chmod(0o600)
     try:
+        socket_dir.mkdir(mode=0o700)
+        directory_owned = True
+        directory_stat = socket_dir.lstat()
+        directory_identity = (directory_stat.st_dev, directory_stat.st_ino)
+        socket_dir.chmod(0o700)
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(socket_path))
+        socket_owned = True
+        socket_stat = socket_path.lstat()
+        socket_identity = (socket_stat.st_dev, socket_stat.st_ino)
+        server.listen(1)
+        socket_path.chmod(0o600)
+
+        def serve():
+            try:
+                with server.accept()[0] as connection:
+                    buffer = framing.FrameBuffer()
+                    frames: list[bytes] = []
+                    while not frames:
+                        frames = buffer.feed(connection.recv(65536))
+                    request = envelope.decode_request(frames[0])
+                    connection.sendall(framing.encode_frame(json.dumps({
+                        "v": 2, "id": request.id, "ok": True,
+                        "result": {"instance_id": instance_id, "bridge_version": "9.9",
+                                   "blender_version": "5.2.0", "envelope_version": 2},
+                    }).encode()))
+            except OSError:
+                pass  # cleanup can close a still-blocked listener after an assertion failure
+
+        session_file = run / "session.json"
+        session_file.write_text(json.dumps({
+            "instance_id": instance_id, "token": "t", "pid": 1,  # pid 1 恒存活 → 不清理
+            "socket_path": str(socket_path), "blender_version": "5.2.0",
+            "bridge_version": "9.9", "envelope_version": 2, "socket_external": True,
+            "socket_dev": socket_identity[0], "socket_ino": socket_identity[1],
+            "socket_dir_dev": directory_identity[0], "socket_dir_ino": directory_identity[1],
+        }))
+        session_file.chmod(0o600)
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
         instances = Discovery(runtime).instances()
         assert len(instances) == 1
         assert instances[0].envelope_mismatch is True
         assert instances[0].state == "disconnected"
         assert run.exists()  # 话不投机 ≠ 死实例（§4.3）
     finally:
-        server.close()
-        thread.join(timeout=1.0)
-        assert not thread.is_alive()
-        socket_path.unlink(missing_ok=True)
-        socket_dir.rmdir()
+        if server is not None:
+            try:
+                server.close()
+            except OSError as exc:
+                cleanup_errors.append(exc)
+        if thread is not None:
+            thread.join(timeout=1.0)
+        if socket_owned and matches(socket_path, socket_identity, stat.S_ISSOCK):
+            try:
+                socket_path.unlink()
+            except OSError as exc:
+                cleanup_errors.append(exc)
+        if directory_owned and matches(socket_dir, directory_identity, stat.S_ISDIR):
+            try:
+                socket_dir.rmdir()
+            except OSError as exc:
+                cleanup_errors.append(exc)
+        if thread is not None:
+            assert not thread.is_alive()
+        assert not cleanup_errors
 
 
 def test_bridge_kill_then_restart_recovers(tmp_path):
