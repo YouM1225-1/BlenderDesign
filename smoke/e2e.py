@@ -1593,7 +1593,7 @@ def _bounded_failure_error(exc: BaseException) -> str:
             name = type(value).__name__
         except BaseException:
             name = "Exception"
-        args = value.args
+        args = BaseException.args.__get__(value, BaseException)
         message = args[0] if type(args) is tuple and len(args) == 1 \
             and type(args[0]) is str \
             else "message omitted"

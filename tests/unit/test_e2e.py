@@ -172,6 +172,12 @@ def test_private_artifact_write_preserves_exact_0600(tmp_path, monkeypatch):
     formatter_calls = []
 
     class MultiArgTrap(Exception):
+        def __getattribute__(self, name):
+            if name == "args":
+                formatter_calls.append("args")
+                raise AssertionError("dynamic args lookup")
+            return super().__getattribute__(name)
+
         def __str__(self):
             formatter_calls.append("str")
             return "token=secret socket_path=/private/socket traceback"
