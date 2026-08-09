@@ -1,0 +1,1993 @@
+{
+ "timer_tick": true,
+ "revision_bump": true,
+ "fields": true,
+ "hash_scope": true,
+ "cycles_leak_free": true,
+ "large_scene": true,
+ "large_scene_budget_ok": true,
+ "large_scene_metrics": {
+  "target_objects": 100000,
+  "object_count": 100000,
+  "mesh_count": 100000,
+  "camera_count": 0,
+  "light_count": 0,
+  "build_wall_ms": 113915.53429199848,
+  "query_runs": 20,
+  "query_wall_ms": 1292.7742500032764,
+  "query_wall_ms_p95": 1292.7742500032764,
+  "query_wall_ms_max": 1989.0998330083676,
+  "query_wall_ms_samples": [
+   1989.0998330083676,
+   1282.852250005817,
+   1260.9689999953844,
+   1271.6155420057476,
+   1240.0372500123922,
+   1262.5685000093654,
+   1234.7588340053335,
+   1234.3224590003956,
+   1266.3110000139568,
+   1242.156124993926,
+   1242.5222079909872,
+   1274.142040987499,
+   1253.7833339883946,
+   1272.803666011896,
+   1257.4961250065826,
+   1232.1933749772143,
+   1263.7331669975538,
+   1256.1325840069912,
+   1292.7742500032764,
+   1285.866582999006
+  ],
+  "observer_wall_ms_p95": 1385.9482499829028,
+  "observer_wall_ms_max": 2050.8820000104606,
+  "max_tick_ms": 62.763041991274804,
+  "tick_count": 1065,
+  "max_callback_ms": 0.24562497856095433,
+  "callback_count": 237,
+  "max_build_callback_ms": 2724.0593750029802,
+  "build_callback_count": 98
+ },
+ "nfr_p1": true,
+ "nfr_p1_metrics": {
+  "results": {
+   "get_blender_status": {
+    "arguments": {
+     "instance_selector": "gui-2820-04de0a06"
+    },
+    "arguments_bytes": 41,
+    "arguments_sha256": "b67c715798fe4d46211225d841ac0a77f4e67650c597c2591e992ccdd75d1c13",
+    "samples_ms": [
+     70.338834,
+     19.241792,
+     25.401333,
+     24.901875,
+     25.468042,
+     24.306041,
+     25.453917,
+     24.930583,
+     25.429083,
+     25.322625,
+     25.723333,
+     24.795792,
+     24.994708,
+     25.478,
+     25.192084,
+     25.276667,
+     25.346334,
+     25.122,
+     25.446583,
+     25.619833
+    ],
+    "sample_results": [
+     {
+      "duration_ms": 70.338834,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 19.241792,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 25.401333,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 24.901875,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 25.468042,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 24.306041,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 25.453917,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 24.930583,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 25.429083,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 25.322625,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 25.723333,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 24.795792,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 24.994708,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 25.478,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 25.192084,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 25.276667,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 25.346334,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 25.122,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 25.446583,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     },
+     {
+      "duration_ms": 25.619833,
+      "result_bytes": 275,
+      "result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91",
+      "validated_result": {
+       "ok": true,
+       "guidance": null,
+       "partial": false,
+       "skipped_count": 0,
+       "instances": [
+        {
+         "instance_id": "gui-2820-04de0a06",
+         "pid": 2820,
+         "mode": "gui",
+         "bridge_state": "connected",
+         "blender_version": "5.2.0",
+         "blender_supported": true,
+         "version_warning": null,
+         "scene_path": null,
+         "scene_revision": 104
+        }
+       ]
+      },
+      "text_content": "{\n  \"ok\": true,\n  \"guidance\": null,\n  \"partial\": false,\n  \"skipped_count\": 0,\n  \"instances\": [\n    {\n      \"instance_id\": \"gui-2820-04de0a06\",\n      \"pid\": 2820,\n      \"mode\": \"gui\",\n      \"bridge_state\": \"connected\",\n      \"blender_version\": \"5.2.0\",\n      \"blender_supported\": true,\n      \"version_warning\": null,\n      \"scene_path\": null,\n      \"scene_revision\": 104\n    }\n  ]\n}",
+      "text_content_bytes": 381,
+      "text_content_sha256": "08e0f3e5c509cdada7d1ce2c811aba52e51946efda28077ca3c95ad7b0cf89af",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.385455
+     }
+    ],
+    "p95_method": "nearest_rank",
+    "p95_ms": 25.723333,
+    "max_ms": 70.338834,
+    "validated": true,
+    "representative_result": {
+     "ok": true,
+     "guidance": null,
+     "partial": false,
+     "skipped_count": 0,
+     "instances": [
+      {
+       "instance_id": "gui-2820-04de0a06",
+       "pid": 2820,
+       "mode": "gui",
+       "bridge_state": "connected",
+       "blender_version": "5.2.0",
+       "blender_supported": true,
+       "version_warning": null,
+       "scene_path": null,
+       "scene_revision": 104
+      }
+     ]
+    },
+    "representative_result_bytes": 275,
+    "representative_result_sha256": "842896f3e418a68ff33004fd0bb1359723403bf8f47adacaa265e902e1423b91"
+   },
+   "get_scene_summary": {
+    "arguments": {
+     "instance_id": "gui-2820-04de0a06",
+     "include_collections": false,
+     "include_managed_objects": false
+    },
+    "arguments_bytes": 95,
+    "arguments_sha256": "293c95d8e67715019037fe00093584ab1f1f341990391b026473764fd9259c07",
+    "samples_ms": [
+     1315.795708,
+     1315.368333,
+     1331.818084,
+     1322.558667,
+     1441.067917,
+     1568.370583,
+     1473.739583,
+     1514.459459,
+     1475.328625,
+     1337.090541,
+     1442.224125,
+     1467.22,
+     1472.416208,
+     1342.922666,
+     1294.433875,
+     1287.4815,
+     1350.97475,
+     1287.7685,
+     1274.529834,
+     1269.502792
+    ],
+    "sample_results": [
+     {
+      "duration_ms": 1315.795708,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1315.368333,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1331.818084,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1322.558667,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1441.067917,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1568.370583,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1473.739583,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1514.459459,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1475.328625,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1337.090541,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1442.224125,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1467.22,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1472.416208,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1342.922666,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1294.433875,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1287.4815,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1350.97475,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1287.7685,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1274.529834,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     },
+     {
+      "duration_ms": 1269.502792,
+      "result_bytes": 377,
+      "result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60",
+      "validated_result": {
+       "instance_id": "gui-2820-04de0a06",
+       "scene_name": "Scene",
+       "scene_revision": 104,
+       "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+       "scene_path": null,
+       "version_warning": null,
+       "units": {
+        "system": "METRIC",
+        "scale_length": 1.0
+       },
+       "summary": {
+        "object_count": 100000,
+        "mesh_count": 100000,
+        "camera_count": 0,
+        "light_count": 0,
+        "collections": [],
+        "managed_objects": []
+       }
+      },
+      "text_content": "{\n  \"instance_id\": \"gui-2820-04de0a06\",\n  \"scene_name\": \"Scene\",\n  \"scene_revision\": 104,\n  \"scene_hash\": \"sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af\",\n  \"scene_path\": null,\n  \"version_warning\": null,\n  \"units\": {\n    \"system\": \"METRIC\",\n    \"scale_length\": 1.0\n  },\n  \"summary\": {\n    \"object_count\": 100000,\n    \"mesh_count\": 100000,\n    \"camera_count\": 0,\n    \"light_count\": 0,\n    \"collections\": [],\n    \"managed_objects\": []\n  }\n}",
+      "text_content_bytes": 464,
+      "text_content_sha256": "99537aa71b571ebe9af0de8805d85b322e1c48cdd7f3534cbf9d0a99474f5dc9",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.230769
+     }
+    ],
+    "p95_method": "nearest_rank",
+    "p95_ms": 1514.459459,
+    "max_ms": 1568.370583,
+    "validated": true,
+    "representative_result": {
+     "instance_id": "gui-2820-04de0a06",
+     "scene_name": "Scene",
+     "scene_revision": 104,
+     "scene_hash": "sha256:944b928746484a4a19de04cb6bcd1e19aabef84c98673de2a840143a3498e0af",
+     "scene_path": null,
+     "version_warning": null,
+     "units": {
+      "system": "METRIC",
+      "scale_length": 1.0
+     },
+     "summary": {
+      "object_count": 100000,
+      "mesh_count": 100000,
+      "camera_count": 0,
+      "light_count": 0,
+      "collections": [],
+      "managed_objects": []
+     }
+    },
+    "representative_result_bytes": 377,
+    "representative_result_sha256": "6c641c20ce1f376506534e7dbcffb1fcca7409e5802147eadc735dcf1e9aad60"
+   },
+   "describe_capabilities": {
+    "arguments": {
+     "include_instances": false
+    },
+    "arguments_bytes": 27,
+    "arguments_sha256": "d8c675290f22d07031649caab2e1dd5eef40ecdf12a25ffacdb913398a2bb57e",
+    "samples_ms": [
+     4.179791,
+     1.054666,
+     0.878709,
+     0.846,
+     1.014792,
+     0.91375,
+     0.908584,
+     0.818584,
+     0.850833,
+     0.769584,
+     0.7345,
+     0.726458,
+     0.714125,
+     0.710709,
+     0.753083,
+     0.8305,
+     0.990667,
+     0.841792,
+     0.740917,
+     0.715
+    ],
+    "sample_results": [
+     {
+      "duration_ms": 4.179791,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 1.054666,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.878709,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.846,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 1.014792,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.91375,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.908584,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.818584,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.850833,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.769584,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.7345,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.726458,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.714125,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.710709,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.753083,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.8305,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.990667,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.841792,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.740917,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     },
+     {
+      "duration_ms": 0.715,
+      "result_bytes": 348,
+      "result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983",
+      "validated_result": {
+       "server_version": "0.1.0",
+       "envelope_version": 1,
+       "phase": "phase0",
+       "supported_tools": [
+        "get_blender_status",
+        "get_scene_summary",
+        "describe_capabilities"
+       ],
+       "baseline_blender": {
+        "version": "5.2.0",
+        "platform": "macos-arm64"
+       },
+       "ir_schema_version": null,
+       "supported_operation_kinds": [],
+       "connected_instances": [],
+       "instances_partial": false,
+       "instances_skipped_count": 0
+      },
+      "text_content": "{\n  \"server_version\": \"0.1.0\",\n  \"envelope_version\": 1,\n  \"phase\": \"phase0\",\n  \"supported_tools\": [\n    \"get_blender_status\",\n    \"get_scene_summary\",\n    \"describe_capabilities\"\n  ],\n  \"baseline_blender\": {\n    \"version\": \"5.2.0\",\n    \"platform\": \"macos-arm64\"\n  },\n  \"ir_schema_version\": null,\n  \"supported_operation_kinds\": [],\n  \"connected_instances\": [],\n  \"instances_partial\": false,\n  \"instances_skipped_count\": 0\n}",
+      "text_content_bytes": 422,
+      "text_content_sha256": "8092c519d6bc8713fbfd70e165aa33a455635cb53f396e869ccc18e6b94a1481",
+      "text_json_equivalent": true,
+      "duplication_ratio": 2.212644
+     }
+    ],
+    "p95_method": "nearest_rank",
+    "p95_ms": 1.054666,
+    "max_ms": 4.179791,
+    "validated": true,
+    "representative_result": {
+     "server_version": "0.1.0",
+     "envelope_version": 1,
+     "phase": "phase0",
+     "supported_tools": [
+      "get_blender_status",
+      "get_scene_summary",
+      "describe_capabilities"
+     ],
+     "baseline_blender": {
+      "version": "5.2.0",
+      "platform": "macos-arm64"
+     },
+     "ir_schema_version": null,
+     "supported_operation_kinds": [],
+     "connected_instances": [],
+     "instances_partial": false,
+     "instances_skipped_count": 0
+    },
+    "representative_result_bytes": 348,
+    "representative_result_sha256": "203a84b0ecee468fa76152cc944b62ad779bb0f20c112d57255be08ceab1d983"
+   }
+  },
+  "max_tick_ms": 62.763041991274804,
+  "returncode": 0,
+  "processes_clean": true,
+  "helper_group_clean": true,
+  "registry_groups_clean": true
+ },
+ "errors": []
+}
