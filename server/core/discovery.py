@@ -9,6 +9,8 @@ deadline 语义（2026-08-07 三轮审计 F-03 / R-03 / F-01 累积修订）—�
   FIFO/device/symlink、换入竞态、读取中扩容均被拒绝；每次 `next/open/fstat/read` 前重查预算；
 - 常规文件 I/O 进入内核后仍不可由 monotonic clock 强制取消，因此保证限定为本机常规文件与
   有界系统调用序列，不宣称对失效网络文件系统或内核卡死提供绝对墙钟上界。
+- probe worker 共享原 absolute deadline；真实 BridgeClient 等合作式 worker 在发布前静止，
+  但任意不合作 Python 代码不可移植地抢占，明确不在该保证内。
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from protocol import envelope
 from .bridge_client import BridgeClient, BridgeError
@@ -38,11 +40,11 @@ MAX_SCAN_ENTRIES = 256       # 单窗口枚举上限；cursor + backlog 跨调�
 MAX_CANDIDATES = 16          # probe 上限：按 mtime 取**最新**（F-08：字典序会饿死活实例）
 MAX_SESSION_BYTES = 64 * 1024
 PROBE_TIMEOUT = 2.0
-PRIVATE_INIT_TIMEOUT = 0.1
 DirIdentity = tuple[int, int]
 Entry = tuple[float, Path, DirIdentity]
 INSTANCE_ID = re.compile(r"^gui-([1-9][0-9]*)-([0-9a-f]{8})$")
 _DIR_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_DIRECTORY
+_PRIVATE_INIT_LOCK = threading.Lock()
 
 
 def _private_dir_identity(st: os.stat_result, path: Path,
@@ -56,54 +58,62 @@ def _private_dir_identity(st: os.stat_result, path: Path,
 
 
 def _ensure_private_dir(path: Path) -> DirIdentity:
-    created = False
-    try:
-        path.mkdir(mode=0o700, parents=True)
-    except FileExistsError:
-        pass
-    else:
-        created = True
-    if created:
-        os.chmod(path, 0o700, follow_symlinks=False)
-    deadline = time.monotonic() + PRIVATE_INIT_TIMEOUT
-    expected: DirIdentity | None = None
-    while True:
+    with _PRIVATE_INIT_LOCK:
+        created = False
+        previous_umask = os.umask(0)
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        else:
+            created = True
+        finally:
+            os.umask(previous_umask)
         st = path.lstat()
-        identity = st.st_dev, st.st_ino
-        mode = stat_mod.S_IMODE(st.st_mode)
-        if (not stat_mod.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid()
-                or mode & ~0o700 or (expected is not None and identity != expected)):
-            raise PermissionError(f"private directory required: {path}")
-        if mode == 0o700:
+        identity = _private_dir_identity(st, path)
+        if not created:
             return identity
-        expected = identity
-        if time.monotonic() >= deadline:
-            raise PermissionError(f"private directory required: {path}")
-        time.sleep(0.005)
+        fd = os.open(path, _DIR_FLAGS)
+        try:
+            _private_dir_identity(os.fstat(fd), path, identity)
+            os.fchmod(fd, 0o700)
+            _private_dir_identity(path.lstat(), path, identity)
+            return identity
+        finally:
+            os.close(fd)
 
 
-def _wait_private_dir_at(name: str, parent_fd: int, path: Path) -> os.stat_result:
-    deadline = time.monotonic() + PRIVATE_INIT_TIMEOUT
-    expected: DirIdentity | None = None
-    while True:
+def _open_private_dir_at(name: str, parent_fd: int, path: Path) -> tuple[int, DirIdentity]:
+    with _PRIVATE_INIT_LOCK:
+        created = False
+        previous_umask = os.umask(0)
+        try:
+            os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        else:
+            created = True
+        finally:
+            os.umask(previous_umask)
         st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        identity = st.st_dev, st.st_ino
-        mode = stat_mod.S_IMODE(st.st_mode)
-        if (not stat_mod.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid()
-                or mode & ~0o700 or (expected is not None and identity != expected)):
-            raise PermissionError(f"private directory required: {path}")
-        if mode == 0o700:
-            return st
-        expected = identity
-        if time.monotonic() >= deadline:
-            raise PermissionError(f"private directory required: {path}")
-        time.sleep(0.005)
+        identity = _private_dir_identity(st, path)
+        fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+        try:
+            _private_dir_identity(os.fstat(fd), path, identity)
+            if created:
+                os.fchmod(fd, 0o700)
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            _private_dir_identity(current, path, identity)
+            return fd, identity
+        except BaseException:
+            os.close(fd)
+            raise
 
 
 @dataclass
 class Instance:
     session: dict[str, Any]
-    state: str
+    state: Literal["connected", "disconnected", "busy"]
     blender_supported: bool
     version_warning: str | None
     client: BridgeClient | None
@@ -163,21 +173,8 @@ class Discovery:
         try:
             _private_dir_identity(os.fstat(parent_fd), self._run.parent,
                                   self._run_parent_identity)
-            created = False
-            try:
-                os.mkdir(self._run.name, mode=0o700, dir_fd=parent_fd)
-            except FileExistsError:
-                pass
-            else:
-                created = True
-            if created:
-                os.chmod(self._run.name, 0o700, dir_fd=parent_fd,
-                         follow_symlinks=False)
-            run_stat = _wait_private_dir_at(self._run.name, parent_fd, self._run)
-            self._run_identity = _private_dir_identity(run_stat, self._run)
-            run_fd = os.open(self._run.name, _DIR_FLAGS, dir_fd=parent_fd)
-            _private_dir_identity(os.fstat(run_fd), self._run,
-                                  self._run_identity)
+            run_fd, self._run_identity = _open_private_dir_at(
+                self._run.name, parent_fd, self._run)
         finally:
             if run_fd is not None:
                 os.close(run_fd)
@@ -197,6 +194,7 @@ class Discovery:
         self._scan_identity: DirIdentity | None = None
         self._pending_entry: Any = None
         self._candidate_backlog: list[Entry] = []
+        self._corrupt_first_seen: dict[DirIdentity, float] = {}
         self.last_scan = ScanStats()
 
     def __del__(self) -> None:
@@ -307,6 +305,8 @@ class Discovery:
             self._candidate_backlog = []
             return out
 
+        if self._candidate_backlog and not self._validate_scan_cursor(deadline, stats):
+            return out
         from_backlog = bool(self._candidate_backlog)
         entries = self._candidate_backlog
         self._candidate_backlog = []
@@ -565,31 +565,16 @@ class Discovery:
                     stats.reasons.append("entry error")
                 continue
 
-        # 一项 look-ahead 区分“正好 256 项”与“仍有候选”；保留该项供下轮处理，
-        # 从而使 256 项后的活实例不会永久饿死。
+        # ``next()`` itself is part of the per-window bound.  At an exact
+        # boundary we conservatively report one extra partial round instead of
+        # consuming a 257th entry merely to prove exhaustion.
         if seen >= MAX_SCAN_ENTRIES and self._scan_iter is not None:
-            if time.monotonic() >= deadline:
-                stats.partial = True
-                stats.skipped_count += 1
-                stats.reasons.append("enumeration deadline")
-            else:
-                try:
-                    self._pending_entry = next(self._scan_iter)
-                except StopIteration:
-                    self._close_scan_cursor()
-                except OSError:
-                    self._close_scan_cursor()
-                    stats.partial = True
-                    stats.skipped_count += 1
-                    stats.reasons.append("enumeration error")
-                else:
-                    stats.partial = True
-                    stats.skipped_count += 1  # 未枚举总数未知，报告至少跳过一项
-                    stats.reasons.append("enumeration window")
+            stats.partial = True
+            stats.skipped_count += 1
+            stats.reasons.append("enumeration window")
         return found
 
-    @staticmethod
-    def _read_session(d: Path, expected_identity: DirIdentity,
+    def _read_session(self, d: Path, expected_identity: DirIdentity,
                       deadline: float,
                       stats: ScanStats | None = None) -> dict[str, Any] | None:
         """同一目录/file fd 完成 open/fstat/有界读取，拒绝换入竞态。"""
@@ -668,6 +653,7 @@ class Discovery:
                     raise _SocketIdentityInvalid("invalid external socket path")
             elif socket_path != d / "bridge.sock":
                 raise _SocketIdentityInvalid("invalid internal socket path")
+            self._corrupt_first_seen.pop(expected_identity, None)
             return data
         except TimeoutError:
             if dir_fd is not None:
@@ -695,13 +681,17 @@ class Discovery:
                 )
                 if not boundary_ok:
                     _mark_session_identity_replaced(stats)
-                elif (time.monotonic() < deadline
-                      and time.time() - dst.st_mtime > GRACE_SECONDS):
+                elif time.monotonic() < deadline:
+                    first_seen = self._corrupt_first_seen.setdefault(
+                        expected_identity, self._clock())
+                    expired = self._clock() - first_seen > GRACE_SECONDS
+                    if not expired:
+                        return None
                     _diag.info("cleaning corrupt session dir %s", d)
-                    complete = Discovery._remove_external_socket(d, None, deadline)
+                    complete = Discovery._remove_session_dir(
+                        d, expected_identity, deadline)
                     if complete:
-                        complete = Discovery._remove_session_dir(
-                            d, expected_identity, deadline)
+                        self._corrupt_first_seen.pop(expected_identity, None)
                     if not complete:
                         _mark_cleanup_incomplete(stats)
             except OSError:
@@ -812,32 +802,23 @@ class Discovery:
     def _remove_external_socket(d: Path, sess: dict[str, Any] | None,
                                 deadline: float) -> bool:
         """Remove the identity-bound deterministic sun_path fallback, if one exists."""
-        default_is_long = len(str(d / "bridge.sock").encode()) > 100
-        if sess is not None:
-            socket_path = Path(sess["socket_path"])
-            actual_external = socket_path.parent != d
-            if not actual_external:
-                try:
-                    state = Discovery._socket_identity_state(sess, deadline)
-                except _ProbeDeadline:
-                    return False
-                return state in {"ok", "missing"}
-            if sess.get("socket_external") is not True:
-                return False  # old/untrusted metadata: retain session evidence
-            fallback = Discovery._fallback_dir(d.name)
-            if fallback is None or socket_path != fallback / "bridge.sock":
+        if sess is None:
+            return True  # no complete metadata means no authority over a global fallback
+        socket_path = Path(sess["socket_path"])
+        actual_external = socket_path.parent != d
+        if not actual_external:
+            try:
+                state = Discovery._socket_identity_state(sess, deadline)
+            except _ProbeDeadline:
                 return False
-            expected_dir = (sess["socket_dir_dev"], sess["socket_dir_ino"])
-            expected_socket: DirIdentity | None = (sess["socket_dev"], sess["socket_ino"])
-        else:
-            if not default_is_long:
-                return True
-            fallback = Discovery._fallback_dir(d.name)
-            if fallback is None:
-                return False
-            expected_dir = None
-            expected_socket = None
-            socket_path = fallback / "bridge.sock"
+            return state in {"ok", "missing"}
+        if sess.get("socket_external") is not True:
+            return False  # old/untrusted metadata: retain session evidence
+        fallback = Discovery._fallback_dir(d.name)
+        if fallback is None or socket_path != fallback / "bridge.sock":
+            return False
+        expected_dir = (sess["socket_dir_dev"], sess["socket_dir_ino"])
+        expected_socket: DirIdentity = (sess["socket_dev"], sess["socket_ino"])
 
         dir_fd: int | None = None
         observed_dir: DirIdentity | None = None
@@ -851,9 +832,7 @@ class Discovery:
             st = os.fstat(dir_fd)
             observed_dir = (st.st_dev, st.st_ino)
             if (st.st_uid != os.geteuid() or stat_mod.S_IMODE(st.st_mode) != 0o700
-                    or (expected_dir is not None and observed_dir != expected_dir)
-                    or (expected_dir is None
-                        and time.time() - st.st_mtime <= GRACE_SECONDS)):
+                    or observed_dir != expected_dir):
                 return False
             if time.monotonic() >= deadline:
                 return False
@@ -866,9 +845,8 @@ class Discovery:
                 if (not stat_mod.S_ISSOCK(socket_stat.st_mode)
                         or socket_stat.st_uid != os.geteuid()
                         or stat_mod.S_IMODE(socket_stat.st_mode) != 0o600
-                        or (expected_socket is not None
-                            and (socket_stat.st_dev, socket_stat.st_ino)
-                            != expected_socket)):
+                        or (socket_stat.st_dev, socket_stat.st_ino)
+                        != expected_socket):
                     return False
                 if time.monotonic() >= deadline:
                     return False
@@ -959,7 +937,11 @@ class Discovery:
             if not_done and "probe deadline" not in stats.reasons:
                 stats.reasons.append("probe deadline")
         finally:
-            ex.shutdown(wait=False, cancel_futures=True)
+            # BridgeClient and the in-module probe path honor the shared
+            # absolute deadline. Waiting makes cooperative workers quiescent
+            # before publication; arbitrary non-cooperative Python code remains
+            # outside this guarantee and cannot be preempted portably.
+            ex.shutdown(wait=True, cancel_futures=True)
         return out
 
     def _probe(self, sess: dict[str, Any], deadline: float) -> Instance | None:
@@ -986,7 +968,7 @@ class Discovery:
             raise _ProbeDeadline
         budget = min(PROBE_TIMEOUT, remaining)
         try:
-            pong = client.call("ping", timeout=budget)   # 剩余预算，防批次叠加
+            pong = client.call("ping", timeout=budget, deadline=deadline)
         except BridgeError as exc:
             if exc.code == envelope.ENVELOPE_VERSION_MISMATCH:
                 inst = self._make(sess, "disconnected", client=None)
@@ -1013,7 +995,9 @@ class Discovery:
         return self._make(sess, "connected", client=client)
 
     @staticmethod
-    def _make(sess: dict[str, Any], state: str, client: BridgeClient | None,
+    def _make(sess: dict[str, Any],
+              state: Literal["connected", "disconnected", "busy"],
+              client: BridgeClient | None,
               note: str | None = None) -> Instance:
         supported, warning = check(str(sess.get("blender_version", "")))
         if note is not None:

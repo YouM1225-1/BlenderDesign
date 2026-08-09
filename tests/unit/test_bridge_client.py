@@ -136,7 +136,7 @@ def test_slow_drip_respects_total_deadline():
         socket_dir.rmdir()
 
 
-def test_response_decode_cannot_escape_total_deadline(live, monkeypatch):
+def test_absolute_deadline_precedes_relative_timeout(live, monkeypatch):
     import server.core.bridge_client as client_module
 
     real_decode = client_module.envelope.decode_response
@@ -148,7 +148,8 @@ def test_response_decode_cannot_escape_total_deadline(live, monkeypatch):
     monkeypatch.setattr(client_module.envelope, "decode_response", slow_decode)
     started = time.monotonic()
     with pytest.raises(BridgeError) as exc:
-        BridgeClient(_session_dict(live)).call("ping", timeout=0.2)
+        BridgeClient(_session_dict(live)).call(
+            "ping", timeout=2.0, deadline=started + 0.2)
     assert exc.value.code == envelope.BRIDGE_TIMEOUT
     assert time.monotonic() - started < 0.6
 

@@ -7,9 +7,11 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Literal, get_type_hints
 
 import pytest
 from bridge.core.lifecycle import BridgeSession
+from protocol import envelope
 from server.core.discovery import Discovery
 from tests.unit.test_lifecycle import FakeReader
 
@@ -101,58 +103,89 @@ def test_cache_within_ttl(live):
     assert d.instances(force=True) == []      # force 绕过缓存
 
 
-def test_created_runtime_and_run_ignore_restrictive_umask(tmp_path):
-    root = tmp_path / "runtime"
-    previous_umask = os.umask(0o777)
-    try:
-        Discovery(root / "run")
-    finally:
-        os.umask(previous_umask)
-    assert (root.stat().st_mode & 0o777) == 0o700
-    assert ((root / "run").stat().st_mode & 0o777) == 0o700
-
-
-def test_concurrent_discovery_waits_for_restrictive_umask_chmod(tmp_path, monkeypatch):
+def test_created_runtime_root_chmod_is_identity_bound(tmp_path, monkeypatch):
     import server.core.discovery as disc_mod
 
     root = tmp_path / "runtime"
-    chmod_entered = threading.Event()
-    release_chmod = threading.Event()
-    discoveries = []
-    errors = []
+    original = tmp_path / "runtime-original"
     real_chmod = disc_mod.os.chmod
+    real_open = disc_mod.os.open
+    swapped = False
 
-    def delayed_root_chmod(path, mode, *, dir_fd=None, follow_symlinks=True):
-        if Path(path) == root and dir_fd is None and not chmod_entered.is_set():
-            chmod_entered.set()
-            assert release_chmod.wait(1.0)
+    def swap_root():
+        nonlocal swapped
+        swapped = True
+        root.rename(original)
+        root.mkdir(mode=0o755)
+        real_chmod(root, 0o755)
+
+    def swapping_chmod(path, mode, *, dir_fd=None, follow_symlinks=True):
+        if Path(path) == root and dir_fd is None and not swapped:
+            swap_root()
         return real_chmod(path, mode, dir_fd=dir_fd,
                           follow_symlinks=follow_symlinks)
 
-    monkeypatch.setattr(disc_mod.os, "chmod", delayed_root_chmod)
+    def swapping_open(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if Path(path) == root and dir_fd is None and not swapped:
+            swap_root()
+        return fd
 
-    def create() -> None:
-        try:
-            discoveries.append(Discovery(root / "run"))
-        except BaseException as exc:
-            errors.append(exc)
-
+    monkeypatch.setattr(disc_mod.os, "chmod", swapping_chmod)
+    monkeypatch.setattr(disc_mod.os, "open", swapping_open)
     previous_umask = os.umask(0o777)
     try:
-        worker_a = threading.Thread(target=create)
-        worker_a.start()
-        assert chmod_entered.wait(1.0)
-        worker_b = threading.Thread(target=create)
-        worker_b.start()
-        time.sleep(0.02)
-        release_chmod.set()
-        worker_a.join(timeout=2.0)
-        worker_b.join(timeout=2.0)
+        with pytest.raises(PermissionError, match="private directory"):
+            Discovery(root / "run")
     finally:
-        release_chmod.set()
         os.umask(previous_umask)
-    assert not worker_a.is_alive() and not worker_b.is_alive()
-    assert errors == [] and len(discoveries) == 2
+    assert swapped is True
+    assert (root.stat().st_mode & 0o777) == 0o755
+    assert (original.stat().st_mode & 0o777) == 0o700
+
+
+def test_created_run_chmod_is_identity_bound(tmp_path, monkeypatch):
+    import server.core.discovery as disc_mod
+
+    root = tmp_path / "runtime"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    run = root / "run"
+    original = root / "run-original"
+    real_chmod = disc_mod.os.chmod
+    real_open = disc_mod.os.open
+    swapped = False
+
+    def swap_run():
+        nonlocal swapped
+        swapped = True
+        run.rename(original)
+        run.mkdir(mode=0o755)
+        real_chmod(run, 0o755)
+
+    def swapping_chmod(path, mode, *, dir_fd=None, follow_symlinks=True):
+        if path == run.name and dir_fd is not None and not swapped:
+            swap_run()
+        return real_chmod(path, mode, dir_fd=dir_fd,
+                          follow_symlinks=follow_symlinks)
+
+    def swapping_open(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == run.name and dir_fd is not None and not swapped:
+            swap_run()
+        return fd
+
+    monkeypatch.setattr(disc_mod.os, "chmod", swapping_chmod)
+    monkeypatch.setattr(disc_mod.os, "open", swapping_open)
+    previous_umask = os.umask(0o777)
+    try:
+        with pytest.raises(PermissionError, match="private directory"):
+            Discovery(run)
+    finally:
+        os.umask(previous_umask)
+    assert swapped is True
+    assert (run.stat().st_mode & 0o777) == 0o755
+    assert (original.stat().st_mode & 0o777) == 0o700
 
 
 def test_rejects_preexisting_wide_run_without_chmod(tmp_path):
@@ -470,15 +503,24 @@ def test_internal_socket_replacement_during_stale_cleanup_is_preserved(
             socket_path.unlink(missing_ok=True)
 
 
-def test_corrupt_session_respects_grace_period(tmp_path):
+def test_corrupt_session_uses_monotonic_grace_and_restart_resets_it(
+        tmp_path, monkeypatch):
+    import server.core.discovery as disc_mod
+
     run = _make_run(tmp_path)
     broken = _make_session_dir(run, "gui-1-deadbeef")
     _write_private(broken / "session.json", "{corrupt")
-    Discovery(run).instances()
-    assert broken.exists()                    # mtime 新 → 60s 宽限期内不删
-    old = time.time() - 120
-    os.utime(broken, (old, old))
-    Discovery(run).instances()
+    now = [0.0]
+    monkeypatch.setattr(disc_mod.time, "time", lambda: 10 ** 12)
+    Discovery(run, clock=lambda: now[0]).instances()
+    assert broken.exists()  # wall-clock jump cannot authorize cleanup
+
+    now[0] = 61.0
+    restarted = Discovery(run, clock=lambda: now[0])
+    restarted.instances()
+    assert broken.exists()  # process restart conservatively restarts first-seen grace
+    now[0] = 122.0
+    restarted.instances(force=True)
     assert not broken.exists()
 
 
@@ -493,15 +535,32 @@ def test_deeply_nested_session_json_is_isolated(tmp_path):
     assert broken.exists()  # fresh malformed metadata remains inside the grace period
 
 
-def test_session_instance_id_must_match_directory_name(tmp_path):
+def test_session_identity_replacement_restarts_monotonic_grace(tmp_path):
     run = _make_run(tmp_path)
     directory = _make_session_dir(run, f"gui-{os.getpid()}-deadbeef")
-    _write_private(directory / "session.json", json.dumps({
-        "instance_id": f"gui-{os.getpid()}-feedface", "token": "t", "pid": os.getpid(),
-        "socket_path": "/nonexistent.sock", "blender_version": "5.2.0",
-        "bridge_version": "0.1.0", "envelope_version": 1}))
-    assert Discovery(run).instances() == []
-    assert directory.exists()  # fresh malformed metadata remains inside the grace period
+    now = [0.0]
+
+    def write_mismatched(target):
+        _write_private(target / "session.json", json.dumps({
+            "instance_id": f"gui-{os.getpid()}-feedface",
+            "token": "t", "pid": os.getpid(),
+            "socket_path": "/nonexistent.sock", "blender_version": "5.2.0",
+            "bridge_version": "0.1.0", "envelope_version": 1}))
+
+    write_mismatched(directory)
+    discovery = Discovery(run, clock=lambda: now[0])
+    assert discovery.instances() == []
+    now[0] = 59.0
+    directory.rename(run / "original-session")
+    replacement = _make_session_dir(run, directory.name)
+    write_mismatched(replacement)
+    discovery.instances(force=True)
+    now[0] = 61.0
+    discovery.instances(force=True)
+    assert replacement.exists()
+    now[0] = 120.0
+    discovery.instances(force=True)
+    assert not replacement.exists()
 
 
 def test_expired_cleanup_deadline_preserves_evidence(tmp_path):
@@ -524,9 +583,12 @@ def test_expired_cleanup_is_retried_by_a_later_scan(tmp_path):
         directory, identity, time.monotonic() - 1.0) is False
     assert session_file.exists()
 
-    old = time.time() - 120
-    os.utime(directory, (old, old))
-    assert Discovery(run).instances(force=True) == []
+    now = [0.0]
+    discovery = Discovery(run, clock=lambda: now[0])
+    assert discovery.instances(force=True) == []
+    assert directory.exists()
+    now[0] = 61.0
+    assert discovery.instances(force=True) == []
     assert not directory.exists()
 
 
@@ -569,10 +631,10 @@ def test_corrupt_session_incomplete_cleanup_is_reported_as_partial(tmp_path):
     directory = _make_session_dir(run, "gui-1-deadbeef")
     _write_private(directory / "session.json", "{}")
     (directory / "unknown.txt").write_text("preserve")
-    old = time.time() - 120
-    os.utime(directory, (old, old))
-
-    discovery = Discovery(run)
+    now = [0.0]
+    discovery = Discovery(run, clock=lambda: now[0])
+    assert discovery.instances() == []
+    now[0] = 61.0
     assert discovery.instances() == []
     assert discovery.last_scan.partial is True
     assert discovery.last_scan.skipped_count >= 1
@@ -634,11 +696,16 @@ def test_crashed_fallback_session_cleans_external_socket(tmp_path, monkeypatch):
     assert not fallback.exists()
 
 
-def test_prepublication_crash_cleans_deterministic_fallback(tmp_path):
+def test_corrupt_cross_runtime_session_preserves_untrusted_fallback(
+        tmp_path, monkeypatch):
+    import server.core.discovery as disc_mod
+
     root = tmp_path / ("y" * 90)
-    run = _make_run(root)
+    run = _make_run(root / "runtime-a")
+    other_run = _make_run(root / "runtime-b")
     suffix = f"{tmp_path.stat().st_ino & 0xffffffff:08x}"
     directory = _make_session_dir(run, f"gui-99999999-{suffix}")
+    other_directory = _make_session_dir(other_run, directory.name)
     fallback = Discovery._fallback_dir(directory.name)
     assert fallback is not None
     fallback.mkdir(mode=0o700)
@@ -647,14 +714,21 @@ def test_prepublication_crash_cleans_deterministic_fallback(tmp_path):
     sock.bind(str(socket_path))
     sock.close()
     socket_path.chmod(0o600)
-    old = time.time() - 120
-    os.utime(directory, (old, old))
-    os.utime(fallback, (old, old))
-
-    assert Discovery(run).instances() == []
-    assert not directory.exists()
-    assert not socket_path.exists()
-    assert not fallback.exists()
+    now = [0.0]
+    monkeypatch.setattr(disc_mod.time, "time", lambda: 10 ** 12)
+    try:
+        discovery = Discovery(run, clock=lambda: now[0])
+        assert discovery.instances() == []
+        assert directory.exists() and socket_path.exists() and fallback.exists()
+        now[0] = 61.0
+        assert discovery.instances(force=True) == []
+        assert not directory.exists()
+        assert other_directory.exists()
+        assert socket_path.exists() and fallback.exists()
+    finally:
+        socket_path.unlink(missing_ok=True)
+        if fallback.exists():
+            fallback.rmdir()
 
 
 def test_fallback_identity_mismatch_preserves_replacement_and_session(tmp_path, monkeypatch):
@@ -699,9 +773,20 @@ def test_version_warning_for_non_baseline(live, tmp_path):
     assert "4.5.3" in inst.version_warning
 
 
-def test_scan_respects_total_deadline_with_hanging_candidates(tmp_path):
+def test_scan_respects_total_deadline_with_hanging_candidates(tmp_path, monkeypatch):
     # audit F-03：16 个挂起候选（listen 不 accept：连接成功但永无响应）。
     # 旧实现 8 并发 × 每探测 2s 分两批 → 实测 4.0s；总 deadline 后必须 < 3.2s
+    import server.core.discovery as disc_mod
+
+    executors = []
+    real_executor = disc_mod.ThreadPoolExecutor
+
+    class RecordingExecutor(real_executor):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            executors.append(self)
+
+    monkeypatch.setattr(disc_mod, "ThreadPoolExecutor", RecordingExecutor)
     run = _make_run(tmp_path)
     listeners: list[tuple[socket.socket, Path]] = []
     for i in range(16):
@@ -733,6 +818,8 @@ def test_scan_respects_total_deadline_with_hanging_candidates(tmp_path):
         assert len(insts) == 16
         assert all(i.state == "disconnected" for i in insts)
         assert all((run / i.session["instance_id"]).exists() for i in insts)  # 绝不误删
+        assert executors and all(
+            not thread.is_alive() for executor in executors for thread in executor._threads)
     finally:
         for hang, fallback in listeners:
             hang.close()
@@ -970,34 +1057,30 @@ def test_valid_json_with_missing_session_fields_isolated(tmp_path):
     assert Discovery(run).instances() == []
 
 
-@pytest.mark.parametrize("identity_fields", [{}, {"socket_dev": 1}])
-def test_invalid_socket_identity_is_preserved_before_probe(
-        tmp_path, monkeypatch, identity_fields):
+def test_invalid_socket_identity_is_preserved_before_probe(tmp_path, monkeypatch):
     import server.core.discovery as disc_mod
 
     run = _make_run(tmp_path)
-    directory = _make_session_dir(run, f"gui-{os.getpid()}-deadbeef")
-    session_file = directory / "session.json"
-    session_file.write_text(json.dumps({
-        "instance_id": directory.name, "token": "t", "pid": os.getpid(),
-        "socket_path": str(directory / "bridge.sock"),
-        "blender_version": "5.2.0", "bridge_version": "0.1.0",
-        "envelope_version": 1, "socket_external": False,
-        **identity_fields,
-    }))
-    session_file.chmod(0o600)
-    old = time.time() - 120
-    os.utime(directory, (old, old))
-
     def forbidden_client(_session):
         raise AssertionError("invalid socket identity reached BridgeClient")
 
     monkeypatch.setattr(disc_mod, "BridgeClient", forbidden_client)
-    instances, stats = disc_mod.Discovery(run).instances_with_stats()
-    assert instances == []
-    assert stats.partial is True
-    assert stats.reasons == ["socket identity invalid"]
-    assert directory.exists() and session_file.exists()
+    for index, identity_fields in enumerate(({}, {"socket_dev": 1})):
+        directory = _make_session_dir(run, f"gui-{os.getpid()}-{index:08x}")
+        session_file = directory / "session.json"
+        session_file.write_text(json.dumps({
+            "instance_id": directory.name, "token": "t", "pid": os.getpid(),
+            "socket_path": str(directory / "bridge.sock"),
+            "blender_version": "5.2.0", "bridge_version": "0.1.0",
+            "envelope_version": 1, "socket_external": False,
+            **identity_fields,
+        }))
+        session_file.chmod(0o600)
+        instances, stats = disc_mod.Discovery(run).instances_with_stats()
+        assert instances == []
+        assert stats.partial is True
+        assert stats.reasons == ["socket identity invalid"]
+        assert directory.exists() and session_file.exists()
 
 
 def test_runtime_socket_identity_mismatch_is_partial_and_preserved(tmp_path):
@@ -1059,11 +1142,14 @@ def test_busy_probe_is_reported_without_cleanup(tmp_path, monkeypatch):
         "socket_path": str(socket_path), "blender_version": "5.2.0",
         "bridge_version": "0.1.0", "envelope_version": 1}))
 
+    seen_deadlines = []
+
     class BusyClient:
         def __init__(self, session):
             pass
 
-        def call(self, method, params=None, timeout=None):
+        def call(self, method, params=None, timeout=None, *, deadline=None):
+            seen_deadlines.append(deadline)
             raise BridgeError("BRIDGE_BUSY", "queue full", retryable=True)
 
     def dead_pid(_pid, _signal):
@@ -1072,8 +1158,12 @@ def test_busy_probe_is_reported_without_cleanup(tmp_path, monkeypatch):
     monkeypatch.setattr(disc_mod, "BridgeClient", BusyClient)
     monkeypatch.setattr(disc_mod.os, "kill", dead_pid)
     try:
-        inst = Discovery(run).instances()
+        requested_deadline = time.monotonic() + 1.0
+        inst = Discovery(run).instances(deadline=requested_deadline)
         assert len(inst) == 1 and inst[0].state == "busy" and inst[0].client is not None
+        assert seen_deadlines == [requested_deadline]
+        assert get_type_hints(disc_mod.Instance)["state"] == Literal[
+            "connected", "disconnected", "busy"]
         assert d.exists()
     finally:
         listener.close()
@@ -1081,7 +1171,9 @@ def test_busy_probe_is_reported_without_cleanup(tmp_path, monkeypatch):
         fallback.rmdir()
 
 
-def test_ping_bool_envelope_version_is_a_mismatch(tmp_path, monkeypatch):
+@pytest.mark.parametrize("response_kind", ["bool_version", "instance_mismatch"])
+def test_ping_identity_and_envelope_version_are_authoritative(
+        tmp_path, monkeypatch, response_kind):
     import server.core.discovery as disc_mod
 
     run = _make_run(tmp_path)
@@ -1099,20 +1191,31 @@ def test_ping_bool_envelope_version_is_a_mismatch(tmp_path, monkeypatch):
         "socket_path": str(socket_path), "blender_version": "5.2.0",
         "bridge_version": "0.1.0", "envelope_version": 1}))
 
-    class BoolVersionClient:
+    class PingClient:
         def __init__(self, session):
             self._session = session
 
-        def call(self, method, params=None, timeout=None):
-            return {"instance_id": self._session["instance_id"],
-                    "envelope_version": True}
+        def call(self, method, params=None, timeout=None, *, deadline=None):
+            return {
+                "instance_id": ("gui-1-feedface" if response_kind == "instance_mismatch"
+                                else self._session["instance_id"]),
+                "envelope_version": (True if response_kind == "bool_version"
+                                     else envelope.ENVELOPE_VERSION),
+            }
 
-    monkeypatch.setattr(disc_mod, "BridgeClient", BoolVersionClient)
+    monkeypatch.setattr(disc_mod, "BridgeClient", PingClient)
     try:
-        instances = disc_mod.Discovery(run).instances()
-        assert len(instances) == 1
-        assert instances[0].envelope_mismatch is True
-        assert instances[0].state == "disconnected"
+        discovery = disc_mod.Discovery(run)
+        instances = discovery.instances()
+        if response_kind == "bool_version":
+            assert len(instances) == 1
+            assert instances[0].envelope_mismatch is True
+            assert instances[0].state == "disconnected"
+        else:
+            assert instances == []
+            assert d.exists() and socket_path.exists()
+            assert discovery.last_scan.partial is True
+            assert discovery.last_scan.reasons == ["identity mismatch"]
     finally:
         listener.close()
         socket_path.unlink(missing_ok=True)
@@ -1135,8 +1238,10 @@ def test_enumeration_windows_eventually_reach_later_live_instance(live, monkeypa
         def __init__(self, path):
             self._inner = real_scandir(path)
             self._entries = iter(sorted(list(self._inner), key=lambda e: e.name))
+            self.next_calls = 0
 
         def __next__(self):
+            self.next_calls += 1
             return next(self._entries)
 
         def close(self):
@@ -1146,6 +1251,7 @@ def test_enumeration_windows_eventually_reach_later_live_instance(live, monkeypa
     monkeypatch.setattr(disc_mod, "MAX_SCAN_ENTRIES", 2)
     d = Discovery(run)
     first = d.instances(force=True)
+    assert d._scan_iter.next_calls <= 2
     assert d.last_scan.partial and d.last_scan.skipped_count >= 1
     assert all(i.session["instance_id"] != s.instance_id for i in first)
     second = d.instances(force=True)
@@ -1180,10 +1286,12 @@ def test_replaced_run_during_preflight_discards_cursor(
     run = _make_run(tmp_path)
     for suffix in ("00000000", "00000001", "00000002"):
         _make_session_dir(run, f"gui-1-{suffix}")
-    monkeypatch.setattr(disc_mod, "MAX_SCAN_ENTRIES", 1)
+    monkeypatch.setattr(disc_mod, "MAX_SCAN_ENTRIES", 2)
+    monkeypatch.setattr(disc_mod, "MAX_CANDIDATES", 1)
     discovery = disc_mod.Discovery(run)
     discovery.instances(force=True)
     assert discovery._scan_iter is not None
+    assert discovery._candidate_backlog
     scan_fd = discovery._scan_fd
     assert scan_fd is not None
 
@@ -1220,11 +1328,13 @@ def test_closed_scan_cursor_is_dropped(
     import server.core.discovery as disc_mod
 
     run = _make_run(tmp_path)
-    for suffix in ("00000000", "00000001"):
+    for suffix in ("00000000", "00000001", "00000002"):
         _make_session_dir(run, f"gui-1-{suffix}")
-    monkeypatch.setattr(disc_mod, "MAX_SCAN_ENTRIES", 1)
+    monkeypatch.setattr(disc_mod, "MAX_SCAN_ENTRIES", 2)
+    monkeypatch.setattr(disc_mod, "MAX_CANDIDATES", 1)
     discovery = disc_mod.Discovery(run)
     discovery.instances(force=True)
+    assert discovery._candidate_backlog
     scan_fd = discovery._scan_fd
     assert scan_fd is not None
     os.close(scan_fd)  # simulate an externally closed/reused descriptor
@@ -1232,17 +1342,20 @@ def test_closed_scan_cursor_is_dropped(
     assert discovery.last_scan.partial is True
     assert "run cursor closed" in discovery.last_scan.reasons
     assert discovery._scan_fd is None and discovery._scan_iter is None
+    assert discovery._candidate_backlog == []
 
 
 def test_identity_different_reused_scan_fd_is_not_closed(tmp_path, monkeypatch):
     import server.core.discovery as disc_mod
 
     run = _make_run(tmp_path)
-    for suffix in ("00000000", "00000001"):
+    for suffix in ("00000000", "00000001", "00000002"):
         _make_session_dir(run, f"gui-1-{suffix}")
-    monkeypatch.setattr(disc_mod, "MAX_SCAN_ENTRIES", 1)
+    monkeypatch.setattr(disc_mod, "MAX_SCAN_ENTRIES", 2)
+    monkeypatch.setattr(disc_mod, "MAX_CANDIDATES", 1)
     discovery = disc_mod.Discovery(run)
     discovery.instances(force=True)
+    assert discovery._candidate_backlog
     scan_fd = discovery._scan_fd
     assert scan_fd is not None
 
@@ -1254,6 +1367,7 @@ def test_identity_different_reused_scan_fd_is_not_closed(tmp_path, monkeypatch):
         assert discovery.instances(force=True) == []
         assert discovery.last_scan.partial is True
         assert "run cursor replaced" in discovery.last_scan.reasons
+        assert discovery._candidate_backlog == []
         assert os.read(unrelated_fd, 5) == b"owned"  # no collateral close
     finally:
         os.close(unrelated_fd)

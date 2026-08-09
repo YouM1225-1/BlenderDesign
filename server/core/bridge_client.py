@@ -21,9 +21,12 @@ class BridgeClient:
         self._token = session["token"]
 
     def call(self, method: str, params: dict[str, Any] | None = None,
-             timeout: float | None = None) -> dict[str, Any]:
+             timeout: float | None = None, *,
+             deadline: float | None = None) -> dict[str, Any]:
         budget = envelope.METHOD_TIMEOUTS.get(method, 2.0) if timeout is None else timeout
-        deadline = time.monotonic() + budget
+        relative_deadline = time.monotonic() + budget
+        deadline = (relative_deadline if deadline is None
+                    else min(relative_deadline, deadline))
         self._check_deadline(deadline)
         request = envelope.Request.new(self._token, method, params if params is not None else {})
         frame = envelope.encode_request(request)
