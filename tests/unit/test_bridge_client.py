@@ -153,6 +153,22 @@ def test_absolute_deadline_precedes_relative_timeout(live, monkeypatch):
     assert exc.value.code == envelope.BRIDGE_TIMEOUT
     assert time.monotonic() - started < 0.6
 
+    class Socket:
+        def settimeout(self, timeout):
+            if timeout < 0:
+                raise ValueError(timeout)
+            self.timeout = timeout
+
+    monotonic = iter([10.0, 10.1])
+    monkeypatch.setattr(client_module.time, "monotonic", lambda: next(monotonic))
+    client = Socket()
+    BridgeClient._set_deadline(client, 10.05)
+    assert client.timeout == pytest.approx(0.05)
+    monkeypatch.setattr(client_module.time, "monotonic", lambda: 10.1)
+    with pytest.raises(BridgeError) as exc:
+        BridgeClient._set_deadline(client, 10.05)
+    assert exc.value.code == envelope.BRIDGE_TIMEOUT
+
 
 MISSING_VERSION = object()
 

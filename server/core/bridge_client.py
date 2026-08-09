@@ -60,8 +60,10 @@ class BridgeClient:
 
     @classmethod
     def _set_deadline(cls, client: socket.socket, deadline: float) -> None:
-        cls._check_deadline(deadline)
-        client.settimeout(deadline - time.monotonic())
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BridgeError(envelope.BRIDGE_TIMEOUT, "request timed out", retryable=True)
+        client.settimeout(remaining)
 
     @classmethod
     def _receive(cls, client: socket.socket, deadline: float) -> bytes:

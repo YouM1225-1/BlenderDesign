@@ -60,7 +60,7 @@ def _private_dir_identity(st: os.stat_result, path: Path,
 def _ensure_private_dir(path: Path) -> DirIdentity:
     with _PRIVATE_INIT_LOCK:
         created = False
-        previous_umask = os.umask(0)
+        previous_umask = os.umask(0o077)
         try:
             path.mkdir(mode=0o700)
         except FileExistsError:
@@ -86,7 +86,7 @@ def _ensure_private_dir(path: Path) -> DirIdentity:
 def _open_private_dir_at(name: str, parent_fd: int, path: Path) -> tuple[int, DirIdentity]:
     with _PRIVATE_INIT_LOCK:
         created = False
-        previous_umask = os.umask(0)
+        previous_umask = os.umask(0o077)
         try:
             os.mkdir(name, mode=0o700, dir_fd=parent_fd)
         except FileExistsError:
@@ -970,6 +970,8 @@ class Discovery:
         try:
             pong = client.call("ping", timeout=budget, deadline=deadline)
         except BridgeError as exc:
+            if exc.code == envelope.BRIDGE_TIMEOUT and time.monotonic() >= deadline:
+                raise _ProbeDeadline
             if exc.code == envelope.ENVELOPE_VERSION_MISMATCH:
                 inst = self._make(sess, "disconnected", client=None)
                 inst.envelope_mismatch = True

@@ -110,6 +110,8 @@ def test_created_runtime_root_chmod_is_identity_bound(tmp_path, monkeypatch):
     original = tmp_path / "runtime-original"
     real_chmod = disc_mod.os.chmod
     real_open = disc_mod.os.open
+    real_mkdir = disc_mod.os.mkdir
+    unrelated = tmp_path / "unrelated"
     swapped = False
 
     def swap_root():
@@ -131,8 +133,15 @@ def test_created_runtime_root_chmod_is_identity_bound(tmp_path, monkeypatch):
             swap_root()
         return fd
 
+    def observing_mkdir(path, mode=0o777, *, dir_fd=None):
+        if Path(path) == root and dir_fd is None and not unrelated.exists():
+            fd = real_open(unrelated, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+            os.close(fd)
+        return real_mkdir(path, mode=mode, dir_fd=dir_fd)
+
     monkeypatch.setattr(disc_mod.os, "chmod", swapping_chmod)
     monkeypatch.setattr(disc_mod.os, "open", swapping_open)
+    monkeypatch.setattr(disc_mod.os, "mkdir", observing_mkdir)
     previous_umask = os.umask(0o777)
     try:
         with pytest.raises(PermissionError, match="private directory"):
@@ -140,6 +149,7 @@ def test_created_runtime_root_chmod_is_identity_bound(tmp_path, monkeypatch):
     finally:
         os.umask(previous_umask)
     assert swapped is True
+    assert (unrelated.stat().st_mode & 0o777) == 0o600
     assert (root.stat().st_mode & 0o777) == 0o755
     assert (original.stat().st_mode & 0o777) == 0o700
 
@@ -829,6 +839,7 @@ def test_scan_respects_total_deadline_with_hanging_candidates(tmp_path, monkeypa
 
 def test_completed_probe_deadline_is_reported_as_partial(tmp_path, monkeypatch):
     import server.core.discovery as disc_mod
+    from server.core.bridge_client import BridgeError
 
     run = _make_run(tmp_path)
     directory = _make_session_dir(run, f"gui-{os.getpid()}-deadbeef")
@@ -837,10 +848,19 @@ def test_completed_probe_deadline_is_reported_as_partial(tmp_path, monkeypatch):
         "socket_path": "/nonexistent.sock", "blender_version": "5.2.0",
         "bridge_version": "0.1.0", "envelope_version": 1}))
 
-    def deadline(*_args, **_kwargs):
-        raise disc_mod._ProbeDeadline
+    class DeadlineClient:
+        def __init__(self, _session):
+            pass
 
-    monkeypatch.setattr(disc_mod.Discovery, "_probe", deadline)
+        def call(self, _method, _params=None, timeout=None, *, deadline=None):
+            assert deadline is not None
+            assert timeout is not None
+            monkeypatch.setattr(disc_mod.time, "monotonic", lambda: deadline)
+            raise BridgeError(envelope.BRIDGE_TIMEOUT, "request timed out", retryable=True)
+
+    monkeypatch.setattr(disc_mod, "BridgeClient", DeadlineClient)
+    monkeypatch.setattr(disc_mod.Discovery, "_socket_identity_state",
+                        staticmethod(lambda *_args: "valid"))
     discovery = disc_mod.Discovery(run)
     instances = discovery.instances()
     assert len(instances) == 1 and instances[0].state == "disconnected"
