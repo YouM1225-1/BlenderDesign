@@ -585,8 +585,9 @@ Expected: 返回当前 Blender 文件的结构化 data-block summary。不得在
    包括新增、删除和重命名；
 10. 运行四层验收，要求 live candidate Server catalog、effective config 和新任务模型
    目录三者集合全等；
-11. 成功后把候选完整 SHA 记录为新 pin；失败则先重验 live checkout identity，
-    再 detached checkout 旧 commit，并恢复 Extension、
+11. 成功后把候选完整 SHA 记录为新 pin；失败则先重验 live checkout 的
+    device/inode、`HEAD` 仍等于候选 SHA 且 worktree clean；任一变化都停止，全部
+    匹配才 detached checkout 旧 commit，并恢复 Extension、
     userpref、config 和旧 catalog。
 
 若候选引入非唯一/空 catalog、Server 无法握手、Extension validate 失败或 Blender
@@ -608,7 +609,7 @@ Blender：
 - 关闭 Blender；
 - 原 Extension 存在时，从已验证备份恢复；原 Extension 为 `absent` 时，先验证
   当前目录仍是本次安装的 ID/version/文件树且 identity 未变，再执行
-  `"$BLENDER_BIN" --command extension remove user_default.mcp` 并验证目录和模块
+  `"$BLENDER_BIN" --command extension remove --no-prefs user_default.mcp` 并验证目录和模块
   均不存在；若目录已被外部替换则停止，不删除；
 - 原 `userpref.blend` 存在时恢复已验证备份；原状态为 `absent` 时，仅当当前文件
   identity/SHA 等于本次记录的 post-image 才删除该文件，变化时停止；
