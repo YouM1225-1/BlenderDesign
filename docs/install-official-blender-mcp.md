@@ -114,6 +114,10 @@ fi
 CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"
 CODEX_CONFIG="$CODEX_ROOT/config.toml"
 MCP_SOURCE_DIR="${MCP_SOURCE_DIR:-$HOME/.local/share/blender-lab-mcp/source}"
+case "$MCP_SOURCE_DIR" in
+  /*) ;;
+  *) echo "STOP: MCP_SOURCE_DIR must be absolute" >&2; exit 1 ;;
+esac
 
 export BLENDER_APP BLENDER_BIN CODEX_BIN UV_BIN CODEX_ROOT CODEX_CONFIG MCP_SOURCE_DIR
 ```
@@ -206,8 +210,39 @@ export BACKUP_ROOT
 `stat -f '%d %i %p %u'` 与 `shasum -a 256`。例如：
 
 ```bash
+revalidate_config_image() {
+  test ! -L "$CODEX_CONFIG"
+  test -f "$CODEX_CONFIG"
+  test "$(stat -f '%u' "$CODEX_CONFIG")" = "$(id -u)"
+  test "$(stat -f '%d %i' "$CODEX_CONFIG")" = "$1"
+  test "$(shasum -a 256 "$CODEX_CONFIG" | awk '{print $1}')" = "$2"
+}
+
+record_config_post_image() {
+  test ! -L "$CODEX_CONFIG"
+  test -f "$CODEX_CONFIG"
+  test "$(stat -f '%u' "$CODEX_CONFIG")" = "$(id -u)"
+  CONFIG_LAST_STAGE="$1"
+  CONFIG_LAST_IDENTITY="$(stat -f '%d %i' "$CODEX_CONFIG")"
+  CONFIG_LAST_SHA="$(shasum -a 256 "$CODEX_CONFIG" | awk '{print $1}')"
+  printf '%s\t%s\t%s\n' "$CONFIG_LAST_STAGE" "$CONFIG_LAST_IDENTITY" \
+    "$CONFIG_LAST_SHA" >> "$BACKUP_ROOT/config-post-images"
+  chmod 600 "$BACKUP_ROOT/config-post-images"
+  export CONFIG_LAST_STAGE CONFIG_LAST_IDENTITY CONFIG_LAST_SHA
+}
+
+CONFIG_PRE_IDENTITY=""
+CONFIG_PRE_SHA=""
+CONFIG_PARENT_IDENTITY=""
+CONFIG_CREATED_IDENTITY=""
+CONFIG_CREATED_SHA=""
+CONFIG_POST_IDENTITY=""
+CONFIG_POST_SHA=""
+CONFIG_ADD_EXIT=""
 if [ -f "$CODEX_CONFIG" ]; then
   CONFIG_PRESTATE=present
+  CONFIG_PRE_IDENTITY="$(stat -f '%d %i' "$CODEX_CONFIG")"
+  CONFIG_PRE_SHA="$(shasum -a 256 "$CODEX_CONFIG" | awk '{print $1}')"
   cp -p "$CODEX_CONFIG" "$BACKUP_ROOT/config.toml.pre"
   chmod 600 "$BACKUP_ROOT/config.toml.pre"
   stat -f '%d %i %p %u' "$CODEX_CONFIG" "$BACKUP_ROOT/config.toml.pre"
@@ -217,7 +252,13 @@ else
   CONFIG_PARENT_IDENTITY="$(stat -f '%d %i' "$CODEX_ROOT")"
   printf '%s\n' "config=absent" >> "$BACKUP_ROOT/prestates"
 fi
-export CONFIG_PRESTATE CONFIG_PARENT_IDENTITY
+CONFIG_LAST_STAGE="$CONFIG_PRESTATE"
+CONFIG_LAST_IDENTITY="$CONFIG_PRE_IDENTITY"
+CONFIG_LAST_SHA="$CONFIG_PRE_SHA"
+export CONFIG_PRESTATE CONFIG_PRE_IDENTITY CONFIG_PRE_SHA CONFIG_PARENT_IDENTITY
+export CONFIG_LAST_STAGE CONFIG_LAST_IDENTITY CONFIG_LAST_SHA
+export CONFIG_CREATED_IDENTITY CONFIG_CREATED_SHA CONFIG_POST_IDENTITY CONFIG_POST_SHA
+export CONFIG_ADD_EXIT
 ```
 
 从 Blender 精确版本的用户资源路径解析 `userpref.blend`，不要假设版本目录名。
@@ -313,6 +354,9 @@ revalidate_blender_target() {
 snapshot_blender_target "$USERPREF" file > "$BACKUP_ROOT/userpref.pre.json"
 snapshot_blender_target "$EXT_INSTALLED" directory > "$BACKUP_ROOT/extension.pre.json"
 chmod 600 "$BACKUP_ROOT/userpref.pre.json" "$BACKUP_ROOT/extension.pre.json"
+USERPREF_LAST_SNAPSHOT="$BACKUP_ROOT/userpref.pre.json"
+EXTENSION_LAST_SNAPSHOT="$BACKUP_ROOT/extension.pre.json"
+export USERPREF_LAST_SNAPSHOT EXTENSION_LAST_SNAPSHOT
 
 if [ -e "$USERPREF" ]; then
   printf '%s\n' "userpref=present" >> "$BACKUP_ROOT/prestates"
@@ -354,48 +398,119 @@ SHA/manifest/tree digest；与对应 `.pre.json` 不一致时停止，不覆盖�
 ```bash
 UPSTREAM_URL="https://projects.blender.org/lab/blender_mcp.git"
 PINNED_COMMIT="4309a39646e644261624bfcd2bca669b343b7621"
-export UPSTREAM_URL PINNED_COMMIT
+PYTHONDONTWRITEBYTECODE=1
+export UPSTREAM_URL PINNED_COMMIT PYTHONDONTWRITEBYTECODE
 
 SOURCE_PARENT="$(dirname "$MCP_SOURCE_DIR")"
+
+snapshot_source_parent() {
+  "$UV_BIN" run --quiet --no-project --python 3.13 python - "$HOME" "$MCP_SOURCE_DIR" "$1" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+home = Path(os.path.abspath(sys.argv[1]))
+source = Path(os.path.abspath(sys.argv[2]))
+require_parent = sys.argv[3] == "required"
+uid = os.getuid()
+assert source != home and source.is_relative_to(home)
+parent = source.parent
+
+def owned_directory(path: Path):
+    info = os.lstat(path)
+    assert stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+    assert info.st_uid == uid
+    return info
+
+current = home
+info = owned_directory(current)
+for part in parent.relative_to(home).parts:
+    candidate = current / part
+    try:
+        info = owned_directory(candidate)
+    except FileNotFoundError:
+        assert not require_parent
+        print("parent=absent")
+        raise SystemExit
+    current = candidate
+assert current == parent
+print(f"{info.st_dev} {info.st_ino}")
+PY
+}
+
+revalidate_source_checkout() {
+  test ! -L "$MCP_SOURCE_DIR"
+  test -d "$MCP_SOURCE_DIR"
+  test "$(stat -f '%u' "$MCP_SOURCE_DIR")" = "$(id -u)"
+  test "$(stat -f '%d %i' "$MCP_SOURCE_DIR")" = "$1"
+  test "$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)" = "$2"
+  test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all)"
+}
+
+SOURCE_PARENT_IDENTITY=""
+SOURCE_CREATED_IDENTITY=""
+SOURCE_EXISTING_IDENTITY=""
+SOURCE_OLD_COMMIT=""
+SOURCE_EXISTING_CLEAN=""
+snapshot_source_parent optional >/dev/null
 if [ -L "$MCP_SOURCE_DIR" ]; then
   echo "STOP: source checkout is a symlink" >&2
   exit 1
 elif [ -e "$MCP_SOURCE_DIR" ]; then
   SOURCE_PRESTATE=present
   test -d "$MCP_SOURCE_DIR/.git"
+  SOURCE_EXISTING_IDENTITY="$(stat -f '%d %i' "$MCP_SOURCE_DIR")"
   SOURCE_OLD_COMMIT="$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)"
+  test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all)"
+  SOURCE_EXISTING_CLEAN=clean
 else
   SOURCE_PRESTATE=absent
   printf '%s\n' "source=absent" >> "$BACKUP_ROOT/prestates"
   if [ ! -e "$SOURCE_PARENT" ]; then
     install -d -m 700 "$SOURCE_PARENT"
   fi
-  test ! -L "$SOURCE_PARENT"
-  test -d "$SOURCE_PARENT"
-  test "$(stat -f '%u' "$SOURCE_PARENT")" = "$(id -u)"
-  SOURCE_PARENT_IDENTITY="$(stat -f '%d %i' "$SOURCE_PARENT")"
+  SOURCE_PARENT_IDENTITY="$(snapshot_source_parent required)"
+  test "$(snapshot_source_parent required)" = "$SOURCE_PARENT_IDENTITY"
   git clone "$UPSTREAM_URL" "$MCP_SOURCE_DIR"
   SOURCE_CREATED_IDENTITY="$(stat -f '%d %i' "$MCP_SOURCE_DIR")"
 fi
-export SOURCE_PRESTATE SOURCE_PARENT SOURCE_PARENT_IDENTITY SOURCE_CREATED_IDENTITY SOURCE_OLD_COMMIT
+export SOURCE_PRESTATE SOURCE_PARENT SOURCE_PARENT_IDENTITY SOURCE_CREATED_IDENTITY
+export SOURCE_EXISTING_IDENTITY SOURCE_OLD_COMMIT
 
 test ! -L "$MCP_SOURCE_DIR"
 test "$(stat -f '%u' "$MCP_SOURCE_DIR")" = "$(id -u)"
-test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain)"
+SOURCE_WRITE_IDENTITY="$(stat -f '%d %i' "$MCP_SOURCE_DIR")"
+SOURCE_WRITE_HEAD="$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)"
+test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all)"
+SOURCE_WRITE_CLEAN=clean
 
-if [ "$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)" != "$PINNED_COMMIT" ]; then
+if [ "$SOURCE_WRITE_HEAD" != "$PINNED_COMMIT" ]; then
+  revalidate_source_checkout "$SOURCE_WRITE_IDENTITY" "$SOURCE_WRITE_HEAD"
   git -C "$MCP_SOURCE_DIR" fetch origin "$PINNED_COMMIT"
+  revalidate_source_checkout "$SOURCE_WRITE_IDENTITY" "$SOURCE_WRITE_HEAD"
   git -C "$MCP_SOURCE_DIR" checkout --detach "$PINNED_COMMIT"
 fi
 
+SOURCE_POST_IDENTITY="$(stat -f '%d %i' "$MCP_SOURCE_DIR")"
+SOURCE_POST_HEAD="$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)"
 test "$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)" = "$PINNED_COMMIT"
 test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all)"
+if [ "$SOURCE_PRESTATE" = absent ]; then
+  test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all --ignored)"
+fi
 test ! -e "$MCP_SOURCE_DIR/uv.lock"
+SOURCE_POST_CLEAN=clean
+export SOURCE_WRITE_IDENTITY SOURCE_WRITE_HEAD SOURCE_WRITE_CLEAN
+export SOURCE_POST_IDENTITY SOURCE_POST_HEAD SOURCE_POST_CLEAN SOURCE_EXISTING_CLEAN
 ```
 
-`source=absent` 分支在 clone 前记录父目录 identity，在 clone 后记录新目录 identity；
-`source=present` 分支记录原完整 commit。两条分支的回滚合同不同，不得把首次创建
-描述为“恢复旧 commit”。
+`snapshot_source_parent` 用 `lstat` 验证从 `$HOME` 到 `SOURCE_PARENT` 的全部现存
+祖先都是当前 UID 所有的非 symlink 目录，并把 `MCP_SOURCE_DIR` 词法限制在
+`$HOME` 内；越界 override 直接停止。`source=absent` 分支在 clone 前记录并紧邻
+重验父目录 identity，在 clone 后记录新目录 identity；`source=present` 分支记录
+目录 identity、原完整 commit 和 clean 状态，并在 fetch、checkout 与 rollback 前
+执行相同重验。两条分支的回滚合同不同，不得把首次创建描述为“恢复旧 commit”。
 
 用真实 MCP handshake 读取 catalog；这一步不需要 Blender listener：
 
@@ -444,7 +559,16 @@ Expected for the pinned commit: exit 0 and exactly 26 unique names. Also run:
 ```
 
 Expected: SDK version major `<2` and `FastMCP` imports successfully. The checkout must
-still be clean and contain no generated `uv.lock`.
+still be clean and contain no generated `uv.lock`. `SOURCE_PRESTATE=absent` 时还必须再次
+要求以下命令无输出；`--ignored` 只检查 working tree，不把 `.git` 内部数据库当作
+ignored 内容：
+
+```bash
+test ! -e "$MCP_SOURCE_DIR/uv.lock"
+if [ "$SOURCE_PRESTATE" = absent ]; then
+  test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all --ignored)"
+fi
+```
 
 ## 8. Blender Extension：安装、启用与 Online Access
 
@@ -476,14 +600,53 @@ unzip -p "$EXT_ZIP" blender_manifest.toml | \
   'import sys,tomllib; d=tomllib.loads(sys.stdin.read()); assert d["id"]=="mcp"; assert d["version"]=="1.0.0"; assert tuple(map(int,d["blender_version_min"].split("."))) <= (5,2,0); print("manifest=ok")'
 revalidate_blender_target "$EXT_INSTALLED" directory extension
 revalidate_blender_target "$USERPREF" file userpref
-"$BLENDER_BIN" --command extension install-file -r user_default -e "$EXT_ZIP"
+if "$BLENDER_BIN" --command extension install-file -r user_default -e "$EXT_ZIP"; then
+  EXT_INSTALL_EXIT=0
+else
+  EXT_INSTALL_EXIT=$?
+fi
+
+EXTENSION_POST_SNAPSHOT_OK=1
+USERPREF_POST_SNAPSHOT_OK=1
+if snapshot_blender_target "$EXT_INSTALLED" directory \
+  > "$BACKUP_ROOT/extension.install-post.json"; then
+  EXTENSION_POST_SNAPSHOT_OK=1
+else
+  EXTENSION_POST_SNAPSHOT_OK=0
+fi
+if snapshot_blender_target "$USERPREF" file \
+  > "$BACKUP_ROOT/userpref.install-post.json"; then
+  USERPREF_POST_SNAPSHOT_OK=1
+else
+  USERPREF_POST_SNAPSHOT_OK=0
+fi
+
+if [ "$EXTENSION_POST_SNAPSHOT_OK" != 1 ] || [ "$USERPREF_POST_SNAPSHOT_OK" != 1 ]; then
+  printf '%s\n' "extension-install-exit=$EXT_INSTALL_EXIT state=unsafe-post-image" \
+    >> "$BACKUP_ROOT/prestates"
+  echo "STOP: post-install target is unsafe; do not overwrite; manual recovery required" >&2
+  exit 1
+fi
+chmod 600 "$BACKUP_ROOT/extension.install-post.json" \
+  "$BACKUP_ROOT/userpref.install-post.json"
+EXTENSION_LAST_SNAPSHOT="$BACKUP_ROOT/extension.install-post.json"
+USERPREF_LAST_SNAPSHOT="$BACKUP_ROOT/userpref.install-post.json"
+export EXTENSION_LAST_SNAPSHOT USERPREF_LAST_SNAPSHOT
+if [ "$EXT_INSTALL_EXIT" != 0 ]; then
+  printf '%s\n' "extension-install-exit=$EXT_INSTALL_EXIT state=failed" \
+    >> "$BACKUP_ROOT/prestates"
+  echo "STOP: extension install failed; use section 13 rollback from recorded post-images" >&2
+  exit 1
+fi
+printf '%s\n' "extension-install-exit=0 state=succeeded" >> "$BACKUP_ROOT/prestates"
 EXTENSION_MUTATED=1
-snapshot_blender_target "$EXT_INSTALLED" directory > "$BACKUP_ROOT/extension.install-post.json"
-snapshot_blender_target "$USERPREF" file > "$BACKUP_ROOT/userpref.install-post.json"
-chmod 600 "$BACKUP_ROOT/extension.install-post.json" "$BACKUP_ROOT/userpref.install-post.json"
 ```
 
-不要只信最后一条命令的 exit code。随后必须确认 installed manifest、Extension
+不要只信 install-file 的 exit code。conditional 无论得到 `0` 或非零都会先对
+Extension 和 `userpref.blend` 两个可能目标生成 post snapshot，再判断成功/失败；
+因此 `set -e` 不会越过 post-image。任一 snapshot 因 symlink、type 或 ownership
+不安全而失败时，停止且要求人工恢复，绝不覆盖。install 非零时使用已记录的两个
+post-image 进入第 13 节 rollback；成功后仍必须确认 installed manifest、Extension
 列表、启用模块和文件树。任一不一致即视为安装失败并从备份回滚。
 
 在 `userpref.blend` 已备份、Blender 已退出且写前 SHA/inode 未变化后，开启
@@ -513,6 +676,8 @@ print("preferences-saved=ok")
 '
 snapshot_blender_target "$USERPREF" file > "$BACKUP_ROOT/userpref.post.json"
 chmod 600 "$BACKUP_ROOT/userpref.post.json"
+USERPREF_LAST_SNAPSHOT="$BACKUP_ROOT/userpref.post.json"
+export USERPREF_LAST_SNAPSHOT
 ```
 
 重新启动一个正常读取用户偏好的 Blender 进程核验。`bpy.app.online_access` 只有
@@ -623,9 +788,9 @@ trap - EXIT
 ```
 
 不存在 entry 时，在任何写入前按第 6 节记录 `config=absent` 或备份已有 config，
-并用以下精确命令创建 transport 骨架。若 config 原本不存在，先重验
-`CODEX_ROOT` 仍是当前 UID 的非 symlink 目录且 device/inode 等于
-`CONFIG_PARENT_IDENTITY`：
+并用以下精确命令创建 transport 骨架。`CONFIG_PRESTATE=present` 时紧邻 add 前重验
+config 仍是当前 UID 的普通非 symlink 文件且 device/inode/SHA 等于 pre-image；
+`CONFIG_PRESTATE=absent` 时重验 `CODEX_ROOT` 的 type/owner/identity：
 
 ```bash
 if [ "$MCP_ENTRY_STATE" = absent ]; then
@@ -634,20 +799,46 @@ if [ "$MCP_ENTRY_STATE" = absent ]; then
     test -d "$CODEX_ROOT"
     test "$(stat -f '%u' "$CODEX_ROOT")" = "$(id -u)"
     test "$(stat -f '%d %i' "$CODEX_ROOT")" = "$CONFIG_PARENT_IDENTITY"
+  else
+    revalidate_config_image "$CONFIG_PRE_IDENTITY" "$CONFIG_PRE_SHA"
   fi
-  "$CODEX_BIN" mcp add blender \
+
+  if "$CODEX_BIN" mcp add blender \
     --env "BLENDER_PATH=$BLENDER_BIN" \
     -- "$UV_BIN" run --quiet --no-project --python 3.13 \
     --with 'mcp[cli]>=1.2.0,<2' \
-    --with-editable "$MCP_SOURCE_DIR/mcp" blender-mcp
-  test ! -L "$CODEX_CONFIG"
-  test -f "$CODEX_CONFIG"
-  test "$(stat -f '%u' "$CODEX_CONFIG")" = "$(id -u)"
-  CONFIG_CREATED_IDENTITY="$(stat -f '%d %i' "$CODEX_CONFIG")"
-  CONFIG_CREATED_SHA="$(shasum -a 256 "$CODEX_CONFIG" | awk '{print $1}')"
+    --with-editable "$MCP_SOURCE_DIR/mcp" blender-mcp; then
+    CONFIG_ADD_EXIT=0
+  else
+    CONFIG_ADD_EXIT=$?
+  fi
+
+  if [ -L "$CODEX_CONFIG" ]; then
+    echo "STOP: config became a symlink; manual recovery required" >&2
+    exit 1
+  elif [ -f "$CODEX_CONFIG" ]; then
+    record_config_post_image "mcp-add-exit-$CONFIG_ADD_EXIT"
+    CONFIG_CREATED_IDENTITY="$CONFIG_LAST_IDENTITY"
+    CONFIG_CREATED_SHA="$CONFIG_LAST_SHA"
+  elif [ "$CONFIG_ADD_EXIT" = 0 ] || [ "$CONFIG_PRESTATE" = present ]; then
+    echo "STOP: config path unexpectedly absent after mcp add; manual recovery required" >&2
+    exit 1
+  fi
+
+  if [ "$CONFIG_ADD_EXIT" != 0 ]; then
+    echo "STOP: mcp add failed; rollback from the last completed config post-image" >&2
+    exit 1
+  fi
+  revalidate_config_image "$CONFIG_CREATED_IDENTITY" "$CONFIG_CREATED_SHA"
 fi
-export CONFIG_CREATED_IDENTITY CONFIG_CREATED_SHA
+export CONFIG_ADD_EXIT CONFIG_CREATED_IDENTITY CONFIG_CREATED_SHA
 ```
+
+add 返回成功或非零后都先记录最后一个安全可读 post-image，再处理状态。成功 add
+记录的 `CONFIG_CREATED_IDENTITY`/`CONFIG_CREATED_SHA` 是下一次原子 TOML 写入的
+基线；该写入前必须再次调用 `revalidate_config_image`。add 非零且 config 原本
+absent、当前路径仍 absent 时无需移动；若留下普通文件，则使用刚记录的 post-image
+安全 rollback。任何 symlink/type/identity 异常都停止并要求人工恢复。
 
 存在 entry 时不得先 remove。LLM 必须解析 TOML、只修改
 `[mcp_servers.blender]`、其 `env`，并集合式
@@ -677,21 +868,49 @@ direct_only_tool_namespaces = ["mcp__blender"]
 
 如果该数组已有其他成员，只添加缺失的 `mcp__blender`，不得替换整个数组。
 
+紧邻原子 TOML 写入前选择并重验本次基线：
+
+```bash
+if [ "$MCP_ENTRY_STATE" = absent ]; then
+  CONFIG_WRITE_BASELINE_IDENTITY="$CONFIG_CREATED_IDENTITY"
+  CONFIG_WRITE_BASELINE_SHA="$CONFIG_CREATED_SHA"
+else
+  CONFIG_WRITE_BASELINE_IDENTITY="$CONFIG_PRE_IDENTITY"
+  CONFIG_WRITE_BASELINE_SHA="$CONFIG_PRE_SHA"
+fi
+revalidate_config_image "$CONFIG_WRITE_BASELINE_IDENTITY" "$CONFIG_WRITE_BASELINE_SHA"
+export CONFIG_WRITE_BASELINE_IDENTITY CONFIG_WRITE_BASELINE_SHA
+```
+
 写入流程：
 
-1. 记录原文件 bytes、mode、device、inode 和 SHA；
+1. 选择最近一个已完成的 config post-image 作为写入基线：entry 原本存在时是
+   pre-image，刚执行 add 时是 `CONFIG_CREATED_IDENTITY`/`CONFIG_CREATED_SHA`；
 2. 备份并验证备份 SHA；
-3. 写入前重验原文件 identity 和 SHA；
+3. 写入前用 `revalidate_config_image` 重验基线文件的当前 UID、普通非 symlink
+   type、identity 和 SHA；
 4. 在同目录创建 mode `0600` 的临时文件；
 5. 用 Python 3.13 `tomllib.loads()` 验证临时文件；
 6. 原子 `replace`；
-7. 重读并再次解析，记录 post-SHA；
+7. replace 返回后立即调用 `record_config_post_image atomic-final`，把
+   `CONFIG_POST_IDENTITY="$CONFIG_LAST_IDENTITY"` 和
+   `CONFIG_POST_SHA="$CONFIG_LAST_SHA"`，随后重读并再次解析；
 8. 运行 `codex mcp get blender --json` 精确验证 transport、args、env、timeouts
    和工具集合。
 
-若 `CONFIG_PRESTATE=absent`，第 7 步还必须记录原子 replace 后最终普通文件的
-`CONFIG_POST_IDENTITY`（device/inode）与 `CONFIG_POST_SHA`；这两个最终值而不是
-骨架的中间 identity/SHA 是首次安装回滚的唯一整文件移动条件。
+第 7 步紧邻 replace 返回后执行：
+
+```bash
+record_config_post_image atomic-final
+CONFIG_POST_IDENTITY="$CONFIG_LAST_IDENTITY"
+CONFIG_POST_SHA="$CONFIG_LAST_SHA"
+export CONFIG_POST_IDENTITY CONFIG_POST_SHA
+```
+
+每次可能写 config 的命令后都必须立即记录 post-image。若记录本身失败，保留上一
+个已完成 post-image；rollback 重验会因当前对象不匹配而停止，不能猜测或覆盖。
+所有 `CONFIG_CREATED_*`、`CONFIG_POST_*` 和 `CONFIG_LAST_*` 在第 6 节先初始化，
+因此中途失败的 `set -u` shell 不会引用未绑定变量。
 
 检测到并发变化立即停止。不得使用
 `codex --strict-config mcp get`；当前 Codex CLI 不支持该组合。
@@ -848,8 +1067,9 @@ stanza 或者完全精确，或者唯一 drift 是 `--no-project` 后缺少 `--p
    目录 device/inode、clean 状态和旧 commit 作为 source pre-image；
 8. 写入前重验 live checkout 的 device/inode、HEAD 和 clean 状态。全部仍等于
    pre-image 后，在 live checkout fetch 候选完整 SHA 并执行 detached checkout；
-   断言 live `HEAD` 等于候选 SHA、worktree clean，且 Server handshake 返回候选
-   catalog；
+   断言 live `HEAD` 等于候选 SHA、worktree clean，立即把当前 device/inode 写入
+   `SOURCE_POST_IDENTITY`、候选 SHA 写入 `SOURCE_POST_HEAD`，且 Server handshake
+   返回候选 catalog；
 9. 安装候选 Extension，把 `enabled_tools` 原子替换为候选 catalog 的精确集合，
    包括新增、删除和重命名；
 10. 运行四层验收，要求 live candidate Server catalog、effective config 和新任务模型
@@ -864,27 +1084,49 @@ stanza 或者完全精确，或者唯一 drift 是 `--no-project` 后缺少 `--p
 
 ## 13. 回滚
 
+所有 absent-object recovery move 都必须是同卷 rename。先定义并在每次 `mv` 紧邻
+之前调用；source 与 recovery 目标父目录的 `st_dev` 不同就停止，禁止 copy+unlink：
+
+```bash
+same_device_or_stop() {
+  if [ "$(stat -f '%d' "$1")" != "$(stat -f '%d' "$2")" ]; then
+    echo "STOP: recovery move would cross devices; no copy+unlink fallback" >&2
+    exit 1
+  fi
+}
+```
+
 Codex config：
 
-- `CONFIG_PRESTATE=present` 且当前 SHA 等于本次记录的 post-SHA：可在同目录
-  mode `0600` 临时文件中写入完整 pre-image，解析后原子恢复；
+- `CONFIG_PRESTATE=present`：先用 `CONFIG_LAST_IDENTITY`/`CONFIG_LAST_SHA` 重验
+  最近一个已完成 post-image，匹配时可在同目录 mode `0600` 临时文件中写入完整
+  pre-image，解析后原子恢复；
 - 当前 SHA 已变化：禁止整文件覆盖，只做三方/手术式恢复原 `blender` stanza 和
   本次新增的 `mcp__blender` membership；
 - 原 stanza 不存在：只删除本次创建的 stanza；原 stanza 存在：恢复原值，不能
   用简单 `mcp remove` 代替。
-- `CONFIG_PRESTATE=absent` 时，只有当前路径仍是当前 UID 所有的普通非 symlink
-  文件、device/inode 等于 `CONFIG_POST_IDENTITY` 且 SHA 等于
-  `CONFIG_POST_SHA`，才把它移动到 `BACKUP_ROOT` 内新建的唯一 `0700` recovery
-  目录并验证原路径恢复为 absent；这是可恢复移动，不是删除。identity/SHA 有
-  任一变化时停止整文件移动，改用上述手术式 rollback，绝不覆盖并发内容。
+- `CONFIG_PRESTATE=absent` 时按 `CONFIG_LAST_STAGE` 选择最后一个已完成 post-image：
+  初值 `absent` 表示路径尚未创建；add 后是 `CONFIG_CREATED_*`；最终 atomic replace
+  后是 `CONFIG_POST_*`。只引用 `CONFIG_LAST_IDENTITY`/`CONFIG_LAST_SHA`，因此
+  atomic 步骤中途失败也不会在 `set -u` 下引用未绑定的 `CONFIG_POST_*`。路径已
+  创建时必须重验当前 UID、普通非 symlink、last identity/SHA 后才能移动；任一
+  变化都停止整文件移动并改用手术式 rollback。
 
-例如 absent-config 分支先逐项重验，再执行：
+Absent-config 的可执行选择与同卷移动：
 
 ```bash
-RECOVERY_CONFIG="$(mktemp -d "$BACKUP_ROOT/recovery-config.XXXXXX")"
-chmod 700 "$RECOVERY_CONFIG"
-mv "$CODEX_CONFIG" "$RECOVERY_CONFIG/config.toml.installer-created"
-test ! -e "$CODEX_CONFIG"
+if [ "$CONFIG_LAST_STAGE" = absent ]; then
+  test ! -e "$CODEX_CONFIG"
+  test ! -L "$CODEX_CONFIG"
+else
+  revalidate_config_image "$CONFIG_LAST_IDENTITY" "$CONFIG_LAST_SHA"
+  RECOVERY_CONFIG="$(mktemp -d "$BACKUP_ROOT/recovery-config.XXXXXX")"
+  chmod 700 "$RECOVERY_CONFIG"
+  same_device_or_stop "$CODEX_CONFIG" "$RECOVERY_CONFIG"
+  mv "$CODEX_CONFIG" "$RECOVERY_CONFIG/config.toml.installer-created"
+  test ! -e "$CODEX_CONFIG"
+  test ! -L "$CODEX_CONFIG"
+fi
 ```
 
 Blender：
@@ -896,31 +1138,65 @@ Blender：
   均不存在；若目录已被外部替换则停止，不删除；
 - 原 `userpref.blend` 存在时恢复已验证备份；原状态为 `absent` 时，仅当当前文件
   identity/SHA 等于本次记录的 post-image 才把它移动到 `BACKUP_ROOT` 内唯一
-  recovery 目录并恢复路径 absent，变化时停止；
+  recovery 目录并恢复路径 absent，变化时停止；紧邻 `mv` 前必须执行
+  `same_device_or_stop "$USERPREF" "$RECOVERY_USERPREF"`，跨设备时停止；
 - 重新启动并核验旧 ID/version、启用状态和偏好；
 - 不删除或修改任何 `.blend` 文件。
 
+原 `userpref.blend` 为 absent 且 last post-image 重验通过时执行：
+
+```bash
+revalidate_blender_target "$USERPREF" file userpref "$USERPREF_LAST_SNAPSHOT"
+RECOVERY_USERPREF="$(mktemp -d "$BACKUP_ROOT/recovery-userpref.XXXXXX")"
+chmod 700 "$RECOVERY_USERPREF"
+same_device_or_stop "$USERPREF" "$RECOVERY_USERPREF"
+mv "$USERPREF" "$RECOVERY_USERPREF/userpref.blend.installer-created"
+test ! -e "$USERPREF"
+test ! -L "$USERPREF"
+```
+
 Source/runtime：
 
-- `SOURCE_PRESTATE=present`：只有 source identity 未变、worktree clean 且 HEAD
-  仍是本流程写入的 pin/candidate 时，才 detached checkout 记录的旧完整 commit，
-  并恢复旧 catalog；否则停止；
+- `SOURCE_PRESTATE=present`：执行
+  `revalidate_source_checkout "$SOURCE_POST_IDENTITY" "$SOURCE_POST_HEAD"`，证明
+  source identity 未变、worktree clean 且 HEAD 仍是本流程最后记录的 pin/candidate
+  后，才 detached checkout `SOURCE_OLD_COMMIT` 并恢复旧 catalog；否则停止；
 - `SOURCE_PRESTATE=absent`：重验 source 父目录和新 checkout 的 device/inode 均
   等于 clone 前后记录值，HEAD 仍等于 `PINNED_COMMIT`，
-  `git status --porcelain --untracked-files=all` 为空且没有生成的 `uv.lock`。全部成立
-  才把整个 checkout 移动到 `BACKUP_ROOT` 内新建的唯一 `0700` recovery 目录，
-  验证原路径 absent；这不是“恢复旧 commit”。任一条件失败都停止，绝不移动或
-  删除用户新增内容；
+  `git status --porcelain --untracked-files=all --ignored` 为空且没有生成的
+  `uv.lock`。`--ignored` 检查 working tree 中用户新增的 ignored 内容，不检查
+  `.git` 内部。全部成立才把整个 checkout 同卷移动到 `BACKUP_ROOT` 内新建的唯一
+  `0700` recovery 目录并验证原路径 absent；这不是“恢复旧 commit”。任一条件
+  失败都停止，绝不移动或删除用户新增内容；
 - 不递归删除 checkout，不清理共享 uv cache；
 - 回滚后重复第 10 节四层验收。
+
+Existing-source rollback 在 detached checkout 旧 commit 前执行：
+
+```bash
+if [ "$SOURCE_PRESTATE" = present ]; then
+  revalidate_source_checkout "$SOURCE_POST_IDENTITY" "$SOURCE_POST_HEAD"
+  git -C "$MCP_SOURCE_DIR" checkout --detach "$SOURCE_OLD_COMMIT"
+fi
+```
 
 例如 absent-source 分支通过上述全部重验后执行：
 
 ```bash
+test "$(snapshot_source_parent required)" = "$SOURCE_PARENT_IDENTITY"
+test ! -L "$MCP_SOURCE_DIR"
+test -d "$MCP_SOURCE_DIR"
+test "$(stat -f '%u' "$MCP_SOURCE_DIR")" = "$(id -u)"
+test "$(stat -f '%d %i' "$MCP_SOURCE_DIR")" = "$SOURCE_CREATED_IDENTITY"
+test "$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)" = "$PINNED_COMMIT"
+test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all --ignored)"
+test ! -e "$MCP_SOURCE_DIR/uv.lock"
 RECOVERY_SOURCE="$(mktemp -d "$BACKUP_ROOT/recovery-source.XXXXXX")"
 chmod 700 "$RECOVERY_SOURCE"
+same_device_or_stop "$MCP_SOURCE_DIR" "$RECOVERY_SOURCE"
 mv "$MCP_SOURCE_DIR" "$RECOVERY_SOURCE/source.installer-created"
 test ! -e "$MCP_SOURCE_DIR"
+test ! -L "$MCP_SOURCE_DIR"
 ```
 
 ## 14. 常见问题判定
