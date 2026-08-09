@@ -688,6 +688,9 @@ and `EXPECTED_BASENAME='viewport.png'`. After both renders, call
 
 Add a 26-row table to the audit, one row for each exact tool name from the server catalog, with outcome, wall ms, expected/observed shape, retry count and issue ID. Validate the table with:
 
+Before running the validator, change the audit status to
+`Status: tool coverage complete; root-cause analysis pending`.
+
 ```bash
 python3 - <<'PY'
 from pathlib import Path
@@ -710,7 +713,7 @@ assert len(tools) == len(set(tools)) == 26
 for tool in tools:
     marker = f"`{tool}`"
     assert marker in audit, marker
-assert "baseline running" not in audit
+assert "Status: tool coverage complete; root-cause analysis pending" in audit
 print("tool-coverage=26")
 PY
 git diff --check
