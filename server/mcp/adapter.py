@@ -344,12 +344,14 @@ mcp = MCPServer("blender-codex", version=SERVER_VERSION, instructions=INSTRUCTIO
 
 @mcp.tool()
 def get_blender_status(instance_selector: str | None = None) -> StatusResult:
+    """列出 Blender 实例、Bridge 连接状态与场景概况。无实例时返回引导文案。"""
     return StatusResult.model_validate(status_impl(_deps()[0], instance_selector))
 
 
 @mcp.tool()
 def get_scene_summary(instance_id: str, include_collections: bool = True,
                       include_managed_objects: bool = True) -> SceneSummaryResult:
+    """返回指定实例的场景摘要：对象统计、单位、scene_hash 与受管对象清单。"""
     discovery = _deps()[0]
     try:
         return SceneSummaryResult.model_validate(scene_summary_impl(
@@ -364,6 +366,7 @@ def get_scene_summary(instance_id: str, include_collections: bool = True,
 
 @mcp.tool()
 def describe_capabilities(include_instances: bool = False) -> CapabilitiesResult:
+    """返回本 Server 能力：支持的工具、IR 版本、Blender 基线。默认不连 Bridge。"""
     return CapabilitiesResult.model_validate(capabilities_impl(_deps()[0], include_instances))
 
 

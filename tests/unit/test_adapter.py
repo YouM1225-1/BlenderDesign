@@ -508,6 +508,17 @@ async def test_scene_summary_server_admission_releases_after_exception(audit,
 
 
 def test_capabilities_is_local_by_default():
+    import server.mcp.adapter as adapter
+
+    tools = list(adapter.mcp._tool_manager._tools.values())
+    assert [(tool.name, tool.description) for tool in tools] == [
+        ("get_blender_status",
+         "列出 Blender 实例、Bridge 连接状态与场景概况。无实例时返回引导文案。"),
+        ("get_scene_summary",
+         "返回指定实例的场景摘要：对象统计、单位、scene_hash 与受管对象清单。"),
+        ("describe_capabilities",
+         "返回本 Server 能力：支持的工具、IR 版本、Blender 基线。默认不连 Bridge。"),
+    ]
     # 复审 F-07：默认不碰 Bridge——Blender 离线时也必须能回答
     class ExplodingDiscovery:
         last_scan = ScanStats()
