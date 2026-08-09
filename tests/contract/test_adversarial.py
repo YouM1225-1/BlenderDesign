@@ -112,8 +112,8 @@ def test_tokenless_connection_closed_silently(tmp_path):
 
 
 def test_pipeline_busy_and_reply_frames_never_interleave(tmp_path, monkeypatch):
-    # 首个正常帧受控为 1-byte partial write；随后 I/O 产生 BUSY。单写者会把 BUSY
-    # 排在该帧后，双写者反例会把 BUSY 字节插入未完成的正常帧并损坏 framing。
+    # 首个正常帧真实写 1 byte，随后写端保持 non-writable、I/O 继续读到 BUSY。
+    # 单写者会把 BUSY 排在该帧后，双写者反例会破坏 framing 或丢失回复。
     partial_started = threading.Event()
     advance_partial = threading.Event()
     busy_queued = threading.Event()
@@ -129,6 +129,8 @@ def test_pipeline_busy_and_reply_frames_never_interleave(tmp_path, monkeypatch):
             if not release_writes.is_set():
                 if not normal_size[0]:
                     normal_size[0] = len(data)
+                if normal_sent[0]:
+                    raise BlockingIOError
                 sent = self._wrapped.send(data[:1])
                 if sent:
                     normal_sent[0] += sent
