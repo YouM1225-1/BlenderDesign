@@ -544,7 +544,11 @@ try:
     status = request(3, "mcpServerStatus/list", {"cursor": None, "limit": 100, "threadId": None, "detail": "toolsAndAuthOnly"})
     assert "blender" in config["config"]["mcp_servers"]
     server = next(item for item in status["data"] if item["name"] == "blender")
-    tools = sorted(tool["name"] for tool in server["tools"])
+    raw_tools = server["tools"]
+    if isinstance(raw_tools, dict):
+        tools = sorted(raw_tools)
+    else:
+        tools = sorted(tool["name"] for tool in raw_tools)
     assert tools and len(tools) == len(set(tools))
     print(json.dumps({"name": server["name"], "tools": tools}, ensure_ascii=False))
 finally:
