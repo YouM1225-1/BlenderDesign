@@ -55,9 +55,12 @@ Create `docs/install-official-blender-mcp.md` with this exact content:
 ````markdown
 # Blender Lab 官方 MCP：LLM 执行安装手册
 
-状态：operational、non-normative  
-本仓库技术版本：`0.1.0`  
-适用平台：macOS Apple Silicon  
+状态：operational、non-normative
+
+本仓库技术版本：`0.1.0`
+
+适用平台：macOS Apple Silicon
+
 适用 Blender：`>=5.2`（5.2 为实测基线）
 
 ## 1. 目的与边界
