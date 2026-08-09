@@ -17,7 +17,7 @@ macOS Apple Silicon 主机上完成检测、备份、安装、配置、验证、
 
 ## 2. 交付范围
 
-实现阶段只新增：
+仓库内实现阶段只新增：
 
 - `docs/install-official-blender-mcp.md`：面向 LLM 的操作手册。
 
@@ -27,6 +27,10 @@ macOS Apple Silicon 主机上完成检测、备份、安装、配置、验证、
 
 手册属于 operational、non-normative 文档，不纳入既有 Phase 0 attestation。
 若未来要把它提升为正式安装合同，需建立新的 attestation 链。
+
+仓库外还需按新手册对当前机器执行一次真实修复和验收：在无需重装扩展时开启
+Online Access、验证官方 Server 配置、重启所需进程并完成安全只读调用。真实
+执行结果只作为本轮运维报告，不回写历史 evidence。
 
 ## 3. 已确认约束
 
@@ -196,6 +200,7 @@ Blender CLI 报成功后仍须验证：
 备份目录必须为当前用户所有、模式 `0700`；配置和偏好备份模式为 `0600`。
 记录每个文件的原始 bytes、SHA-256、mode、device/inode、修改后预期 SHA、旧
 MCP stanza、旧工具集合、旧 namespace membership、旧扩展版本和旧提交。
+日志不得输出完整 Codex config、环境变量值或其他可能包含凭据的原始内容。
 
 写 Codex config 前后均使用 TOML parser 校验。写入前再次比较 SHA 和 inode；
 检测到并发变化立即停止。同目录 mode `0600` 临时文件解析成功后才能原子替换。
@@ -250,8 +255,13 @@ MCP stanza、旧工具集合、旧 namespace membership、旧扩展版本和旧�
 
 - 修改后的 TOML 可解析；
 - `codex mcp get blender --json` 与目标 transport、args、env、timeouts 一致；
+- App Server 的 `config/read` 与 `mcpServerStatus/list` 分别确认 effective config
+  和 Server 状态；
 - Server catalog、`enabled_tools` 和 fresh/reloaded task 的模型工具集合完全相等；
 - 当前已知安全只读工具 `get_blendfile_summary_datablocks` 调用成功。
+
+当前 Codex CLI 不支持 `codex --strict-config mcp get`，手册不得把该命令列为
+验收步骤。
 
 安装 smoke 不调用 `execute_blender_code`、`execute_blender_code_for_cli` 或 render。
 安装成功不等于所有工具稳定；既有 screenshot 长序列缺陷和 deferred render
@@ -280,4 +290,3 @@ MCP stanza、旧工具集合、旧 namespace membership、旧扩展版本和旧�
 - 不以 GUI 自动化作为唯一成功路径；
 - 不修改冻结 ROADMAP、既有安装文档或历史证据；
 - 不新增 pytest，以保持既有 337 unit、32 contract、369 full gate count。
-
