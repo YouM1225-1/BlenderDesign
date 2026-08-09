@@ -259,12 +259,27 @@ def group_is_live(record: ProcessRecord) -> bool:
     return group_id_is_live(record.pgid)
 
 
+def current_record(record: ProcessRecord) -> ProcessRecord:
+    current = read_record(
+        record.path, expected_marker=record.marker,
+        not_before_ns=record.started_monotonic_ns)
+    if current != record:
+        raise RuntimeError(f"process record identity changed: {record.path}")
+    return current
+
+
+def recorded_group_is_live(record: ProcessRecord) -> bool:
+    return group_is_live(current_record(record))
+
+
 def signal_live_records(records: Iterable[ProcessRecord], sig: int) -> None:
     unique = {record.pgid: record for record in records}
     first_error: Exception | None = None
     for record in sorted(unique.values(), key=lambda item: item.pgid):
         try:
-            if group_is_live(record):
+            if recorded_group_is_live(record):
+                # POSIX has no atomic record-validation + killpg operation.  A
+                # same-UID swap after this final check remains indistinguishable.
                 signal_group_id(record.pgid, sig)
         except Exception as exc:
             if first_error is None:
@@ -273,9 +288,78 @@ def signal_live_records(records: Iterable[ProcessRecord], sig: int) -> None:
         raise first_error
 
 
+def wait_owned_process_record(
+    process: subprocess.Popen[bytes],
+    path: Path,
+    *,
+    expected_marker: str,
+    not_before_ns: int,
+    deadline: float,
+) -> ProcessRecord:
+    while True:
+        try:
+            record = read_record(
+                path, expected_marker=expected_marker,
+                not_before_ns=not_before_ns)
+        except FileNotFoundError:
+            process.poll()
+            if process.returncode is not None:
+                raise RuntimeError(
+                    f"owned process exited before publishing its record: {process.pid}")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("owned process record publication timed out")
+            time.sleep(min(0.01, remaining))
+            continue
+        if record.pid != process.pid:
+            raise RuntimeError(
+                f"owned process record PID differs: {record.pid} != {process.pid}")
+        return record
+
+
+def cleanup_owned_process(
+    process: subprocess.Popen[bytes],
+    record: ProcessRecord,
+    *,
+    deadline: float,
+    term_grace: float,
+) -> int:
+    def live() -> bool:
+        process.poll()
+        return recorded_group_is_live(record)
+
+    group_live = live()
+    if group_live:
+        signal_live_records([record], signal.SIGTERM)
+    term_deadline = min(deadline, time.monotonic() + term_grace)
+    while group_live and time.monotonic() < term_deadline:
+        time.sleep(min(0.05, max(0.0, term_deadline - time.monotonic())))
+        group_live = live()
+    if group_live:
+        signal_live_records([record], signal.SIGKILL)
+    while group_live:
+        group_live = live()
+        if not group_live:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"owned process group survived cleanup: {record.pgid}")
+        time.sleep(min(0.05, remaining))
+    remaining = max(0.0, deadline - time.monotonic())
+    try:
+        return process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(
+            f"owned process leader could not be reaped: {record.pid}") from exc
+
+
 def _remember_known_record(
     known_records: dict[int, ProcessRecord], record: ProcessRecord,
 ) -> None:
+    cached_same_group = known_records.get(record.pgid)
+    if cached_same_group is not None and cached_same_group != record:
+        raise RuntimeError(f"process record identity changed: {record.path}")
     first_error: Exception | None = None
     for pgid, cached in tuple(known_records.items()):
         if pgid == record.pgid:

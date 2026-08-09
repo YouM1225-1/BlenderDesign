@@ -21,11 +21,16 @@ import bmesh  # noqa: E402
 from bridge.blender import driver, panel  # noqa: E402
 from server.core.bridge_client import BridgeClient, BridgeError  # noqa: E402
 from smoke.process_registry import (  # noqa: E402
-    group_id_is_live,
+    REPLACE_MODE,
+    current_record,
+    finish_publication_reservation,
     new_marker,
     poll_before_deadline,
+    read_record,
+    recorded_group_is_live,
+    reserve_publication,
+    retire_record,
     scan_records,
-    signal_group_id,
     signal_live_records,
 )
 
@@ -61,7 +66,9 @@ ST: dict = {"phase": "start", "box": None, "thread": None, "deadline": 0.0,
             "nfr_registry_marker": None, "nfr_registry_not_before_ns": 0,
             "nfr_registry_pending": False,
             "nfr_known_records": {},
-            "nfr_helper_pgid": None, "nfr_work_deadline": 0.0,
+            "nfr_helper_record": None, "nfr_helper_identity": None,
+            "nfr_helper_publication": None,
+            "nfr_work_deadline": 0.0,
             "nfr_final_deadline": 0.0}
 
 
@@ -221,15 +228,57 @@ def _signal_nfr_groups(sig: int) -> None:
             _nfr_error_once(message)
 
 
+def _nfr_helper_record():
+    path = ST.get("nfr_helper_record")
+    process = ST.get("nfr_proc")
+    marker = ST.get("nfr_registry_marker")
+    not_before_ns = ST.get("nfr_registry_not_before_ns")
+    if (not isinstance(path, Path) or process is None
+            or not isinstance(marker, str) or type(not_before_ns) is not int):
+        return None
+    cached = ST.get("nfr_helper_identity")
+    if cached is not None:
+        return current_record(cached)
+    try:
+        current = read_record(
+            path, expected_marker=marker, not_before_ns=not_before_ns)
+    except FileNotFoundError:
+        return None
+    if current.pid != process.pid:
+        raise RuntimeError(
+            f"NFR helper record PID differs: {current.pid} != {process.pid}")
+    ST["nfr_helper_identity"] = current
+    return current
+
+
 def _nfr_helper_is_live() -> bool:
-    pgid = ST.get("nfr_helper_pgid")
-    return type(pgid) is int and pgid > 1 and group_id_is_live(pgid)
+    try:
+        record = _nfr_helper_record()
+        if record is None:
+            process = ST.get("nfr_proc")
+            return process is not None and process.poll() is None
+        return recorded_group_is_live(record)
+    except Exception as exc:
+        ST["nfr_registry_pending"] = True
+        message = f"nfr helper identity: {type(exc).__name__}: {exc}"
+        if ST.get("nfr_error") is None:
+            ST["nfr_error"] = message
+        _nfr_error_once(message)
+        return True
 
 
 def _signal_nfr_helper(sig: int) -> None:
-    pgid = ST.get("nfr_helper_pgid")
-    if type(pgid) is int and pgid > 1:
-        signal_group_id(pgid, sig)
+    try:
+        record = _nfr_helper_record()
+        if record is None:
+            raise RuntimeError("NFR helper record is unavailable")
+        signal_live_records([record], sig)
+    except Exception as exc:
+        ST["nfr_registry_pending"] = True
+        message = f"nfr helper signal: {type(exc).__name__}: {exc}"
+        if ST.get("nfr_error") is None:
+            ST["nfr_error"] = message
+        _nfr_error_once(message)
 
 
 def _nfr_stage_deadline(seconds: float) -> float:
@@ -246,6 +295,28 @@ def _remove_nfr_process_dir() -> None:
         directory.rmdir()
     except OSError:
         pass
+
+
+def _retire_nfr_helper() -> None:
+    path = ST.get("nfr_helper_record")
+    publication = ST.get("nfr_helper_publication")
+    marker = ST.get("nfr_registry_marker")
+    not_before_ns = ST.get("nfr_registry_not_before_ns")
+    if (not isinstance(path, Path) or not isinstance(marker, str)
+            or type(not_before_ns) is not int):
+        return
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        if isinstance(publication, tuple):
+            finish_publication_reservation(*publication)
+    else:
+        retire_record(
+            path, expected_marker=marker, not_before_ns=not_before_ns)
+    ST["nfr_helper_identity"] = None
+    ST["nfr_helper_publication"] = None
+    if path.parent.exists() and not any(path.parent.iterdir()):
+        path.parent.rmdir()
 
 
 def _settle_nfr(returncode: int | None) -> None:
@@ -266,12 +337,14 @@ def _settle_nfr(returncode: int | None) -> None:
         and final_tick_ms < LARGE_MAX_TICK_MS
     )
     helper_live = _nfr_helper_is_live()
+    if not helper_live and ST["nfr_proc"].poll() is not None:
+        _retire_nfr_helper()
     live_groups = _live_nfr_groups()
     registry_clean = _nfr_groups_clean(live_groups)
     processes_clean = not helper_live and registry_clean
     if helper_live:
         _nfr_error_once(
-            f"nfr leaked helper process group: {ST.get('nfr_helper_pgid')}")
+            f"nfr leaked helper process group: {ST['nfr_proc'].pid}")
     if not processes_clean:
         if live_groups:
             _nfr_error_once(f"nfr leaked MCP process groups: {live_groups}")
@@ -295,8 +368,6 @@ def _settle_nfr(returncode: int | None) -> None:
             f"nfr_p1 failed: returncode={returncode}, error={ST.get('nfr_error')}, "
             f"artifact_success={(artifact or {}).get('success') if isinstance(artifact, dict) else None}, "
             f"max_tick_ms={final_tick_ms}")
-    if not helper_live:
-        ST["nfr_helper_pgid"] = None
     _remove_nfr_process_dir()
     _close_large_session()
 
@@ -337,9 +408,16 @@ def _finish() -> None:
                         break
                     time.sleep(0.05)
         nfr_proc.poll()
-        if _nfr_helper_is_live():
+        helper_live = _nfr_helper_is_live()
+        if helper_live:
             _nfr_error_once(
-                f"finish: unreaped helper process group: {ST['nfr_helper_pgid']}")
+                f"finish: unreaped helper process group: {nfr_proc.pid}")
+        elif nfr_proc.returncode is not None:
+            try:
+                _retire_nfr_helper()
+            except Exception as exc:
+                _nfr_error_once(
+                    f"finish: helper record cleanup: {type(exc).__name__}: {exc}")
         groups = _live_nfr_groups()
         if not _nfr_groups_clean(groups):
             _nfr_error_once(f"finish: unreaped MCP process groups: {groups}")
@@ -546,6 +624,9 @@ def _step() -> float | None:
                 process_dir = Path(str(NFR_OUT) + ".processes")
                 process_dir.mkdir(mode=0o700)
                 os.chmod(process_dir, 0o700)
+                helper_dir = Path(str(NFR_OUT) + ".helper-process")
+                helper_dir.mkdir(mode=0o700)
+                os.chmod(helper_dir, 0o700)
                 offline_root = Path(str(NFR_OUT) + ".offline-root")
                 offline_root.mkdir(mode=0o700)
                 os.chmod(offline_root, 0o700)
@@ -565,15 +646,32 @@ def _step() -> float | None:
                     "--registry-marker", registry_marker,
                     "--registry-not-before-ns", str(registry_not_before_ns),
                 ]
+                helper_record = helper_dir / "nfr-helper.json"
+                publication = reserve_publication(helper_record)
+                reservation, device, inode = publication
+                wrapped = [
+                    sys.executable,
+                    str(Path(__file__).with_name("process_registry.py")),
+                    REPLACE_MODE,
+                    str(helper_record), str(reservation), str(device), str(inode),
+                    registry_marker, *command,
+                ]
                 spawned_at = time.monotonic()
-                process = subprocess.Popen(
-                    command, cwd=Path(__file__).resolve().parents[1],
-                    start_new_session=True)
+                try:
+                    process = subprocess.Popen(
+                        wrapped, cwd=Path(__file__).resolve().parents[1],
+                        start_new_session=True)
+                except BaseException:
+                    finish_publication_reservation(*publication)
+                    helper_dir.rmdir()
+                    raise
                 work_deadline = spawned_at + NFR_TIMEOUT - NFR_CLEANUP_MARGIN
                 final_deadline = spawned_at + NFR_TIMEOUT
                 ST.update(
                     nfr_proc=process,
-                    nfr_helper_pgid=process.pid,
+                    nfr_helper_record=helper_record,
+                    nfr_helper_identity=None,
+                    nfr_helper_publication=publication,
                     nfr_work_deadline=work_deadline,
                     nfr_final_deadline=final_deadline,
                     phase="nfr_wait",
@@ -583,6 +681,7 @@ def _step() -> float | None:
                 _close_large_session()
         elif ph == "nfr_wait":
             proc = ST["nfr_proc"]
+            _nfr_helper_is_live()
             returncode, deadline_expired = poll_before_deadline(
                 proc.poll, ST["nfr_work_deadline"])
             if deadline_expired:
@@ -654,7 +753,7 @@ def _step() -> float | None:
                 if _nfr_helper_is_live():
                     _nfr_error_once(
                         "nfr unreaped helper process group: "
-                        f"{ST.get('nfr_helper_pgid')}")
+                        f"{proc.pid}")
                 groups = _live_nfr_groups()
                 if groups:
                     _nfr_error_once(f"nfr unreaped MCP process groups: {groups}")

@@ -36,17 +36,18 @@ try:
         REPLACE_MODE,
         SENTINEL_MODE,
         _unlink_private_temporary,
+        cleanup_owned_process,
         cleanup_registry,
         finish_publication_reservation,
-        group_id_is_live,
         new_marker,
         poll_before_deadline,
         read_record,
+        recorded_group_is_live,
         require_private_directory,
         reserve_publication,
         retire_record,
         scan_records,
-        signal_group_id,
+        wait_owned_process_record,
     )
 except ModuleNotFoundError:  # absolute script execution puts smoke/ on sys.path
     from process_registry import (  # type: ignore[no-redef]
@@ -54,17 +55,18 @@ except ModuleNotFoundError:  # absolute script execution puts smoke/ on sys.path
         REPLACE_MODE,
         SENTINEL_MODE,
         _unlink_private_temporary,
+        cleanup_owned_process,
         cleanup_registry,
         finish_publication_reservation,
-        group_id_is_live,
         new_marker,
         poll_before_deadline,
         read_record,
+        recorded_group_is_live,
         require_private_directory,
         reserve_publication,
         retire_record,
         scan_records,
-        signal_group_id,
+        wait_owned_process_record,
     )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -292,42 +294,64 @@ def _bounded_process_stdout(
 ) -> bytes:
     if max_bytes < 0:
         raise ValueError("negative subprocess output limit")
-    process = subprocess.Popen(
-        command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    if process.stdout is None:
-        raise RuntimeError("bounded subprocess stdout pipe missing")
-    descriptor = process.stdout.fileno()
-    os.set_blocking(descriptor, False)
-    selector = selectors.DefaultSelector()
-    selector.register(descriptor, selectors.EVENT_READ)
-    chunks: list[bytes] = []
-    total = 0
-    try:
-        while True:
-            events = selector.select(min(1.0, _remaining(deadline)))
-            if not events:
-                continue
-            chunk = os.read(descriptor, min(64 * 1024, max_bytes - total + 1))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > max_bytes:
-                raise ValueError("bounded subprocess output exceeds its limit")
-        returncode = process.wait(timeout=_remaining(deadline))
-        _remaining(deadline)
-        if returncode != 0:
-            raise subprocess.CalledProcessError(returncode, command)
-        return b"".join(chunks)
-    finally:
-        selector.close()
-        process.stdout.close()
-        if process.poll() is None:
-            process.kill()
-            try:
-                process.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                pass
+    with tempfile.TemporaryDirectory(prefix="bcx-bounded-process-") as temporary:
+        registry = Path(temporary)
+        registry.chmod(0o700)
+        marker = new_marker()
+        not_before_ns = time.monotonic_ns()
+        record_path = registry / "owned.json"
+        publication = reserve_publication(record_path)
+        reservation, device, inode = publication
+        wrapped = [
+            sys.executable, str(Path(__file__).with_name("process_registry.py")),
+            REPLACE_MODE, str(record_path), str(reservation), str(device),
+            str(inode), marker, *command,
+        ]
+        try:
+            process = subprocess.Popen(
+                wrapped, cwd=cwd, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+        except BaseException:
+            finish_publication_reservation(*publication)
+            raise
+        if process.stdout is None:
+            raise RuntimeError("bounded subprocess stdout pipe missing")
+        cleanup_reserve = min(1.0, _remaining(deadline) / 2.0)
+        work_deadline = deadline - cleanup_reserve
+        record = wait_owned_process_record(
+            process, record_path, expected_marker=marker,
+            not_before_ns=not_before_ns, deadline=work_deadline)
+        descriptor = process.stdout.fileno()
+        os.set_blocking(descriptor, False)
+        selector = selectors.DefaultSelector()
+        selector.register(descriptor, selectors.EVENT_READ)
+        chunks: list[bytes] = []
+        total = 0
+        try:
+            while True:
+                events = selector.select(min(1.0, _remaining(work_deadline)))
+                if not events:
+                    continue
+                chunk = os.read(descriptor, min(64 * 1024, max_bytes - total + 1))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValueError("bounded subprocess output exceeds its limit")
+            returncode = process.wait(timeout=_remaining(work_deadline))
+            _remaining(work_deadline)
+            if returncode != 0:
+                raise subprocess.CalledProcessError(returncode, command)
+            return b"".join(chunks)
+        finally:
+            selector.close()
+            process.stdout.close()
+            cleanup_owned_process(
+                process, record, deadline=deadline, term_grace=0.25)
+            retire_record(
+                record_path, expected_marker=marker,
+                not_before_ns=not_before_ns)
 
 
 def _git_bytes(
@@ -1512,19 +1536,6 @@ def _worker_main(args: argparse.Namespace) -> int:
     return 0 if artifact["success"] else 1
 
 
-def _wait_worker_group_gone(
-    process: subprocess.Popen[bytes], deadline: float,
-) -> bool:
-    while True:
-        process.poll()
-        if not group_id_is_live(process.pid):
-            return True
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        time.sleep(min(0.05, remaining))
-
-
 def _recovery_worker_command(
     args: argparse.Namespace, marker: str, not_before_ns: int,
 ) -> list[str]:
@@ -1548,8 +1559,10 @@ def _supervise_recovery(args: argparse.Namespace) -> int:
     started = time.monotonic()
     worker_deadline = started + args.timeout_seconds
     cleanup_deadline = worker_deadline + RECOVERY_CLEANUP_MARGIN
-    registry_reserve = min(RECOVERY_REGISTRY_RESERVE, RECOVERY_CLEANUP_MARGIN)
+    registry_reserve = min(
+        RECOVERY_REGISTRY_RESERVE, RECOVERY_CLEANUP_MARGIN / 3.0)
     command = _recovery_worker_command(args, marker, not_before_ns)
+    worker_record = registry / "recovery-worker.json"
     process: subprocess.Popen[bytes] | None = None
     returncode: int | None = None
     supervisor_error: str | None = None
@@ -1567,7 +1580,20 @@ def _supervise_recovery(args: argparse.Namespace) -> int:
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[signum] = signal.signal(signum, cancel)
         if cancelled_signal is None:
-            process = subprocess.Popen(command, start_new_session=True)
+            publication = reserve_publication(worker_record)
+            reservation, device, inode = publication
+            wrapped = [
+                sys.executable,
+                str(Path(__file__).with_name("process_registry.py")),
+                REPLACE_MODE,
+                str(worker_record), str(reservation), str(device), str(inode),
+                marker, *command,
+            ]
+            try:
+                process = subprocess.Popen(wrapped, start_new_session=True)
+            except BaseException:
+                finish_publication_reservation(*publication)
+                raise
         while process is not None:
             scan_records(
                 registry, expected_marker=marker, not_before_ns=not_before_ns,
@@ -1590,8 +1616,6 @@ def _supervise_recovery(args: argparse.Namespace) -> int:
                 break
             if polled is not None:
                 returncode = polled
-                if group_id_is_live(process.pid):
-                    supervisor_error = "recovery worker group survived its leader"
                 break
             time.sleep(min(0.05, max(0.0, worker_deadline - time.monotonic())))
         if process is None and cancelled_signal is not None:
@@ -1603,34 +1627,21 @@ def _supervise_recovery(args: argparse.Namespace) -> int:
     finally:
         if process is not None:
             try:
-                worker_cleanup_deadline = min(
-                    cleanup_deadline,
-                    cleanup_deadline - registry_reserve)
-                process.poll()
-                if group_id_is_live(process.pid):
+                worker_cleanup_deadline = cleanup_deadline - registry_reserve
+                record = known_records.get(process.pid) or wait_owned_process_record(
+                    process, worker_record, expected_marker=marker,
+                    not_before_ns=not_before_ns, deadline=worker_cleanup_deadline)
+                if record.path != worker_record:
+                    raise RuntimeError("recovery worker record path differs")
+                if process.poll() is not None and recorded_group_is_live(record):
                     if supervisor_error is None:
                         supervisor_error = "recovery worker group survived its leader"
-                    if time.monotonic() >= worker_cleanup_deadline:
-                        signal_group_id(process.pid, signal.SIGKILL)
-                        process.poll()
-                        if group_id_is_live(process.pid):
-                            supervisor_error += "; worker group still live after final KILL"
-                    else:
-                        signal_group_id(process.pid, signal.SIGTERM)
-                        term_deadline = min(
-                            worker_cleanup_deadline,
-                            time.monotonic() + RECOVERY_WORKER_TERM_GRACE)
-                        if not _wait_worker_group_gone(process, term_deadline):
-                            signal_group_id(process.pid, signal.SIGKILL)
-                            if time.monotonic() >= worker_cleanup_deadline:
-                                process.poll()
-                                if group_id_is_live(process.pid):
-                                    supervisor_error += "; worker group still live after final KILL"
-                            elif not _wait_worker_group_gone(
-                                    process, worker_cleanup_deadline):
-                                supervisor_error += "; worker group could not be reaped"
-                process.poll()
-                returncode = process.returncode
+                returncode = cleanup_owned_process(
+                    process, record, deadline=worker_cleanup_deadline,
+                    term_grace=RECOVERY_WORKER_TERM_GRACE)
+                retire_record(
+                    worker_record, expected_marker=marker,
+                    not_before_ns=not_before_ns)
             except Exception as exc:
                 detail = f"worker cleanup failed: {type(exc).__name__}: {exc}"
                 supervisor_error = (

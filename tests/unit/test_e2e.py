@@ -407,6 +407,7 @@ def test_known_cache_prunes_dead_records_while_publication_stays_pending(
     signaled = []
     monkeypatch.setattr(
         process_registry, "group_is_live", lambda record: record.pgid in live)
+    monkeypatch.setattr(process_registry, "current_record", lambda record: record)
     monkeypatch.setattr(
         process_registry, "signal_group_id",
         lambda pgid, sig: signaled.append((pgid, sig)))
@@ -460,6 +461,7 @@ def test_clean_scan_kills_overflow_without_growing_known_cache(
         process_registry, "read_record",
         lambda path, **_kwargs: records_by_name[path.name])
     monkeypatch.setattr(process_registry, "group_is_live", lambda _record: True)
+    monkeypatch.setattr(process_registry, "current_record", lambda current: current)
     monkeypatch.setattr(
         process_registry, "signal_group_id",
         lambda pgid, sig: signaled.append((pgid, sig)))
@@ -581,6 +583,7 @@ def test_cleanup_final_kills_cached_group_after_pending_publication_deadline(
         process_registry.time, "sleep",
         lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
     monkeypatch.setattr(process_registry, "group_is_live", lambda _record: True)
+    monkeypatch.setattr(process_registry, "current_record", lambda current: current)
     monkeypatch.setattr(
         process_registry, "signal_group_id",
         lambda pgid, sig: signaled.append((pgid, sig)))
@@ -612,9 +615,14 @@ def test_cleanup_uses_preobserved_cache_if_deadline_expired_before_scan(tmp_path
 
 
 def test_cached_signal_rechecks_pid_pgid_reuse(monkeypatch, tmp_path):
-    record = process_registry.ProcessRecord(
-        tmp_path / "cached.json", 42, 42,
-        process_registry.new_marker(), 1, 1, 1)
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    path = tmp_path / "cached.json"
+    process_registry._write_private_json(path, {
+        "schema_version": 1, "pid": 42, "pgid": 42, "marker": marker,
+        "started_monotonic_ns": time.monotonic_ns(),
+    })
+    record = process_registry.read_record(path, expected_marker=marker)
     signaled = []
     monkeypatch.setattr(process_registry.os, "getpgid", lambda _pid: 43)
     monkeypatch.setattr(
@@ -629,10 +637,17 @@ def test_cached_signal_continues_after_another_record_is_reused(
     monkeypatch, tmp_path,
 ):
     marker = process_registry.new_marker()
-    reused = process_registry.ProcessRecord(
-        tmp_path / "reused.json", 41, 41, marker, 1, 1, 1)
-    valid = process_registry.ProcessRecord(
-        tmp_path / "valid.json", 42, 42, marker, 1, 1, 1)
+    tmp_path.chmod(0o700)
+    started_ns = time.monotonic_ns()
+    reused_path = tmp_path / "reused.json"
+    valid_path = tmp_path / "valid.json"
+    for path, pid in ((reused_path, 41), (valid_path, 42)):
+        process_registry._write_private_json(path, {
+            "schema_version": 1, "pid": pid, "pgid": pid, "marker": marker,
+            "started_monotonic_ns": started_ns,
+        })
+    reused = process_registry.read_record(reused_path, expected_marker=marker)
+    valid = process_registry.read_record(valid_path, expected_marker=marker)
     signaled = []
     monkeypatch.setattr(
         process_registry.os, "getpgid", lambda pid: 99 if pid == 41 else pid)
@@ -645,7 +660,7 @@ def test_cached_signal_continues_after_another_record_is_reused(
     assert signaled == [(42, signal.SIGKILL)]
 
 
-def test_runner_keeps_cached_records_when_registry_is_unavailable():
+def test_runner_never_signals_replaced_cached_outer_record(tmp_path, monkeypatch):
     runner = Path(__file__).resolve().parents[2] / "smoke" / "runner.py"
     tree = ast.parse(runner.read_text())
     query = next(
@@ -665,28 +680,60 @@ def test_runner_keeps_cached_records_when_registry_is_unavailable():
         and keyword.value.id == "deadline"
         for keyword in bridge_calls[0].keywords
     )
-    names = {"_nfr_error_once", "_live_nfr_groups", "_signal_nfr_groups"}
+    finish = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_finish"
+    )
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_retire_nfr_helper"
+        for node in ast.walk(finish)
+    )
+    names = {
+        "_nfr_error_once", "_live_nfr_groups", "_signal_nfr_groups",
+        "_nfr_helper_record", "_signal_nfr_helper",
+    }
     body = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name in names
     ]
-    record = SimpleNamespace(pgid=42)
+    tmp_path.chmod(0o700)
+    marker = process_registry.new_marker()
+    started_ns = time.monotonic_ns()
+    path = tmp_path / "nfr-helper.json"
+    value = {
+        "schema_version": 1, "pid": 42, "pgid": 42, "marker": marker,
+        "started_monotonic_ns": started_ns,
+    }
+    process_registry._write_private_json(path, value)
+    record = process_registry.read_record(
+        path, expected_marker=marker, not_before_ns=started_ns)
+    path.unlink()
+    process_registry._write_private_json(path, value)
     known = {42: record}
     signaled = []
+    monkeypatch.setattr(
+        process_registry, "signal_group_id",
+        lambda pgid, sig: signaled.append((pgid, sig)))
     namespace = {
         "Path": Path,
         "RES": {"errors": []},
         "ST": {
             "nfr_process_dir": None,
-            "nfr_registry_marker": process_registry.new_marker(),
-            "nfr_registry_not_before_ns": 1,
+            "nfr_registry_marker": marker,
+            "nfr_registry_not_before_ns": started_ns,
             "nfr_registry_pending": False,
             "nfr_known_records": known,
             "nfr_error": None,
+            "nfr_helper_record": path,
+            "nfr_helper_identity": record,
+            "nfr_proc": SimpleNamespace(pid=42, poll=lambda: None),
         },
+        "current_record": process_registry.current_record,
+        "read_record": process_registry.read_record,
         "scan_records": lambda *_args, **_kwargs: ([], False),
-        "signal_live_records": (
-            lambda records, sig: signaled.append((list(records), sig))),
+        "signal_live_records": process_registry.signal_live_records,
     }
     module = ast.fix_missing_locations(ast.Module(body=body, type_ignores=[]))
     exec(compile(module, str(runner), "exec"), namespace)
@@ -694,9 +741,12 @@ def test_runner_keeps_cached_records_when_registry_is_unavailable():
     assert namespace["ST"]["nfr_registry_pending"] is True
     assert namespace["ST"]["nfr_known_records"] is known
     namespace["_signal_nfr_groups"](signal.SIGKILL)
-    assert signaled == [([record], signal.SIGKILL)]
-    namespace["signal_live_records"] = (
-        lambda *_args: (_ for _ in ()).throw(RuntimeError("reused")))
+    namespace["_signal_nfr_helper"](signal.SIGKILL)
+    assert signaled == []
+    assert any("process record identity changed" in message
+               for message in namespace["RES"]["errors"])
+    namespace["signal_live_records"] = lambda *_args: (
+        (_ for _ in ()).throw(RuntimeError("reused")))
     namespace["_signal_nfr_groups"](signal.SIGKILL)
     assert any("process group signal: RuntimeError: reused" in message
                for message in namespace["RES"]["errors"])
@@ -1159,11 +1209,40 @@ def test_bridge_unavailable_requires_exact_retryable_true():
             e2e._require_bridge_unavailable(value)
 
 
-def test_bounded_subprocess_stdout_rejects_excess_output(tmp_path):
+def test_bounded_subprocess_stdout_rejects_excess_output(tmp_path, monkeypatch):
+    pgid_path = tmp_path / "bounded.pgid"
+    script = (
+        "import os,signal,subprocess,sys,time; from pathlib import Path; "
+        "os.setsid() if os.getpgrp()!=os.getpid() else None; "
+        f"Path({str(pgid_path)!r}).write_text(str(os.getpgrp())); "
+        "subprocess.Popen([sys.executable,'-c',"
+        "'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+        "time.sleep(30)']); "
+        "os.write(1,b'x'*1024); time.sleep(30)"
+    )
+    real_popen = e2e.subprocess.Popen
+    spawned = {}
+
+    def capture_process(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        spawned["process"] = process
+        return process
+
+    monkeypatch.setattr(e2e.subprocess, "Popen", capture_process)
+    started = time.monotonic()
     with pytest.raises(ValueError, match="subprocess output exceeds"):
         e2e._bounded_process_stdout(
-            [sys.executable, "-c", "import os; os.write(1, b'x' * 1024)"],
-            cwd=tmp_path, deadline=time.monotonic() + 2.0, max_bytes=8)
+            [sys.executable, "-c", script], cwd=tmp_path,
+            deadline=time.monotonic() + 2.0, max_bytes=8)
+    assert time.monotonic() - started < 2.0
+    process = spawned["process"]
+    pgid = int(pgid_path.read_text())
+    try:
+        assert process.returncode is not None
+        with pytest.raises(ProcessLookupError):
+            os.killpg(pgid, 0)
+    finally:
+        process_registry.signal_group_id(pgid, signal.SIGKILL)
 
 
 def test_recovery_supervisor_rejects_completion_observed_after_deadline(
@@ -1190,7 +1269,6 @@ def test_recovery_supervisor_rejects_completion_observed_after_deadline(
     )
     monkeypatch.setattr(e2e, "time", fake_time)
     monkeypatch.setattr(e2e.subprocess, "Popen", lambda *_args, **_kwargs: LateProcess())
-    monkeypatch.setattr(e2e, "group_id_is_live", lambda _pgid: False)
     monkeypatch.setattr(e2e, "scan_records", lambda *_args, **_kwargs: ([], False))
     monkeypatch.setattr(e2e, "cleanup_registry", lambda *_args, **_kwargs: None)
     args = SimpleNamespace(
@@ -1202,48 +1280,75 @@ def test_recovery_supervisor_rejects_completion_observed_after_deadline(
     assert artifact["worker_timed_out"] is True
 
 
-def test_recovery_supervisor_issues_final_kill_at_expired_cleanup_deadline(
+def test_recovery_supervisor_does_not_signal_replaced_outer_record(
     tmp_path, monkeypatch,
 ):
     tmp_path.chmod(0o700)
     registry = tmp_path / "registry"
     registry.mkdir(mode=0o700)
-    output = tmp_path / "expired-cleanup.json"
-    clock = {"now": 10.0}
-    live = {"value": True}
+    output = tmp_path / "replaced-worker.json"
+    record = registry / "recovery-worker.json"
+    original = tmp_path / "original-worker.json"
+    marker = process_registry.new_marker()
     signaled = []
+    spawned = {}
+    observed = threading.Event()
+    replaced = threading.Event()
+    real_popen = e2e.subprocess.Popen
+    real_scan = e2e.scan_records
 
-    class ResistantProcess:
-        pid = 424242
-        returncode = None
+    def spawn(command, *args, **kwargs):
+        process = real_popen(command, *args, **kwargs)
+        spawned["process"] = process
+        return process
 
-        def poll(self):
-            clock["now"] = 11.0
-            return self.returncode
+    def replace_record():
+        deadline = time.monotonic() + 2.0
+        if not observed.wait(max(0.0, deadline - time.monotonic())):
+            return
+        value = json.loads(record.read_text())
+        record.rename(original)
+        process_registry._write_private_json(record, value)
+        replaced.set()
 
-    def signal_group(_pgid, sig):
-        signaled.append(sig)
-        if sig == signal.SIGKILL:
-            live["value"] = False
+    def scan(*args, **kwargs):
+        result = real_scan(*args, **kwargs)
+        if any(item.path == record for item in result[0]):
+            observed.set()
+        return result
 
-    fake_time = SimpleNamespace(
-        monotonic=lambda: clock["now"],
-        monotonic_ns=lambda: int(clock["now"] * 1_000_000_000),
-        sleep=lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
-    )
-    monkeypatch.setattr(e2e, "time", fake_time)
-    monkeypatch.setattr(e2e.subprocess, "Popen", lambda *_args, **_kwargs: ResistantProcess())
-    monkeypatch.setattr(e2e, "group_id_is_live", lambda _pgid: live["value"])
-    monkeypatch.setattr(e2e, "signal_group_id", signal_group)
-    monkeypatch.setattr(e2e, "scan_records", lambda *_args, **_kwargs: ([], False))
-    monkeypatch.setattr(e2e, "cleanup_registry", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(e2e, "RECOVERY_CLEANUP_MARGIN", 0.0)
+    monkeypatch.setattr(e2e, "new_marker", lambda: marker)
+    monkeypatch.setattr(e2e, "_recovery_worker_command", lambda *_args: [
+        sys.executable, "-c",
+        "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+        "time.sleep(30)"])
+    monkeypatch.setattr(e2e.subprocess, "Popen", spawn)
+    monkeypatch.setattr(e2e, "scan_records", scan)
+    monkeypatch.setattr(
+        process_registry, "signal_group_id",
+        lambda pgid, sig: signaled.append((pgid, sig)))
+    monkeypatch.setattr(e2e, "RECOVERY_CLEANUP_MARGIN", 0.5)
+    monkeypatch.setattr(e2e, "RECOVERY_REGISTRY_RESERVE", 0.1)
+    replacer = threading.Thread(target=replace_record)
+    replacer.start()
     args = SimpleNamespace(
         root=str(tmp_path), output=str(output), process_registry=str(registry),
-        timeout_seconds=1.0,
+        timeout_seconds=0.2,
     )
-    assert e2e._supervise_recovery(args) == 1
-    assert signal.SIGKILL in signaled and live["value"] is False
+    try:
+        assert e2e._supervise_recovery(args) == 1
+        replacer.join(timeout=2)
+        assert replaced.is_set()
+        assert signaled == []
+        assert spawned["process"].poll() is None
+    finally:
+        replacer.join(timeout=2)
+        process = spawned.get("process")
+        if process is not None and process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=2)
+        record.unlink(missing_ok=True)
+        original.unlink(missing_ok=True)
 
 
 def test_recovery_supervisor_reaps_child_left_by_exited_worker(
@@ -1298,14 +1403,29 @@ def test_recovery_supervisor_signal_is_safe_during_poll_and_registry_cleanup(
                 os.kill(os.getpid(), signal.SIGTERM)
             return self.returncode
 
-    monkeypatch.setattr(e2e, "group_id_is_live", lambda _pgid: False)
+        def wait(self, timeout):
+            assert timeout >= 0
+            return self.returncode
+
     for window in ("poll", "registry"):
         registry = tmp_path / f"registry-{window}"
         registry.mkdir(mode=0o700)
         output = tmp_path / f"cancel-{window}.json"
-        monkeypatch.setattr(
-            e2e.subprocess, "Popen",
-            lambda *_args, _window=window, **_kwargs: FakeProcess(_window == "poll"))
+        def spawn(command, *_args, _window=window, **_kwargs):
+            process = FakeProcess(_window == "poll")
+            record = Path(command[3])
+            process_registry._write_private_json(record, {
+                "schema_version": 1,
+                "pid": process.pid,
+                "pgid": process.pid,
+                "marker": command[7],
+                "started_monotonic_ns": time.monotonic_ns(),
+            })
+            process_registry.finish_publication_reservation(
+                Path(command[4]), int(command[5]), int(command[6]))
+            return process
+
+        monkeypatch.setattr(e2e.subprocess, "Popen", spawn)
 
         def cleanup(*_args, _window=window, **_kwargs):
             if _window == "registry":
