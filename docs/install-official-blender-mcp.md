@@ -211,23 +211,28 @@ export BACKUP_ROOT
 
 ```bash
 revalidate_config_image() {
-  test ! -L "$CODEX_CONFIG"
-  test -f "$CODEX_CONFIG"
-  test "$(stat -f '%u' "$CODEX_CONFIG")" = "$(id -u)"
-  test "$(stat -f '%d %i' "$CODEX_CONFIG")" = "$1"
-  test "$(shasum -a 256 "$CODEX_CONFIG" | awk '{print $1}')" = "$2"
+  test ! -L "$CODEX_CONFIG" || return 1
+  test -f "$CODEX_CONFIG" || return 1
+  test "$(stat -f '%u' "$CODEX_CONFIG")" = "$(id -u)" || return 1
+  test "$(stat -f '%d %i' "$CODEX_CONFIG")" = "$1" || return 1
+  test "$(shasum -a 256 "$CODEX_CONFIG" | awk '{print $1}')" = "$2" || return 1
 }
 
 record_config_post_image() {
-  test ! -L "$CODEX_CONFIG"
-  test -f "$CODEX_CONFIG"
-  test "$(stat -f '%u' "$CODEX_CONFIG")" = "$(id -u)"
-  CONFIG_LAST_STAGE="$1"
-  CONFIG_LAST_IDENTITY="$(stat -f '%d %i' "$CODEX_CONFIG")"
-  CONFIG_LAST_SHA="$(shasum -a 256 "$CODEX_CONFIG" | awk '{print $1}')"
-  printf '%s\t%s\t%s\n' "$CONFIG_LAST_STAGE" "$CONFIG_LAST_IDENTITY" \
-    "$CONFIG_LAST_SHA" >> "$BACKUP_ROOT/config-post-images"
-  chmod 600 "$BACKUP_ROOT/config-post-images"
+  local candidate_stage candidate_identity candidate_sha ledger
+  candidate_stage="$1"
+  ledger="$BACKUP_ROOT/config-post-images"
+  test ! -L "$CODEX_CONFIG" || return 1
+  test -f "$CODEX_CONFIG" || return 1
+  test "$(stat -f '%u' "$CODEX_CONFIG")" = "$(id -u)" || return 1
+  candidate_identity="$(stat -f '%d %i' "$CODEX_CONFIG")" || return 1
+  candidate_sha="$(shasum -a 256 "$CODEX_CONFIG" | awk '{print $1}')" || return 1
+  printf '%s\t%s\t%s\n' "$candidate_stage" "$candidate_identity" \
+    "$candidate_sha" >> "$ledger" || return 1
+  chmod 600 "$ledger" || return 1
+  CONFIG_LAST_STAGE="$candidate_stage"
+  CONFIG_LAST_IDENTITY="$candidate_identity"
+  CONFIG_LAST_SHA="$candidate_sha"
   export CONFIG_LAST_STAGE CONFIG_LAST_IDENTITY CONFIG_LAST_SHA
 }
 
@@ -239,7 +244,12 @@ CONFIG_CREATED_SHA=""
 CONFIG_POST_IDENTITY=""
 CONFIG_POST_SHA=""
 CONFIG_ADD_EXIT=""
-if [ -f "$CODEX_CONFIG" ]; then
+if [ -L "$CODEX_CONFIG" ]; then
+  echo "STOP: Codex config is a symlink" >&2
+  exit 1
+elif [ -e "$CODEX_CONFIG" ]; then
+  test -f "$CODEX_CONFIG"
+  test "$(stat -f '%u' "$CODEX_CONFIG")" = "$(id -u)"
   CONFIG_PRESTATE=present
   CONFIG_PRE_IDENTITY="$(stat -f '%d %i' "$CODEX_CONFIG")"
   CONFIG_PRE_SHA="$(shasum -a 256 "$CODEX_CONFIG" | awk '{print $1}')"
@@ -248,6 +258,11 @@ if [ -f "$CODEX_CONFIG" ]; then
   stat -f '%d %i %p %u' "$CODEX_CONFIG" "$BACKUP_ROOT/config.toml.pre"
   shasum -a 256 "$CODEX_CONFIG" "$BACKUP_ROOT/config.toml.pre"
 else
+  test ! -e "$CODEX_CONFIG"
+  test ! -L "$CODEX_CONFIG"
+  test ! -L "$CODEX_ROOT"
+  test -d "$CODEX_ROOT"
+  test "$(stat -f '%u' "$CODEX_ROOT")" = "$(id -u)"
   CONFIG_PRESTATE=absent
   CONFIG_PARENT_IDENTITY="$(stat -f '%d %i' "$CODEX_ROOT")"
   printf '%s\n' "config=absent" >> "$BACKUP_ROOT/prestates"
@@ -260,6 +275,10 @@ export CONFIG_LAST_STAGE CONFIG_LAST_IDENTITY CONFIG_LAST_SHA
 export CONFIG_CREATED_IDENTITY CONFIG_CREATED_SHA CONFIG_POST_IDENTITY CONFIG_POST_SHA
 export CONFIG_ADD_EXIT
 ```
+
+Preflight、这里的分类/备份和第 9 节 add 紧前检查使用同一合同：symlink（包括
+dangling symlink）、目录和特殊对象全部停止；只有当前 UID 所有的普通非 symlink
+文件是 `present`，同时满足 `! -e` 与 `! -L` 才是 `absent`。
 
 从 Blender 精确版本的用户资源路径解析 `userpref.blend`，不要假设版本目录名。
 如果即将写偏好，备份存在的文件：
@@ -440,12 +459,36 @@ PY
 }
 
 revalidate_source_checkout() {
-  test ! -L "$MCP_SOURCE_DIR"
-  test -d "$MCP_SOURCE_DIR"
-  test "$(stat -f '%u' "$MCP_SOURCE_DIR")" = "$(id -u)"
-  test "$(stat -f '%d %i' "$MCP_SOURCE_DIR")" = "$1"
-  test "$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)" = "$2"
-  test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all)"
+  local ignored_gate
+  ignored_gate="$3"
+  test ! -L "$MCP_SOURCE_DIR" || return 1
+  test -d "$MCP_SOURCE_DIR" || return 1
+  test "$(stat -f '%u' "$MCP_SOURCE_DIR")" = "$(id -u)" || return 1
+  test "$(stat -f '%d %i' "$MCP_SOURCE_DIR")" = "$1" || return 1
+  test "$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)" = "$2" || return 1
+  test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all)" || return 1
+  if [ "$ignored_gate" = strict ]; then
+    test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all --ignored)" || return 1
+    test ! -e "$MCP_SOURCE_DIR/uv.lock" || return 1
+  fi
+}
+
+record_source_post_image() {
+  local candidate_stage candidate_identity candidate_head ignored_gate ledger
+  candidate_stage="$1"
+  candidate_identity="$2"
+  candidate_head="$3"
+  ignored_gate="$4"
+  ledger="$BACKUP_ROOT/source-post-images"
+  revalidate_source_checkout "$candidate_identity" "$candidate_head" "$ignored_gate" || return 1
+  printf '%s\t%s\t%s\t%s\n' "$candidate_stage" "$candidate_identity" \
+    "$candidate_head" "$ignored_gate" >> "$ledger" || return 1
+  chmod 600 "$ledger" || return 1
+  SOURCE_LAST_STAGE="$candidate_stage"
+  SOURCE_LAST_IDENTITY="$candidate_identity"
+  SOURCE_LAST_HEAD="$candidate_head"
+  SOURCE_LAST_IGNORED_GATE="$ignored_gate"
+  export SOURCE_LAST_STAGE SOURCE_LAST_IDENTITY SOURCE_LAST_HEAD SOURCE_LAST_IGNORED_GATE
 }
 
 SOURCE_PARENT_IDENTITY=""
@@ -453,6 +496,18 @@ SOURCE_CREATED_IDENTITY=""
 SOURCE_EXISTING_IDENTITY=""
 SOURCE_OLD_COMMIT=""
 SOURCE_EXISTING_CLEAN=""
+SOURCE_CLONE_HEAD=""
+SOURCE_WRITE_IDENTITY=""
+SOURCE_WRITE_HEAD=""
+SOURCE_FETCH_EXIT=""
+SOURCE_CHECKOUT_EXIT=""
+SOURCE_POST_IDENTITY=""
+SOURCE_POST_HEAD=""
+SOURCE_POST_CLEAN=""
+SOURCE_LAST_STAGE=""
+SOURCE_LAST_IDENTITY=""
+SOURCE_LAST_HEAD=""
+SOURCE_LAST_IGNORED_GATE=""
 snapshot_source_parent optional >/dev/null
 if [ -L "$MCP_SOURCE_DIR" ]; then
   echo "STOP: source checkout is a symlink" >&2
@@ -464,6 +519,14 @@ elif [ -e "$MCP_SOURCE_DIR" ]; then
   SOURCE_OLD_COMMIT="$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)"
   test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all)"
   SOURCE_EXISTING_CLEAN=clean
+  SOURCE_WRITE_IDENTITY="$SOURCE_EXISTING_IDENTITY"
+  SOURCE_WRITE_HEAD="$SOURCE_OLD_COMMIT"
+  revalidate_source_checkout "$SOURCE_WRITE_IDENTITY" "$SOURCE_WRITE_HEAD" ordinary
+  if ! record_source_post_image existing-pre \
+    "$SOURCE_WRITE_IDENTITY" "$SOURCE_WRITE_HEAD" ordinary; then
+    echo "STOP: cannot commit existing-source baseline; manual recovery required" >&2
+    exit 1
+  fi
 else
   SOURCE_PRESTATE=absent
   printf '%s\n' "source=absent" >> "$BACKUP_ROOT/prestates"
@@ -474,43 +537,80 @@ else
   test "$(snapshot_source_parent required)" = "$SOURCE_PARENT_IDENTITY"
   git clone "$UPSTREAM_URL" "$MCP_SOURCE_DIR"
   SOURCE_CREATED_IDENTITY="$(stat -f '%d %i' "$MCP_SOURCE_DIR")"
+  SOURCE_CLONE_HEAD="$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)"
+  SOURCE_WRITE_IDENTITY="$SOURCE_CREATED_IDENTITY"
+  SOURCE_WRITE_HEAD="$SOURCE_CLONE_HEAD"
+  revalidate_source_checkout "$SOURCE_WRITE_IDENTITY" "$SOURCE_WRITE_HEAD" strict
+  if ! record_source_post_image clone \
+    "$SOURCE_WRITE_IDENTITY" "$SOURCE_WRITE_HEAD" strict; then
+    echo "STOP: cannot commit cloned-source baseline; manual recovery required" >&2
+    exit 1
+  fi
 fi
 export SOURCE_PRESTATE SOURCE_PARENT SOURCE_PARENT_IDENTITY SOURCE_CREATED_IDENTITY
-export SOURCE_EXISTING_IDENTITY SOURCE_OLD_COMMIT
-
-test ! -L "$MCP_SOURCE_DIR"
-test "$(stat -f '%u' "$MCP_SOURCE_DIR")" = "$(id -u)"
-SOURCE_WRITE_IDENTITY="$(stat -f '%d %i' "$MCP_SOURCE_DIR")"
-SOURCE_WRITE_HEAD="$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)"
-test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all)"
-SOURCE_WRITE_CLEAN=clean
+export SOURCE_EXISTING_IDENTITY SOURCE_OLD_COMMIT SOURCE_CLONE_HEAD
+export SOURCE_WRITE_IDENTITY SOURCE_WRITE_HEAD
 
 if [ "$SOURCE_WRITE_HEAD" != "$PINNED_COMMIT" ]; then
-  revalidate_source_checkout "$SOURCE_WRITE_IDENTITY" "$SOURCE_WRITE_HEAD"
-  git -C "$MCP_SOURCE_DIR" fetch origin "$PINNED_COMMIT"
-  revalidate_source_checkout "$SOURCE_WRITE_IDENTITY" "$SOURCE_WRITE_HEAD"
-  git -C "$MCP_SOURCE_DIR" checkout --detach "$PINNED_COMMIT"
+  revalidate_source_checkout "$SOURCE_WRITE_IDENTITY" "$SOURCE_WRITE_HEAD" ordinary
+  if git -C "$MCP_SOURCE_DIR" fetch origin "$PINNED_COMMIT"; then
+    SOURCE_FETCH_EXIT=0
+  else
+    SOURCE_FETCH_EXIT=$?
+  fi
+  if ! record_source_post_image "fetch-exit-$SOURCE_FETCH_EXIT" \
+    "$SOURCE_WRITE_IDENTITY" "$SOURCE_WRITE_HEAD" ordinary; then
+    echo "STOP: unsafe/dirty source after fetch; manual recovery required" >&2
+    exit 1
+  fi
+  if [ "$SOURCE_FETCH_EXIT" != 0 ]; then
+    echo "STOP: source fetch failed; rollback from SOURCE_LAST_*" >&2
+    exit 1
+  fi
+
+  revalidate_source_checkout "$SOURCE_LAST_IDENTITY" "$SOURCE_LAST_HEAD" strict
+  if git -C "$MCP_SOURCE_DIR" checkout --detach "$PINNED_COMMIT"; then
+    SOURCE_CHECKOUT_EXIT=0
+  else
+    SOURCE_CHECKOUT_EXIT=$?
+  fi
+  if SOURCE_AFTER_CHECKOUT_HEAD="$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)"; then
+    :
+  else
+    echo "STOP: cannot read source HEAD after checkout; manual recovery required" >&2
+    exit 1
+  fi
+  if ! record_source_post_image "checkout-exit-$SOURCE_CHECKOUT_EXIT" \
+    "$SOURCE_WRITE_IDENTITY" "$SOURCE_AFTER_CHECKOUT_HEAD" strict; then
+    echo "STOP: unsafe/dirty source after checkout; manual recovery required" >&2
+    exit 1
+  fi
+  if [ "$SOURCE_CHECKOUT_EXIT" != 0 ]; then
+    echo "STOP: source checkout failed; rollback from SOURCE_LAST_*" >&2
+    exit 1
+  fi
 fi
 
-SOURCE_POST_IDENTITY="$(stat -f '%d %i' "$MCP_SOURCE_DIR")"
-SOURCE_POST_HEAD="$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)"
-test "$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)" = "$PINNED_COMMIT"
-test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all)"
-if [ "$SOURCE_PRESTATE" = absent ]; then
-  test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all --ignored)"
-fi
-test ! -e "$MCP_SOURCE_DIR/uv.lock"
+SOURCE_POST_IDENTITY="$SOURCE_LAST_IDENTITY"
+SOURCE_POST_HEAD="$SOURCE_LAST_HEAD"
+test "$SOURCE_POST_HEAD" = "$PINNED_COMMIT"
+revalidate_source_checkout "$SOURCE_POST_IDENTITY" "$SOURCE_POST_HEAD" \
+  "$SOURCE_LAST_IGNORED_GATE"
 SOURCE_POST_CLEAN=clean
-export SOURCE_WRITE_IDENTITY SOURCE_WRITE_HEAD SOURCE_WRITE_CLEAN
-export SOURCE_POST_IDENTITY SOURCE_POST_HEAD SOURCE_POST_CLEAN SOURCE_EXISTING_CLEAN
+export SOURCE_FETCH_EXIT SOURCE_CHECKOUT_EXIT SOURCE_POST_IDENTITY SOURCE_POST_HEAD
+export SOURCE_POST_CLEAN SOURCE_EXISTING_CLEAN
 ```
 
 `snapshot_source_parent` 用 `lstat` 验证从 `$HOME` 到 `SOURCE_PARENT` 的全部现存
 祖先都是当前 UID 所有的非 symlink 目录，并把 `MCP_SOURCE_DIR` 词法限制在
 `$HOME` 内；越界 override 直接停止。`source=absent` 分支在 clone 前记录并紧邻
-重验父目录 identity，在 clone 后记录新目录 identity；`source=present` 分支记录
-目录 identity、原完整 commit 和 clean 状态，并在 fetch、checkout 与 rollback 前
-执行相同重验。两条分支的回滚合同不同，不得把首次创建描述为“恢复旧 commit”。
+重验父目录 identity，在 clone 后记录新目录 identity/HEAD；`source=present` 分支
+记录目录 identity、原完整 commit 和 clean 状态。write baseline 只从这些已记录值
+建立，第一步就是对原 baseline 重验，不得从当前路径重新采样 identity/HEAD 来
+“自证”。fetch 与 checkout 都用 conditional 捕获 exit，并在判断 exit 前提交安全、
+clean 的 last-complete post-image；记录失败、dirty 或 unsafe 一律停止并要求人工
+恢复。任何 existing-source checkout 紧前还必须通过含 `--ignored` 的 strict gate，
+避免 ignored 用户内容被 checkout 覆盖。
 
 用真实 MCP handshake 读取 catalog；这一步不需要 Blender listener：
 
@@ -795,6 +895,8 @@ config 仍是当前 UID 的普通非 symlink 文件且 device/inode/SHA 等于 p
 ```bash
 if [ "$MCP_ENTRY_STATE" = absent ]; then
   if [ "$CONFIG_PRESTATE" = absent ]; then
+    test ! -e "$CODEX_CONFIG"
+    test ! -L "$CODEX_CONFIG"
     test ! -L "$CODEX_ROOT"
     test -d "$CODEX_ROOT"
     test "$(stat -f '%u' "$CODEX_ROOT")" = "$(id -u)"
@@ -817,7 +919,10 @@ if [ "$MCP_ENTRY_STATE" = absent ]; then
     echo "STOP: config became a symlink; manual recovery required" >&2
     exit 1
   elif [ -f "$CODEX_CONFIG" ]; then
-    record_config_post_image "mcp-add-exit-$CONFIG_ADD_EXIT"
+    if ! record_config_post_image "mcp-add-exit-$CONFIG_ADD_EXIT"; then
+      echo "STOP: cannot commit config post-image ledger; manual recovery required" >&2
+      exit 1
+    fi
     CONFIG_CREATED_IDENTITY="$CONFIG_LAST_IDENTITY"
     CONFIG_CREATED_SHA="$CONFIG_LAST_SHA"
   elif [ "$CONFIG_ADD_EXIT" = 0 ] || [ "$CONFIG_PRESTATE" = present ]; then
@@ -901,7 +1006,10 @@ export CONFIG_WRITE_BASELINE_IDENTITY CONFIG_WRITE_BASELINE_SHA
 第 7 步紧邻 replace 返回后执行：
 
 ```bash
-record_config_post_image atomic-final
+if ! record_config_post_image atomic-final; then
+  echo "STOP: cannot commit final config post-image ledger; manual recovery required" >&2
+  exit 1
+fi
 CONFIG_POST_IDENTITY="$CONFIG_LAST_IDENTITY"
 CONFIG_POST_SHA="$CONFIG_LAST_SHA"
 export CONFIG_POST_IDENTITY CONFIG_POST_SHA
@@ -1065,19 +1173,19 @@ stanza 或者完全精确，或者唯一 drift 是 `--no-project` 后缺少 `--p
 6. 当前所有者已授权自动接受该完整候选 catalog，不逐工具询问；
 7. Blender 正常退出后，备份 Extension/userpref/config；记录 live checkout 的
    目录 device/inode、clean 状态和旧 commit 作为 source pre-image；
-8. 写入前重验 live checkout 的 device/inode、HEAD 和 clean 状态。全部仍等于
-   pre-image 后，在 live checkout fetch 候选完整 SHA 并执行 detached checkout；
-   断言 live `HEAD` 等于候选 SHA、worktree clean，立即把当前 device/inode 写入
-   `SOURCE_POST_IDENTITY`、候选 SHA 写入 `SOURCE_POST_HEAD`，且 Server handshake
-   返回候选 catalog；
+8. 完整复用第 7 节 source state machine：从已记录 pre-image 建立 baseline，不能
+   重采样自证；fetch/checkout 均 conditional，命令返回后先记录安全 post-image 再
+   判断 exit；detached checkout 紧前必须通过 ordinary+ignored strict gate。成功后
+   `SOURCE_LAST_HEAD` 必须等于候选 SHA、worktree clean，且 Server handshake 返回
+   候选 catalog；
 9. 安装候选 Extension，把 `enabled_tools` 原子替换为候选 catalog 的精确集合，
    包括新增、删除和重命名；
 10. 运行四层验收，要求 live candidate Server catalog、effective config 和新任务模型
    目录三者集合全等；
-11. 成功后把候选完整 SHA 记录为新 pin；失败则先重验 live checkout 的
-    device/inode、`HEAD` 仍等于候选 SHA 且 worktree clean；任一变化都停止，全部
-    匹配才 detached checkout 旧 commit，并恢复 Extension、
-    userpref、config 和旧 catalog。
+11. 成功后把候选完整 SHA 记录为新 pin；失败时只使用已绑定的 `SOURCE_LAST_*`，
+    并按第 13 节在 checkout 旧 commit 紧前通过 ordinary+ignored strict gate；rollback
+    checkout 也必须 conditional 且先记录 post-image 后判断 exit。任一变化/dirty/
+    ignored 内容都停止，再恢复 Extension、userpref、config 和旧 catalog。
 
 若候选引入非唯一/空 catalog、Server 无法握手、Extension validate 失败或 Blender
 `>=5.2` smoke 失败，停止更新，保持旧 pin。
@@ -1158,11 +1266,13 @@ test ! -L "$USERPREF"
 Source/runtime：
 
 - `SOURCE_PRESTATE=present`：执行
-  `revalidate_source_checkout "$SOURCE_POST_IDENTITY" "$SOURCE_POST_HEAD"`，证明
-  source identity 未变、worktree clean 且 HEAD 仍是本流程最后记录的 pin/candidate
-  后，才 detached checkout `SOURCE_OLD_COMMIT` 并恢复旧 catalog；否则停止；
+  `revalidate_source_checkout "$SOURCE_LAST_IDENTITY" "$SOURCE_LAST_HEAD" strict`，
+  证明 source identity 未变、ordinary/ignored working tree 均为空且 HEAD 仍是最后
+  完成的安全 post-image 后，才 conditional detached checkout `SOURCE_OLD_COMMIT`；
+  checkout 返回后也必须先记录安全 post-image 再判断 exit，否则停止人工恢复；
 - `SOURCE_PRESTATE=absent`：重验 source 父目录和新 checkout 的 device/inode 均
-  等于 clone 前后记录值，HEAD 仍等于 `PINNED_COMMIT`，
+  等于 clone 前后记录值，HEAD 等于已绑定的 `SOURCE_LAST_HEAD`（不盲要求一定是
+  `PINNED_COMMIT`），
   `git status --porcelain --untracked-files=all --ignored` 为空且没有生成的
   `uv.lock`。`--ignored` 检查 working tree 中用户新增的 ignored 内容，不检查
   `.git` 内部。全部成立才把整个 checkout 同卷移动到 `BACKUP_ROOT` 内新建的唯一
@@ -1175,8 +1285,31 @@ Existing-source rollback 在 detached checkout 旧 commit 前执行：
 
 ```bash
 if [ "$SOURCE_PRESTATE" = present ]; then
-  revalidate_source_checkout "$SOURCE_POST_IDENTITY" "$SOURCE_POST_HEAD"
-  git -C "$MCP_SOURCE_DIR" checkout --detach "$SOURCE_OLD_COMMIT"
+  revalidate_source_checkout "$SOURCE_LAST_IDENTITY" "$SOURCE_LAST_HEAD" strict
+  if git -C "$MCP_SOURCE_DIR" checkout --detach "$SOURCE_OLD_COMMIT"; then
+    SOURCE_ROLLBACK_EXIT=0
+  else
+    SOURCE_ROLLBACK_EXIT=$?
+  fi
+  if SOURCE_AFTER_ROLLBACK_HEAD="$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)"; then
+    :
+  else
+    echo "STOP: cannot read source HEAD after rollback; manual recovery required" >&2
+    exit 1
+  fi
+  if ! record_source_post_image "rollback-exit-$SOURCE_ROLLBACK_EXIT" \
+    "$SOURCE_LAST_IDENTITY" "$SOURCE_AFTER_ROLLBACK_HEAD" strict; then
+    echo "STOP: unsafe/dirty source after rollback checkout; manual recovery required" >&2
+    exit 1
+  fi
+  if [ "$SOURCE_ROLLBACK_EXIT" != 0 ]; then
+    echo "STOP: source rollback checkout failed; use SOURCE_LAST_*" >&2
+    exit 1
+  fi
+  if [ "$SOURCE_LAST_HEAD" != "$SOURCE_OLD_COMMIT" ]; then
+    echo "STOP: rollback checkout did not reach recorded old commit" >&2
+    exit 1
+  fi
 fi
 ```
 
@@ -1187,8 +1320,8 @@ test "$(snapshot_source_parent required)" = "$SOURCE_PARENT_IDENTITY"
 test ! -L "$MCP_SOURCE_DIR"
 test -d "$MCP_SOURCE_DIR"
 test "$(stat -f '%u' "$MCP_SOURCE_DIR")" = "$(id -u)"
-test "$(stat -f '%d %i' "$MCP_SOURCE_DIR")" = "$SOURCE_CREATED_IDENTITY"
-test "$(git -C "$MCP_SOURCE_DIR" rev-parse HEAD)" = "$PINNED_COMMIT"
+test "$SOURCE_LAST_IDENTITY" = "$SOURCE_CREATED_IDENTITY"
+revalidate_source_checkout "$SOURCE_LAST_IDENTITY" "$SOURCE_LAST_HEAD" strict
 test -z "$(git -C "$MCP_SOURCE_DIR" status --porcelain --untracked-files=all --ignored)"
 test ! -e "$MCP_SOURCE_DIR/uv.lock"
 RECOVERY_SOURCE="$(mktemp -d "$BACKUP_ROOT/recovery-source.XXXXXX")"
