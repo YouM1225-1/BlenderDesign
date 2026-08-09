@@ -3,8 +3,8 @@
 | 项 | 值 |
 |---|---|
 | 版本 | v1.17 |
-| 日期 | 2026-07-23（初版）· 2026-08-08（r18 Task 3 测试/来源修正；v1.17） |
-| 状态 | 交付目标／隔离预检；**Phase 0 未执行**（隔离树只用于组合性与对抗性验证；决策见 URS ADR-3/D-4 与 `docs/decisions/2026-08-07-mcp-sdk-v2-selection.md`） |
+| 日期 | 2026-07-23（初版）· 2026-08-08（r18 Task 3 测试/来源修正；v1.17）· 2026-08-09（r18 live adapter provenance 重冻结） |
+| 状态 | 交付目标／approved provenance；**Task 18 尚未开始**（项目所有者选择选项 1，以 live 327 行 supersede 历史 373 tuple；决策见 URS ADR-3/D-4 与 `docs/decisions/2026-08-07-mcp-sdk-v2-selection.md`） |
 | 上游需求 | `Blender-Codex-需求规格说明书-v1.md`（**URS v1.17**；含 20 项稳定验收 ID、三工具 NFR-P1 正式门与可复算证据合同、确定性 catalog / 双内容 result payload 基线、官方 MCP 风险接受边界、continuation/崩溃恢复、process-registry 生命周期、文件 identity 红线、资源上限与 conversion 准入契约及决策 D-4/D-5） |
 | 覆盖子系统 | S1 传输与 Bridge 骨架 · S2 MCP Server 骨架 · S4 标识与一致性（读取部分） |
 
@@ -24,7 +24,9 @@
 
 **v1.16/r17 研究融合（非实施证据）**：MCP `2026-07-28` Tools 规范已明确要求集合不变时返回确定顺序，并说明它改善 tool-list 与 LLM prompt cache。三工具 catalog 因而固定名称/顺序/完整定义；Task 17 冻结 ordered catalog 与 instructions 的 canonical/UTF-8 bytes+SHA，Task 18 进一步保留 60 次 `structuredContent` 与兼容 TextContent 的原文、等价性、字节与 duplication ratio。byte 只作可复算基线，不冒充 token，也不引入 tokenizer 依赖或未经 A/B 的经验阈值。r16 tuple 虽已获所有者批准，但在 source commit/attestation 前被本轮 r17 修订取代；Phase 0 仍未执行。
 
-**v1.17/r18 测试/来源修正（非实施证据）**：r17 Plan 的同输入 topology 碰撞测试是空洞断言；r18 以 `inspect.signature` 精确固定 `scene_hash.object_line` 的五参数输入合同，一对一替换该测试并保留结构字段测试。真实 topology-only Blender 语义仍由 Task 18 L3 `hash_scope` 覆盖。此修正不改变任何产品行为、`scene_hash` 合同、公开工具面或测试总数；r17 evidence 保持不可变历史，r18 exact tuple 仍待批准。
+**v1.17/r18 测试/来源修正（历史非实施证据）**：r17 Plan 的同输入 topology 碰撞测试是空洞断言；r18 以 `inspect.signature` 精确固定 `scene_hash.object_line` 的五参数输入合同，一对一替换该测试并保留结构字段测试。真实 topology-only Blender 语义仍由 Task 18 L3 `hash_scope` 覆盖。此修正不改变任何产品行为、`scene_hash` 合同、公开工具面或测试总数；r17 evidence 保持不可变历史。
+
+**r18 live-adapter provenance 重冻结（当前 approved）**：项目所有者于 2026-08-09 选择选项 1，不向生产 adapter 填充代码，改以 live/source **327** 实质行 supersede 已 attested 的历史 373 tuple。新 approved tuple 固定最终预期 unit 337 / contract 32 / full 369 / adapter 35 / adapter 327 行；Task 18 尚未开始，当前 full 315 不是 369 live evidence。旧 attestation 与历史 manifest 保持原字节，superseding chain 使用 `docs/audits/evidence/2026-08-09-r18-live-adapter-post-freeze-attestation.json`。
 
 ---
 
@@ -198,7 +200,7 @@ server/
     versions.py              版本门禁判定
     capabilities.py          describe_capabilities 静态回答
   mcp/
-    adapter.py               MCPServer 注册三个工具（SDK v2；实质代码 ≤375 行，URS NFR-C3；v8 隔离实现 373 行）
+    adapter.py               MCPServer 注册三个工具（SDK v2；实质代码 ≤375 行，URS NFR-C3；v8 历史隔离实现 373 行，当前 approved live/source 327 行）
 
 tests/
   unit/                      L1

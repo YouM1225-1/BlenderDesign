@@ -3,8 +3,8 @@
 | 项 | 值 |
 |---|---|
 | 版本 | v1.17 |
-| 日期 | 2026-07-23（v1.0）· 2026-08-08（v1.17：r18 Task 3 测试/来源修正） |
-| 状态 | 已评审；决策 D-1 / D-2 / D-3 / **D-4（官方 MCP 重评与边界澄清）** / **D-5（MCP SDK v2）** 已确认；当前为交付目标与隔离预检，**Phase 0 尚未执行**；变更记录见 §13。项目所有者已接受三项平台候选；重启后当前模型面与宿主目录均为 26/26，并以“当前用户接受风险”关闭 G5。该关闭是对 screenshot 顺序敏感性与 deferred render `SIGABRT` 的知情风险接受，**不是缺陷已修复或 26 工具稳定性证明**。r17 已 attested，但因 Task 3 空洞同输入测试的评审发现被 r18 supersede；当前 r18 仍为 proposed，须经精确 SHA/计数审批后方可提交或执行 |
+| 日期 | 2026-07-23（v1.0）· 2026-08-08（v1.17：r18 Task 3 测试/来源修正）· 2026-08-09（r18 live adapter provenance 重冻结） |
+| 状态 | 已评审；决策 D-1 / D-2 / D-3 / **D-4（官方 MCP 重评与边界澄清）** / **D-5（MCP SDK v2）** 已确认；当前为交付目标与隔离预检，**Task 18 尚未开始**；变更记录见 §13。项目所有者已接受三项平台候选；重启后当前模型面与宿主目录均为 26/26，并以“当前用户接受风险”关闭 G5。该关闭是对 screenshot 顺序敏感性与 deferred render `SIGABRT` 的知情风险接受，**不是缺陷已修复或 26 工具稳定性证明**。r17 已 attested，但因 Task 3 空洞同输入测试的评审发现被 r18 supersede；项目所有者现已选择选项 1，以最终 live adapter 327 实质行 supersede 旧 r18 373 行 tuple，当前 approved provenance 由 `docs/audits/evidence/2026-08-09-r18-live-adapter-post-freeze-attestation.json` 固定 |
 | 适用范围 | macOS 桌面端本地部署 |
 
 ---
@@ -274,7 +274,7 @@
 |---|---|
 | NFR-C1 | 支持面 = macOS 14+ / Apple Silicon。Intel Mac 不在本版支持范围 |
 | NFR-C2 | Blender 生产基线 = **5.2 LTS 单栈**，钉定具体补丁版本（不写 `>=5.2`）。4.5 LTS 兼容为 best-effort：不刻意破坏，但不测试、不承诺、不进验收门槛 |
-| NFR-C3 | Server 解释器声明 **`>=3.13,<3.14`**，与 Blender 5.2.0 内置 Python 3.13.13 对齐；不得让 uv 自动漂移到 3.14（深层 JSON/递归失败行为已实测不同）。**Python SDK 钉 `mcp>=2.0,<3`（决策 D-5）**；SDK v2 必须同时服务当前 Codex 实测的 `2025-06-18`、legacy 合同 `2025-11-25` 与 SDK 直连 `2026-07-28`，协议 rollout 与 SDK 版本解耦。协议适配收敛于 ≤ 375 行 adapter 层；v7 隔离实现实质代码为 373 行 |
+| NFR-C3 | Server 解释器声明 **`>=3.13,<3.14`**，与 Blender 5.2.0 内置 Python 3.13.13 对齐；不得让 uv 自动漂移到 3.14（深层 JSON/递归失败行为已实测不同）。**Python SDK 钉 `mcp>=2.0,<3`（决策 D-5）**；SDK v2 必须同时服务当前 Codex 实测的 `2025-06-18`、legacy 合同 `2025-11-25` 与 SDK 直连 `2026-07-28`，协议 rollout 与 SDK 版本解耦。协议适配收敛于 ≤ 375 行 adapter 层；v7 隔离实现的 373 行是历史快照，当前 approved live/source 实质代码为 327 行 |
 | NFR-C4 | Server / Bridge / IR 三者独立版本号，握手时协商；不匹配则拒绝并返回可读原因 |
 | NFR-C5 | Codex Skill 置于 `.agents/skills/<name>/`；`agents/openai.yaml` 中设 `policy.allow_implicit_invocation: false`；`description` ≤ 200 字符、触发词前置；schema 与策略正文置于 `references/`。Skill 交付物**另含 `AGENTS.md` 模板片段**（Blender 版本矩阵、先检查后修改、禁任意 Python、长任务须走 job）供用户仓库采用（Phase 1 与 Skill 同批交付） |
 | NFR-C6 | `AGENTS.md` 只承载仓库/测试约定；Skill 承载 Agent 决策与按需 reference 路由；MCP `instructions` 只承载跨工具运行合同；单工具 schema/description 只承载选择与调用语义；可机器强制的 Blender context/validation 规则落在 Server/Addon。规范性规则只设一个权威定义，其余层引用，不复制成多份易漂移正文 |
@@ -694,7 +694,11 @@ Phase 0 的性能与生命周期反例门禁还必须逐项通过：
 
 评审发现 r17 Plan 的 `test_same_counts_different_topology_collide_by_design` 对完全相同的输入断言完全相同的输出，不能证明 topology 被 `scene_hash.object_line` 输入合同排除。项目所有者选择选项 1：以 `inspect.signature` 精确断言五参数输入合同，一对一替换该测试；保留结构字段测试，真实 topology-only Blender 语义仍由 Task 18 L3 `hash_scope` 覆盖。
 
-本次仅修正测试与 provenance 基线，不改变 `scene_hash` 产品合同、实现、公开工具面、验收数量或门禁计数。r17 evidence 保持不可变历史；r18 exact tuple 获批并完成 `source_commit → attestation commit` 两提交链前，Phase 0 仍不得执行。
+本次仅修正测试与 provenance 基线，不改变 `scene_hash` 产品合同、实现、公开工具面、验收数量或门禁计数。r17 evidence 保持不可变历史；当时停点是 r18 exact tuple 获批并完成 `source_commit → attestation commit` 两提交链前不得继续执行，后续时态由下一节更新。
+
+### r18 live adapter provenance 重冻结（2026-08-09）
+
+项目所有者选择选项 1：不向生产 adapter 填充代码，以最终 live `server/mcp/adapter.py` 的 **327** 实质行 supersede 旧 r18 attestation 固定的 373 行 tuple。旧 attestation 与历史 preflight/manifest 保持原字节；新 approved tuple 仍固定 20 Tasks、93 open / 0 checked、50 Python fences、49 path-bound / 49 unique，以及最终预期 unit 337 / contract 32 / full 369 / adapter 35 / adapter 327 行。Task 18 尚未开始，当前 full 315 不得写成已执行 369 证据；新 `source_commit → attestation commit` 链由 `docs/audits/evidence/2026-08-09-r18-live-adapter-post-freeze-attestation.json` 固定。
 
 ---
 
