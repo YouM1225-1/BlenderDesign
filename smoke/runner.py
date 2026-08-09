@@ -426,6 +426,14 @@ def _settle_nfr(returncode: int | None) -> None:
             f"artifact_success={(artifact or {}).get('success') if isinstance(artifact, dict) else None}, "
             f"max_tick_ms={final_tick_ms}")
     _remove_nfr_process_dir()
+    if processes_clean:
+        ST.update(
+            nfr_proc=None, nfr_process_dir=None, nfr_offline_root=None,
+            nfr_registry_marker=None, nfr_registry_not_before_ns=0,
+            nfr_registry_pending=False, nfr_known_records={},
+            nfr_helper_record=None, nfr_helper_identity=None,
+            nfr_helper_publication=None,
+        )
     _close_large_session()
 
 

@@ -167,6 +167,45 @@ def test_private_artifact_write_preserves_exact_0600(tmp_path, monkeypatch):
     monkeypatch.setattr(e2e, "MAX_ARTIFACT_BYTES", 8)
     with pytest.raises(ValueError, match="32 MiB"):
         e2e._write_artifact(output, {"success": True})
+    monkeypatch.setattr(e2e, "MAX_ARTIFACT_BYTES", 32 * 1024 * 1024)
+
+    class ReprLeaksSecret(Exception):
+        def __repr__(self):
+            return "token=secret socket_path=/private/socket traceback"
+
+    async def grouped_failure(_args):
+        raise ExceptionGroup("outer", [
+            ExceptionGroup("too-deep", [ExceptionGroup("deeper", [
+                ValueError("hidden leaf"),
+            ])]),
+            ExceptionGroup("inner", [
+                TimeoutError("timeout leaf"),
+                AssertionError("assertion leaf"),
+                ReprLeaksSecret("safe leaf"),
+            ]),
+        ])
+
+    artifact = tmp_path / "failure.json"
+    args = SimpleNamespace(
+        mode="nfr", timeout_seconds=15.0,
+        registry_marker="0" * 32, registry_not_before_ns=1,
+        output=str(artifact),
+    )
+    monkeypatch.setattr(e2e, "MAX_FAILURE_GROUP_DEPTH", 2)
+    monkeypatch.setattr(e2e, "MAX_FAILURE_LEAVES", 3)
+    monkeypatch.setattr(e2e, "MAX_FAILURE_MESSAGE_CHARS", 16)
+    monkeypatch.setattr(e2e, "MAX_FAILURE_ERROR_CHARS", 96)
+    monkeypatch.setattr(e2e, "_current_provenance", lambda _deadline: {})
+    monkeypatch.setattr(e2e, "_run_bounded", grouped_failure)
+    assert e2e._worker_main(args) == 1
+    failed = json.loads(artifact.read_text())
+    error = failed["error"]
+    assert failed["success"] is False and len(error) <= e2e.MAX_FAILURE_ERROR_CHARS
+    assert "ExceptionGroup: nested exception" in error
+    assert "TimeoutError: timeout leaf" in error
+    assert "AssertionError: assertion leaf" in error
+    assert "ReprLeaksSecret" not in error and "hidden leaf" not in error
+    assert "token=" not in error and "socket_path=" not in error and "traceback" not in error
 
 
 def test_live_mcp_process_record_cannot_be_retired_as_clean(tmp_path):
@@ -936,6 +975,80 @@ def test_runner_never_signals_replaced_cached_outer_record(tmp_path, monkeypatch
     namespace["_signal_nfr_groups"](signal.SIGKILL)
     assert any("process group signal: RuntimeError: reused" in message
                for message in namespace["RES"]["errors"])
+
+    settle_body = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in {"_settle_nfr", "_finish"}
+    ]
+    finish_writes = []
+
+    class Output:
+        def write_text(self, value):
+            finish_writes.append(value)
+
+    def error_once(message):
+        if message not in settle_namespace["RES"]["errors"]:
+            settle_namespace["RES"]["errors"].append(message)
+
+    clean_process = SimpleNamespace(pid=42, returncode=0, poll=lambda: 0)
+    settle_namespace = {
+        "Path": lambda _path: Output(), "json": json, "signal": signal,
+        "time": SimpleNamespace(monotonic=lambda: 0.0),
+        "bpy": SimpleNamespace(ops=SimpleNamespace(
+            wm=SimpleNamespace(quit_blender=lambda: None))),
+        "NFR_OUT": "nfr.json", "OUT": "smoke.json", "LARGE_OBJECTS": 0,
+        "LARGE_MAX_TICK_MS": 100.0, "MAX_NFR_ARTIFACT_BYTES": 1,
+        "ST": {
+            "nfr_proc": clean_process, "nfr_error": None,
+            "nfr_final_deadline": 1.0, "nfr_process_dir": Path("registry"),
+            "nfr_offline_root": Path("offline"), "nfr_registry_marker": "marker",
+            "nfr_registry_not_before_ns": 1, "nfr_registry_pending": False,
+            "nfr_known_records": {}, "nfr_helper_record": Path("helper"),
+            "nfr_helper_identity": None, "nfr_helper_publication": None,
+            "large_max_tick_ms": 0.0, "large_tick_count": 0, "thread": None,
+        },
+        "RES": {
+            "errors": [], "large_scene_budget_ok": True,
+            "large_scene_metrics": {}, "timer_tick": True, "revision_bump": True,
+            "fields": True, "hash_scope": True, "cycles_leak_free": True,
+        },
+        "_read_private_json": lambda *_args: {"success": True, "results": {"ok": 1}},
+        "_nfr_helper_is_live": lambda: False,
+        "_retire_nfr_helper": lambda: None,
+        "_live_nfr_groups": lambda: [],
+        "_nfr_groups_clean": lambda groups: groups == [],
+        "_nfr_error_once": error_once,
+        "_remove_nfr_process_dir": lambda: None,
+        "_close_large_session": lambda: None,
+        "_restore_large_tick": lambda: None,
+    }
+    module = ast.fix_missing_locations(ast.Module(body=settle_body, type_ignores=[]))
+    exec(compile(module, str(runner), "exec"), settle_namespace)
+    settle_namespace["_settle_nfr"](0)
+    assert settle_namespace["RES"]["nfr_p1"] is True
+    assert settle_namespace["RES"]["nfr_p1_metrics"]["results"] == {"ok": 1}
+    assert settle_namespace["ST"]["nfr_proc"] is None
+    assert settle_namespace["ST"]["nfr_process_dir"] is None
+    settle_namespace["_nfr_helper_is_live"] = lambda: pytest.fail("finish re-entered helper")
+    settle_namespace["_live_nfr_groups"] = lambda: pytest.fail("finish re-entered registry")
+    settle_namespace["_finish"]()
+    assert finish_writes and not any(
+        "identity is missing" in error or "unreaped MCP" in error
+        for error in settle_namespace["RES"]["errors"])
+
+    live_process = SimpleNamespace(pid=99, returncode=0, poll=lambda: 0)
+    settle_namespace["ST"].update(
+        nfr_proc=live_process, nfr_error=None, nfr_process_dir=Path("live"),
+        nfr_registry_pending=False,
+    )
+    settle_namespace["RES"].update(errors=[], large_scene_budget_ok=True)
+    settle_namespace["_nfr_helper_is_live"] = lambda: False
+    settle_namespace["_live_nfr_groups"] = lambda: [99]
+    settle_namespace["_nfr_groups_clean"] = lambda _groups: False
+    settle_namespace["_settle_nfr"](0)
+    assert settle_namespace["ST"]["nfr_proc"] is live_process
+    assert settle_namespace["RES"]["nfr_p1"] is False
+    assert "nfr leaked MCP process groups: [99]" in settle_namespace["RES"]["errors"]
 
 
 def test_nonce_mismatch_is_never_signaled(tmp_path):

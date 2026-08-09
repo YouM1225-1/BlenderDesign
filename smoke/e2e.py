@@ -100,6 +100,10 @@ MAX_AUDIT_TOTAL_BYTES = 16 * 1024 * 1024
 MAX_AUDIT_LINE_BYTES = 64 * 1024
 MAX_AUDIT_ROWS = 256
 MAX_RECOVERY_STATUS_ATTEMPTS = 64
+MAX_FAILURE_GROUP_DEPTH = 4
+MAX_FAILURE_LEAVES = 8
+MAX_FAILURE_MESSAGE_CHARS = 256
+MAX_FAILURE_ERROR_CHARS = 2048
 PLAN_PATH = ROOT / "docs/superpowers/plans/2026-07-23-phase0-readonly-channel.md"
 ATTESTATION_PATH = (
     ROOT / "docs/audits/evidence/2026-08-09-r18-live-adapter-post-freeze-attestation.json")
@@ -1548,6 +1552,44 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+def _bounded_failure_error(exc: BaseException) -> str:
+    parts: list[str] = []
+    total = 0
+
+    def add(name: str, message: str) -> bool:
+        nonlocal total
+        message = message[:MAX_FAILURE_MESSAGE_CHARS]
+        part = f"{name}: {message}"
+        if total + len(part) + (2 if parts else 0) > MAX_FAILURE_ERROR_CHARS:
+            return False
+        parts.append(part)
+        total += len(part) + (2 if len(parts) > 1 else 0)
+        return True
+
+    def visit(value: BaseException, depth: int) -> None:
+        if len(parts) >= MAX_FAILURE_LEAVES:
+            return
+        if isinstance(value, BaseExceptionGroup):
+            if depth >= MAX_FAILURE_GROUP_DEPTH:
+                add("ExceptionGroup", "nested exception depth limit")
+                return
+            for child in value.exceptions:
+                visit(child, depth + 1)
+                if len(parts) >= MAX_FAILURE_LEAVES:
+                    return
+            return
+        try:
+            message = str(value)
+        except BaseException:
+            message = "message unavailable"
+        add(type(value).__name__, message)
+
+    visit(exc, 0)
+    if not parts:
+        return "failure diagnostics unavailable"[:MAX_FAILURE_ERROR_CHARS]
+    return "; ".join(parts)
+
+
 def _worker_main(args: argparse.Namespace) -> int:
     if (type(args.registry_marker) is not str
             or re.fullmatch(r"[0-9a-f]{32}", args.registry_marker) is None
@@ -1572,10 +1614,10 @@ def _worker_main(args: argparse.Namespace) -> int:
         artifact.update(asyncio.run(_run_bounded(args)))
     except asyncio.CancelledError:
         artifact["error"] = "CancelledError: termination requested"
+    except BaseExceptionGroup as exc:
+        artifact["error"] = _bounded_failure_error(exc)
     except Exception as exc:
         artifact["error"] = f"{type(exc).__name__}: {exc}"
-    except BaseExceptionGroup as exc:
-        artifact["error"] = f"BaseExceptionGroup: {exc}"
     artifact["completed_at"] = datetime.datetime.now(datetime.UTC).isoformat()
     _write_artifact(Path(args.output), artifact)
     return 0 if artifact["success"] else 1
