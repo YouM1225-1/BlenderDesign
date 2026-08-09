@@ -714,6 +714,30 @@ def test_cached_signal_continues_after_another_record_is_reused(
 def test_runner_never_signals_replaced_cached_outer_record(tmp_path, monkeypatch):
     runner = Path(__file__).resolve().parents[2] / "smoke" / "runner.py"
     tree = ast.parse(runner.read_text())
+    bytecode_guard = next(
+        node for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Attribute)
+        and isinstance(node.targets[0].value, ast.Name)
+        and node.targets[0].value.id == "sys"
+        and node.targets[0].attr == "dont_write_bytecode"
+    )
+    assert isinstance(bytecode_guard.value, ast.Constant)
+    assert bytecode_guard.value.value is True
+    project_imports = [
+        node for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        and any(
+            name.name.split(".", 1)[0] in {"bridge", "server", "smoke"}
+            for name in (
+                node.names if isinstance(node, ast.Import)
+                else [ast.alias(name=node.module or "")]
+            )
+        )
+    ]
+    assert project_imports
+    assert all(bytecode_guard.lineno < node.lineno for node in project_imports)
     query = next(
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "_query_async"
