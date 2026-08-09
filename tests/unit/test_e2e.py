@@ -20,6 +20,22 @@ from smoke import e2e
 from smoke import process_registry
 
 
+_PHASE_A_PATHS = {
+    "smoke/process_registry.py", "smoke/runner.py", "smoke/e2e.py",
+    "tests/unit/test_e2e.py",
+}
+
+
+def _without_status_paths(raw: str, allowed: set[str]) -> str:
+    kept = []
+    for line in raw.splitlines():
+        offset = 2 if len(line) > 1 and line[1] == " " else 3
+        path = line[offset:].split(" -> ")[-1]
+        if path not in allowed:
+            kept.append(line)
+    return "\n".join(kept)
+
+
 def _clear_vendor_bytecode() -> None:
     vendor_root = e2e.ROOT / "bridge/_vendor"
     for directory in vendor_root.rglob("__pycache__"):
@@ -77,12 +93,47 @@ async def test_measure_call_uses_the_shared_deadline():
 
 
 @pytest.mark.asyncio
-async def test_ready_file_pid_must_match_spawned_blender(tmp_path):
+async def test_ready_file_pid_must_match_spawned_blender(tmp_path, monkeypatch):
+    tmp_path.chmod(0o700)
     ready = tmp_path / "ready.json"
     ready.write_text(json.dumps({"instance_id": "gui-1-deadbeef", "pid": 999}))
+    ready.chmod(0o600)
     process = SimpleNamespace(pid=123, poll=lambda: None, returncode=None)
     with pytest.raises(ValueError, match="malformed recovery ready"):
         await e2e._wait_ready(ready, process, time.monotonic() + 1.0)
+
+    parsed = []
+    original_loads = e2e._strict_json_loads
+
+    def track_parse(raw):
+        parsed.append(raw)
+        return original_loads(raw)
+
+    monkeypatch.setattr(e2e, "_strict_json_loads", track_parse)
+    target = tmp_path / "target.json"
+    target.write_bytes(b'{"instance_id":"gui-1-deadbeef","pid":123}')
+    target.chmod(0o600)
+    ready.unlink()
+    ready.symlink_to(target)
+    with pytest.raises(PermissionError, match="private bounded 0600 JSON"):
+        await e2e._wait_ready(ready, process, time.monotonic() + 1.0)
+    assert parsed == []
+
+    ready.unlink()
+    ready.write_bytes(b"x" * 9)
+    ready.chmod(0o600)
+    monkeypatch.setattr(e2e, "MAX_RECOVERY_READY_BYTES", 8)
+    with pytest.raises(ValueError, match="private bounded 0600 JSON"):
+        await e2e._wait_ready(ready, process, time.monotonic() + 1.0)
+    assert parsed == []
+    ready.write_bytes(b'{}')
+    ready.chmod(0o644)
+    with pytest.raises(PermissionError, match="private bounded 0600 JSON"):
+        await e2e._wait_ready(ready, process, time.monotonic() + 1.0)
+    assert parsed == []
+    with pytest.raises(TimeoutError, match="deadline expired"):
+        await e2e._wait_ready(ready, process, time.monotonic() - 1.0)
+    assert parsed == []
 
 
 def test_private_artifact_write_preserves_exact_0600(tmp_path, monkeypatch):
@@ -690,6 +741,88 @@ def test_runner_never_signals_replaced_cached_outer_record(tmp_path, monkeypatch
         and node.func.id == "_retire_nfr_helper"
         for node in ast.walk(finish)
     )
+    settle = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_settle_nfr"
+    )
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_read_private_json"
+        for node in ast.walk(settle)
+    )
+    recovery = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_recovery_step"
+    )
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_write_process_json"
+        for node in ast.walk(recovery)
+    )
+    read_helpers = {
+        "_remaining", "_reject_json_constant", "_finite_json_float",
+        "_reject_duplicate_keys", "_strict_json_loads",
+        "_read_private_json",
+    }
+    helper_body = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in read_helpers
+    ]
+    helper_namespace = {
+        "json": json, "math": math, "os": os, "stat": stat,
+        "time": time, "Path": Path,
+        "read_private_bytes": process_registry.read_private_bytes,
+    }
+    helper_module = ast.fix_missing_locations(
+        ast.Module(body=helper_body, type_ignores=[]))
+    exec(compile(helper_module, str(runner), "exec"), helper_namespace)
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir(mode=0o700)
+    artifact = artifact_dir / "nfr.json"
+    artifact.write_bytes(b'{"success":true}')
+    artifact.chmod(0o600)
+    assert helper_namespace["_read_private_json"](
+        artifact, time.monotonic() + 1.0, 64) == {"success": True}
+    artifact.write_bytes(b'{"success":true,"success":false}')
+    with pytest.raises(ValueError, match="duplicate JSON object key"):
+        helper_namespace["_read_private_json"](
+            artifact, time.monotonic() + 1.0, 64)
+
+    parsed = []
+    helper_namespace["_strict_json_loads"] = lambda raw: parsed.append(raw)
+    artifact.write_bytes(b"x" * 9)
+    with pytest.raises(ValueError, match="private bounded 0600 JSON"):
+        helper_namespace["_read_private_json"](
+            artifact, time.monotonic() + 1.0, 8)
+    linked = artifact_dir / "linked.json"
+    linked.symlink_to(artifact)
+    with pytest.raises(PermissionError, match="private bounded 0600 JSON"):
+        helper_namespace["_read_private_json"](
+            linked, time.monotonic() + 1.0, 64)
+    original = artifact_dir / "original.json"
+    real_open = process_registry.os.open
+    swapped = False
+
+    def replace_before_open(path, flags, *args):
+        nonlocal swapped
+        if Path(path) == artifact and not swapped:
+            swapped = True
+            artifact.rename(original)
+            artifact.write_bytes(b'{"success":false}')
+            artifact.chmod(0o600)
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(process_registry.os, "open", replace_before_open)
+    with pytest.raises(RuntimeError, match="identity changed"):
+        helper_namespace["_read_private_json"](
+            artifact, time.monotonic() + 1.0, 64)
+    monkeypatch.setattr(process_registry.os, "open", real_open)
+    with pytest.raises(TimeoutError, match="deadline expired"):
+        helper_namespace["_read_private_json"](
+            artifact, time.monotonic() - 1.0, 64)
+    assert parsed == []
     names = {
         "_nfr_error_once", "_live_nfr_groups", "_signal_nfr_groups",
         "_nfr_helper_record", "_signal_nfr_helper",
@@ -1086,6 +1219,8 @@ async def test_measure_records_a_digest_for_every_call(monkeypatch):
     record["sample_results"][1]["text_content_sha256"] = "0" * 64
     with pytest.raises(AssertionError, match="TextContent digest differs"):
         e2e._verify_measurement_record(record, arguments, validate)
+    record["sample_results"][1]["text_content_sha256"] = hashlib.sha256(
+        record["sample_results"][1]["text_content"].encode("utf-8")).hexdigest()
     with pytest.raises(ValueError, match="Out of range float values"):
         e2e._canonical({"value": float("inf")})
     with pytest.raises(ValueError, match="non-standard JSON constant"):
@@ -1108,6 +1243,29 @@ async def test_measure_records_a_digest_for_every_call(monkeypatch):
         await e2e._measure(
             ExtraContentClient(), "tool", arguments, validate,
             time.monotonic() + 1.0)
+
+    parsed = []
+    original_loads = e2e._strict_json_loads
+
+    def track_parse(raw):
+        parsed.append(raw)
+        return original_loads(raw)
+
+    monkeypatch.setattr(e2e, "_strict_json_loads", track_parse)
+    monkeypatch.setattr(e2e, "MAX_SAMPLE_TEXT_BYTES", 8)
+    oversized = SimpleNamespace(content=[SimpleNamespace(type="text", text="x" * 9)])
+    with pytest.raises(ValueError, match="TextContent character limit"):
+        e2e._compat_text_metrics(
+            oversized, {"index": 1, "scale": 1.0}, validate)
+    multibyte = SimpleNamespace(content=[SimpleNamespace(type="text", text="\u00e9" * 5)])
+    with pytest.raises(ValueError, match="TextContent byte limit"):
+        e2e._compat_text_metrics(
+            multibyte, {"index": 1, "scale": 1.0}, validate)
+    monkeypatch.setattr(e2e, "RUNS", 3)
+    record["sample_results"][0]["text_content"] = "x" * 9
+    with pytest.raises(AssertionError, match="TextContent character limit"):
+        e2e._verify_measurement_record(record, arguments, validate)
+    assert parsed == []
 
 
 @pytest.mark.asyncio
@@ -1504,12 +1662,14 @@ def test_provenance_ignores_ignored_untracked_python(monkeypatch):
     ignored.write_text("must not enter the source manifest")
     monkeypatch.setattr(e2e, "BLENDER", "/bin/echo")
     original_git_text = e2e._git_text
-    monkeypatch.setattr(
-        e2e, "_git_text",
-        lambda deadline, *args, **kwargs: ""
-        if args == ("status", "--porcelain=v1", "--untracked-files=all")
-        else original_git_text(deadline, *args, **kwargs),
-    )
+
+    def allow_phase_a_edits(deadline, *args, **kwargs):
+        raw = original_git_text(deadline, *args, **kwargs)
+        if args == ("status", "--porcelain=v1", "--untracked-files=all"):
+            return _without_status_paths(raw, _PHASE_A_PATHS)
+        return raw
+
+    monkeypatch.setattr(e2e, "_git_text", allow_phase_a_edits)
     _clear_vendor_bytecode()
     try:
         provenance = e2e._current_provenance(time.monotonic() + 10.0)
@@ -1522,23 +1682,33 @@ def test_provenance_rejects_vendor_extra_or_content_drift(monkeypatch):
     vendor = e2e.ROOT / "bridge/_vendor/protocol/envelope.py"
     extra = vendor.with_suffix(".so")
     original = vendor.read_bytes()
-    monkeypatch.setattr(e2e, "BLENDER", "/bin/echo")
     original_git_text = e2e._git_text
-    monkeypatch.setattr(
-        e2e, "_git_text",
-        lambda deadline, *args, **kwargs: ""
-        if args == ("status", "--porcelain=v1", "--untracked-files=all")
-        else original_git_text(deadline, *args, **kwargs),
-    )
+    status_args = ("status", "--porcelain=v1", "--untracked-files=all")
+    for dirty in (" M unrelated-tracked.py", "?? unrelated-untracked.py"):
+        def unrelated_dirty(deadline, *args, _dirty=dirty, **kwargs):
+            if args == status_args:
+                raw = f" M smoke/e2e.py\n{_dirty}"
+                return _without_status_paths(raw, _PHASE_A_PATHS)
+            return original_git_text(deadline, *args, **kwargs)
+
+        monkeypatch.setattr(e2e, "_git_text", unrelated_dirty)
+        with pytest.raises(RuntimeError, match="clean Git worktree"):
+            e2e._current_provenance(time.monotonic() + 1.0)
+    monkeypatch.setattr(e2e, "_git_text", original_git_text)
+    required = {
+        e2e.PLAN_PATH, e2e.ATTESTATION_PATH,
+        e2e.ROOT / "pyproject.toml", e2e.ROOT / "uv.lock",
+        *e2e.APPROVED_DOCUMENTS.values(),
+    }
     _clear_vendor_bytecode()
     try:
         extra.write_bytes(b"executable blind spot")
         with pytest.raises(AssertionError, match="vendored protocol file set"):
-            e2e._current_provenance(time.monotonic() + 10.0)
+            e2e._tracked_sources(time.monotonic() + 10.0, required)
         extra.unlink()
         vendor.write_bytes(original + b"\n# drift\n")
         with pytest.raises(AssertionError, match="vendored protocol content differs"):
-            e2e._current_provenance(time.monotonic() + 10.0)
+            e2e._tracked_sources(time.monotonic() + 10.0, required)
     finally:
         extra.unlink(missing_ok=True)
         vendor.write_bytes(original)
@@ -1610,9 +1780,11 @@ def test_provenance_rejects_approved_tuple_drift(monkeypatch, mutation):
     original_git_text = e2e._git_text
 
     def allow_fixture_edit(deadline, *args, **kwargs):
+        raw = original_git_text(deadline, *args, **kwargs)
         if args == ("status", "--porcelain=v1", "--untracked-files=all"):
-            return ""
-        return original_git_text(deadline, *args, **kwargs)
+            allowed = _PHASE_A_PATHS | {str(path.relative_to(e2e.ROOT))}
+            return _without_status_paths(raw, allowed)
+        return raw
 
     monkeypatch.setattr(e2e, "_git_text", allow_fixture_edit)
     monkeypatch.setattr(e2e, "BLENDER", "/bin/echo")

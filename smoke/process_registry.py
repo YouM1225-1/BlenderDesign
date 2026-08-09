@@ -91,6 +91,46 @@ def _validate_record_stat(st: os.stat_result, path: Path) -> None:
         raise PermissionError(f"private bounded 0600 record required: {path}")
 
 
+def read_private_bytes(path: Path, deadline: float, max_bytes: int) -> bytes:
+    if deadline <= time.monotonic():
+        raise TimeoutError("private file deadline expired")
+    require_private_directory(path.parent)
+    before = path.lstat()
+    if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+            or stat.S_IMODE(before.st_mode) != 0o600):
+        raise PermissionError(f"private bounded 0600 JSON file required: {path}")
+    if not 0 <= before.st_size <= max_bytes:
+        raise ValueError(f"private bounded 0600 JSON file required: {path}")
+    if deadline <= time.monotonic():
+        raise TimeoutError("private file deadline expired")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.geteuid()
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_size > max_bytes
+                or (opened.st_dev, opened.st_ino)
+                != (before.st_dev, before.st_ino)):
+            raise RuntimeError(f"private JSON identity changed: {path}")
+        if deadline <= time.monotonic():
+            raise TimeoutError("private file deadline expired")
+        raw = os.read(descriptor, max_bytes + 1)
+        if len(raw) != opened.st_size:
+            raise ValueError(f"private JSON size changed during read: {path}")
+    finally:
+        os.close(descriptor)
+    current = path.lstat()
+    if ((current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_uid != os.geteuid()
+            or stat.S_IMODE(current.st_mode) != 0o600
+            or current.st_size != len(raw)):
+        raise RuntimeError(f"private JSON identity changed after read: {path}")
+    if deadline <= time.monotonic():
+        raise TimeoutError("private file deadline expired")
+    return raw
+
+
 def _validate_temporary_stat(
     st: os.stat_result, path: Path, device: int, inode: int,
 ) -> None:

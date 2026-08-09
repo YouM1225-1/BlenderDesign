@@ -41,6 +41,7 @@ try:
         finish_publication_reservation,
         new_marker,
         poll_before_deadline,
+        read_private_bytes,
         read_record,
         recorded_group_is_live,
         require_private_directory,
@@ -60,6 +61,7 @@ except ModuleNotFoundError:  # absolute script execution puts smoke/ on sys.path
         finish_publication_reservation,
         new_marker,
         poll_before_deadline,
+        read_private_bytes,
         read_record,
         recorded_group_is_live,
         require_private_directory,
@@ -86,8 +88,10 @@ MAX_SOURCE_TOTAL_BYTES = 128 * 1024 * 1024
 MAX_TRACKED_PATH_BYTES = 4096
 MAX_GIT_LIST_BYTES = (MAX_SOURCE_FILES + 1) * (MAX_TRACKED_PATH_BYTES + 1)
 MAX_SAMPLE_RESULT_BYTES = 256 * 1024
+MAX_SAMPLE_TEXT_BYTES = 256 * 1024
 MAX_SAMPLE_RESULTS_BYTES = 16 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
+MAX_RECOVERY_READY_BYTES = 4096
 MAX_AUDIT_FILES = 8
 MAX_AUDIT_FILE_BYTES = 4 * 1024 * 1024
 MAX_AUDIT_TOTAL_BYTES = 16 * 1024 * 1024
@@ -407,6 +411,13 @@ def _read_bounded_bytes(path: Path, deadline: float, max_bytes: int) -> bytes:
     finally:
         os.close(fd)
     return b"".join(chunks)
+
+
+def _read_private_json(path: Path, deadline: float, max_bytes: int) -> object:
+    raw = read_private_bytes(path, deadline, max_bytes)
+    value = _strict_json_loads(raw)
+    _remaining(deadline)
+    return value
 
 
 def _bounded_directory_names(
@@ -769,6 +780,7 @@ def _compat_text_metrics(
             or type(getattr(content[0], "text", None)) is not str):
         raise AssertionError("exactly one compatibility TextContent is required")
     text = content[0].text
+    raw_text = _bounded_text_content(text)
     try:
         text_value = _strict_json_loads(text)
     except (json.JSONDecodeError, ValueError) as exc:
@@ -777,7 +789,6 @@ def _compat_text_metrics(
     if (not _exact_json_equal(text_value, text_validated)
             or not _exact_json_equal(text_validated, validated)):
         raise AssertionError("TextContent and structuredContent differ")
-    raw_text = text.encode("utf-8")
     structured_bytes, _structured_sha = _canonical(validated)
     return {
         "text_content": text,
@@ -787,6 +798,17 @@ def _compat_text_metrics(
         "duplication_ratio": round(
             (structured_bytes + len(raw_text)) / structured_bytes, 6),
     }
+
+
+def _bounded_text_content(text: str) -> bytes:
+    # UTF-8 needs at most four bytes per code point, so this bounds the encode
+    # allocation before the exact byte limit is checked.
+    if len(text) > MAX_SAMPLE_TEXT_BYTES:
+        raise ValueError("compatibility TextContent character limit exceeded")
+    raw = text.encode("utf-8")
+    if len(raw) > MAX_SAMPLE_TEXT_BYTES:
+        raise ValueError("compatibility TextContent byte limit exceeded")
+    return raw
 
 
 def _audit_rows(runtime_root: Path, deadline: float) -> list[dict[str, Any]]:
@@ -1035,7 +1057,10 @@ def _verify_measurement_record(
         text = item["text_content"]
         if type(text) is not str:
             raise AssertionError("measurement TextContent differs")
-        raw_text = text.encode("utf-8")
+        try:
+            raw_text = _bounded_text_content(text)
+        except ValueError as exc:
+            raise AssertionError(str(exc)) from exc
         try:
             text_value = _strict_json_loads(text)
             text_validated = validate(text_value)
@@ -1242,13 +1267,17 @@ async def _wait_ready(
         if process.poll() is not None:
             raise RuntimeError(f"Blender exited before ready: {process.returncode}")
         try:
-            ready = _strict_json_loads(path.read_text())
-        except (FileNotFoundError, json.JSONDecodeError):
+            ready = _read_private_json(
+                path, deadline, MAX_RECOVERY_READY_BYTES)
+        except FileNotFoundError:
             await asyncio.sleep(min(0.05, _remaining(deadline)))
             continue
-        if (type(ready.get("instance_id")) is str
-                and ready.get("pid") == process.pid):
-            return ready
+        if (type(ready) is dict
+                and set(ready) == {"instance_id", "pid"}
+                and type(ready["instance_id"]) is str
+                and type(ready["pid"]) is int
+                and ready["pid"] == process.pid):
+            return cast(dict[str, Any], ready)
         raise ValueError(f"malformed recovery ready file: {ready!r}")
 
 

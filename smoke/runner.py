@@ -22,10 +22,12 @@ from bridge.blender import driver, panel  # noqa: E402
 from server.core.bridge_client import BridgeClient, BridgeError  # noqa: E402
 from smoke.process_registry import (  # noqa: E402
     REPLACE_MODE,
+    _write_private_json as _write_process_json,
     current_record,
     finish_publication_reservation,
     new_marker,
     poll_before_deadline,
+    read_private_bytes,
     read_record,
     recorded_group_is_live,
     reserve_publication,
@@ -48,6 +50,7 @@ NFR_TIMEOUT = 180.0              # 60 calls; observation window, not the <2 s pa
 NFR_CLEANUP_MARGIN = 15.0        # single bounded cleanup reserve
 NFR_TERM_GRACE = 8.0             # let helper cancellation unwind the SDK Client context
 NFR_GROUP_GRACE = 3.0            # emergency TERM window for a recorded MCP process group
+MAX_NFR_ARTIFACT_BYTES = 32 * 1024 * 1024
 RES: dict = {"timer_tick": None, "revision_bump": None, "fields": None,
              "hash_scope": None, "cycles_leak_free": None, "large_scene": None,
              "large_scene_budget_ok": None, "large_scene_metrics": None,
@@ -70,6 +73,46 @@ ST: dict = {"phase": "start", "box": None, "thread": None, "deadline": 0.0,
             "nfr_helper_publication": None,
             "nfr_work_deadline": 0.0,
             "nfr_final_deadline": 0.0}
+
+
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("smoke control/result deadline expired")
+    return remaining
+
+
+def _reject_json_constant(value: str) -> object:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"non-finite JSON number: {value}")
+    return parsed
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
+def _strict_json_loads(raw: bytes) -> object:
+    return json.loads(
+        raw, parse_constant=_reject_json_constant, parse_float=_finite_json_float,
+        object_pairs_hook=_reject_duplicate_keys)
+
+
+def _read_private_json(path: Path, deadline: float, max_bytes: int) -> object:
+    raw = read_private_bytes(path, deadline, max_bytes)
+    value = _strict_json_loads(raw)
+    _remaining(deadline)
+    return value
 
 
 def _register():
@@ -323,7 +366,9 @@ def _settle_nfr(returncode: int | None) -> None:
     artifact = None
     if NFR_OUT:
         try:
-            artifact = json.loads(Path(NFR_OUT).read_text())
+            artifact = _read_private_json(
+                Path(NFR_OUT), ST["nfr_final_deadline"],
+                MAX_NFR_ARTIFACT_BYTES)
         except (OSError, ValueError) as exc:
             RES["errors"].append(f"nfr_p1 artifact: {type(exc).__name__}: {exc}")
     metrics = (artifact or {}).get("results") if isinstance(artifact, dict) else None
@@ -823,12 +868,10 @@ def _recovery_step() -> float | None:
             if session is None:
                 raise RuntimeError("recovery session failed to start")
             ready = Path(RECOVERY_READY)
-            temporary = ready.with_suffix(ready.suffix + ".tmp")
-            temporary.write_text(json.dumps({
+            _write_process_json(ready, {
                 "instance_id": session.instance_id,
                 "pid": os.getpid(),
-            }))
-            os.replace(temporary, ready)
+            })
             ST["phase"] = "recovery_wait"
         elif ST["phase"] == "recovery_wait" and Path(RECOVERY_STOP).exists():
             bpy.ops.bcx.disconnect()
