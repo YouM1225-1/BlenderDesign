@@ -49,14 +49,18 @@ Subagent-Driven Development、对抗性审计和重复实测闭环所有问题�
   library_source.blend
   lamp_fixture.blend
   assets/known-missing.png       # 路径存在于 datablock，但文件刻意不存在
-  renders/thumbnail.png
-  renders/viewport.png
+  renders/thumbnail.png          # 从官方 Blender scratch 校验后复制的证据副本
+  renders/viewport.png           # 从官方 Blender scratch 校验后复制的证据副本
   results.ndjson
   run-report.md
 ```
 
-所有输出路径必须词法位于 run root、父链无 symlink、目标不是用户文件。二进制 `.blend`
-和 PNG 不提交；最终只提交设计、计划、审计报告，以及根因证明确实需要的最小代码/文档。
+fixture 与证据副本路径必须词法位于 run root、父链无 symlink、目标不是用户文件。官方两个
+render 工具只接受请求路径的 basename，并把真实输出解析到
+`bpy.app.tempdir/blender_mcp`；实测必须校验返回路径位于该 Blender-owned scratch、basename
+精确匹配、文件非空，再由外部只读验收步骤复制到 run root。不得把这一有意的 scratch
+重定位误报为路径逃逸。二进制 `.blend` 和 PNG 不提交；最终只提交设计、计划、审计报告，
+以及根因证明确实需要的最小代码/文档。
 
 ## 4. 台灯场景合同
 
@@ -133,7 +137,8 @@ Blender 内部脚本另用 `time.perf_counter()` 返回操作耗时。两者不�
 4. **Structure/externality**：GUI/CLI summaries、object detail、linked/missing/path/usage；
 5. **Docs**：API exact lookup、API search、manual search；
 6. **UI/visual**：workspace、area、object/data 聚焦、JSON 和 PNG screenshots；
-7. **Render**：低分辨率 thumbnail 和 viewport render，路径前后哨兵不变；
+7. **Render**：低分辨率 thumbnail 和 viewport render，返回路径位于官方 Blender scratch，
+   复制后的 run-root 证据非空，路径前后哨兵不变；
 8. **Adversarial cases**：不存在对象、ignored/linked/missing edge、坏输出路径或受控 timeout
    中不破坏数据的子集；
 9. **Closeout**：26/26 分类、耗时表、artifact hashes、根因分析，关闭 GUI 不保存或保留
