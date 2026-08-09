@@ -236,7 +236,9 @@ fi
 
 ## 6. 备份合同
 
-只为将要修改的对象创建一次备份。先建立受限目录：
+只为将要修改的对象创建一次备份。对象不存在时也要把 pre-state 明确记录为
+`absent`；这不是可跳过的空值，而是首次安装回滚必须恢复的状态。先建立受限
+目录：
 
 ```bash
 umask 077
@@ -278,6 +280,9 @@ fi
 
 只有真实安装/升级 Extension 时才备份现有扩展目录；内容一致的当前安装必须
 跳过重装。目录备份使用 `ditto`，并记录源目录与备份目录的逐文件 SHA 清单。
+若 Extension 目录或 `userpref.blend` 原本不存在，分别记录 `extension=absent` 或
+`userpref=absent`，并记录本次创建后的 identity/SHA，供失败时只移除本次创建且
+未被外部替换的对象。
 
 每次写入前重新读取目标 device/inode/SHA；与记录不一致时停止，不覆盖并发
 修改。
@@ -625,12 +630,18 @@ Expected: 返回当前 Blender 文件的结构化 data-block summary。不得在
 4. 构建并 validate 候选 Extension；
 5. 显示 `old_commit -> candidate_commit` 以及工具 added/removed/renamed diff；
 6. 当前所有者已授权自动接受该完整候选 catalog，不逐工具询问；
-7. Blender 正常退出后，备份 live checkout/Extension/userpref/config；
-8. 安装候选 Extension，把 `enabled_tools` 原子替换为候选 catalog 的精确集合，
+7. Blender 正常退出后，备份 Extension/userpref/config；记录 live checkout 的
+   目录 device/inode、clean 状态和旧 commit 作为 source pre-image；
+8. 写入前重验 live checkout 的 device/inode、HEAD 和 clean 状态。全部仍等于
+   pre-image 后，在 live checkout fetch 候选完整 SHA 并执行 detached checkout；
+   断言 live `HEAD` 等于候选 SHA、worktree clean，且 Server handshake 返回候选
+   catalog；
+9. 安装候选 Extension，把 `enabled_tools` 原子替换为候选 catalog 的精确集合，
    包括新增、删除和重命名；
-9. 运行四层验收，要求 candidate Server catalog、effective config 和新任务模型
+10. 运行四层验收，要求 live candidate Server catalog、effective config 和新任务模型
    目录三者集合全等；
-10. 成功后把候选完整 SHA 记录为新 pin；失败则恢复旧 commit、Extension、
+11. 成功后把候选完整 SHA 记录为新 pin；失败则先重验 live checkout identity，
+    再 detached checkout 旧 commit，并恢复 Extension、
     userpref、config 和旧 catalog。
 
 若候选引入非唯一/空 catalog、Server 无法握手、Extension validate 失败或 Blender
@@ -650,7 +661,12 @@ Codex config：
 Blender：
 
 - 关闭 Blender；
-- 从已验证备份恢复旧 Extension 和 `userpref.blend`；
+- 原 Extension 存在时，从已验证备份恢复；原 Extension 为 `absent` 时，先验证
+  当前目录仍是本次安装的 ID/version/文件树且 identity 未变，再执行
+  `"$BLENDER_BIN" --command extension remove user_default.mcp` 并验证目录和模块
+  均不存在；若目录已被外部替换则停止，不删除；
+- 原 `userpref.blend` 存在时恢复已验证备份；原状态为 `absent` 时，仅当当前文件
+  identity/SHA 等于本次记录的 post-image 才删除该文件，变化时停止；
 - 重新启动并核验旧 ID/version、启用状态和偏好；
 - 不删除或修改任何 `.blend` 文件。
 
