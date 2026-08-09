@@ -181,6 +181,7 @@ def status_impl(discovery: Discovery, instance_selector: str | None = None) -> d
             if (type(result) is not dict or type(result.get("instance_id")) is not str
                     or result["instance_id"] != item.session["instance_id"]
                     or type(result.get("scene_revision")) is not int
+                    or "scene_path" not in result
                     or type(result.get("scene_path")) not in (str, type(None))):
                 raise ValueError("malformed status result")
             return result
