@@ -102,6 +102,7 @@ MAX_AUDIT_ROWS = 256
 MAX_RECOVERY_STATUS_ATTEMPTS = 64
 MAX_FAILURE_GROUP_DEPTH = 4
 MAX_FAILURE_LEAVES = 8
+MAX_FAILURE_TYPE_CHARS = 64
 MAX_FAILURE_MESSAGE_CHARS = 256
 MAX_FAILURE_ERROR_CHARS = 2048
 PLAN_PATH = ROOT / "docs/superpowers/plans/2026-07-23-phase0-readonly-channel.md"
@@ -1555,34 +1556,48 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 def _bounded_failure_error(exc: BaseException) -> str:
     parts: list[str] = []
     total = 0
+    visited = 0
+    full = False
 
-    def add(name: str, message: str) -> bool:
-        nonlocal total
+    def add(name: object, message: str) -> None:
+        nonlocal total, full
+        if type(name) is not str:
+            name = "Exception"
+        name = re.sub(r"[^A-Za-z0-9_.]", "_", name[:MAX_FAILURE_TYPE_CHARS]) \
+            or "Exception"
         message = message[:MAX_FAILURE_MESSAGE_CHARS]
         part = f"{name}: {message}"
         if total + len(part) + (2 if parts else 0) > MAX_FAILURE_ERROR_CHARS:
-            return False
+            full = True
+            return
         parts.append(part)
         total += len(part) + (2 if len(parts) > 1 else 0)
-        return True
+        full = total >= MAX_FAILURE_ERROR_CHARS
 
     def visit(value: BaseException, depth: int) -> None:
-        if len(parts) >= MAX_FAILURE_LEAVES:
+        nonlocal visited
+        if full or visited >= MAX_FAILURE_LEAVES:
             return
         if isinstance(value, BaseExceptionGroup):
             if depth >= MAX_FAILURE_GROUP_DEPTH:
+                visited += 1
                 add("ExceptionGroup", "nested exception depth limit")
                 return
             for child in value.exceptions:
                 visit(child, depth + 1)
-                if len(parts) >= MAX_FAILURE_LEAVES:
+                if full or visited >= MAX_FAILURE_LEAVES:
                     return
             return
+        visited += 1
         try:
-            message = str(value)
+            name = type(value).__name__
         except BaseException:
-            message = "message unavailable"
-        add(type(value).__name__, message)
+            name = "Exception"
+        args = value.args
+        message = args[0] if type(args) is tuple and len(args) == 1 \
+            and type(args[0]) is str \
+            else "message omitted"
+        add(name, message)
 
     visit(exc, 0)
     if not parts:
@@ -1617,7 +1632,7 @@ def _worker_main(args: argparse.Namespace) -> int:
     except BaseExceptionGroup as exc:
         artifact["error"] = _bounded_failure_error(exc)
     except Exception as exc:
-        artifact["error"] = f"{type(exc).__name__}: {exc}"
+        artifact["error"] = _bounded_failure_error(exc)
     artifact["completed_at"] = datetime.datetime.now(datetime.UTC).isoformat()
     _write_artifact(Path(args.output), artifact)
     return 0 if artifact["success"] else 1

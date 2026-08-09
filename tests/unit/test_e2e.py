@@ -169,21 +169,42 @@ def test_private_artifact_write_preserves_exact_0600(tmp_path, monkeypatch):
         e2e._write_artifact(output, {"success": True})
     monkeypatch.setattr(e2e, "MAX_ARTIFACT_BYTES", 32 * 1024 * 1024)
 
-    class ReprLeaksSecret(Exception):
-        def __repr__(self):
+    formatter_calls = []
+
+    class MultiArgTrap(Exception):
+        def __str__(self):
+            formatter_calls.append("str")
             return "token=secret socket_path=/private/socket traceback"
+
+        def __repr__(self):
+            formatter_calls.append("repr")
+            return "token=secret socket_path=/private/socket traceback"
+
+    after_limit_visits = []
+
+    class AfterLimitTrap(Exception):
+        def __getattribute__(self, name):
+            if name == "args":
+                after_limit_visits.append("args")
+            return super().__getattribute__(name)
+
+        def __str__(self):
+            formatter_calls.append("late-str")
+            return "late secret"
 
     async def grouped_failure(_args):
         raise ExceptionGroup("outer", [
             ExceptionGroup("too-deep", [ExceptionGroup("deeper", [
                 ValueError("hidden leaf"),
             ])]),
-            ExceptionGroup("inner", [
-                TimeoutError("timeout leaf"),
-                AssertionError("assertion leaf"),
-                ReprLeaksSecret("safe leaf"),
-            ]),
+            TimeoutError("timeout leaf"),
+            MultiArgTrap("token=secret", "/private/socket"),
+            AssertionError("assertion leaf"),
+            AfterLimitTrap("after visit limit"),
         ])
+
+    async def ordinary_failure(_args):
+        raise MultiArgTrap("token=secret", "/private/socket")
 
     artifact = tmp_path / "failure.json"
     args = SimpleNamespace(
@@ -192,9 +213,9 @@ def test_private_artifact_write_preserves_exact_0600(tmp_path, monkeypatch):
         output=str(artifact),
     )
     monkeypatch.setattr(e2e, "MAX_FAILURE_GROUP_DEPTH", 2)
-    monkeypatch.setattr(e2e, "MAX_FAILURE_LEAVES", 3)
+    monkeypatch.setattr(e2e, "MAX_FAILURE_LEAVES", 4)
     monkeypatch.setattr(e2e, "MAX_FAILURE_MESSAGE_CHARS", 16)
-    monkeypatch.setattr(e2e, "MAX_FAILURE_ERROR_CHARS", 96)
+    monkeypatch.setattr(e2e, "MAX_FAILURE_ERROR_CHARS", 160)
     monkeypatch.setattr(e2e, "_current_provenance", lambda _deadline: {})
     monkeypatch.setattr(e2e, "_run_bounded", grouped_failure)
     assert e2e._worker_main(args) == 1
@@ -204,8 +225,33 @@ def test_private_artifact_write_preserves_exact_0600(tmp_path, monkeypatch):
     assert "ExceptionGroup: nested exception" in error
     assert "TimeoutError: timeout leaf" in error
     assert "AssertionError: assertion leaf" in error
-    assert "ReprLeaksSecret" not in error and "hidden leaf" not in error
+    assert "MultiArgTrap: message omitted" in error
+    assert "AfterLimitTrap" not in error and "hidden leaf" not in error
+    assert formatter_calls == [] and after_limit_visits == []
     assert "token=" not in error and "socket_path=" not in error and "traceback" not in error
+
+    monkeypatch.setattr(e2e, "_run_bounded", ordinary_failure)
+    assert e2e._worker_main(args) == 1
+    ordinary = json.loads(artifact.read_text())["error"]
+    assert ordinary == "MultiArgTrap: message omitted" and formatter_calls == []
+
+    total_cap_visits = []
+
+    class TotalCapTrap(Exception):
+        def __getattribute__(self, name):
+            if name == "args":
+                total_cap_visits.append("args")
+            return super().__getattribute__(name)
+
+        def __str__(self):
+            total_cap_visits.append("str")
+            return "must not be visited"
+
+    first_part = "TimeoutError: does not fit"
+    monkeypatch.setattr(e2e, "MAX_FAILURE_ERROR_CHARS", len(first_part))
+    capped = e2e._bounded_failure_error(ExceptionGroup(
+        "full", [TimeoutError("does not fit"), TotalCapTrap("later")]))
+    assert capped == first_part and total_cap_visits == []
 
 
 def test_live_mcp_process_record_cannot_be_retired_as_clean(tmp_path):
