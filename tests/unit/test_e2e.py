@@ -503,6 +503,37 @@ def test_server_params_reserves_first_publication_before_spawn(
         not_before_ns=not_before_ns)
     assert list(registry.iterdir()) == []
 
+    physical_parent = tmp_path / "physical"
+    physical_parent.mkdir(mode=0o700)
+    lexical_parent = tmp_path / "lexical"
+    lexical_parent.symlink_to(physical_parent, target_is_directory=True)
+    lexical_runtime_root = lexical_parent / "runtime"
+    lexical_runtime_root.mkdir(mode=0o700)
+    offline_root = tmp_path / "offline"
+    offline_root.mkdir(mode=0o700)
+    seen_roots = []
+
+    async def capture_nfr(runtime_root, *_args):
+        seen_roots.append(("nfr", runtime_root))
+        return {}
+
+    async def capture_recovery(runtime_root, *_args):
+        seen_roots.append(("recovery", runtime_root))
+        return {}
+
+    monkeypatch.setattr(e2e, "_run_nfr", capture_nfr)
+    monkeypatch.setattr(e2e, "_run_recovery", capture_recovery)
+    for mode in ("nfr", "recovery"):
+        asyncio.run(e2e._run(SimpleNamespace(
+            root=str(lexical_runtime_root), mode=mode,
+            offline_root=str(offline_root), instance="gui-1-deadbeef",
+            registry_marker=marker, registry_not_before_ns=not_before_ns,
+        ), registry, time.monotonic() + 1.0))
+    assert seen_roots == [
+        ("nfr", lexical_runtime_root),
+        ("recovery", lexical_runtime_root),
+    ]
+
     def fail(*_args, **_kwargs):
         raise RuntimeError("pre-spawn failure")
 

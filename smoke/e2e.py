@@ -1490,7 +1490,7 @@ async def _run_recovery(
 async def _run(
     args: argparse.Namespace, process_registry: Path, deadline: float,
 ) -> dict[str, Any]:
-    runtime_root = Path(args.root).resolve()
+    runtime_root = Path(args.root)
     if not runtime_root.is_dir():
         raise FileNotFoundError(f"runtime root does not exist: {runtime_root}")
     if args.mode == "nfr":
