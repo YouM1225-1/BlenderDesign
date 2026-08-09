@@ -314,8 +314,19 @@ def _signal_nfr_helper(sig: int) -> None:
     try:
         record = _nfr_helper_record()
         if record is None:
-            raise RuntimeError("NFR helper record is unavailable")
-        signal_live_records([record], sig)
+            process = ST.get("nfr_proc")
+            if process is None or process.poll() is not None:
+                return
+            if sig == signal.SIGTERM:
+                process.terminate()
+            elif sig == signal.SIGKILL:
+                process.kill()
+            else:
+                raise ValueError(f"unsupported direct NFR helper signal: {sig}")
+        else:
+            signal_live_records([record], sig)
+    except ProcessLookupError:
+        return
     except Exception as exc:
         ST["nfr_registry_pending"] = True
         message = f"nfr helper signal: {type(exc).__name__}: {exc}"

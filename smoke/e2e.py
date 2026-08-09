@@ -37,6 +37,7 @@ try:
         SENTINEL_MODE,
         _unlink_private_temporary,
         cleanup_owned_process,
+        cleanup_unpublished_process,
         cleanup_registry,
         finish_publication_reservation,
         new_marker,
@@ -57,6 +58,7 @@ except ModuleNotFoundError:  # absolute script execution puts smoke/ on sys.path
         SENTINEL_MODE,
         _unlink_private_temporary,
         cleanup_owned_process,
+        cleanup_unpublished_process,
         cleanup_registry,
         finish_publication_reservation,
         new_marker,
@@ -311,6 +313,8 @@ def _bounded_process_stdout(
             REPLACE_MODE, str(record_path), str(reservation), str(device),
             str(inode), marker, *command,
         ]
+        cleanup_reserve = min(1.0, _remaining(deadline) / 2.0)
+        work_deadline = deadline - cleanup_reserve
         try:
             process = subprocess.Popen(
                 wrapped, cwd=cwd, stdout=subprocess.PIPE,
@@ -318,44 +322,56 @@ def _bounded_process_stdout(
         except BaseException:
             finish_publication_reservation(*publication)
             raise
-        if process.stdout is None:
-            raise RuntimeError("bounded subprocess stdout pipe missing")
-        cleanup_reserve = min(1.0, _remaining(deadline) / 2.0)
-        work_deadline = deadline - cleanup_reserve
-        record = wait_owned_process_record(
-            process, record_path, expected_marker=marker,
-            not_before_ns=not_before_ns, deadline=work_deadline)
-        descriptor = process.stdout.fileno()
-        os.set_blocking(descriptor, False)
-        selector = selectors.DefaultSelector()
-        selector.register(descriptor, selectors.EVENT_READ)
-        chunks: list[bytes] = []
-        total = 0
+        record: ProcessRecord | None = None
         try:
-            while True:
-                events = selector.select(min(1.0, _remaining(work_deadline)))
-                if not events:
-                    continue
-                chunk = os.read(descriptor, min(64 * 1024, max_bytes - total + 1))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-                if total > max_bytes:
-                    raise ValueError("bounded subprocess output exceeds its limit")
-            returncode = process.wait(timeout=_remaining(work_deadline))
-            _remaining(work_deadline)
-            if returncode != 0:
-                raise subprocess.CalledProcessError(returncode, command)
-            return b"".join(chunks)
+            if process.stdout is None:
+                raise RuntimeError("bounded subprocess stdout pipe missing")
+            record = wait_owned_process_record(
+                process, record_path, expected_marker=marker,
+                not_before_ns=not_before_ns, deadline=work_deadline)
+            descriptor = process.stdout.fileno()
+            os.set_blocking(descriptor, False)
+            selector = selectors.DefaultSelector()
+            selector.register(descriptor, selectors.EVENT_READ)
+            chunks: list[bytes] = []
+            total = 0
+            try:
+                while True:
+                    events = selector.select(min(1.0, _remaining(work_deadline)))
+                    if not events:
+                        continue
+                    chunk = os.read(
+                        descriptor, min(64 * 1024, max_bytes - total + 1))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError(
+                            "bounded subprocess output exceeds its limit")
+                returncode = process.wait(timeout=_remaining(work_deadline))
+                _remaining(work_deadline)
+                if returncode != 0:
+                    raise subprocess.CalledProcessError(returncode, command)
+                return b"".join(chunks)
+            finally:
+                selector.close()
         finally:
-            selector.close()
-            process.stdout.close()
-            cleanup_owned_process(
-                process, record, deadline=deadline, term_grace=0.25)
-            retire_record(
-                record_path, expected_marker=marker,
-                not_before_ns=not_before_ns)
+            if process.stdout is not None:
+                process.stdout.close()
+            if record is None:
+                cleanup_unpublished_process(
+                    process, deadline=deadline,
+                    term_grace=min(0.25, cleanup_reserve / 2.0))
+                _retire_record_or_reservation(
+                    record_path, publication, expected_marker=marker,
+                    not_before_ns=not_before_ns)
+            else:
+                cleanup_owned_process(
+                    process, record, deadline=deadline, term_grace=0.25)
+                retire_record(
+                    record_path, expected_marker=marker,
+                    not_before_ns=not_before_ns)
 
 
 def _git_bytes(
@@ -1591,14 +1607,20 @@ def _supervise_recovery(args: argparse.Namespace) -> int:
     registry_reserve = min(
         RECOVERY_REGISTRY_RESERVE, RECOVERY_CLEANUP_MARGIN / 3.0)
     command = _recovery_worker_command(args, marker, not_before_ns)
-    worker_record = registry / "recovery-worker.json"
+    outer_temporary = tempfile.TemporaryDirectory(
+        prefix="bcx-recovery-supervisor-")
+    outer_registry = Path(outer_temporary.name)
+    outer_registry.chmod(0o700)
+    worker_record = outer_registry / "recovery-worker.json"
     process: subprocess.Popen[bytes] | None = None
+    publication: tuple[Path, int, int] | None = None
     returncode: int | None = None
     supervisor_error: str | None = None
     timed_out = False
     cancelled_signal: int | None = None
     previous_handlers: dict[int, Any] = {}
     known_records: dict[int, ProcessRecord] = {}
+    known_outer_records: dict[int, ProcessRecord] = {}
 
     def cancel(signum: int, _frame: object) -> None:
         nonlocal cancelled_signal
@@ -1625,8 +1647,13 @@ def _supervise_recovery(args: argparse.Namespace) -> int:
                 raise
         while process is not None:
             scan_records(
-                registry, expected_marker=marker, not_before_ns=not_before_ns,
-                deadline=cleanup_deadline, known_records=known_records,
+                outer_registry, expected_marker=marker,
+                not_before_ns=not_before_ns, deadline=cleanup_deadline,
+                known_records=known_outer_records, retire_dead=False)
+            scan_records(
+                registry, expected_marker=marker,
+                not_before_ns=not_before_ns, deadline=cleanup_deadline,
+                known_records=known_records,
                 retire_dead=False)
             if cancelled_signal is not None:
                 supervisor_error = (
@@ -1657,9 +1684,30 @@ def _supervise_recovery(args: argparse.Namespace) -> int:
         if process is not None:
             try:
                 worker_cleanup_deadline = cleanup_deadline - registry_reserve
-                record = known_records.get(process.pid) or wait_owned_process_record(
-                    process, worker_record, expected_marker=marker,
-                    not_before_ns=not_before_ns, deadline=worker_cleanup_deadline)
+                record = known_outer_records.get(process.pid)
+                if record is None:
+                    cleanup_started = time.monotonic()
+                    cleanup_remaining = max(
+                        0.0, worker_cleanup_deadline - cleanup_started)
+                    publication_deadline = cleanup_started + min(
+                        0.1, cleanup_remaining / 2.0)
+                    try:
+                        record = wait_owned_process_record(
+                            process, worker_record, expected_marker=marker,
+                            not_before_ns=not_before_ns,
+                            deadline=publication_deadline)
+                    except Exception:
+                        returncode = cleanup_unpublished_process(
+                            process, deadline=worker_cleanup_deadline,
+                            term_grace=min(0.25, cleanup_remaining / 2.0))
+                        if publication is None:
+                            raise RuntimeError(
+                                "recovery worker publication identity missing")
+                        _retire_record_or_reservation(
+                            worker_record, publication,
+                            expected_marker=marker,
+                            not_before_ns=not_before_ns)
+                        raise
                 if record.path != worker_record:
                     raise RuntimeError("recovery worker record path differs")
                 if process.poll() is not None and recorded_group_is_live(record):
@@ -1688,6 +1736,7 @@ def _supervise_recovery(args: argparse.Namespace) -> int:
         finally:
             for signum, previous in previous_handlers.items():
                 signal.signal(signum, previous)
+            outer_temporary.cleanup()
             if cancelled_signal is not None and supervisor_error is None:
                 supervisor_error = (
                     f"recovery supervisor cancelled by signal {cancelled_signal}")

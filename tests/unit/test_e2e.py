@@ -850,7 +850,7 @@ def test_runner_never_signals_replaced_cached_outer_record(tmp_path, monkeypatch
         process_registry, "signal_group_id",
         lambda pgid, sig: signaled.append((pgid, sig)))
     namespace = {
-        "Path": Path,
+        "Path": Path, "signal": signal,
         "RES": {"errors": []},
         "ST": {
             "nfr_process_dir": None,
@@ -878,6 +878,35 @@ def test_runner_never_signals_replaced_cached_outer_record(tmp_path, monkeypatch
     assert signaled == []
     assert any("process record identity changed" in message
                for message in namespace["RES"]["errors"])
+
+    direct_ready = tmp_path / "direct-ready"
+    direct = subprocess.Popen([
+        sys.executable, "-c",
+        "import signal,time; from pathlib import Path; "
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+        f"Path({str(direct_ready)!r}).touch(); time.sleep(30)",
+    ], start_new_session=True)
+    ready_deadline = time.monotonic() + 1.0
+    while (not direct_ready.exists() and direct.poll() is None
+           and time.monotonic() < ready_deadline):
+        time.sleep(0.01)
+    assert direct_ready.exists()
+    namespace["ST"].update(
+        nfr_helper_record=tmp_path / "missing-helper.json",
+        nfr_helper_identity=None, nfr_proc=direct)
+    started = time.monotonic()
+    try:
+        namespace["_signal_nfr_helper"](signal.SIGTERM)
+        time.sleep(0.05)
+        assert direct.poll() is None
+        namespace["_signal_nfr_helper"](signal.SIGKILL)
+        assert direct.wait(timeout=1.0) == -signal.SIGKILL
+        assert time.monotonic() - started < 1.0
+    finally:
+        if direct.poll() is None:
+            direct.kill()
+            direct.wait(timeout=2)
+
     namespace["signal_live_records"] = lambda *_args: (
         (_ for _ in ()).throw(RuntimeError("reused")))
     namespace["_signal_nfr_groups"](signal.SIGKILL)
@@ -1402,6 +1431,33 @@ def test_bounded_subprocess_stdout_rejects_excess_output(tmp_path, monkeypatch):
     finally:
         process_registry.signal_group_id(pgid, signal.SIGKILL)
 
+    stalled = {}
+
+    def stall_publication(_command, **kwargs):
+        process = real_popen(
+            [sys.executable, "-c",
+             "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+             "time.sleep(30)"],
+            cwd=kwargs["cwd"], stdout=kwargs["stdout"],
+            stderr=kwargs["stderr"], start_new_session=True)
+        stalled["process"] = process
+        return process
+
+    monkeypatch.setattr(e2e.subprocess, "Popen", stall_publication)
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError, match="publication timed out"):
+            e2e._bounded_process_stdout(
+                ["never-execed"], cwd=tmp_path,
+                deadline=time.monotonic() + 0.5, max_bytes=8)
+        assert time.monotonic() - started < 0.5
+        assert stalled["process"].returncode == -signal.SIGKILL
+    finally:
+        process = stalled.get("process")
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
+
 
 def test_recovery_supervisor_rejects_completion_observed_after_deadline(
     tmp_path, monkeypatch,
@@ -1445,7 +1501,6 @@ def test_recovery_supervisor_does_not_signal_replaced_outer_record(
     registry = tmp_path / "registry"
     registry.mkdir(mode=0o700)
     output = tmp_path / "replaced-worker.json"
-    record = registry / "recovery-worker.json"
     original = tmp_path / "original-worker.json"
     marker = process_registry.new_marker()
     signaled = []
@@ -1456,6 +1511,7 @@ def test_recovery_supervisor_does_not_signal_replaced_outer_record(
     real_scan = e2e.scan_records
 
     def spawn(command, *args, **kwargs):
+        spawned["record"] = Path(command[3])
         process = real_popen(command, *args, **kwargs)
         spawned["process"] = process
         return process
@@ -1464,6 +1520,7 @@ def test_recovery_supervisor_does_not_signal_replaced_outer_record(
         deadline = time.monotonic() + 2.0
         if not observed.wait(max(0.0, deadline - time.monotonic())):
             return
+        record = spawned["record"]
         value = json.loads(record.read_text())
         record.rename(original)
         process_registry._write_private_json(record, value)
@@ -1471,7 +1528,7 @@ def test_recovery_supervisor_does_not_signal_replaced_outer_record(
 
     def scan(*args, **kwargs):
         result = real_scan(*args, **kwargs)
-        if any(item.path == record for item in result[0]):
+        if any(item.path == spawned.get("record") for item in result[0]):
             observed.set()
         return result
 
@@ -1505,7 +1562,9 @@ def test_recovery_supervisor_does_not_signal_replaced_outer_record(
         if process is not None and process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=2)
-        record.unlink(missing_ok=True)
+        record = spawned.get("record")
+        if isinstance(record, Path):
+            record.unlink(missing_ok=True)
         original.unlink(missing_ok=True)
 
 
@@ -1546,6 +1605,7 @@ def test_recovery_supervisor_signal_is_safe_during_poll_and_registry_cleanup(
 ):
     tmp_path.chmod(0o700)
     original = signal.getsignal(signal.SIGTERM)
+    wiring = []
 
     class FakeProcess:
         pid = 424242
@@ -1572,6 +1632,13 @@ def test_recovery_supervisor_signal_is_safe_during_poll_and_registry_cleanup(
         def spawn(command, *_args, _window=window, **_kwargs):
             process = FakeProcess(_window == "poll")
             record = Path(command[3])
+            worker_command = command[8:]
+            registry_option = worker_command.index("--process-registry")
+            wiring.append({
+                "outer_record": record,
+                "worker_registry_entries": list(registry.iterdir()),
+                "worker_registry": worker_command[registry_option + 1],
+            })
             process_registry._write_private_json(record, {
                 "schema_version": 1,
                 "pid": process.pid,
@@ -1599,6 +1666,10 @@ def test_recovery_supervisor_signal_is_safe_during_poll_and_registry_cleanup(
         assert artifact["worker_cancelled_signal"] == signal.SIGTERM
         assert "cancelled by signal" in artifact["error"]
         assert signal.getsignal(signal.SIGTERM) == original
+        observed = wiring[-1]
+        assert observed["outer_record"].parent != registry
+        assert observed["worker_registry_entries"] == []
+        assert observed["worker_registry"] == str(registry)
 
 
 def test_recovery_supervisor_reaps_resistant_worker_and_registered_group(

@@ -394,6 +394,29 @@ def cleanup_owned_process(
             f"owned process leader could not be reaped: {record.pid}") from exc
 
 
+def cleanup_unpublished_process(
+    process: subprocess.Popen[bytes], *, deadline: float, term_grace: float,
+) -> int:
+    if process.poll() is None:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+    term_deadline = min(deadline, time.monotonic() + term_grace)
+    while process.poll() is None and time.monotonic() < term_deadline:
+        time.sleep(min(0.01, max(0.0, term_deadline - time.monotonic())))
+    if process.poll() is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        return process.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(
+            f"unpublished process leader could not be reaped: {process.pid}") from exc
+
+
 def _remember_known_record(
     known_records: dict[int, ProcessRecord], record: ProcessRecord,
 ) -> None:
