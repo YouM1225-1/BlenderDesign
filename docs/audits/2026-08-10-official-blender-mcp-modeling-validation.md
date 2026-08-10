@@ -70,11 +70,11 @@ Wall ms is the sum of all fresh Task 3 invocations for that unique tool, includi
 | Ordinal | Tool | Outcome | Wall ms | Observed shape | Retry count | Issue ID |
 |---:|---|---|---:|---|---:|---|
 | 1 | `execute_blender_code` | pass | 2429.1 | exact model contract plus render tempdir/engine/sample postconditions | 0 | `MODEL-PLAN-08`; `MODEL-PLAN-09` |
-| 2 | `execute_blender_code_for_cli` | pass_with_recovery | 1866.7 | original missing-image assertion failed; derived fixture returned image/fake-user/object/library contract | 1 | `MODEL-RUN-06` |
+| 2 | `execute_blender_code_for_cli` | pass_with_recovery | 1866.7 | original missing-image assertion failed; derived fixture returned image/fake-user/object/library contract | 1 | `MODEL-RUN-06`; `MODEL-RUN-11` |
 | 3 | `get_blendfile_summary_datablocks` | pass | 992.4 | nested counts, EEVEE, scene and localized workspace | 0 | none |
 | 4 | `get_blendfile_summary_datablocks_for_cli` | pass | 662.9 | fixture counts with three objects and one library; no persisted image | 0 | `MODEL-RUN-06` |
 | 5 | `get_blendfile_summary_missing_files` | pass | 383.3 | exactly one controlled GUI missing image | 0 | none |
-| 6 | `get_blendfile_summary_missing_files_for_cli` | pass_with_recovery | 2021.0 | original fixture empty; derived fixture exactly one controlled missing image | 1 | `MODEL-RUN-06` |
+| 6 | `get_blendfile_summary_missing_files_for_cli` | pass_with_recovery | 2021.0 | original fixture empty; derived fixture exactly one controlled missing image | 1 | `MODEL-RUN-06`; `MODEL-RUN-11` |
 | 7 | `get_blendfile_summary_of_linked_libraries` | pass | 54.4 | one exact direct library and zero indirect | 0 | none |
 | 8 | `get_blendfile_summary_of_linked_libraries_for_cli` | pass | 597.7 | one direct relative library and zero indirect | 0 | none |
 | 9 | `get_blendfile_summary_path_info` | pass | 859.7 | empty filepath, unsaved before and after renders, dirty observed false | 0 | `MODEL-RUN-02` |
@@ -165,8 +165,9 @@ The controlled replay closes the actionable part of `MODEL-RUN-04`: canonical Ta
 - `MODEL-RUN-09`: the final `blender_mcp` scratch parent was absent, while the upstream render tools do not create it. This was recorded before creating only that owned mode-`0700` directory. No user or repository path was used.
 - `MODEL-PLAN-09`: Blender 5.2 reported `BLENDER_EEVEE` with render samples `64`. Pinned thumbnail code lowers Eevee samples only for obsolete `BLENDER_EEVEE_NEXT`; thumbnail still passed in `2,475.6 ms`, and source was not patched.
 - `MODEL-RUN-08`: the exact 2 MB area screenshot returned truncated JSON. Pinned add-on source accepts nonblocking clients, performs one `sendall`, swallows `OSError`, and closes; a 48 KB single recovery returned PNG. Window screenshot used the same preventive cap and passed; the uncalled frozen 3 MB case is not mislabeled as a failure.
-- `MODEL-PLAN-10`: every official call has immediate same-process UTC/monotonic markers, tool wall, shape, retry and issue. No threshold-only rerun was required; failed cases retained first symptoms and hypotheses before recovery.
-- `MODEL-RUN-10`: after canonical Task end, 15 uv launchers plus 15 paired `blender-mcp` children remained alive, all rooted at the Codex App Server PID and consuming `724,208 KiB` (`707.2 MiB`) combined RSS. Independent correlation rejected per-call spawning: Task 3 used one stable pair for all 33 calls. Each root/subagent thread session initializes its own MCP fleet; completed agents remain follow-up-capable, so App Server retains stdio and official `blender-mcp` waits for EOF. All pairs were idle at `0%` CPU, opened no extra `9876` listener and do not explain per-call wall time. Severity is P2/Medium for resources and Low for modeling correctness. No process was killed; normal final Codex Desktop exit/restart is safer than individual mid-run kills.
+- `MODEL-PLAN-10`: every official call has immediate same-process UTC/monotonic markers, tool wall, shape, retry and issue, and no threshold-only rerun was required. First symptoms are retained. First-hypothesis capture is complete for the other recorded failures, but not for `MODEL-RUN-06`; this part of the control remains unmet rather than being reconstructed.
+- `MODEL-RUN-11`: evidence-capture gap for `MODEL-RUN-06`. Its two original symptoms and recovery evidence are persisted, but the verbatim first-hypothesis text is missing. Contemporaneous messages mentioned only the hypothesis direction; the original wording is no longer recoverable and is not supplied retrospectively. Task 4 must classify this gap and decide its durable prevention.
+- `MODEL-RUN-10`: after canonical Task end, 15 uv launchers plus 15 paired `blender-mcp` children remained alive, all rooted at the Codex App Server PID and consuming `724,208 KiB` (`707.2 MiB`) combined RSS. The snapshot directly proves that App Server retained multiple stdio launcher/child pairs, and independent correlation rejected per-call spawning because Task 3 used one stable pair for all 33 calls. Process start times and agent/session logs strongly support, but do not directly prove at thread-runtime identity level, the inference that separate root/subagent sessions initialized separate MCP fleets. All pairs were idle at `0%` CPU, opened no extra `9876` listener and do not explain per-call wall time. Severity is P2/Medium for resources and Low for modeling correctness. No process was killed; normal final Codex Desktop exit/restart is safer than individual mid-run kills.
 
 ## Root-cause analysis
 
@@ -178,7 +179,7 @@ Task 2 adds two preliminary root causes for final Task 4 classification: display
 
 `MODEL-RUN-04` is a timing-capture gap and overstatement: the original Task lacked one comparable monotonic endpoint, so its total cannot be called dual-clock verified and its `MODEL-PLAN-05` compliance was incomplete. The corrective evidence must come from a new clean replay, not reconstructed history.
 
-Task 3 preliminary evidence adds deterministic plan/harness gaps (`MODEL-RUN-05`, `MODEL-RUN-06`, `MODEL-RUN-07`), two pinned upstream-tool paths (`MODEL-RUN-08`, `MODEL-PLAN-09`), one render-parent operational gap (`MODEL-RUN-09`), and a per-thread MCP session-lifecycle resource issue (`MODEL-RUN-10`). Task 4 owns the required root-cause class, wall-time loss, reproducibility and preventable-file decision for every row; this section does not prematurely collapse those categories.
+Task 3 preliminary evidence adds deterministic plan/harness gaps (`MODEL-RUN-05`, `MODEL-RUN-06`, `MODEL-RUN-07`), an evidence-capture gap (`MODEL-RUN-11`), two pinned upstream-tool paths (`MODEL-RUN-08`, `MODEL-PLAN-09`), one render-parent operational gap (`MODEL-RUN-09`), and a multi-stdio MCP session-lifecycle resource issue (`MODEL-RUN-10`). The per-root/subagent-session origin of the last issue is a strong inference, not a directly proven thread-runtime mapping. Task 4 owns the required root-cause class, wall-time loss, reproducibility and preventable-file decision for every row; this section does not prematurely collapse those categories.
 
 ## Remediation decision
 
@@ -188,7 +189,7 @@ Task 2 establishes two evidence-backed candidates for the later remediation deci
 
 The immediate Task 2 review remediation for `MODEL-RUN-04` is evidence-only: perform a clean full modeling replay under one persistent monotonic clock, retain both original and replay records, and avoid changing product code or frozen documents.
 
-Task 3 adds candidates, not implementations: persist controlled orphan datablocks in fixture guidance; run harnesses under the documented uv Python/effective editable environment; document screenshot response-size and render-parent safety; update Blender 5.2 render-engine guidance; and add a soft MCP-process baseline/delta diagnostic with normal final Codex Desktop exit/restart guidance. Task 4 will apply the frozen file-justification rule and name exact remediation paths/issue IDs.
+Task 3 adds candidates, not implementations: persist controlled orphan datablocks in fixture guidance; durably record verbatim symptoms and first hypotheses before recovery; run harnesses under the documented uv Python/effective editable environment; document screenshot response-size and render-parent safety; update Blender 5.2 render-engine guidance; and add a soft MCP-process baseline/delta diagnostic with normal final Codex Desktop exit/restart guidance. Task 4 will apply the frozen file-justification rule and name exact remediation paths/issue IDs, including `MODEL-RUN-11`.
 
 ## Adversarial audit and retest
 
