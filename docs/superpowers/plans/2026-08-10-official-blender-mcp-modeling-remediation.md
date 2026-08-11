@@ -6,11 +6,14 @@
 official Blender MCP modeling validation, without changing product code, the pinned
 official checkout, dependencies, or the frozen acceptance baseline.
 
-**Architecture:** Add one concise operational runbook and one standard-library audit
-CLI. The runbook owns human/LLM sequencing, Blender safety, and upstream mitigations.
-The CLI owns only machine-verifiable evidence: a single-process UTC/monotonic journal
-and dynamic catalog/audit validation. The active modeling audit records implementation
-and adversarial-retest evidence; it is not a third remediation mechanism.
+**Architecture:** Add two new artifacts: one concise operational runbook and one
+standard-library audit CLI. Harden the existing repository gate with exactly two lines
+so it installs a non-editable package snapshot and refreshes that snapshot after vendor
+generation. The runbook owns human/LLM sequencing, Blender safety, upstream mitigations,
+and the gate invariant. The CLI owns only machine-verifiable evidence: a single-process
+UTC/monotonic journal and dynamic catalog/audit validation. The active modeling audit
+records implementation and adversarial-retest evidence; it is not another remediation
+mechanism.
 
 **Tech Stack:** Markdown, Python 3.13 standard library, JSON/NDJSON, Git, and the
 existing repository checks.
@@ -23,8 +26,9 @@ existing repository checks.
 - Do not modify ROADMAP, Phase 0 Plan/URS/spec, historical audit/evidence/attestation,
   the modeling validation Plan/design, `docs/install.md`,
   `docs/install-official-blender-mcp.md`, its embedded copy, `pyproject.toml`,
-  `uv.lock`, `scripts/checks.sh`, tests, product code, Codex config, Blender prefs, or
-  `/Users/yeminjie/blender_mcp`.
+  `uv.lock`, tests, product code, Codex config, Blender prefs, or
+  `/Users/yeminjie/blender_mcp`. In `scripts/checks.sh`, add only the exact two lines
+  specified by Task 1; no other gate edit is allowed.
 - Do not add a dependency, pytest file, Blender transaction wrapper, process manager,
   external-checkout patch, or `process-snapshot` CLI subcommand.
 - The audit CLI must not hardcode `26`; live/source/config additions approved upstream
@@ -33,7 +37,9 @@ existing repository checks.
   runbook prevents it or that a per-agent cleanup defect was causally proven.
 - The historical missing verbatim hypothesis in `MODEL-RUN-11` stays missing. No task
   may invent or reconstruct it.
-- Keep the test inventory at 369; use temporary CLI fixtures rather than new test files.
+- Do not use `chflags` except for Task 1 Step 7's recursive sweep of the disposable
+  clone's `.venv`; never use it on a real worktree or real environment. Do not set
+  `PYTHONPATH` or reduce/skip the 369-test inventory. Use temporary CLI fixtures.
 
 ---
 
@@ -43,6 +49,9 @@ existing repository checks.
   it owns sequencing, Blender safety, timing discipline, and upstream mitigations.
 - `scripts/official_blender_mcp_audit.py` — the only durable machine helper; it owns
   secure `record` and dynamic `validate`, with standard library only.
+- `scripts/checks.sh` — the existing gate hardened by exactly two added lines: force
+  non-editable project installation, then refresh the package snapshot after vendor
+  generation/checking.
 - `docs/audits/2026-08-10-official-blender-mcp-modeling-validation.md` — the existing
   active evidence ledger; it records remediation/retest facts but adds no mechanism.
 - `docs/superpowers/plans/2026-08-10-official-blender-mcp-modeling-remediation.md` — this
@@ -326,11 +335,30 @@ Use exactly these ignored review reports for round `N`:
 .superpowers/sdd/modeling-remediation/plan-ponytail-review-rN.md
 ```
 
+For this corrected Git-provenance revision set `N=12`; do not reuse any r11 report or
+verdict. If r12 finds anything, use the next unused integer for the complete corrected
+bytes.
+
 Before dispatch, compute `shasum -a 256` for the Plan. Each reviewer prompt and report
-must name that digest; a verdict on another digest is invalid. Because the Plan is
-untracked during review, check whitespace with `git diff --no-index --check /dev/null
-"$PLAN"`, accepting only the normal no-index difference status and empty diagnostic
-output. Do not rely on `git diff --check` until the file is staged.
+must name that digest; a verdict on another digest is invalid. This is a tracked
+Plan-only fix-forward revision: require the Plan to be the only tracked worktree change,
+run `git diff --check`, and also run `git diff --no-index --check /dev/null "$PLAN"`,
+accepting only the normal no-index difference status and empty diagnostic output.
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+PLAN=docs/superpowers/plans/2026-08-10-official-blender-mcp-modeling-remediation.md
+test "$(git status --short --untracked-files=all)" = " M $PLAN"
+git diff --check
+set +e
+NOINDEX_OUTPUT="$(git diff --no-index --check /dev/null "$PLAN" 2>&1)"
+NOINDEX_EXIT=$?
+set -e
+test "$NOINDEX_EXIT" = 1
+test -z "$NOINDEX_OUTPUT"
+shasum -a 256 "$PLAN"
+BASH
+```
 
 - [ ] **Step 1: Run the specification and safety review**
 
@@ -350,12 +378,13 @@ HEAD binding, first merge, clean fix-forward, and dirty fail-closed behavior.
 
 The reviewer must look only for unnecessary code, duplicated mechanisms, speculative
 features, hidden test/dependency expansion, hardcoded local assumptions, and any simpler
-standard-library/native alternative. It must verify that exactly two remediation files
-remain justified and that `MODEL-RUN-10` did not expand the CLI.
+standard-library/native alternative. It must verify that exactly two new remediation
+artifacts plus one existing-gate hardening remain justified and that `MODEL-RUN-10` did
+not expand the CLI.
 
 - [ ] **Step 4: Fix and repeat until the Plan is clean**
 
-For every finding, edit only this Plan, run the untracked-file whitespace check, compute
+For every finding, edit only this Plan, run both tracked and full-file whitespace checks, compute
 a new digest, use new round-specific report paths, and send the complete new bytes back
 to three fresh reviewers. Repeat until all three explicitly report zero Critical, zero
 Important, and zero Minor findings. Record reviewer verdicts in the three exact ignored
@@ -368,17 +397,30 @@ Only then run:
 ```bash
 git add -- docs/superpowers/plans/2026-08-10-official-blender-mcp-modeling-remediation.md
 git diff --cached --check
-git commit -m "docs: plan official MCP modeling remediation"
+git commit -m "docs: revise official MCP modeling remediation plan"
 ```
 
 Expected: the Plan-only commit is clean. Task 1 is still blocked by Steps 6–7.
 
-- [ ] **Step 6: Normalize the ignored Python environment and run the clean baseline gate**
+- [ ] **Step 6: Verify the executed r1 gate failure and restored environment**
 
-This is a hard gate, not an optional diagnostic. The observed uv-managed CPython
-3.13.14 skips the hidden editable `.pth` file and breaks the tmp-cwd entrypoint test.
-uv-managed CPython 3.13.13 passes that focused case without `PYTHONPATH`. Rebuild only
-the ignored generated `.venv`, then run the repository gate unchanged:
+This is a hard fail-closed evidence gate, not a rerun and not a pass. The already
+executed exact repository gate reported 368 passed and 1 failed. The failing
+`test_cancelled_sdk_client_reaps_its_recorded_process_group` launched
+`.venv/bin/blender-codex-server` from a temporary cwd and received
+`ModuleNotFoundError: No module named 'server'`. The transaction restored the original
+ignored `.venv`, retained the rejected fresh environment at
+`.superpowers/sdd/modeling-remediation/task0-step6-environment/rejected.venv`, and
+removed the transient `original.venv` backup. The later controlled measurements support
+a delayed external workspace metadata sweep that recursively set `UF_HIDDEN` on the
+editable project `.pth`; CPython skipped that path hook, while uv did not reproduce the
+flag mutation. The responsible process remains unknown.
+Record this implementation-environment incident as `POSTPLAN-ENV-01` in prose only.
+It is not one of the 24 `MODEL-*` findings and must not enter the audit CLI's literal
+issue-ID fields or the runbook disposition table.
+
+Run only this read-only state verification; do not rebuild either environment or rerun
+the full gate in Task 0:
 
 ```bash
 /bin/bash -euo pipefail <<'BASH'
@@ -387,13 +429,10 @@ case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
 FEATURE_ROOT="$(git rev-parse --show-toplevel)"
 PLAN=docs/superpowers/plans/2026-08-10-official-blender-mcp-modeling-remediation.md
 VENV="$FEATURE_ROOT/.venv"
-ENV_PARENT="$FEATURE_ROOT/.superpowers/sdd/modeling-remediation"
-ENV_STATE="$ENV_PARENT/task0-step6-environment"
-BACKUP_VENV="$ENV_STATE/original.venv"
+ENV_STATE="$FEATURE_ROOT/.superpowers/sdd/modeling-remediation/task0-step6-environment"
 REJECTED_VENV="$ENV_STATE/rejected.venv"
-FOCUSED_CWD=""
-VENV_MOVED=0
-VENV_ACCEPTED=0
+ORIGINAL_VENV="$ENV_STATE/original.venv"
+EVIDENCE="$FEATURE_ROOT/.superpowers/sdd/modeling-remediation/uv-hidden-flag-research.md"
 test "$(pwd -P)" = "$FEATURE_ROOT"
 test "$(git branch --show-current)" = codex/official-blender-mcp-install
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
@@ -402,168 +441,104 @@ test "$(git diff-tree --no-commit-id --name-only -r HEAD)" = "$PLAN"
 test -z "${PYTHONPATH-}"
 git check-ignore -q -- .venv/
 git check-ignore -q -- .superpowers/sdd/modeling-remediation/task0-step6-environment/
-test ! -e "$ENV_STATE"
+test -d "$VENV"
+test ! -L "$VENV"
+test -d "$ENV_STATE"
 test ! -L "$ENV_STATE"
+test -d "$REJECTED_VENV"
+test ! -L "$REJECTED_VENV"
+test ! -e "$ORIGINAL_VENV"
+test ! -L "$ORIGINAL_VENV"
+test -f "$EVIDENCE"
+test ! -L "$EVIDENCE"
 PYTHON_31313="$("$UV" python find 3.13.13)"
 case "$PYTHON_31313" in /*) ;; *) echo 'STOP: uv Python 3.13.13 absent' >&2; exit 1 ;; esac
-test "$($PYTHON_31313 -c 'import platform; print(platform.python_version())')" = 3.13.13
-"$PYTHON_31313" - "$FEATURE_ROOT" "$VENV" "$ENV_PARENT" <<'PY'
+"$PYTHON_31313" - "$FEATURE_ROOT" "$VENV" "$ENV_STATE" "$REJECTED_VENV" \
+  "$EVIDENCE" <<'PY'
 from pathlib import Path
+import hashlib
 import os
 import stat
 import sys
 
-root = Path(sys.argv[1])
-venv = Path(sys.argv[2])
-parent = Path(sys.argv[3])
-if Path(os.path.realpath(root)) != root or venv.parent != root or venv.name != ".venv":
-    raise SystemExit("STOP: .venv must be the canonical repository-root child")
-info = venv.lstat()
-if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-    raise SystemExit("STOP: existing .venv must be an ordinary non-symlink directory")
-if info.st_uid != os.getuid():
-    raise SystemExit("STOP: existing .venv must be owned by the current UID")
-if parent.parent.parent.parent != root or Path(os.path.realpath(parent)) != parent:
-    raise SystemExit("STOP: environment state parent escaped the repository")
-info = parent.lstat()
-if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-    raise SystemExit("STOP: environment state parent must be an ordinary directory")
-if info.st_uid != os.getuid() or info.st_mode & stat.S_IWOTH:
-    raise SystemExit("STOP: unsafe environment state parent ownership/mode")
-PY
-install -d -m 700 "$ENV_STATE"
-"$PYTHON_31313" - "$FEATURE_ROOT" "$ENV_STATE" <<'PY'
-from pathlib import Path
-import os
-import stat
-import sys
-
-root = Path(sys.argv[1])
-state = Path(sys.argv[2])
-if state.parent.parent.parent.parent != root or Path(os.path.realpath(state)) != state:
-    raise SystemExit("STOP: environment state directory escaped the repository")
-info = state.lstat()
-if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-    raise SystemExit("STOP: environment state must be an ordinary directory")
-if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
-    raise SystemExit("STOP: environment state must be current-UID mode 0700")
-PY
-test ! -e "$BACKUP_VENV"
-test ! -L "$BACKUP_VENV"
-test ! -e "$REJECTED_VENV"
-test ! -L "$REJECTED_VENV"
-
-restore_feature_venv() {
-  rc=$?
-  trap - EXIT
-  if [ -n "$FOCUSED_CWD" ]; then
-    rmdir -- "$FOCUSED_CWD" 2>/dev/null || true
-  fi
-  if [ "$rc" != 0 ] && [ "$VENV_MOVED" = 1 ] && [ "$VENV_ACCEPTED" = 0 ]; then
-    if [ -e "$VENV" ] || [ -L "$VENV" ]; then
-      test ! -e "$REJECTED_VENV"
-      test ! -L "$REJECTED_VENV"
-      mv -- "$VENV" "$REJECTED_VENV"
-    fi
-    test -d "$BACKUP_VENV"
-    test ! -L "$BACKUP_VENV"
-    mv -- "$BACKUP_VENV" "$VENV"
-    printf 'STOP: fresh environment rejected; original restored; rejected=%s\n' \
-      "$REJECTED_VENV" >&2
-  fi
-  exit "$rc"
-}
-
-verify_feature_venv() {
-  "$VENV/bin/python" - "$FEATURE_ROOT" "$VENV" <<'PY'
-from pathlib import Path
-import os
-import site
-import stat
-import sys
-
-root = Path(sys.argv[1])
-venv = Path(sys.argv[2])
-if sys.version_info[:3] != (3, 13, 13) or Path(sys.prefix) != venv:
-    raise SystemExit("STOP: fresh environment is not CPython 3.13.13")
-info = venv.lstat()
-if venv.parent != root or stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-    raise SystemExit("STOP: fresh .venv identity/type mismatch")
-if info.st_uid != os.getuid():
-    raise SystemExit("STOP: fresh .venv has foreign ownership")
-if not hasattr(stat, "UF_HIDDEN") or not hasattr(info, "st_flags"):
+root, venv, state, rejected, evidence = map(Path, sys.argv[1:])
+for path in (root, venv, state, rejected):
+    if Path(os.path.realpath(path)) != path:
+        raise SystemExit(f"STOP: symlinked path rejected: {path}")
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise SystemExit(f"STOP: ordinary directory required: {path}")
+    if info.st_uid != os.getuid() or info.st_mode & stat.S_IWOTH:
+        raise SystemExit(f"STOP: unsafe ownership/mode: {path}")
+if venv.parent != root or venv.name != ".venv":
+    raise SystemExit("STOP: live .venv identity differs")
+if state.parent.parent.parent.parent != root:
+    raise SystemExit("STOP: environment state escaped the repository")
+if rejected.parent != state or rejected.name != "rejected.venv":
+    raise SystemExit("STOP: rejected environment identity differs")
+live = venv.lstat()
+failed = rejected.lstat()
+if (live.st_dev, live.st_ino) == (failed.st_dev, failed.st_ino):
+    raise SystemExit("STOP: restored and rejected environments share identity")
+if not hasattr(stat, "UF_HIDDEN") or not hasattr(failed, "st_flags"):
     raise SystemExit("STOP: macOS hidden-flag inspection unavailable")
-pths = sorted(
-    path
-    for site_root in map(Path, site.getsitepackages())
-    if site_root.is_relative_to(venv)
-    for path in site_root.rglob("*.pth")
+pth = rejected / "lib" / "python3.13" / "site-packages" / "_editable_impl_blender_codex.pth"
+entry = pth.lstat()
+if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode):
+    raise SystemExit("STOP: rejected editable .pth is not a regular file")
+if entry.st_uid != os.getuid() or not entry.st_flags & stat.UF_HIDDEN:
+    raise SystemExit("STOP: rejected editable .pth no longer carries UF_HIDDEN")
+evidence_info = evidence.lstat()
+if stat.S_ISLNK(evidence_info.st_mode) or not stat.S_ISREG(evidence_info.st_mode):
+    raise SystemExit("STOP: regular failure evidence required")
+if evidence_info.st_uid != os.getuid() or evidence_info.st_mode & stat.S_IWOTH:
+    raise SystemExit("STOP: unsafe failure evidence ownership/mode")
+payload = evidence.read_bytes()
+if hashlib.sha256(payload).hexdigest() != (
+    "ebd57eee1c24b90c4a68d71b112c2682cf879f5ca345231960071661131edbd5"
+):
+    raise SystemExit("STOP: Task 0 failure evidence digest differs")
+for literal in (
+    b"**1 failed, 368 passed**",
+    b"ModuleNotFoundError: No module named 'server'",
+    b"The evidence does **not** support the claim that uv 0.12.2 sets",
+):
+    if literal not in payload:
+        raise SystemExit(f"STOP: Task 0 evidence literal absent: {literal!r}")
+print(
+    "TASK0_R1_FAILURE_VERIFIED passed=368 failed=1 "
+    "original_restored=true rejected_hidden_pth=true"
 )
-if not pths or not any(path.name == "_editable_impl_blender_codex.pth" for path in pths):
-    raise SystemExit("STOP: required editable .pth is absent")
-for path in pths:
-    entry = path.lstat()
-    if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode):
-        raise SystemExit(f"STOP: non-regular .pth rejected: {path}")
-    if entry.st_uid != os.getuid():
-        raise SystemExit(f"STOP: foreign-owned .pth rejected: {path}")
-    if entry.st_flags & stat.UF_HIDDEN:
-        raise SystemExit(f"STOP: hidden .pth rejected: {path}")
-print(f"VENV_GREEN python=3.13.13 pth_count={len(pths)} hidden_pth=0")
 PY
-}
-
-trap restore_feature_venv EXIT
-mv -- "$VENV" "$BACKUP_VENV"
-VENV_MOVED=1
-export UV_LINK_MODE=copy
-UV_PROJECT_ENVIRONMENT="$VENV" UV_PYTHON=3.13.13 \
-  "$UV" sync --frozen
-verify_feature_venv
-FOCUSED_CWD="$(mktemp -d /private/tmp/blender-codex-step5.XXXXXX)"
-test "$($PYTHON_31313 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' \
-  "$FOCUSED_CWD")" = "$FOCUSED_CWD"
-(
-  cd "$FOCUSED_CWD"
-  PYTHONDONTWRITEBYTECODE=1 "$VENV/bin/python" -c \
-    'import server; print("TMP_CWD_IMPORT_GREEN module=server")'
-  PYTHONDONTWRITEBYTECODE=1 "$VENV/bin/python" -m pytest -q -p no:cacheprovider \
-    "$FEATURE_ROOT/tests/unit/test_e2e.py::test_cancelled_sdk_client_reaps_its_recorded_process_group"
-)
-rmdir -- "$FOCUSED_CWD"
-FOCUSED_CWD=""
-test -z "$(git status --porcelain=v1 --untracked-files=all)"
-./scripts/checks.sh
-git diff --check
-verify_feature_venv
 test -z "${PYTHONPATH-}"
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
-VENV_ACCEPTED=1
-trap - EXIT
-printf 'BASELINE_FULL_GATE_GREEN head=%s python=3.13.13 backup=%s\n' \
-  "$(git rev-parse HEAD)" "$BACKUP_VENV"
 BASH
 ```
 
-Expected: the focused lane reports `TMP_CWD_IMPORT_GREEN module=server` and one passed
-test; the unchanged gate then reports 369 tests plus Ruff, mypy, vendor, and
-nested-import success, followed by `BASELINE_FULL_GATE_GREEN` with the retained ignored
-backup path. Any nonzero exit restores the original environment and stops execution for
-explicit user resolution. Do not set `PYTHONPATH`, use
-`uv sync --no-editable`, change a tracked file, edit the gate, or report the measured
-expectation as a pass.
+Expected: the one exact marker above. No command in this Step changes flags, installs a
+package, mutates `.venv`, reruns pytest, or converts the failed gate into success.
+Only Task 1 is authorized to harden `scripts/checks.sh`; Tasks 2–5 remain blocked until
+Task 1 commits the final gate bytes and passes its post-commit full 369-test/tmp-cwd
+entrypoint gate.
 
 - [ ] **Step 7: Capture the external baseline**
 
-Only after Step 6 is green, run Appendix E's exact `capture` block. It creates the
+Only after Step 6 verifies the failed r1 evidence and restored original environment,
+run Appendix E's exact `capture` block. It creates the
 ignored mode-`0700`
 `.superpowers/sdd/modeling-remediation/external-baseline` directory and its one
-mode-`0600` `baseline.json`. The record contains only resolved path/type/UID/mode/hash
-metadata, feature HEAD, immutable `review_base_head`, `initial_main_anchor`, official
-source HEAD/clean, and the three fixture/two PNG hashes. At capture both main fields
-equal the uniquely resolved clean main HEAD. It never prints or stores config/preference
-contents or unrelated values. Any absent, symlinked, foreign-owned, non-regular, or
-world-writable protected input stops the run. Tasks 4–5 pass
+mode-`0600` `baseline.json`. Generic unchanged `paths` contain only resolved
+path/type/UID/mode/hash metadata for frozen external inputs; the mutable
+`scripts/checks.sh` path is not added there. A separate `gate_provenance` object binds
+the baseline feature commit's checks Git blob, old checks SHA-256
+`c0798f66b9b1ac6ed7e85b772adc0cca24b6c5f69ebb5df2e1b742a7c745307e`, and retained
+failure-evidence SHA-256
+`ebd57eee1c24b90c4a68d71b112c2682cf879f5ca345231960071661131edbd5`.
+The record also binds feature HEAD, immutable `review_base_head`,
+`initial_main_anchor`, official source HEAD/clean, and the three fixture/two PNG hashes.
+At capture both main fields equal the uniquely resolved clean main HEAD. It never prints
+or stores config/preference contents or unrelated values. Any absent, symlinked,
+foreign-owned, non-regular, or world-writable protected input stops the run. Tasks 4–5 pass
 `EXPECTED_MAIN_ANCHOR=<initial_main_anchor>` to Appendix D.
 
 ---
@@ -572,12 +547,14 @@ world-writable protected input stops the run. Tasks 4–5 pass
 
 **Files:**
 - Create: `docs/use-official-blender-mcp.md`
+- Modify: `scripts/checks.sh` (exactly two added lines)
 
 **Interfaces:**
 - Consumes: the approved root-cause table in
   `docs/audits/2026-08-10-official-blender-mcp-modeling-validation.md`.
 - Produces: one LLM-executable procedure for safe official MCP modeling and evidence
-  capture. It does not install, patch, or invoke Blender by itself.
+  capture, plus a deterministic non-editable repository gate. The runbook does not
+  install, patch, or invoke Blender by itself.
 
 - [ ] **Step 1: Prove the runbook is absent and freeze scope**
 
@@ -587,6 +564,9 @@ Run:
 /bin/bash -euo pipefail <<'BASH'
 test ! -e docs/use-official-blender-mcp.md
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
+test "$(shasum -a 256 scripts/checks.sh | awk '{print $1}')" = \
+  c0798f66b9b1ac6ed7e85b772adc0cca24b6c5f69ebb5df2e1b742a7c745307e
+test "$(rg -c '^source = \{ editable = "\." \}$' uv.lock)" = 1
 test "$(git rev-parse 09bf5c2^{commit})" = \
   "$(git merge-base 09bf5c2 HEAD)"
 BASH
@@ -602,7 +582,10 @@ Create `docs/use-official-blender-mcp.md` with these concise sections:
    Blender `>=5.2`, disposable factory scene, no user `.blend` open/save/overwrite.
 2. **Shell and SDD discipline** — execute Bash-labelled fences with `/bin/bash`; never
    use zsh special variable `path`; pass the task-brief helper's explicit output path;
-   use a run-scoped brief/report stem and assert output absence/presence.
+   use a run-scoped brief/report stem and assert output absence/presence; document the
+   repository gate's `UV_NO_EDITABLE=1`, post-vendor forced package refresh, tmp-cwd
+   entrypoint contract, prohibition on `chflags`, `PYTHONPATH`, or fewer tests, and
+   `POSTPLAN-ENV-01` as prose outside the 24-row `MODEL-*` disposition map.
 3. **Preflight and exact write scope** — one Blender listener, unsaved factory scene,
    exact allowed Scene/World/collection/datablock writes, target-absence checks.
 4. **Locale and identity** — select built-ins by unique stable RNA `node.type`, not
@@ -634,25 +617,335 @@ Include a short checklist mapping these rules to literal issue IDs. Say explicit
 `MODEL-RUN-08/09/10` and `MODEL-PLAN-09` are mitigated/observed rather than repaired,
 and that `MODEL-RUN-11` is prevented only for future runs.
 
-- [ ] **Step 3: Run a deterministic runbook contract probe**
+- [ ] **Step 3: Harden the existing gate with exactly two lines**
+
+Apply only this diff to `scripts/checks.sh`:
+
+```patch
+*** Begin Patch
+*** Update File: scripts/checks.sh
+@@
+ export PYTHONDONTWRITEBYTECODE=1
++export UV_NO_EDITABLE=1
+@@
+ "$UV_BIN" run --frozen python scripts/vendor_protocol.py            # 生成
+ "$UV_BIN" run --frozen python scripts/vendor_protocol.py --check    # 检查 2
++"$UV_BIN" sync --frozen --python 3.13 --reinstall-package blender-codex
+ "$UV_BIN" run --frozen python scripts/nested_import_smoke.py        # 检查 3
+*** End Patch
+```
+
+The first line makes every project sync/run in the gate non-editable. The second
+rebuilds the installed `blender-codex` snapshot only after vendor generation and its
+check, so nested import, the tmp-cwd console entrypoint, and pytest see the current
+tracked sources. Do not add `chflags`, `PYTHONPATH`, a second script, or a test skip.
+
+- [ ] **Step 4: Run the deterministic pre-commit contracts**
 
 Run Appendix A's exact uv-Python 3.13 probe. It asserts the file is a regular
 non-symlink, contains each section heading and the exact 24-ID disposition map, and
 rejects false fix claims, `_NEXT` as the 5.2 engine, a 3 MB screenshot recommendation,
-or instructions to kill retained servers. Expected: `issue_rows=24` and `contract=ok`.
+instructions to kill retained servers, or a gate workaround using a `chflags` command,
+a `PYTHONPATH` assignment, or fewer tests. Expected: `issue_rows=24` and
+`contract=ok`.
 
-- [ ] **Step 4: Commit the runbook only**
+Then prove the gate change is exactly two additions and is valid Bash:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+test "$(git diff --numstat -- scripts/checks.sh)" = \
+  $'2\t0\tscripts/checks.sh'
+test "$(git diff --unified=0 -- scripts/checks.sh | rg '^\+[^+]')" = \
+  $'+export UV_NO_EDITABLE=1\n+"$UV_BIN" sync --frozen --python 3.13 --reinstall-package blender-codex'
+/bin/bash -n scripts/checks.sh
+git diff --check
+BASH
+```
+
+Expected: exit `0`; no full gate runs against an uncommitted tree.
+
+- [ ] **Step 5: Commit the final two-file Task 1 bytes**
 
 Run:
 
 ```bash
 git diff --check
-git add -- docs/use-official-blender-mcp.md
+git add -- docs/use-official-blender-mcp.md scripts/checks.sh
 git diff --cached --check
-git commit -m "docs: add official Blender MCP usage runbook"
+git commit -m "docs: add official MCP runbook and harden checks"
 ```
 
-Expected: the commit contains exactly the runbook.
+Expected: the commit contains exactly the new runbook and the two-line
+`scripts/checks.sh` hardening; the test inventory remains 369 and the worktree is
+clean.
+
+- [ ] **Step 6: Run the clean post-commit full gate and tmp-cwd entrypoint**
+
+Run this exact self-contained gate only after Step 5 commits the final bytes:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+FEATURE_ROOT="$(git rev-parse --show-toplevel)"
+TASK1_HEAD="$(git rev-parse HEAD)"
+FOCUSED_CWD=""
+cleanup() {
+  if [ -n "$FOCUSED_CWD" ]; then
+    rmdir -- "$FOCUSED_CWD" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+test "$(pwd -P)" = "$FEATURE_ROOT"
+test -z "${PYTHONPATH-}"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+./scripts/checks.sh
+test "$(git rev-parse HEAD)" = "$TASK1_HEAD"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+FOCUSED_CWD="$(mktemp -d /private/tmp/blender-codex-task1.XXXXXX)"
+test "$("$FEATURE_ROOT/.venv/bin/python" -c \
+  'import os,sys; print(os.path.realpath(sys.argv[1]))' "$FOCUSED_CWD")" = \
+  "$FOCUSED_CWD"
+(
+  cd "$FOCUSED_CWD"
+  PYTHONDONTWRITEBYTECODE=1 "$FEATURE_ROOT/.venv/bin/python" -P - \
+    "$FEATURE_ROOT/.venv" <<'PY'
+from pathlib import Path
+import site
+import sys
+
+venv = Path(sys.argv[1])
+if not sys.flags.safe_path or Path(sys.prefix) != venv:
+    raise SystemExit("STOP: Task 1 safe-path venv contract failed")
+site_roots = [
+    path for path in map(Path, site.getsitepackages()) if path.is_relative_to(venv)
+]
+if len(site_roots) != 1:
+    raise SystemExit("STOP: expected one Task 1 site-packages directory")
+site_root = site_roots[0]
+if list(site_root.glob("*_editable_impl_blender_codex.pth")):
+    raise SystemExit("STOP: editable project hook remains")
+import server
+if Path(server.__file__).resolve() != site_root / "server" / "__init__.py":
+    raise SystemExit("STOP: server did not import from the installed snapshot")
+print("TMP_CWD_IMPORT_GREEN module=server origin=site-packages")
+PY
+  PYTHONDONTWRITEBYTECODE=1 \
+    "$FEATURE_ROOT/.venv/bin/blender-codex-server" </dev/null
+  echo 'TMP_CWD_ENTRYPOINT_GREEN exit=0'
+)
+rmdir -- "$FOCUSED_CWD"
+FOCUSED_CWD=""
+git diff --check
+test "$(git rev-parse HEAD)" = "$TASK1_HEAD"
+test -z "${PYTHONPATH-}"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+printf 'TASK1_FULL_GATE_GREEN head=%s tests=369 install=noneditable\n' "$TASK1_HEAD"
+BASH
+```
+
+Expected: `./scripts/checks.sh` reports all 369 tests plus Ruff, mypy, vendor,
+nested-import, and `ALL CHECKS PASSED`; the tmp-cwd lane reports
+`TMP_CWD_IMPORT_GREEN module=server origin=site-packages`,
+`TMP_CWD_ENTRYPOINT_GREEN exit=0`; the final marker binds the
+clean committed HEAD. If it fails, Task 1 remains incomplete: fix forward within Task
+1's two-file scope, commit the new final bytes, rerun Steps 4 and 6 on the new clean
+HEAD, and obtain the combined Task 1 review. Tasks 2–5 remain blocked until this gate is
+green. In this real-worktree step, do not use `chflags`, set `PYTHONPATH`, or
+reduce/skip tests. The sole `chflags` exception is the explicitly bounded disposable
+clone adversary in Step 7 below.
+
+Task 1 report raw-marker contract: after Steps 6 and 7 both pass, append exactly one
+raw output line for each of `TASK1_FULL_GATE_GREEN`, `STALE_SNAPSHOT_NEGATIVE`,
+`STALE_SNAPSHOT_REFRESH`, `HIDDEN_SWEEP_GREEN`, and
+`TASK1_DISPOSABLE_ADVERSARY_GREEN` to `task-1-report.md`. The machine verifier selects
+only complete lines beginning with a marker and requires one of each; the report may
+still preserve the exact marker-bearing commands required by the general SDD contract.
+Do not repeat a raw output line in prose. Those five raw lines carry the old/current
+adapter SHA-256 values and the common final Task 1 HEAD.
+
+- [ ] **Step 7: Prove stale-snapshot refresh and hidden-sweep resistance in one disposable clone**
+
+This adversary never writes the real feature worktree, its `.venv`, main, or a ref. It
+uses historical committed source rather than an artificial marker: at
+`STALE_BASE=4f1913c364c995c93432bb24b1cc3c9ad1b8590f`,
+`server/mcp/adapter.py` has SHA-256
+`48b21860a2c8c76a5f66ee7fc41fe5ad5f7e61fba4fa17abb6f0634dc8fb0506`.
+Install that old tree non-editably, detach the clone at Task 1's final HEAD, and prove
+an ordinary frozen sync leaves the installed adapter stale. Then run the exact
+repository gate, including all 369 tests, and prove it refreshes the installed adapter
+to the current committed source. Finally apply a recursive hidden sweep only to the
+disposable clone's `.venv` and repeat the safe-path external import and real console
+entrypoint probes. Run:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+UV_BIN="${UV_BIN:-$HOME/.local/bin/uv}"
+case "$UV_BIN" in /*) ;; *) echo 'STOP: UV_BIN must be absolute' >&2; exit 1 ;; esac
+export GIT_NO_REPLACE_OBJECTS=1
+FEATURE_ROOT="$(git rev-parse --show-toplevel)"
+TASK1_HEAD="$(git rev-parse HEAD)"
+STALE_BASE=4f1913c364c995c93432bb24b1cc3c9ad1b8590f
+STALE_ADAPTER_SHA=48b21860a2c8c76a5f66ee7fc41fe5ad5f7e61fba4fa17abb6f0634dc8fb0506
+DISPOSABLE_ROOT=""
+CLONE_ROOT=""
+PROBE_CWD=""
+
+validate_and_remove() {
+  root="$1"
+  "$UV_BIN" run --quiet --no-project --python 3.13 python - "$root" <<'PY'
+from pathlib import Path
+import os
+import re
+import stat
+import sys
+
+root = Path(sys.argv[1])
+absolute = Path(os.path.abspath(root))
+if absolute != root or Path(os.path.realpath(root)) != root:
+    raise SystemExit("STOP: disposable root is not canonical")
+if root.parent != Path("/private/tmp") or re.fullmatch(
+    r"blender-codex-task1-stale\.[A-Za-z0-9]+", root.name
+) is None:
+    raise SystemExit("STOP: disposable root identity differs")
+info = root.lstat()
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+    raise SystemExit("STOP: disposable root must be an ordinary directory")
+if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+    raise SystemExit("STOP: disposable root must be current-UID mode 0700")
+PY
+  /bin/rm -rf -- "$root"
+}
+
+cleanup() {
+  rc=$?
+  trap - EXIT
+  if [ -n "$DISPOSABLE_ROOT" ]; then
+    validate_and_remove "$DISPOSABLE_ROOT"
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+
+test "$(pwd -P)" = "$FEATURE_ROOT"
+test -z "${PYTHONPATH-}"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+git cat-file -e "$STALE_BASE^{commit}"
+test "$(git show "$STALE_BASE:server/mcp/adapter.py" | shasum -a 256 | awk '{print $1}')" = \
+  "$STALE_ADAPTER_SHA"
+
+DISPOSABLE_ROOT="$(mktemp -d /private/tmp/blender-codex-task1-stale.XXXXXX)"
+CLONE_ROOT="$DISPOSABLE_ROOT/repo"
+PROBE_CWD="$DISPOSABLE_ROOT/probe"
+test ! -e "$CLONE_ROOT"
+git clone --quiet --no-local --no-hardlinks "$FEATURE_ROOT" "$CLONE_ROOT"
+install -d -m 700 "$PROBE_CWD"
+git -C "$CLONE_ROOT" checkout --quiet --detach "$STALE_BASE"
+(
+  cd "$CLONE_ROOT"
+  UV_NO_EDITABLE=1 "$UV_BIN" sync --frozen --python 3.13
+)
+
+installed_adapter_sha() {
+  (
+    cd "$PROBE_CWD"
+    PYTHONDONTWRITEBYTECODE=1 "$CLONE_ROOT/.venv/bin/python" -P - \
+      "$CLONE_ROOT/.venv" <<'PY'
+from pathlib import Path
+import hashlib
+import site
+import sys
+
+venv = Path(sys.argv[1])
+if not sys.flags.safe_path or Path(sys.prefix) != venv:
+    raise SystemExit("STOP: disposable safe-path venv contract failed")
+roots = [Path(path) for path in site.getsitepackages() if Path(path).is_relative_to(venv)]
+if len(roots) != 1:
+    raise SystemExit("STOP: expected one disposable site-packages directory")
+import server.mcp.adapter as adapter
+adapter_path = Path(adapter.__file__).resolve()
+if not adapter_path.is_relative_to(roots[0]):
+    raise SystemExit("STOP: adapter did not import from the disposable installed snapshot")
+print(hashlib.sha256(adapter_path.read_bytes()).hexdigest())
+PY
+  )
+}
+
+test "$(installed_adapter_sha)" = "$STALE_ADAPTER_SHA"
+git -C "$CLONE_ROOT" checkout --quiet --detach "$TASK1_HEAD"
+test -z "$(git -C "$CLONE_ROOT" status --porcelain=v1 --untracked-files=all)"
+CURRENT_ADAPTER_SHA="$(shasum -a 256 "$CLONE_ROOT/server/mcp/adapter.py" | awk '{print $1}')"
+test "$CURRENT_ADAPTER_SHA" != "$STALE_ADAPTER_SHA"
+(
+  cd "$CLONE_ROOT"
+  UV_NO_EDITABLE=1 "$UV_BIN" sync --frozen --python 3.13
+)
+test "$(installed_adapter_sha)" = "$STALE_ADAPTER_SHA"
+printf 'STALE_SNAPSHOT_NEGATIVE ordinary_sync=stale adapter_sha256=%s\n' \
+  "$STALE_ADAPTER_SHA"
+
+(cd "$CLONE_ROOT" && ./scripts/checks.sh)
+test "$(installed_adapter_sha)" = "$CURRENT_ADAPTER_SHA"
+printf 'STALE_SNAPSHOT_REFRESH gate=pass tests=369 adapter_sha256=%s\n' \
+  "$CURRENT_ADAPTER_SHA"
+
+/usr/bin/chflags -R hidden "$CLONE_ROOT/.venv"
+(
+  cd "$PROBE_CWD"
+  PYTHONDONTWRITEBYTECODE=1 "$CLONE_ROOT/.venv/bin/python" -P - \
+    "$CLONE_ROOT/.venv" <<'PY'
+from pathlib import Path
+import site
+import stat
+import sys
+
+venv = Path(sys.argv[1])
+if not sys.flags.safe_path or Path(sys.prefix) != venv:
+    raise SystemExit("STOP: hidden readback requires the disposable safe-path venv")
+if not hasattr(stat, "UF_HIDDEN"):
+    raise SystemExit("STOP: macOS hidden-flag inspection unavailable")
+roots = [Path(path) for path in site.getsitepackages() if Path(path).is_relative_to(venv)]
+if len(roots) != 1:
+    raise SystemExit("STOP: expected one disposable site-packages directory")
+pths = sorted(roots[0].glob("*.pth"))
+if not pths:
+    raise SystemExit("STOP: expected a disposable site-packages .pth")
+server_path = roots[0] / "server" / "__init__.py"
+entrypoint = venv / "bin" / "blender-codex-server"
+for path in (venv, *pths, server_path, entrypoint):
+    info = path.lstat()
+    if not hasattr(info, "st_flags") or not info.st_flags & stat.UF_HIDDEN:
+        raise SystemExit(f"STOP: UF_HIDDEN readback failed: {path}")
+PY
+)
+test "$(installed_adapter_sha)" = "$CURRENT_ADAPTER_SHA"
+(
+  cd "$PROBE_CWD"
+  PYTHONDONTWRITEBYTECODE=1 "$CLONE_ROOT/.venv/bin/blender-codex-server" </dev/null
+)
+printf 'HIDDEN_SWEEP_GREEN flags=verified import=safe-path entrypoint=real exit=0\n'
+test "$(git -C "$CLONE_ROOT" rev-parse HEAD)" = "$TASK1_HEAD"
+test -z "$(git -C "$CLONE_ROOT" status --porcelain=v1 --untracked-files=all)"
+
+REMOVED_ROOT="$DISPOSABLE_ROOT"
+validate_and_remove "$DISPOSABLE_ROOT"
+DISPOSABLE_ROOT=""
+test ! -e "$REMOVED_ROOT"
+trap - EXIT
+test "$(git rev-parse HEAD)" = "$TASK1_HEAD"
+test -z "${PYTHONPATH-}"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+printf 'TASK1_DISPOSABLE_ADVERSARY_GREEN head=%s cleanup=exact\n' "$TASK1_HEAD"
+BASH
+```
+
+Expected: ordinary sync reports the exact historical stale SHA; the exact gate reports
+369 tests and the current source SHA; the recursive hidden sweep is read back as
+`UF_HIDDEN` on the `.venv`, every site-packages `.pth`, the installed server, and the
+real entrypoint before a subsequent safe-path import and real entrypoint run remain
+green; the validated `/private/tmp` root is absent; the real feature HEAD/status and
+`PYTHONPATH` are unchanged. Append the unique literal `HIDDEN_SWEEP_GREEN
+flags=verified import=safe-path entrypoint=real exit=0` output line, the other literal
+output markers, old/current adapter SHA-256 values, and final Task 1 HEAD to
+`task-1-report.md`.
 
 ---
 
@@ -909,7 +1202,34 @@ imports only standard-library modules.
 
 Append to the active audit under `## Adversarial audit and retest`:
 
-- runbook/script commit IDs and exact scope;
+- runbook/script/checks commit IDs and exact scope;
+- `POSTPLAN-ENV-01` in separate prose: the Task 0 first exact-gate result as a failure
+  (`368 passed, 1 failed`), the exact failing test and tmp-cwd `server` import stderr,
+  and the verified rollback to the original `.venv`. State the evidence at its measured
+  strength: CPython's skip of the `UF_HIDDEN` editable project `.pth` is the directly
+  demonstrated failure mechanism; timing and traversal evidence support an external
+  workspace metadata sweep; uv did not reproduce the flag mutation; the exact
+  responsible process remains unknown. Do not attribute the sweep to a measured Codex
+  process;
+- the baseline old checks SHA-256
+  `c0798f66b9b1ac6ed7e85b772adc0cca24b6c5f69ebb5df2e1b742a7c745307e`,
+  retained Task 0 evidence SHA-256
+  `ebd57eee1c24b90c4a68d71b112c2682cf879f5ca345231960071661131edbd5`,
+  Appendix D's final checks SHA-256, Task 1's gate commit/final HEAD, and exactly one
+  `task1_report_sha256=<digest>` literal copied from the same Appendix D output;
+- the exact two added `scripts/checks.sh` lines, vendor-before-reinstall order, and the
+  self-contained 369-test/tmp-cwd entrypoint result;
+- Task 1's disposable provenance: stale base
+  `4f1913c364c995c93432bb24b1cc3c9ad1b8590f`, historical installed adapter SHA-256
+  `48b21860a2c8c76a5f66ee7fc41fe5ad5f7e61fba4fa17abb6f0634dc8fb0506`,
+  ordinary-sync stale result, exact-gate current-source SHA-256/result, recursive-hidden
+  `.venv`/all `.pth`/installed-server/entrypoint `UF_HIDDEN` readback/result, safe-path
+  import/result, real-entrypoint result, the unique combined hidden-sweep marker, and
+  exact-root cleanup marker; also record Appendix D's no-replacement stale base/blob
+  binding;
+  record only retained literal output and measured facts; do not invent a timestamp,
+  full console transcript, first hypothesis, or process attribution for the already
+  completed Task 0 failure;
 - positive and negative fixture results;
 - dynamic live/source/config/table count and equality;
 - journal event count/clock ID pairing and measured integration time;
@@ -1492,13 +1812,6 @@ fix-forward retry set `EXPECTED_MAIN_ANCHOR` to the old reviewed HEAD and
 FEATURE_BRANCH=codex/official-blender-mcp-install
 UV="${UV:-$HOME/.local/bin/uv}"
 case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
-PYTHON_31313="$("$UV" python find 3.13.13)"
-case "$PYTHON_31313" in
-  /*) ;;
-  *) echo 'STOP: uv Python 3.13.13 absent' >&2; exit 1 ;;
-esac
-test "$($PYTHON_31313 -c 'import platform; print(platform.python_version())')" = 3.13.13
-export UV_LINK_MODE=copy
 case "$EXPECTED_MAIN_ANCHOR" in *[!0-9a-f]*) exit 1 ;; esac
 test "${#EXPECTED_MAIN_ANCHOR}" = 40
 test -z "${PYTHONPATH-}"
@@ -1690,20 +2003,11 @@ git merge-base --is-ancestor "$REVIEW_BASE_HEAD" "$EXPECTED_MAIN_ANCHOR"
 git merge-base --is-ancestor "$EXPECTED_MAIN_ANCHOR" "$REVIEWED_HEAD"
 test "$EXPECTED_MAIN_ANCHOR" != "$REVIEWED_HEAD"
 
-# Fresh-rebuild only main's ignored generated environment before mutating main.
+# Accept an absent generated environment or an owned ordinary canonical one.
 MAIN_VENV="$MAIN_ROOT/.venv"
-MAIN_ENV_PARENT="$MAIN_ROOT/.superpowers/sdd/modeling-remediation"
-MAIN_ENV_STATE="$MAIN_ENV_PARENT/phase-m-environment-$REVIEWED_HEAD"
-MAIN_BACKUP_VENV="$MAIN_ENV_STATE/original.venv"
-MAIN_REJECTED_VENV="$MAIN_ENV_STATE/rejected.venv"
-MAIN_VENV_MOVED=0
-MAIN_VENV_ACCEPTED=0
 git -C "$MAIN_ROOT" check-ignore -q -- .venv/
-git -C "$MAIN_ROOT" check-ignore -q -- \
-  ".superpowers/sdd/modeling-remediation/phase-m-environment-$REVIEWED_HEAD/"
-test ! -e "$MAIN_ENV_STATE"
-test ! -L "$MAIN_ENV_STATE"
-"$PYTHON_31313" - "$MAIN_ROOT" "$MAIN_VENV" "$MAIN_ENV_PARENT" <<'PY'
+"$UV" run --quiet --no-project --python 3.13 python - \
+  "$MAIN_ROOT" "$MAIN_VENV" <<'PY'
 from pathlib import Path
 import os
 import stat
@@ -1711,111 +2015,87 @@ import sys
 
 root = Path(sys.argv[1])
 venv = Path(sys.argv[2])
-parent = Path(sys.argv[3])
 if Path(os.path.realpath(root)) != root or venv.parent != root or venv.name != ".venv":
     raise SystemExit("STOP: main .venv must be the canonical repository-root child")
-info = venv.lstat()
-if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-    raise SystemExit("STOP: existing main .venv must be an ordinary directory")
-if info.st_uid != os.getuid():
-    raise SystemExit("STOP: existing main .venv must be current-UID owned")
-if parent.parent.parent.parent != root or Path(os.path.realpath(parent)) != parent:
-    raise SystemExit("STOP: main environment state parent escaped main")
-info = parent.lstat()
-if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-    raise SystemExit("STOP: main environment state parent must be ordinary")
-if info.st_uid != os.getuid() or info.st_mode & stat.S_IWOTH:
-    raise SystemExit("STOP: unsafe main environment state parent ownership/mode")
+if os.path.lexists(venv):
+    info = venv.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise SystemExit("STOP: existing main .venv must be an ordinary directory")
+    if info.st_uid != os.getuid() or info.st_mode & stat.S_IWOTH:
+        raise SystemExit("STOP: existing main .venv has unsafe ownership/mode")
 PY
-install -d -m 700 "$MAIN_ENV_STATE"
-"$PYTHON_31313" - "$MAIN_ROOT" "$MAIN_ENV_STATE" <<'PY'
-from pathlib import Path
-import os
-import stat
-import sys
-
-root = Path(sys.argv[1])
-state = Path(sys.argv[2])
-if state.parent.parent.parent.parent != root or Path(os.path.realpath(state)) != state:
-    raise SystemExit("STOP: main environment state escaped main")
-info = state.lstat()
-if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-    raise SystemExit("STOP: main environment state must be ordinary")
-if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
-    raise SystemExit("STOP: main environment state must be current-UID mode 0700")
-PY
-test ! -e "$MAIN_BACKUP_VENV"
-test ! -L "$MAIN_BACKUP_VENV"
-test ! -e "$MAIN_REJECTED_VENV"
-test ! -L "$MAIN_REJECTED_VENV"
-
-restore_main_venv() {
-  rc=$?
-  trap - EXIT
-  if [ "$rc" != 0 ] && [ "$MAIN_VENV_MOVED" = 1 ] && \
-     [ "$MAIN_VENV_ACCEPTED" = 0 ]; then
-    if [ -e "$MAIN_VENV" ] || [ -L "$MAIN_VENV" ]; then
-      test ! -e "$MAIN_REJECTED_VENV"
-      test ! -L "$MAIN_REJECTED_VENV"
-      mv -- "$MAIN_VENV" "$MAIN_REJECTED_VENV"
-    fi
-    test -d "$MAIN_BACKUP_VENV"
-    test ! -L "$MAIN_BACKUP_VENV"
-    mv -- "$MAIN_BACKUP_VENV" "$MAIN_VENV"
-    printf 'STOP: fresh main environment rejected; original restored; rejected=%s\n' \
-      "$MAIN_REJECTED_VENV" >&2
-  fi
-  exit "$rc"
-}
 
 verify_main_venv() {
-  "$MAIN_VENV/bin/python" - "$MAIN_ROOT" "$MAIN_VENV" <<'PY'
+  "$MAIN_VENV/bin/python" -P - "$MAIN_ROOT" "$MAIN_VENV" <<'PY'
 from pathlib import Path
+import importlib.metadata
 import os
 import site
 import stat
+import subprocess
 import sys
+import tempfile
 
 root = Path(sys.argv[1])
 venv = Path(sys.argv[2])
-if sys.version_info[:3] != (3, 13, 13) or Path(sys.prefix) != venv:
-    raise SystemExit("STOP: main environment is not CPython 3.13.13")
+if not sys.flags.safe_path:
+    raise SystemExit("STOP: main snapshot verifier requires safe-path mode")
+if sys.version_info[:2] != (3, 13) or Path(sys.prefix) != venv:
+    raise SystemExit("STOP: main environment is not CPython 3.13")
 info = venv.lstat()
 if venv.parent != root or stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
     raise SystemExit("STOP: main .venv identity/type mismatch")
 if info.st_uid != os.getuid():
     raise SystemExit("STOP: main .venv has foreign ownership")
-if not hasattr(stat, "UF_HIDDEN") or not hasattr(info, "st_flags"):
-    raise SystemExit("STOP: macOS hidden-flag inspection unavailable")
-pths = sorted(
-    path
-    for site_root in map(Path, site.getsitepackages())
-    if site_root.is_relative_to(venv)
-    for path in site_root.rglob("*.pth")
-)
-if not pths or not any(path.name == "_editable_impl_blender_codex.pth" for path in pths):
-    raise SystemExit("STOP: main editable .pth is absent")
-for path in pths:
+site_roots = [
+    path for path in map(Path, site.getsitepackages()) if path.is_relative_to(venv)
+]
+if len(site_roots) != 1:
+    raise SystemExit("STOP: expected one main venv site-packages directory")
+site_root = site_roots[0]
+for path in site_root.glob("*_editable_impl_blender_codex.pth"):
+    raise SystemExit(f"STOP: main editable project hook rejected: {path}")
+server_init = site_root / "server" / "__init__.py"
+entrypoint = venv / "bin" / "blender-codex-server"
+for path in (server_init, entrypoint):
     entry = path.lstat()
     if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode):
-        raise SystemExit(f"STOP: non-regular main .pth rejected: {path}")
+        raise SystemExit(f"STOP: regular main snapshot file required: {path}")
     if entry.st_uid != os.getuid():
-        raise SystemExit(f"STOP: foreign-owned main .pth rejected: {path}")
-    if entry.st_flags & stat.UF_HIDDEN:
-        raise SystemExit(f"STOP: hidden main .pth rejected: {path}")
-print(f"MAIN_VENV_GREEN python=3.13.13 pth_count={len(pths)} hidden_pth=0")
+        raise SystemExit(f"STOP: foreign-owned main snapshot file rejected: {path}")
+if not entrypoint.stat().st_mode & stat.S_IXUSR:
+    raise SystemExit("STOP: main blender-codex-server is not executable")
+import server
+if Path(server.__file__).resolve() != server_init:
+    raise SystemExit("STOP: main server did not import from the site-packages snapshot")
+entries = [
+    item
+    for item in importlib.metadata.distribution("blender-codex").entry_points
+    if item.group == "console_scripts" and item.name == "blender-codex-server"
+]
+if len(entries) != 1 or entries[0].value != "server.mcp.adapter:main":
+    raise SystemExit("STOP: main blender-codex-server entrypoint snapshot differs")
+with tempfile.TemporaryDirectory(
+    prefix="blender-codex-main-verify-", dir="/private/tmp"
+) as temporary:
+    completed = subprocess.run(
+        [entrypoint],
+        cwd=temporary,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+if completed.returncode != 0:
+    raise SystemExit("STOP: main blender-codex-server tmp-cwd execution failed")
+print(
+    "MAIN_VENV_GREEN python=3.13 install=noneditable "
+    "server_snapshot=site-packages entrypoint=pass"
+)
 PY
 }
-
-trap restore_main_venv EXIT
-mv -- "$MAIN_VENV" "$MAIN_BACKUP_VENV"
-MAIN_VENV_MOVED=1
-(cd "$MAIN_ROOT" && UV_PROJECT_ENVIRONMENT="$MAIN_VENV" \
-  UV_PYTHON=3.13.13 "$UV" sync --frozen)
-verify_main_venv
-MAIN_VENV_ACCEPTED=1
-trap - EXIT
-test -z "$(git -C "$MAIN_ROOT" status --porcelain=v1 --untracked-files=all)"
 
 # Merge the immutable reviewed object, never the moving branch name.
 git -C "$MAIN_ROOT" merge --ff-only "$REVIEWED_HEAD"
@@ -1954,6 +2234,20 @@ test -s "$BRIEF"
 
 dispatch 时显式传递该 `BRIEF` 和 `REPORT`。agent 完成后必须执行
 `test -s "$REPORT"`；不得把旧的通用 `task-N-report.md` 当成本次报告。
+
+仓库自身 gate 与后文官方 MCP source/config harness 是两条不同的环境边界。
+`scripts/checks.sh` 必须在 `PYTHONDONTWRITEBYTECODE` 后导出 `UV_NO_EDITABLE=1`，并在
+vendor generate 与 `--check` 都成功后执行：
+
+```bash
+"$UV_BIN" sync --frozen --python 3.13 --reinstall-package blender-codex
+```
+
+这样 tmp-cwd console entrypoint 与测试读取的是当次 vendor 生成后的
+site-packages package snapshot，不依赖 editable `.pth`。不得用 `chflags`、
+`PYTHONPATH` 或减少/跳过 369 个测试来规避 worktree 的 `UF_HIDDEN` sweep。
+该实施环境事件记为 `POSTPLAN-ENV-01`，仅用 prose 记录，不加入第 11 节的 24 个
+`MODEL-*` issue，也不写入 audit CLI 的 literal issue-ID 字段。
 
 ## 3. Preflight 与精确写入范围
 
@@ -2252,6 +2546,13 @@ required = [
     "/bin/bash -euo pipefail",
     "scripts/task-brief PLAN_FILE TASK_NUMBER OUTFILE",
     "RUN_STEM",
+    "UV_NO_EDITABLE=1",
+    '"$UV_BIN" sync --frozen --python 3.13 --reinstall-package blender-codex',
+    "site-packages package snapshot",
+    "369 个测试",
+    "POSTPLAN-ENV-01",
+    "`chflags`",
+    "`PYTHONPATH`",
     'node.type == "BSDF_PRINCIPLED"',
     'node.type == "BACKGROUND"',
     "bpy.data.is_dirty",
@@ -2313,13 +2614,18 @@ assert dict(rows) == expected
 all_ids = set(re.findall(r"MODEL-(?:SHELL|SDD|RUN|PLAN)-\d{2}", text))
 assert all_ids == set(expected)
 assert text.count("BLENDER_EEVEE_NEXT") == 1
-for forbidden in ["git clone", "codex mcp add", "3 MB", "3MB", "pkill", "killall"]:
+for forbidden in [
+    "git clone", "codex mcp add", "3 MB", "3MB", "pkill", "killall",
+    "pytest -k", "--ignore=tests",
+]:
     assert forbidden not in text, forbidden
 for forbidden_pattern in [
     r"(?i)\bfix(?:es|ed|ing)?\s+`?MODEL-RUN-10",
     r"(?i)\bprevent(?:s|ed|ing)?\s+`?MODEL-RUN-10",
     r"(?:修复|解决|预防)\s*`?MODEL-RUN-10",
     r"(?i)\bkill\s+-",
+    r"(?m)^\s*chflags\b",
+    r"(?m)^\s*(?:export\s+)?PYTHONPATH\s*=",
 ]:
     assert re.search(forbidden_pattern, text) is None, forbidden_pattern
 print({"headings": len(headings), "issue_rows": len(rows), "contract": "ok"})
@@ -4154,6 +4460,7 @@ TASK_N="${TASK_N:?set to 4 or 5}"
 TASK_REPORT="${TASK_REPORT:?set the ignored Task report path}"
 EXPECTED_MAIN_ANCHOR="${EXPECTED_MAIN_ANCHOR:-}"
 REPO_CWD="$(pwd -P)"
+export GIT_NO_REPLACE_OBJECTS=1
 
 case "$TASK_N:$EXPECTED_ACTIVE_AUDIT_DIRTY" in
   4:1|5:0) ;;
@@ -4838,15 +5145,18 @@ from typing import Any
 
 UID = os.getuid()
 ACTIVE_AUDIT = "docs/audits/2026-08-10-official-blender-mcp-modeling-validation.md"
+STALE_BASE = "4f1913c364c995c93432bb24b1cc3c9ad1b8590f"
 ALLOWED_TRACKED = {
     "docs/superpowers/plans/2026-08-10-official-blender-mcp-modeling-remediation.md",
     "docs/use-official-blender-mcp.md",
+    "scripts/checks.sh",
     "scripts/official_blender_mcp_audit.py",
     ACTIVE_AUDIT,
 }
 REQUIRED_TRACKED = {
     "docs/superpowers/plans/2026-08-10-official-blender-mcp-modeling-remediation.md",
     "docs/use-official-blender-mcp.md",
+    "scripts/checks.sh",
     "scripts/official_blender_mcp_audit.py",
 }
 
@@ -4940,6 +5250,15 @@ def git_z(root: Path, *arguments: str) -> list[str]:
     return [item.decode("utf-8") for item in completed.stdout.split(b"\0") if item]
 
 
+def git_blob(root: Path, object_id: str) -> bytes:
+    completed = subprocess.run(
+        ["git", "-C", os.fspath(root), "cat-file", "blob", object_id],
+        check=True,
+        capture_output=True,
+    )
+    return completed.stdout
+
+
 _, baseline_bytes = safe_bytes(Path(os.environ["EXTERNAL_BASELINE"]))
 baseline = json.loads(baseline_bytes)
 if not isinstance(baseline, dict) or not isinstance(baseline.get("paths"), dict):
@@ -4957,6 +5276,111 @@ main_root = Path(paths["main_root"]["resolved_path"])
 source_root = Path(paths["source_root"]["resolved_path"])
 baseline_feature = baseline["feature_head"]
 current_feature = git(feature_root, "rev-parse", "HEAD")
+provenance = baseline.get("gate_provenance")
+if not isinstance(provenance, dict) or set(provenance) != {
+    "old_checks_blob", "old_checks_sha256", "retained_evidence_sha256"
+}:
+    raise RuntimeError("invalid gate provenance baseline")
+old_checks_blob = git(feature_root, "rev-parse", f"{baseline_feature}:scripts/checks.sh")
+if old_checks_blob != provenance["old_checks_blob"]:
+    raise RuntimeError("baseline checks Git blob differs")
+if hashlib.sha256(git_blob(feature_root, old_checks_blob)).hexdigest() != provenance[
+    "old_checks_sha256"
+]:
+    raise RuntimeError("baseline checks SHA-256 differs")
+_, final_checks_bytes = safe_bytes(feature_root / "scripts" / "checks.sh")
+final_checks_sha256 = hashlib.sha256(final_checks_bytes).hexdigest()
+if final_checks_sha256 == provenance["old_checks_sha256"]:
+    raise RuntimeError("final checks bytes were not changed")
+task1_report_path = (
+    feature_root / ".superpowers/sdd/modeling-remediation/task-1-report.md"
+)
+_, task1_report_bytes = safe_bytes(task1_report_path)
+task1_report_sha256 = hashlib.sha256(task1_report_bytes).hexdigest()
+task1_report_text = task1_report_bytes.decode("utf-8")
+marker_patterns = {
+    "TASK1_FULL_GATE_GREEN": re.compile(
+        r"TASK1_FULL_GATE_GREEN head=(?P<head>[0-9a-f]{40}) "
+        r"tests=369 install=noneditable"
+    ),
+    "STALE_SNAPSHOT_NEGATIVE": re.compile(
+        r"STALE_SNAPSHOT_NEGATIVE ordinary_sync=stale "
+        r"adapter_sha256=(?P<adapter>[0-9a-f]{64})"
+    ),
+    "STALE_SNAPSHOT_REFRESH": re.compile(
+        r"STALE_SNAPSHOT_REFRESH gate=pass tests=369 "
+        r"adapter_sha256=(?P<adapter>[0-9a-f]{64})"
+    ),
+    "HIDDEN_SWEEP_GREEN": re.compile(
+        r"HIDDEN_SWEEP_GREEN flags=verified "
+        r"import=safe-path entrypoint=real exit=0"
+    ),
+    "TASK1_DISPOSABLE_ADVERSARY_GREEN": re.compile(
+        r"TASK1_DISPOSABLE_ADVERSARY_GREEN head=(?P<head>[0-9a-f]{40}) "
+        r"cleanup=exact"
+    ),
+}
+marker_matches: dict[str, re.Match[str]] = {}
+task1_report_lines = task1_report_text.splitlines()
+for marker, pattern in marker_patterns.items():
+    candidates = [line for line in task1_report_lines if line.startswith(marker)]
+    if len(candidates) != 1:
+        raise RuntimeError(f"Task 1 report must contain one raw {marker} output line")
+    match = pattern.fullmatch(candidates[0])
+    if match is None:
+        raise RuntimeError(f"Task 1 report has malformed {marker} output")
+    marker_matches[marker] = match
+task1_head = marker_matches["TASK1_FULL_GATE_GREEN"].group("head")
+if marker_matches["TASK1_DISPOSABLE_ADVERSARY_GREEN"].group("head") != task1_head:
+    raise RuntimeError("Task 1 report markers name different Task 1 HEADs")
+historical_adapter_sha256 = marker_matches["STALE_SNAPSHOT_NEGATIVE"].group(
+    "adapter"
+)
+if historical_adapter_sha256 != (
+    "48b21860a2c8c76a5f66ee7fc41fe5ad5f7e61fba4fa17abb6f0634dc8fb0506"
+):
+    raise RuntimeError("Task 1 report historical adapter SHA-256 differs")
+git(feature_root, "cat-file", "-e", f"{STALE_BASE}^{{commit}}")
+historical_adapter_blob = git(
+    feature_root, "rev-parse", f"{STALE_BASE}:server/mcp/adapter.py"
+)
+if hashlib.sha256(git_blob(feature_root, historical_adapter_blob)).hexdigest() != (
+    historical_adapter_sha256
+):
+    raise RuntimeError("Task 1 historical adapter SHA-256 differs from its Git blob")
+current_adapter_sha256 = marker_matches["STALE_SNAPSHOT_REFRESH"].group("adapter")
+if current_adapter_sha256 == historical_adapter_sha256:
+    raise RuntimeError("Task 1 report refreshed adapter remained stale")
+subprocess.run(
+    ["git", "-C", os.fspath(feature_root), "merge-base", "--is-ancestor",
+     baseline_feature, task1_head],
+    check=True,
+    capture_output=True,
+)
+subprocess.run(
+    ["git", "-C", os.fspath(feature_root), "merge-base", "--is-ancestor",
+     task1_head, current_feature],
+    check=True,
+    capture_output=True,
+)
+task1_adapter_blob = git(
+    feature_root, "rev-parse", f"{task1_head}:server/mcp/adapter.py"
+)
+if hashlib.sha256(git_blob(feature_root, task1_adapter_blob)).hexdigest() != (
+    current_adapter_sha256
+):
+    raise RuntimeError("Task 1 refreshed adapter SHA-256 differs from its Git blob")
+task1_checks_blob = git(
+    feature_root, "rev-parse", f"{task1_head}:scripts/checks.sh"
+)
+if git_blob(feature_root, task1_checks_blob) != final_checks_bytes:
+    raise RuntimeError("Task 1 checks Git blob differs from final checks bytes")
+_, retained_evidence = safe_bytes(
+    feature_root / ".superpowers/sdd/modeling-remediation/uv-hidden-flag-research.md"
+)
+retained_evidence_sha256 = hashlib.sha256(retained_evidence).hexdigest()
+if retained_evidence_sha256 != provenance["retained_evidence_sha256"]:
+    raise RuntimeError("retained failure evidence SHA-256 differs")
 subprocess.run(
     ["git", "-C", os.fspath(feature_root), "merge-base", "--is-ancestor",
      baseline_feature, current_feature],
@@ -5050,12 +5474,33 @@ expected_dirty = os.environ["EXPECTED_ACTIVE_AUDIT_DIRTY"] == "1"
 expected_status = [f" M {ACTIVE_AUDIT}"] if expected_dirty else []
 if status_lines != expected_status:
     raise RuntimeError("working tree differs from the expected active-audit-only state")
+if not expected_dirty:
+    _, active_audit_bytes = safe_bytes(feature_root / ACTIVE_AUDIT)
+    task1_digest_prefix = b"task1_report_sha256="
+    task1_digest_literal = (
+        f"task1_report_sha256={task1_report_sha256}".encode("ascii")
+    )
+    if (
+        active_audit_bytes.count(task1_digest_prefix) != 1
+        or active_audit_bytes.count(task1_digest_literal) != 1
+    ):
+        raise RuntimeError("active audit must contain the unique Task 1 report digest")
 
 print(json.dumps({
     "external_paths_equal": True,
     "baseline_feature_head": baseline_feature,
     "current_feature_head": current_feature,
     "review_base_head": review_base,
+    "old_checks_blob": old_checks_blob,
+    "old_checks_sha256": provenance["old_checks_sha256"],
+    "final_checks_sha256": final_checks_sha256,
+    "retained_evidence_sha256": retained_evidence_sha256,
+    "task1_report_sha256": task1_report_sha256,
+    "task1_head": task1_head,
+    "task1_stale_base": STALE_BASE,
+    "task1_historical_adapter_blob": historical_adapter_blob,
+    "task1_historical_adapter_sha256": historical_adapter_sha256,
+    "task1_current_adapter_sha256": current_adapter_sha256,
     "expected_main_anchor": expected_main_anchor,
     "main_head": current_main,
     "main_clean": main_clean,
@@ -5201,8 +5646,12 @@ Expected:
   reconstruction, sanitization, or cross-run recovery link is created;
 - the external paths, artifact hashes, source pin/clean state, fixed round main anchor,
   immutable original review base, main cleanliness, and feature ancestry remain valid;
+- the ignored Task 1 report has exactly one of each raw freshness/sweep marker, common
+  Task 1 HEADs, replacement-disabled Git-bound old/current adapter and final-checks
+  bytes, and a reported SHA-256; Task 5 additionally requires the tracked active audit
+  to contain that exact `task1_report_sha256=<digest>` literal once;
 - both the net delta and every individual commit since `09bf5c2` belong to the exact
-  four-path remediation allowlist, so modify-then-revert cannot hide a frozen write;
+  five-path remediation allowlist, so modify-then-revert cannot hide a frozen write;
 - Task 4 has exactly the active audit as an unstaged modification; Task 5 is clean;
 - validation starts only after recorder EOF/exit and has an external same-process
   UTC/monotonic bracket;
@@ -5253,6 +5702,8 @@ from typing import Any
 
 UID = os.getuid()
 PINNED_SOURCE = "4309a39646e644261624bfcd2bca669b343b7621"
+OLD_CHECKS_SHA256 = "c0798f66b9b1ac6ed7e85b772adc0cca24b6c5f69ebb5df2e1b742a7c745307e"
+RETAINED_EVIDENCE_SHA256 = "ebd57eee1c24b90c4a68d71b112c2682cf879f5ca345231960071661131edbd5"
 EXPECTED_ARTIFACTS = {
     "library_source.blend": "9e34c9a96ec59a1f7ceda557dfd77c3ca3a461f929e477ae50588176a61a8f62",
     "lamp_fixture.blend": "248c0f22fd46d9b45cb93fd736a1decec94c436fcb66bf5bf2fa01843a46ff12",
@@ -5383,10 +5834,25 @@ def write_json(path: Path, value: object) -> None:
 
 
 feature_root = directory(Path(git(Path.cwd(), "rev-parse", "--show-toplevel")))
+feature_head = git(feature_root, "rev-parse", "HEAD")
 if git(feature_root, "branch", "--show-current") != "codex/official-blender-mcp-install":
     raise RuntimeError("unexpected feature branch")
 if git(feature_root, "status", "--porcelain=v1", "--untracked-files=all"):
     raise RuntimeError("feature worktree must be clean before baseline capture")
+checks_path, _, checks_content = file_bytes(feature_root / "scripts" / "checks.sh")
+old_checks_sha256 = hashlib.sha256(checks_content).hexdigest()
+if old_checks_sha256 != OLD_CHECKS_SHA256:
+    raise RuntimeError("old checks SHA-256 differs")
+old_checks_blob = git(feature_root, "rev-parse", f"{feature_head}:scripts/checks.sh")
+if git(feature_root, "hash-object", os.fspath(checks_path)) != old_checks_blob:
+    raise RuntimeError("old checks worktree bytes differ from the committed Git blob")
+evidence_path = (
+    feature_root / ".superpowers/sdd/modeling-remediation/uv-hidden-flag-research.md"
+)
+_, _, evidence_content = file_bytes(evidence_path)
+retained_evidence_sha256 = hashlib.sha256(evidence_content).hexdigest()
+if retained_evidence_sha256 != RETAINED_EVIDENCE_SHA256:
+    raise RuntimeError("retained failure evidence SHA-256 differs")
 worktrees = parse_worktrees(git(feature_root, "worktree", "list", "--porcelain"))
 main_entries = [entry for entry in worktrees if entry.get("branch") == "refs/heads/main"]
 if len(main_entries) != 1:
@@ -5469,7 +5935,12 @@ record = {
         "model_run_root": metadata(model_run_root, "directory"),
         **artifact_metadata,
     },
-    "feature_head": git(feature_root, "rev-parse", "HEAD"),
+    "feature_head": feature_head,
+    "gate_provenance": {
+        "old_checks_blob": old_checks_blob,
+        "old_checks_sha256": old_checks_sha256,
+        "retained_evidence_sha256": retained_evidence_sha256,
+    },
     "review_base_head": review_base_head,
     "initial_main_anchor": initial_main_anchor,
     "source_head": source_head,
@@ -5489,4 +5960,6 @@ Expected: exactly one main worktree is found; `review_base_head` and
 hashes match; the private baseline directory is mode `0700`; `baseline.json` is a
 current-UID regular non-symlink mode-`0600` file; stdout contains only resolved
 path/type/UID/mode/SHA metadata, feature/main HEAD, source HEAD/clean, artifact hashes,
-and the baseline path. Config and preference contents are absent.
+the committed old-checks blob/SHA-256, retained-evidence SHA-256, and the baseline path.
+The mutable checks path is not added to generic unchanged `paths`. Config and
+preference contents are absent.
