@@ -9,11 +9,20 @@ import stat
 import sys
 import time
 import uuid
+from collections import Counter
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import NoReturn, TextIO, cast
 
 ISSUE_RE = re.compile(r"MODEL-(?:SHELL|SDD|RUN|PLAN)-\d{2}")
+UTC_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z")
+WALL_RE = re.compile(r"(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?")
+TOOL_HEADING = "## Tool results"
+TABLE_HEADER = (
+    "| Ordinal | Tool | Outcome | Wall ms | Observed shape | Retry count | Issue ID |"
+)
+TABLE_SEPARATOR = "|---:|---|---|---:|---|---:|---|"
+GENERATED = {"clock_id", "recorded_at_utc", "monotonic_ns", "sequence"}
 
 
 class AuditError(Exception):
@@ -327,18 +336,282 @@ def record(output: str) -> dict[str, object]:
     return {"status": "ok", "clock_id": clock_id, "events": count}
 
 
+def read_owned_regular(raw_path: str, label: str) -> str:
+    try:
+        before = os.lstat(raw_path)
+    except OSError as exc:
+        raise AuditError("INPUT", f"{label}: unavailable") from exc
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+    ):
+        raise AuditError("INPUT", f"{label}: expected owned non-symlink regular file")
+
+    fd = -1
+    try:
+        fd = os.open(raw_path, os.O_RDONLY | os.O_NOFOLLOW)
+        after = os.fstat(fd)
+        if (
+            (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+            or after.st_uid != os.getuid()
+            or not stat.S_ISREG(after.st_mode)
+        ):
+            raise AuditError("INPUT", f"{label}: changed while opening")
+        with open(fd, "rb", closefd=True) as handle:
+            fd = -1
+            payload = handle.read()
+    except AuditError:
+        raise
+    except OSError as exc:
+        raise AuditError("INPUT", f"{label}: unsafe open failed") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    try:
+        return payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AuditError("INPUT", f"{label}: expected UTF-8") from exc
+
+
+def catalog(text: str, label: str) -> Counter[str]:
+    value = json_value(text, label)
+    if not isinstance(value, list) or not value:
+        raise AuditError("CATALOG", f"{label}: expected nonempty array")
+    names: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item or item != item.strip():
+            raise AuditError("CATALOG", f"{label}: invalid name")
+        names.append(item)
+    if len(names) != len(set(names)):
+        raise AuditError("CATALOG", f"{label}: duplicate name")
+    return Counter(names)
+
+
+def code_cell(cell: str, label: str) -> str:
+    if (
+        len(cell) < 3
+        or cell[0] != "`"
+        or cell[-1] != "`"
+        or "`" in cell[1:-1]
+        or not cell[1:-1]
+        or cell[1:-1] != cell[1:-1].strip()
+    ):
+        raise AuditError("TABLE", f"{label}: invalid code cell")
+    return cell[1:-1]
+
+
+def table_issues(cell: str) -> tuple[str, ...]:
+    if cell == "none":
+        return ()
+    result: list[str] = []
+    for part in cell.split(";"):
+        issue = code_cell(part.strip(), "issue")
+        if ISSUE_RE.fullmatch(issue) is None:
+            raise AuditError("TABLE", "issue: invalid ID")
+        result.append(issue)
+    if len(result) != len(set(result)):
+        raise AuditError("TABLE", "issue: duplicate ID")
+    return tuple(result)
+
+
+def tool_table(text: str) -> Counter[str]:
+    lines = text.splitlines()
+    headings = [index for index, line in enumerate(lines) if line == TOOL_HEADING]
+    if len(headings) != 1:
+        raise AuditError("TABLE", "expected one exact Tool results heading")
+    if lines.count(TABLE_HEADER) != 1:
+        raise AuditError("TABLE", "expected one exact seven-column header")
+    section_start = headings[0] + 1
+    section_end = next(
+        (
+            index
+            for index in range(section_start, len(lines))
+            if lines[index].startswith("## ")
+        ),
+        len(lines),
+    )
+    headers = [
+        index
+        for index in range(section_start, section_end)
+        if lines[index] == TABLE_HEADER
+    ]
+    if len(headers) != 1:
+        raise AuditError("TABLE", "header is outside Tool results section")
+    header = headers[0]
+    if header + 1 >= section_end or lines[header + 1] != TABLE_SEPARATOR:
+        raise AuditError("TABLE", "invalid separator")
+    if any(line.startswith("|") for line in lines[section_start:header]):
+        raise AuditError("TABLE", "unexpected table before tool table")
+
+    tools: list[str] = []
+    expected = 1
+    cursor = header + 2
+    while cursor < section_end and lines[cursor].startswith("|"):
+        line = lines[cursor]
+        if not line.endswith("|"):
+            raise AuditError("TABLE", "row lacks final separator")
+        cells = [part.strip() for part in line[1:-1].split("|")]
+        if len(cells) != 7 or any(not cell for cell in cells):
+            raise AuditError("TABLE", "row must contain seven nonblank cells")
+        ordinal, tool_cell, outcome, wall_cell, shape, retry_cell, issue_cell = cells
+        if not ordinal.isdecimal() or ordinal != str(expected):
+            raise AuditError("TABLE", "ordinals must be canonical 1..N")
+        tool = code_cell(tool_cell, "tool")
+        if outcome not in {"pass", "pass_with_recovery", "pass_with_deviation"}:
+            raise AuditError("TABLE", "invalid outcome")
+        if WALL_RE.fullmatch(wall_cell) is None or float(wall_cell) == float("inf"):
+            raise AuditError("TABLE", "wall time must be finite and nonnegative")
+        if not shape:
+            raise AuditError("TABLE", "blank observed shape")
+        if not retry_cell.isdecimal() or retry_cell != str(int(retry_cell)):
+            raise AuditError("TABLE", "invalid retry count")
+        retry = int(retry_cell)
+        row_issues = table_issues(issue_cell)
+        if outcome == "pass_with_recovery":
+            if retry < 1 or not row_issues:
+                raise AuditError("TABLE", "recovery requires retry and issue ID")
+        elif retry != 0:
+            raise AuditError("TABLE", "non-recovery retry must be zero")
+        if outcome == "pass_with_deviation" and not row_issues:
+            raise AuditError("TABLE", "deviation requires issue ID")
+        tools.append(tool)
+        expected += 1
+        cursor += 1
+
+    if not tools:
+        raise AuditError("TABLE", "tool table has no rows")
+    if any(line.startswith("|") for line in lines[cursor:section_end]):
+        raise AuditError("TABLE", "multiple tables in Tool results section")
+    if len(tools) != len(set(tools)):
+        raise AuditError("TABLE", "duplicate tool row")
+    return Counter(tools)
+
+
+def recorded_event(
+    obj: dict[str, object],
+) -> tuple[dict[str, object], str, datetime, int, int]:
+    missing = GENERATED - set(obj)
+    if missing:
+        raise AuditError("SCHEMA", f"missing generated: {','.join(sorted(missing))}")
+    client = {key: value for key, value in obj.items() if key not in GENERATED}
+    validate_event(client)
+    clock_id = text_field(obj, "clock_id")
+    try:
+        parsed = uuid.UUID(clock_id)
+    except ValueError as exc:
+        raise AuditError("CLOCK", "clock_id: invalid UUID") from exc
+    if str(parsed) != clock_id or parsed.version != 4:
+        raise AuditError("CLOCK", "clock_id: expected canonical UUID4")
+    utc_text = text_field(obj, "recorded_at_utc")
+    if UTC_RE.fullmatch(utc_text) is None:
+        raise AuditError("CLOCK", "recorded_at_utc: invalid format")
+    try:
+        utc = datetime.strptime(utc_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as exc:
+        raise AuditError("CLOCK", "recorded_at_utc: invalid value") from exc
+    monotonic_ns = int_field(obj, "monotonic_ns")
+    sequence = int_field(obj, "sequence")
+    if monotonic_ns < 0 or sequence < 1:
+        raise AuditError("CLOCK", "invalid monotonic_ns or sequence")
+    return client, clock_id, utc, monotonic_ns, sequence
+
+
+def journal(text: str) -> tuple[int, str]:
+    lines = text.splitlines()
+    if not lines:
+        raise AuditError("JOURNAL", "journal is empty")
+    opened: dict[str, dict[str, object]] = {}
+    completed: dict[str, dict[str, object]] = {}
+    starts: dict[str, tuple[datetime, int]] = {}
+    clock_id: str | None = None
+    previous_utc: datetime | None = None
+    previous_monotonic: int | None = None
+    for expected, line in enumerate(lines, 1):
+        if not line.strip():
+            raise AuditError("JOURNAL", "blank journal line")
+        event, current_clock, utc, monotonic_ns, sequence = recorded_event(
+            json_object(line, f"journal line {expected}")
+        )
+        if sequence != expected:
+            raise AuditError("JOURNAL", "sequence differs from line order")
+        if clock_id is None:
+            clock_id = current_clock
+        elif current_clock != clock_id:
+            raise AuditError("CLOCK", "mixed clock IDs")
+        if previous_utc is not None and utc <= previous_utc:
+            raise AuditError("CLOCK", "UTC timestamps are not increasing")
+        if previous_monotonic is not None and monotonic_ns <= previous_monotonic:
+            raise AuditError("CLOCK", "monotonic timestamps are not increasing")
+        check_next(event, opened, completed)
+        event_id = text_field(event, "event_id")
+        if event["kind"] == "start":
+            starts[event_id] = (utc, monotonic_ns)
+        else:
+            start_utc, start_monotonic = starts[event_id]
+            if utc <= start_utc or monotonic_ns <= start_monotonic:
+                raise AuditError("CLOCK", "nonpositive event duration")
+        accept_next(event, opened, completed)
+        previous_utc = utc
+        previous_monotonic = monotonic_ns
+    if opened:
+        raise AuditError("JOURNAL", "unpaired start")
+    assert clock_id is not None
+    return len(lines), clock_id
+
+
+def validate(args: argparse.Namespace) -> dict[str, object]:
+    journal_text = read_owned_regular(cast(str, args.journal), "journal")
+    audit_text = read_owned_regular(cast(str, args.audit), "audit")
+    live = catalog(
+        read_owned_regular(cast(str, args.live_catalog), "live catalog"), "live catalog"
+    )
+    source = catalog(
+        read_owned_regular(cast(str, args.source_catalog), "source catalog"),
+        "source catalog",
+    )
+    config = catalog(
+        read_owned_regular(cast(str, args.config_catalog), "config catalog"),
+        "config catalog",
+    )
+    if live != source or live != config:
+        raise AuditError("CATALOG", "catalog counters differ")
+    table = tool_table(audit_text)
+    if table != live:
+        raise AuditError("TABLE", "tool table differs from catalogs")
+    events, clock_id = journal(journal_text)
+    return {
+        "status": "ok",
+        "catalog_count": sum(live.values()),
+        "tool_rows": sum(table.values()),
+        "clock_id": clock_id,
+        "events": events,
+    }
+
+
 def parser() -> Parser:
     result = Parser()
     subcommands = result.add_subparsers(dest="command", required=True)
     command = subcommands.add_parser("record")
     command.add_argument("--output", required=True)
+    command = subcommands.add_parser("validate")
+    command.add_argument("--journal", required=True)
+    command.add_argument("--audit", required=True)
+    command.add_argument("--live-catalog", required=True)
+    command.add_argument("--source-catalog", required=True)
+    command.add_argument("--config-catalog", required=True)
     return result
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
-        result = record(cast(str, args.output))
+        if args.command == "record":
+            result = record(cast(str, args.output))
+        else:
+            result = validate(args)
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         return 0
     except AuditError as exc:
