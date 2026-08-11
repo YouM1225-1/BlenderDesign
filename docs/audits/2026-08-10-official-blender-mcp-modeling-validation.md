@@ -1,10 +1,10 @@
 # Official Blender MCP Modeling Validation
 
-Status: remediation implemented; final adversarial audit pending
+Status: remediation implementation complete; final gate evidence is bound in the ignored Task 5 report and terminal review
 
 ## Scope and safety boundary
 
-No user `.blend` was opened or saved. Runtime binaries are untracked. All runtime paths in this report use `$RUN_ROOT` rather than an account name. This active audit is the cumulative Task 1–4 plan output, not historical frozen-plan evidence; it records execution facts and any approved deviations without changing the frozen plan bytes.
+No user `.blend` was opened or saved. Runtime binaries are untracked. All runtime paths in this report use `$RUN_ROOT` rather than an account name. This active audit is the cumulative Task 1–5 plan output, not historical frozen-plan evidence; it records execution facts and any approved deviations without changing the frozen plan bytes.
 
 ## Environment and catalog
 
@@ -265,14 +265,16 @@ At the baseline decision point, no product abstraction, Blender transaction wrap
 
 ## Adversarial audit and retest
 
-The implementation is bound to three reviewed commits and their exact scopes. Commit
+The implementation is bound to four reviewed commits and their exact scopes. Commit
 `e9f75225729908019090c850432f9d75f0266833` is both the Task 1 gate commit and final
 Task 1 HEAD; it added only `docs/use-official-blender-mcp.md` and two lines to
 `scripts/checks.sh`. Commit `07db4904a41726b3a3b32549ce7c4a4a0cfbc501` added only
 `scripts/official_blender_mcp_audit.py` with the recorder, and commit
 `c7ba8c0a7004294fc597f2d52fa0dba0d094c019` modified only that script to add the
-validator. The final helper exposes exactly `record` and `validate` and imports only
-Python standard-library modules. The runbook contract retest reported
+validator. Commit `186ddf9b0b4dc1e30fa26189085af7871b15138c` modified only this
+active audit to record the no-write remediation integration and retest evidence. The
+final helper exposes exactly `record` and `validate` and imports only Python
+standard-library modules. The runbook contract retest reported
 `{'headings': 12, 'issue_rows': 24, 'contract': 'ok'}`. The exact two gate additions
 are `export UV_NO_EDITABLE=1` after `PYTHONDONTWRITEBYTECODE=1` and
 `"$UV_BIN" sync --frozen --python 3.13 --reinstall-package blender-codex` after both
@@ -357,6 +359,38 @@ preceded validation. The external uv-Python 3.13 bracket was
 `42696440593041` to `42696463356250`, measuring `22.763209` ms; validation returned
 `status=ok`, `catalog_count=26`, `tool_rows=26`, and `events=10`.
 
+Task 5 reran all three focused probes on the clean pre-finalization HEAD
+`186ddf9b0b4dc1e30fa26189085af7871b15138c`. Appendix A emitted exactly:
+
+```text
+{'headings': 12, 'issue_rows': 24, 'contract': 'ok'}
+```
+
+Appendix C emitted exactly:
+
+```text
+All checks passed!
+Success: no issues found in 1 source file
+ALL_GREEN
+```
+
+The Appendix D clean lane emitted the following exact non-path results; its private
+run-root paths are represented as `$RUN_ROOT` under this audit's safety convention:
+
+```text
+{"effective_config_count": 26, "equal": true, "live_count": 26, "on_disk_config_count": 26, "source_count": 26}
+{"active_audit_dirty": false, "baseline_feature_head": "f4a2ac8572abbf2b161825d634cd4333d2853540", "current_feature_head": "186ddf9b0b4dc1e30fa26189085af7871b15138c", "expected_main_anchor": "439d1a90997a260bac68be637b89692349d93be7", "external_paths_equal": true, "final_checks_sha256": "a6d9b68d70e2b34b60d99d4a3de3bc2ab3f27c2da2570dc53e3501c7cd59035c", "history_tracked_scope_count": 5, "main_clean": true, "main_head": "439d1a90997a260bac68be637b89692349d93be7", "net_tracked_scope_count": 5, "old_checks_blob": "baf85fb5cb7588a14662c4084f8840ef6cc90e2b", "old_checks_sha256": "c0798f66b9b1ac6ed7e85b772adc0cca24b6c5f69ebb5df2e1b742a7c745307e", "retained_evidence_sha256": "ebd57eee1c24b90c4a68d71b112c2682cf879f5ca345231960071661131edbd5", "review_base_head": "439d1a90997a260bac68be637b89692349d93be7", "source_clean": true, "source_head": "4309a39646e644261624bfcd2bca669b343b7621", "task1_current_adapter_sha256": "972c33ad84706ef4197ac8584b0e27cdf11c7a15014bea41fa5139eae84682d3", "task1_head": "e9f75225729908019090c850432f9d75f0266833", "task1_historical_adapter_blob": "eb91715cf36d886b52f6b0780766e34bfd169ba5", "task1_historical_adapter_sha256": "48b21860a2c8c76a5f66ee7fc41fe5ad5f7e61fba4fa17abb6f0634dc8fb0506", "task1_report_sha256": "35ae0bcd8ba1bb9e81b6e7d9e3ff3aa1ffe09b493d2a99fa3b61626163578a9d", "task1_stale_base": "4f1913c364c995c93432bb24b1cc3c9ad1b8590f"}
+{"clock_id":"1772cc09-84f8-4288-b5fb-5672cc3549ff","events":10,"status":"ok"}
+{"duration_ms": 30.35775, "monotonic_end_ns": 43574698614250, "monotonic_start_ns": 43574668256500, "run_root": "$RUN_ROOT", "utc_end": "2026-08-11T03:34:51.592220Z", "utc_start": "2026-08-11T03:34:51.561719Z", "validation": {"catalog_count": 26, "clock_id": "1772cc09-84f8-4288-b5fb-5672cc3549ff", "events": 10, "status": "ok", "tool_rows": 26}}
+```
+
+This clean comparison preserved the external Codex config and Blender preferences
+byte-for-byte, kept the main worktree clean at fixed anchor
+`439d1a90997a260bac68be637b89692349d93be7`, and kept the official source clean at
+`4309a39646e644261624bfcd2bca669b343b7621`. Net and per-commit tracked history both
+remained inside the five-path remediation allowlist. No post-commit full-gate result is
+claimed here; that gate runs only after this final tracked audit commit.
+
 The adversarial helper suite passed Ruff, strict mypy, byte compilation, and printed
 `ALL_GREEN`. It accepted independent three-name and four-name catalog/table positives.
 Every negative invocation exited exactly 1, wrote no stdout, and emitted one categorized
@@ -405,10 +439,10 @@ The historical baseline Task 4 inspected both copied PNGs locally at original de
 
 Both views show the complete stylized lamp and linked prop against only the disposable ground/world. No visual issue ID is required. The thumbnail and viewport hashes remain `7a4799be69540a5faa24080d6d24cdfd23050ef692651d5be92881aae66f4bcb` and `1bde67e12dbb50fb7dc1a94a69b484dbcfa410e60164b484a475b2c5fdcd8e14`.
 
-The prior structural and path adversarial evidence remains green: exact scene/material/parent/data sets, no `.001`, non-degenerate ground-excluded bounds, unsaved GUI path, unchanged fixture hashes, controlled missing path, canonical render-parent equality, owned ordinary non-symlink PNGs and exact source/copy hashes. The strict 26-row `Counter` validator has no duplicate, missing, extra or blank row. This Task made no Blender call and changed no runtime, config, frozen file, source checkout or external process.
+The prior structural and path adversarial evidence remains green: exact scene/material/parent/data sets, no `.001`, non-degenerate ground-excluded bounds, unsaved GUI path, unchanged fixture hashes, controlled missing path, canonical render-parent equality, owned ordinary non-symlink PNGs and exact source/copy hashes. That prior validated unsaved Blender state is explicitly historical and was not remeasured by the Task 5 no-write replay. The strict 26-row `Counter` validator has no duplicate, missing, extra or blank row. This Task made no Blender call and changed no runtime, config, frozen file, source checkout or external process.
 
 ## Final verdict
 
-Baseline root-cause analysis is complete, repository remediation is implemented, and the final adversarial audit is pending. The catalog contained 26 unique tools; the frozen plan expected 26 successes and zero expected errors. Actual first-issued outcomes were 23 successes and three unexpected failures: original-fixture arbitrary CLI code, original-fixture CLI missing summary, and the 2 MB area screenshot. Exactly three authorized recovery invocations passed, so all 26 unique tools ended with a usable determinate success. The preventive 48 KB window screenshot is one recorded deviation, not a fourth failure or recovery.
+Baseline root-cause analysis and repository remediation implementation are complete; final gate evidence is bound in the ignored Task 5 report and terminal review. The catalog contained 26 unique tools; the frozen plan expected 26 successes and zero expected errors. Actual first-issued outcomes were 23 successes and three unexpected failures: original-fixture arbitrary CLI code, original-fixture CLI missing summary, and the 2 MB area screenshot. Exactly three authorized recovery invocations passed, so all 26 unique tools ended with a usable determinate success. The preventive 48 KB window screenshot is one recorded deviation, not a fourth failure or recovery.
 
 Unresolved modeling correctness failures: **0**. Irrecoverable historical evidence gaps: **1** (`MODEL-RUN-11`, kept explicit). Repository remediation now consists of the runbook, the exact two-line gate hardening, and the two-subcommand audit CLI. External/runtime observations not locally repaired: `MODEL-RUN-08`, `MODEL-RUN-09`, `MODEL-PLAN-09`, and `MODEL-RUN-10`; none invalidated the model or tool-call acceptance, and `MODEL-RUN-10` remains evidence-insufficient for its inferred thread/session mapping. The retained historical conclusions for both renders, all seven visual criteria, structural acceptance, containment, catalog/table equality and safety boundaries pass. No user `.blend` was opened, saved or overwritten.
