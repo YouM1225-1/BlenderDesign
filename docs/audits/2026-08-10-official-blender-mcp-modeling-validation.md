@@ -1,6 +1,6 @@
 # Official Blender MCP Modeling Validation
 
-Status: baseline complete; remediation pending
+Status: remediation implemented; final adversarial audit pending
 
 ## Scope and safety boundary
 
@@ -63,7 +63,7 @@ Task 3 used one long-lived timing process from its first operation. Its canonica
 - No safe summary/docs/navigation call exceeded `5,000 ms`; no individual screenshot call exceeded `10,000 ms`; thumbnail was `2,475.6 ms` versus the `30,000 ms` threshold; viewport was `1,151.6 ms` versus the `60,000 ms` threshold. No threshold-only rerun was needed.
 - The 2 MB area screenshot failed in `2,916.8 ms`; its single reduced-size recovery succeeded in `3,113.0 ms`. The original CLI missing-fixture calls and their single authorized derived-fixture recoveries are included in the MCP total. Final abnormal-time classification remains a Task 4 deliverable.
 
-## 26-tool results
+## Tool results
 
 Wall ms is the sum of all fresh Task 3 invocations for that unique tool, including a recovery or required postcondition call where applicable.
 
@@ -261,11 +261,137 @@ The frozen decision rule justifies exactly two repository files in the separate 
 
 A `process-snapshot` subcommand is explicitly rejected for now: `MODEL-RUN-10` was observed again, but its root/subagent-session mapping still lacks a controlled causal reproduction and a runbook `ps` diagnostic is sufficient. This keeps the helper at two commands and avoids turning an incompletely attributed lifecycle observation into product surface.
 
-No product abstraction, Blender transaction wrapper, external-checkout patch, pytest file, dependency, product wrapper or `checks.sh` change is justified. `MODEL-RUN-08`, `MODEL-RUN-09`, `MODEL-PLAN-09`, and `MODEL-RUN-10` concern pinned external/runtime behavior; none has the required twice-reproduced failure in repository-owned product code. No file is created for normal tool startup/render cost or the unattributed orchestration residual. Task 4 is analysis only; the controller will create a separate writing-plans remediation plan before implementing either file.
+At the baseline decision point, no product abstraction, Blender transaction wrapper, external-checkout patch, pytest file, dependency, product wrapper or `checks.sh` change was justified. `MODEL-RUN-08`, `MODEL-RUN-09`, `MODEL-PLAN-09`, and `MODEL-RUN-10` concern pinned external/runtime behavior; none has the required twice-reproduced failure in repository-owned product code. No file is created for normal tool startup/render cost or the unattributed orchestration residual. That baseline Task 4 was analysis only; the later `POSTPLAN-ENV-01` evidence justified the bounded two-line gate hardening, and the remediation plan implemented it with the runbook and audit CLI recorded below.
 
 ## Adversarial audit and retest
 
-Task 4 inspected both copied PNGs locally at original detail without editing them. Task 3's independent inspection and the machine PNG/hash checks provide separate corroboration.
+The implementation is bound to three reviewed commits and their exact scopes. Commit
+`e9f75225729908019090c850432f9d75f0266833` is both the Task 1 gate commit and final
+Task 1 HEAD; it added only `docs/use-official-blender-mcp.md` and two lines to
+`scripts/checks.sh`. Commit `07db4904a41726b3a3b32549ce7c4a4a0cfbc501` added only
+`scripts/official_blender_mcp_audit.py` with the recorder, and commit
+`c7ba8c0a7004294fc597f2d52fa0dba0d094c019` modified only that script to add the
+validator. The final helper exposes exactly `record` and `validate` and imports only
+Python standard-library modules. The runbook contract retest reported
+`{'headings': 12, 'issue_rows': 24, 'contract': 'ok'}`. The exact two gate additions
+are `export UV_NO_EDITABLE=1` after `PYTHONDONTWRITEBYTECODE=1` and
+`"$UV_BIN" sync --frozen --python 3.13 --reinstall-package blender-codex` after both
+vendor generation and vendor `--check`, before nested-import and pytest consumers.
+The clean, self-contained Task 1 gate reported `369 passed in 30.31s`,
+`TMP_CWD_IMPORT_GREEN module=server origin=site-packages`, and
+`TMP_CWD_ENTRYPOINT_GREEN exit=0`; the test inventory remained all 369 tests.
+
+`POSTPLAN-ENV-01` is an implementation-environment event, not a 25th `MODEL-*` issue.
+The first exact Task 0 gate failed with `368 passed, 1 failed`; the exact failing test
+was `tests/unit/test_e2e.py::test_cancelled_sdk_client_reaps_its_recorded_process_group`,
+whose tmp-cwd `.venv/bin/blender-codex-server` stderr was
+`ModuleNotFoundError: No module named 'server'`. The transaction verified rollback to
+the original `.venv`, retained the rejected fresh environment, and removed its
+transient `original.venv` backup. The directly demonstrated failure mechanism is that
+CPython 3.13 skipped the editable project `.pth` carrying `UF_HIDDEN`. Metadata timing
+and traversal-order evidence support an external workspace metadata sweep; uv controls
+did not reproduce the flag mutation. The exact responsible process remains unknown,
+and no measured Codex-process attribution is claimed.
+
+`POSTPLAN-ENV-02` is a separate implementation-environment event, also outside the
+`MODEL-*` issue set. The historical temporary run root
+`/private/tmp/bcx-official-mcp-modeling-20260810` was observed absent on 2026-08-11;
+the responsible cleanup process is unknown, and ordinary temporary-directory cleanup
+is only a supported inference. The pre-write Appendix E capture was not separately
+timed and stopped at exactly
+`RuntimeError: required path missing: /private/tmp/bcx-official-mcp-modeling-20260810`
+before creating the external-baseline directory or `baseline.json`. Two same-script
+Blender 5.2 semantic-reconstruction attempts produced different bytes: attempt 1
+produced library SHA-256
+`71bf2b089c360a8cc74c6bb5071fe87c54fd9327e71b22a0fcf7c87a7d4a889d` and fixture
+SHA-256 `80e300e8d9ffd02620df7568a87ecf6699c93086fc7419de413f8cc0fc5bbd3f`
+with `950.192` ms process wall and `99.744` ms Blender-internal; attempt 2 produced
+library SHA-256
+`d97c8d806505a2d0ade7063644c5de0b3f30c31dc4b4f91153989de65b680ae8` and fixture
+SHA-256 `30e34c1836486cf4418b51790ba431685de368ebc5d9444e032974170478b5aa`
+with `78.753` ms Blender-internal and no separately bracketed process wall. The
+differing regenerated hashes prove only semantic reconstruction is possible; those
+bytes are not substituted for the original evidence.
+
+The Task 1 provenance replay ran with replacement objects disabled and bound stale base
+`4f1913c364c995c93432bb24b1cc3c9ad1b8590f` to historical adapter blob
+`eb91715cf36d886b52f6b0780766e34bfd169ba5`, whose SHA-256 is
+`48b21860a2c8c76a5f66ee7fc41fe5ad5f7e61fba4fa17abb6f0634dc8fb0506`.
+An ordinary frozen non-editable sync retained that stale installed snapshot. The exact
+gate then passed all 369 tests and refreshed the installed adapter to the current
+committed source SHA-256
+`972c33ad84706ef4197ac8584b0e27cdf11c7a15014bea41fa5139eae84682d3`.
+After a recursive hidden sweep in the disposable clone, readback verified `UF_HIDDEN`
+on the `.venv`, every site-packages `.pth`, installed `server`, and the real entrypoint;
+the subsequent safe-path installed import and real entrypoint both passed. The retained
+combined marker is `HIDDEN_SWEEP_GREEN flags=verified import=safe-path entrypoint=real exit=0`,
+and the exact-root cleanup marker is `TASK1_DISPOSABLE_ADVERSARY_GREEN head=e9f75225729908019090c850432f9d75f0266833 cleanup=exact`.
+The other retained literal results are `STALE_SNAPSHOT_NEGATIVE ordinary_sync=stale adapter_sha256=48b21860a2c8c76a5f66ee7fc41fe5ad5f7e61fba4fa17abb6f0634dc8fb0506`
+and `STALE_SNAPSHOT_REFRESH gate=pass tests=369 adapter_sha256=972c33ad84706ef4197ac8584b0e27cdf11c7a15014bea41fa5139eae84682d3`.
+
+Gate provenance remains byte-bound: the baseline checks SHA-256 is
+`c0798f66b9b1ac6ed7e85b772adc0cca24b6c5f69ebb5df2e1b742a7c745307e`,
+the retained Task 0 evidence SHA-256 is
+`ebd57eee1c24b90c4a68d71b112c2682cf879f5ca345231960071661131edbd5`,
+the final `scripts/checks.sh` SHA-256 is
+`a6d9b68d70e2b34b60d99d4a3de3bc2ab3f27c2da2570dc53e3501c7cd59035c`,
+and task1_report_sha256=35ae0bcd8ba1bb9e81b6e7d9e3ff3aa1ffe09b493d2a99fa3b61626163578a9d.
+The external frozen-state replay confirmed byte-for-byte equality for the Codex config
+SHA-256 `e39ba93fde2eb107d67bfb0e9a328d11788280dd517aed762faf231a21c36f72`
+and Blender user preferences SHA-256
+`2bdeb539b6a98ca2c56737809ee64091e4bc33234fc1a763cd64f60b347ab6f5`.
+The official source remained clean at
+`4309a39646e644261624bfcd2bca669b343b7621`, the main worktree remained clean at the
+fixed review-base/anchor `439d1a90997a260bac68be637b89692349d93be7`, and both net
+and per-commit tracked history remained inside the five-path remediation allowlist.
+
+The exact Appendix D no-write replay collected sorted live, pinned-source,
+effective-config, and on-disk-config name sets dynamically: all four counts were 26 and
+all four sets were equal. The three emitted catalog files contained only sorted JSON
+string arrays, with the config file carrying the effective set; validation found 26
+tool rows. One recorder produced a single clock ID
+`4b716799-e274-4f77-b5db-c1d67768b01e` and 10 events: the first/last Task pair enclosed
+paired catalog and frozen-state stage/call events. Recorder EOF and successful exit
+preceded validation. The external uv-Python 3.13 bracket was
+`2026-08-11T03:20:13.358793Z` to `2026-08-11T03:20:13.381664Z`, monotonic
+`42696440593041` to `42696463356250`, measuring `22.763209` ms; validation returned
+`status=ok`, `catalog_count=26`, `tool_rows=26`, and `events=10`.
+
+The adversarial helper suite passed Ruff, strict mypy, byte compilation, and printed
+`ALL_GREEN`. It accepted independent three-name and four-name catalog/table positives.
+Every negative invocation exited exactly 1, wrote no stdout, and emitted one categorized
+`ERROR[...]` stderr line. The rejected temporary fixtures covered duplicate, missing,
+and extra catalog/table entries; blank outcome, retry, issue, and evidence fields;
+missing symptom plus missing or blank first-hypothesis fields; missing and mixed clocks,
+unpaired events, reversed/equal UTC
+or monotonic order; recovery before failure and failure-to-recovery cases without a
+first-persisted symptom/hypothesis; and malformed, duplicate, empty, or mismatched issue
+IDs. The supplemental blank-field fixture reported
+`BLANK_FIELDS_REJECTED outcome,retry,issue`.
+
+Because the original binary artifacts are unavailable, the historical ledger is
+retained at exactly its measured 2026-08-10 values and is **unavailable and not
+remeasured**: `library_source.blend`
+`9e34c9a96ec59a1f7ceda557dfd77c3ca3a461f929e477ae50588176a61a8f62`,
+`lamp_fixture.blend`
+`248c0f22fd46d9b45cb93fd736a1decec94c436fcb66bf5bf2fa01843a46ff12`,
+`lamp_fixture_persisted_missing.blend`
+`bd5ac7a7955e70c8902ac46ac753975e4b60605b6eb30cca759765d68a54b9f5`,
+`thumbnail.png`
+`7a4799be69540a5faa24080d6d24cdfd23050ef692651d5be92881aae66f4bcb`,
+and `viewport.png`
+`1bde67e12dbb50fb7dc1a94a69b484dbcfa410e60164b484a475b2c5fdcd8e14`.
+The historical structural, containment, modeling, and visual conclusions below are
+retained but were not remeasured in this no-write replay.
+
+The pinned upstream/runtime observations remain mitigated rather than locally patched:
+`MODEL-RUN-08` retains the 48 KB screenshot cap, `MODEL-RUN-09` retains safe scratch
+parent provisioning, `MODEL-PLAN-09` remains a compatibility warning, and
+`MODEL-RUN-10` remains a soft diagnostic with normal host-lifecycle cleanup guidance.
+No external checkout, Blender source, Blender scene, config, preferences, fixture, or
+render was changed during remediation integration.
+
+The historical baseline Task 4 inspected both copied PNGs locally at original detail without editing them. Task 3's independent inspection and the machine PNG/hash checks provided separate corroboration. Those files are now unavailable and were not remeasured by this remediation replay.
 
 | Visual criterion | Thumbnail | Viewport |
 |---|---|---|
@@ -283,6 +409,6 @@ The prior structural and path adversarial evidence remains green: exact scene/ma
 
 ## Final verdict
 
-Baseline root-cause analysis is complete and remediation is pending. The catalog contained 26 unique tools; the frozen plan expected 26 successes and zero expected errors. Actual first-issued outcomes were 23 successes and three unexpected failures: original-fixture arbitrary CLI code, original-fixture CLI missing summary, and the 2 MB area screenshot. Exactly three authorized recovery invocations passed, so all 26 unique tools ended with a usable determinate success. The preventive 48 KB window screenshot is one recorded deviation, not a fourth failure or recovery.
+Baseline root-cause analysis is complete, repository remediation is implemented, and the final adversarial audit is pending. The catalog contained 26 unique tools; the frozen plan expected 26 successes and zero expected errors. Actual first-issued outcomes were 23 successes and three unexpected failures: original-fixture arbitrary CLI code, original-fixture CLI missing summary, and the 2 MB area screenshot. Exactly three authorized recovery invocations passed, so all 26 unique tools ended with a usable determinate success. The preventive 48 KB window screenshot is one recorded deviation, not a fourth failure or recovery.
 
-Unresolved modeling correctness failures: **0**. Irrecoverable historical evidence gaps: **1** (`MODEL-RUN-11`, kept explicit). Repository remediation pending: exactly the two files named above. External/runtime observations not locally repaired: `MODEL-RUN-08`, `MODEL-RUN-09`, `MODEL-PLAN-09`, and `MODEL-RUN-10`; none invalidated the model or tool-call acceptance, and `MODEL-RUN-10` remains evidence-insufficient for its inferred thread/session mapping. Both renders, all seven visual criteria, structural acceptance, containment, catalog/table equality and safety boundaries pass. No user `.blend` was opened, saved or overwritten.
+Unresolved modeling correctness failures: **0**. Irrecoverable historical evidence gaps: **1** (`MODEL-RUN-11`, kept explicit). Repository remediation now consists of the runbook, the exact two-line gate hardening, and the two-subcommand audit CLI. External/runtime observations not locally repaired: `MODEL-RUN-08`, `MODEL-RUN-09`, `MODEL-PLAN-09`, and `MODEL-RUN-10`; none invalidated the model or tool-call acceptance, and `MODEL-RUN-10` remains evidence-insufficient for its inferred thread/session mapping. The retained historical conclusions for both renders, all seven visual criteria, structural acceptance, containment, catalog/table equality and safety boundaries pass. No user `.blend` was opened, saved or overwritten.
