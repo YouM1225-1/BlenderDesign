@@ -335,9 +335,9 @@ Use exactly these ignored review reports for round `N`:
 .superpowers/sdd/modeling-remediation/plan-ponytail-review-rN.md
 ```
 
-For this corrected Git-provenance revision set `N=12`; do not reuse any r11 report or
-verdict. If r12 finds anything, use the next unused integer for the complete corrected
-bytes.
+For this self-contained post-cleanup evidence revision set `N=18`; do not reuse any
+r13/r15/r16/r17 report or aborted r14 reviewer state. If r18 finds anything, use the
+next unused integer for the complete corrected bytes.
 
 Before dispatch, compute `shasum -a 256` for the Plan. Each reviewer prompt and report
 must name that digest; a verdict on another digest is invalid. This is a tracked
@@ -535,7 +535,45 @@ the baseline feature commit's checks Git blob, old checks SHA-256
 failure-evidence SHA-256
 `ebd57eee1c24b90c4a68d71b112c2682cf879f5ca345231960071661131edbd5`.
 The record also binds feature HEAD, immutable `review_base_head`,
-`initial_main_anchor`, official source HEAD/clean, and the three fixture/two PNG hashes.
+`initial_main_anchor`, and official source HEAD/clean.
+
+Record the Task 0 capture failure after the historical
+`/private/tmp/bcx-official-mcp-modeling-20260810` run root was observed absent on
+2026-08-11 as `POSTPLAN-ENV-02` in prose only. All five 2026-08-10 fixture/PNG hashes remain in this
+Plan and the retained raw run report. Before Task 4, the active audit contains the two
+PNG hash literals and the historical modeling/visual conclusions, but not the three
+fixture hash literals; Task 4 must add the complete five-hash historical ledger. The
+ledger is:
+
+- `library_source.blend`:
+  `9e34c9a96ec59a1f7ceda557dfd77c3ca3a461f929e477ae50588176a61a8f62`;
+- `lamp_fixture.blend`:
+  `248c0f22fd46d9b45cb93fd736a1decec94c436fcb66bf5bf2fa01843a46ff12`;
+- `lamp_fixture_persisted_missing.blend`:
+  `bd5ac7a7955e70c8902ac46ac753975e4b60605b6eb30cca759765d68a54b9f5`;
+- `thumbnail.png`:
+  `7a4799be69540a5faa24080d6d24cdfd23050ef692651d5be92881aae66f4bcb`;
+- `viewport.png`:
+  `1bde67e12dbb50fb7dc1a94a69b484dbcfa410e60164b484a475b2c5fdcd8e14`.
+
+The responsible cleanup process is unknown; ordinary temporary-directory cleanup is a
+supported inference, not a directly observed attribution. The exact terminal symptom was
+`RuntimeError: required path missing: /private/tmp/bcx-official-mcp-modeling-20260810`.
+The failed capture was not separately timed and stopped before creating
+`.superpowers/sdd/modeling-remediation/external-baseline` or `baseline.json`; no partial
+baseline exists. The binary files are unavailable and are not remeasured. Two same-script
+Blender 5.2 recovery attempts produced different `.blend` hashes from each other and
+from history: attempt 1 produced library
+`71bf2b089c360a8cc74c6bb5071fe87c54fd9327e71b22a0fcf7c87a7d4a889d` and fixture
+`80e300e8d9ffd02620df7568a87ecf6699c93086fc7419de413f8cc0fc5bbd3f`
+(`950.192` ms process wall, `99.744` ms Blender-internal); attempt 2 produced library
+`d97c8d806505a2d0ade7063644c5de0b3f30c31dc4b4f91153989de65b680ae8` and fixture
+`30e34c1836486cf4418b51790ba431685de368ebc5d9444e032974170478b5aa`
+(`78.753` ms Blender-internal; process wall was not separately bracketed). Reconstructed
+bytes must not be substituted for the historical artifacts. `POSTPLAN-ENV-02` is not a
+25th `MODEL-*` finding and must not enter the
+runbook disposition table or audit-CLI issue-ID fields.
+
 At capture both main fields equal the uniquely resolved clean main HEAD. It never prints
 or stores config/preference contents or unrelated values. Any absent, symlinked,
 foreign-owned, non-regular, or world-writable protected input stops the run. Tasks 4–5 pass
@@ -1211,6 +1249,33 @@ Append to the active audit under `## Adversarial audit and retest`:
   workspace metadata sweep; uv did not reproduce the flag mutation; the exact
   responsible process remains unknown. Do not attribute the sweep to a measured Codex
   process;
+- `POSTPLAN-ENV-02` in separate prose: the historical temporary run root observed absent
+  on 2026-08-11, with the responsible cleanup process unknown and ordinary temp cleanup
+  labeled only as a supported inference; record the failed pre-write Appendix E capture
+  with exact terminal symptom
+  `RuntimeError: required path missing: /private/tmp/bcx-official-mcp-modeling-20260810`,
+  its not-separately-timed status, and the fact that it stopped before creating the
+  external-baseline directory or `baseline.json`; then record both same-script Blender
+  5.2 recovery attempts and these self-contained measurements: attempt 1 library
+  `71bf2b089c360a8cc74c6bb5071fe87c54fd9327e71b22a0fcf7c87a7d4a889d`, fixture
+  `80e300e8d9ffd02620df7568a87ecf6699c93086fc7419de413f8cc0fc5bbd3f`,
+  process wall `950.192` ms and Blender-internal `99.744` ms; attempt 2 library
+  `d97c8d806505a2d0ade7063644c5de0b3f30c31dc4b4f91153989de65b680ae8`, fixture
+  `30e34c1836486cf4418b51790ba431685de368ebc5d9444e032974170478b5aa`,
+  Blender-internal `78.753` ms and no separately bracketed process wall. State that the
+  differing regenerated hashes prove only semantic reconstruction is possible. Preserve
+  this exact historical-only ledger: `library_source.blend`
+  `9e34c9a96ec59a1f7ceda557dfd77c3ca3a461f929e477ae50588176a61a8f62`,
+  `lamp_fixture.blend`
+  `248c0f22fd46d9b45cb93fd736a1decec94c436fcb66bf5bf2fa01843a46ff12`,
+  `lamp_fixture_persisted_missing.blend`
+  `bd5ac7a7955e70c8902ac46ac753975e4b60605b6eb30cca759765d68a54b9f5`,
+  `thumbnail.png`
+  `7a4799be69540a5faa24080d6d24cdfd23050ef692651d5be92881aae66f4bcb`,
+  and `viewport.png`
+  `1bde67e12dbb50fb7dc1a94a69b484dbcfa410e60164b484a475b2c5fdcd8e14`;
+  retain the historical visual conclusions, state `unavailable and not remeasured`, and
+  do not present regenerated bytes as original evidence;
 - the baseline old checks SHA-256
   `c0798f66b9b1ac6ed7e85b772adc0cca24b6c5f69ebb5df2e1b742a7c745307e`,
   retained Task 0 evidence SHA-256
@@ -1233,8 +1298,8 @@ Append to the active audit under `## Adversarial audit and retest`:
 - positive and negative fixture results;
 - dynamic live/source/config/table count and equality;
 - journal event count/clock ID pairing and measured integration time;
-- unchanged frozen-file hashes, source pin/clean state, fixture/PNG hashes, and 369 test
-  inventory;
+- unchanged frozen-file hashes, source pin/clean state, historical-only fixture/PNG
+  hashes, their unavailable/not-remeasured status, and the 369-test inventory;
 - explicit statement that upstream/runtime observations remain mitigated rather than
   locally patched.
 
@@ -1309,8 +1374,9 @@ excludes `scripts`.
 - [ ] **Step 2: Finalize all tracked evidence**
 
 Update the active audit with the exact focused-probe output, current commit IDs,
-external-baseline comparisons, official source pin/clean state, fixture/PNG hashes, and
-the prior validated unsaved Blender state explicitly labeled historical. Do not claim
+external-baseline comparisons, official source pin/clean state, historical fixture/PNG
+hashes explicitly labeled unavailable/not remeasured, and the prior validated unsaved
+Blender state explicitly labeled historical. Do not claim
 that the post-commit full gate has already run. Set `Status: remediation implementation
 complete; final gate evidence is bound in the ignored Task 5 report and terminal review`.
 No tracked edit follows this final audit commit.
@@ -4348,7 +4414,7 @@ anchor is used. After a clean Phase M gate failure, set it to the exact prior re
 HEAD for the next fix-forward round; the review package base does not move.
 
 The recorder starts before the first App Server, effective-config, on-disk config,
-source, external-baseline, fixture, PNG, audit, or Git-scope integration read. Bootstrap
+source, external-baseline, audit, or Git-scope integration read. Bootstrap
 operations needed solely to create the private directory/FIFO and start the
 repository-owned recorder are not integration reads.
 
@@ -5426,16 +5492,6 @@ source_clean = git(source_root, "status", "--porcelain=v1", "--untracked-files=a
 if current_source != baseline["source_head"] or not source_clean:
     raise RuntimeError("official source state changed")
 
-artifact_hashes = baseline.get("artifact_hashes")
-if not isinstance(artifact_hashes, dict):
-    raise RuntimeError("artifact hash baseline missing")
-for name, expected_hash in artifact_hashes.items():
-    entry = paths.get(name)
-    if not isinstance(entry, dict):
-        raise RuntimeError(f"artifact path missing: {name}")
-    if measure(Path(entry["resolved_path"]), "file")["sha256"] != expected_hash:
-        raise RuntimeError(f"artifact hash changed: {name}")
-
 base_commit = os.environ["BASE_COMMIT"]
 subprocess.run(
     ["git", "-C", os.fspath(feature_root), "merge-base", "--is-ancestor",
@@ -5506,7 +5562,6 @@ print(json.dumps({
     "main_clean": main_clean,
     "source_head": current_source,
     "source_clean": source_clean,
-    "artifact_hashes": artifact_hashes,
     "net_tracked_scope_count": len(changed),
     "history_tracked_scope_count": len(history_changed),
     "active_audit_dirty": expected_dirty,
@@ -5644,7 +5699,7 @@ Expected:
   digest and immediate verbatim first hypothesis to the ignored Task report, signals
   the resume FIFO, then observes call/stage/Task closure and a nonzero exit; no default,
   reconstruction, sanitization, or cross-run recovery link is created;
-- the external paths, artifact hashes, source pin/clean state, fixed round main anchor,
+- the external paths, source pin/clean state, fixed round main anchor,
   immutable original review base, main cleanliness, and feature ancestry remain valid;
 - the ignored Task 1 report has exactly one of each raw freshness/sweep marker, common
   Task 1 HEADs, replacement-disabled Git-bound old/current adapter and final-checks
@@ -5666,27 +5721,24 @@ Run this after the approved Plan-only commit and before Task 1. The output is ig
 It reads the Codex config only to validate TOML and resolve the configured
 `--with-editable` checkout; config and Blender preference contents are never printed.
 It locates `main` by parsing `git worktree list --porcelain` and requires exactly one
-worktree whose branch is `refs/heads/main`.
-
-The default modeling root is the already canonical `/private/tmp/...` spelling. A
-caller-supplied `/tmp/...` or any other path containing a symlink component is rejected;
-the command never calls `realpath` first and then treats the result as the original
-input.
+worktree whose branch is `refs/heads/main`. Historical modeling artifacts are not
+external baseline inputs: their temporary root was observed absent after date rollover
+with the cleanup process unknown, independent Blender saves are not byte-deterministic,
+and the retained hashes are historical-only.
 
 ```bash
 /bin/bash -euo pipefail <<'BASH'
 UV_BIN="${UV_BIN:-$HOME/.local/bin/uv}"
 CODEX_CONFIG="${CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
 BLENDER_USERPREF="${BLENDER_USERPREF:-$HOME/Library/Application Support/Blender/5.2/config/userpref.blend}"
-MODEL_RUN_ROOT="${MODEL_RUN_ROOT:-/private/tmp/bcx-official-mcp-modeling-20260810}"
 
-for resolved_path in "$UV_BIN" "$CODEX_CONFIG" "$BLENDER_USERPREF" "$MODEL_RUN_ROOT"; do
+for resolved_path in "$UV_BIN" "$CODEX_CONFIG" "$BLENDER_USERPREF"; do
   case "$resolved_path" in
     /*) ;;
     *) echo "STOP: required path is not absolute: $resolved_path" >&2; exit 1 ;;
   esac
 done
-export CODEX_CONFIG BLENDER_USERPREF MODEL_RUN_ROOT
+export CODEX_CONFIG BLENDER_USERPREF
 
 "$UV_BIN" run --quiet --no-project --python 3.13 python - <<'PY'
 from __future__ import annotations
@@ -5704,15 +5756,6 @@ UID = os.getuid()
 PINNED_SOURCE = "4309a39646e644261624bfcd2bca669b343b7621"
 OLD_CHECKS_SHA256 = "c0798f66b9b1ac6ed7e85b772adc0cca24b6c5f69ebb5df2e1b742a7c745307e"
 RETAINED_EVIDENCE_SHA256 = "ebd57eee1c24b90c4a68d71b112c2682cf879f5ca345231960071661131edbd5"
-EXPECTED_ARTIFACTS = {
-    "library_source.blend": "9e34c9a96ec59a1f7ceda557dfd77c3ca3a461f929e477ae50588176a61a8f62",
-    "lamp_fixture.blend": "248c0f22fd46d9b45cb93fd736a1decec94c436fcb66bf5bf2fa01843a46ff12",
-    "lamp_fixture_persisted_missing.blend": "bd5ac7a7955e70c8902ac46ac753975e4b60605b6eb30cca759765d68a54b9f5",
-    "thumbnail.png": "7a4799be69540a5faa24080d6d24cdfd23050ef692651d5be92881aae66f4bcb",
-    "viewport.png": "1bde67e12dbb50fb7dc1a94a69b484dbcfa410e60164b484a475b2c5fdcd8e14",
-}
-
-
 def canonical(path: Path) -> Path:
     absolute = Path(os.path.abspath(os.fspath(path)))
     resolved = Path(os.path.realpath(absolute))
@@ -5882,24 +5925,6 @@ source_root = directory(editable_root.parent)
 
 preference_path, _, preference_content = file_bytes(Path(os.environ["BLENDER_USERPREF"]))
 directory(preference_path.parent)
-model_run_root = directory(Path(os.environ["MODEL_RUN_ROOT"]))
-render_root = directory(model_run_root / "renders")
-artifact_paths = {
-    "library_source.blend": model_run_root / "library_source.blend",
-    "lamp_fixture.blend": model_run_root / "lamp_fixture.blend",
-    "lamp_fixture_persisted_missing.blend": model_run_root / "lamp_fixture_persisted_missing.blend",
-    "thumbnail.png": render_root / "thumbnail.png",
-    "viewport.png": render_root / "viewport.png",
-}
-artifact_metadata: dict[str, dict[str, Any]] = {}
-artifact_hashes: dict[str, str] = {}
-for name, artifact_path in artifact_paths.items():
-    resolved, _, content = file_bytes(artifact_path)
-    digest = hashlib.sha256(content).hexdigest()
-    if digest != EXPECTED_ARTIFACTS[name]:
-        raise RuntimeError(f"artifact hash mismatch: {name}")
-    artifact_hashes[name] = digest
-    artifact_metadata[name] = metadata(resolved, "file", content)
 
 source_head = git(source_root, "rev-parse", "HEAD")
 source_clean = git(source_root, "status", "--porcelain=v1", "--untracked-files=all") == ""
@@ -5932,8 +5957,6 @@ record = {
         "codex_config": metadata(config_path, "file", config_content),
         "blender_userpref": metadata(preference_path, "file", preference_content),
         "source_root": metadata(source_root, "directory"),
-        "model_run_root": metadata(model_run_root, "directory"),
-        **artifact_metadata,
     },
     "feature_head": feature_head,
     "gate_provenance": {
@@ -5945,7 +5968,6 @@ record = {
     "initial_main_anchor": initial_main_anchor,
     "source_head": source_head,
     "source_clean": source_clean,
-    "artifact_hashes": artifact_hashes,
 }
 output = baseline_root / "baseline.json"
 write_json(output, record)
@@ -5956,10 +5978,11 @@ BASH
 ```
 
 Expected: exactly one main worktree is found; `review_base_head` and
-`initial_main_anchor` both equal its captured clean HEAD; source pin/clean and all five artifact
-hashes match; the private baseline directory is mode `0700`; `baseline.json` is a
+`initial_main_anchor` both equal its captured clean HEAD; source pin/clean matches; the
+private baseline directory is mode `0700`; `baseline.json` is a
 current-UID regular non-symlink mode-`0600` file; stdout contains only resolved
-path/type/UID/mode/SHA metadata, feature/main HEAD, source HEAD/clean, artifact hashes,
+path/type/UID/mode/SHA metadata, feature/main HEAD, source HEAD/clean,
 the committed old-checks blob/SHA-256, retained-evidence SHA-256, and the baseline path.
 The mutable checks path is not added to generic unchanged `paths`. Config and
-preference contents are absent.
+preference contents are absent. Historical fixture/PNG files are not read, and their
+previously recorded hashes are not described as current comparisons.
