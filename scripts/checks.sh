@@ -2,6 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PYTHONDONTWRITEBYTECODE=1
+export UV_NO_EDITABLE=1
 
 find protocol bridge server smoke scripts tests -type d -name __pycache__ \
   -prune -exec rm -rf '{}' +
@@ -26,6 +27,7 @@ if grep -rnE '^[[:space:]]*(import bpy|from bpy)' bridge/core protocol --include
 fi
 "$UV_BIN" run --frozen python scripts/vendor_protocol.py            # 生成
 "$UV_BIN" run --frozen python scripts/vendor_protocol.py --check    # 检查 2
+"$UV_BIN" sync --frozen --python 3.13 --reinstall-package blender-codex
 "$UV_BIN" run --frozen python scripts/nested_import_smoke.py        # 检查 3
 "$UV_BIN" run --frozen pytest -q                                    # L1 + L2
 echo "ALL CHECKS PASSED"
