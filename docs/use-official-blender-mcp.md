@@ -27,8 +27,9 @@ catalog 与 configured catalog 必须动态、逐名相等。不得把工具数�
 
 ## 2. Shell 与 SDD 纪律
 
-所有标为 Bash 的 fence 都使用 `/bin/bash -euo pipefail` 执行，不把它们直接交给
-默认 zsh。zsh 的 `path` 是与 `PATH` 联动的特殊参数；循环变量使用
+所有使用 Bash 语法的命令——包括 fence、临时 loop、数组、`set --`、here-document
+和复制/校验命令——都使用 `/bin/bash -euo pipefail` 执行，不直接交给默认 zsh。
+zsh 的 `path` 是与 `PATH` 联动的特殊参数；循环变量使用
 `fixture_path` 等普通名称。
 
 SDD 的 brief 必须使用 helper 的第三个 `OUTFILE` 参数：
@@ -92,7 +93,10 @@ factory 数据和 allowlist 之外的既有对象不得修改。
 
 最终结构验收使用 exact set、data 名称、parent chain、collection membership、
 active/selected、library、missing-file 路径和明确排除 ground 后的数值 bounds。
-summary 工具只能作为交叉验证，不能替代 exact assertion。
+每个角点先转为 `mathutils.Vector(corner)`，再计算
+`obj.matrix_world @ Vector(corner)`。对已放置到世界坐标的对象设置 parent 时，先
+`world = obj.matrix_world.copy()`，赋值 parent，再恢复 `obj.matrix_world = world`，
+并立即断言世界矩阵不变。summary 只能交叉验证，不能替代 exact assertion。
 
 ## 4. Locale 与场景身份
 
@@ -101,6 +105,45 @@ summary 工具只能作为交叉验证，不能替代 exact assertion。
 
 - Principled shader：`node.type == "BSDF_PRINCIPLED"`；
 - World background：`node.type == "BACKGROUND"`。
+
+节点 input 也不得按 display name 或猜测的版本名查找。枚举 `node.inputs`，按唯一
+`NodeSocket.identifier` 查找并读回。Blender 5.2 Principled metallic 的 identifier
+是 `Metallic`，不是 `Metallic IOR Level`：
+
+```python
+if not __debug__:
+    raise SystemExit("STOP: 结构断言 payload 需要 assertions；不得设置 PYTHONOPTIMIZE")
+
+
+def unique_socket(node, identifier):
+    matches = [item for item in node.inputs if item.identifier == identifier]
+    assert len(matches) == 1
+    return matches[0]
+
+
+metallic = unique_socket(principled, "Metallic")
+background_color = unique_socket(background, "Color")
+background_strength = unique_socket(background, "Strength")
+metallic.default_value = 0.8
+background_color.default_value = (0.004, 0.006, 0.012, 1.0)
+background_strength.default_value = 0.18
+assert abs(metallic.default_value - 0.8) <= 1e-6
+assert all(
+    abs(actual - expected) <= 1e-6
+    for actual, expected in zip(
+        background_color.default_value,
+        (0.004, 0.006, 0.012, 1.0),
+    )
+)
+assert abs(background_strength.default_value - 0.18) <= 1e-6
+```
+
+每个带 `assert` 的 payload 都必须以上面的 `if not __debug__:` 守卫开头。`-O` 会
+整段剥除 `assert`，把结构验收静默降级成无操作；守卫让这种解释器直接拒绝运行。
+
+所有 RNA float readback 都使用 `1e-6` tolerance；禁止 decimal exact equality。
+World Background 的 `Color`/`Strength` 同样是 identifier，不得使用 display-name
+subscript lookup。
 
 由本次运行创建的名称必须使用计划中的固定 ASCII 名称。
 
@@ -121,6 +164,11 @@ collection membership 和 active/selected 状态共同证明。
 7. 完整重跑 preflight，再从 Phase 1 全量 replay 一次；
 8. recovery 使用新的 event ID，设置正整数 `attempt` 并引用 `recovery_of`。
 
+同一 recorder 内 linked recovery 的 literal issue-ID set 必须与原失败相同。若
+recovery 暴露独立 symptom 或不同 issue-ID，保留整个 journal 为 invalid evidence，
+discard unsaved scene，并用新 recorder PID、新 `clock_id`、`attempt=0` 全量重跑。
+不得改写 issue ID、拼接 recorder 或跨 clock 设置 `recovery_of`。
+
 同一失败再次出现时停止盲目重试，保留两次证据并进入根因分析。不得用 `.001`
 对象、局部删除或强制修改 dirty flag 掩盖 partial state。
 
@@ -139,6 +187,33 @@ collection membership 和 active/selected 状态共同证明。
 命令在 `/bin/bash -euo pipefail` 下运行。执行后重新验证固定 checkout clean，
 且没有生成 `uv.lock`。
 
+每个将发送给 GUI/CLI execution tool 的完整 Python payload 都先 exclusive-create 为
+run root 下 native mode `0600` 的普通非 symlink 文件，再用同一 uv-managed Python
+3.13 预编译：
+
+```bash
+test -f "$PAYLOAD_FILE"
+test ! -L "$PAYLOAD_FILE"
+test "$(stat -f '%u' "$PAYLOAD_FILE")" = "$(id -u)"
+test "$(stat -f '%Lp' "$PAYLOAD_FILE")" = 600
+"$UV_BIN" run --quiet --no-project --python 3.13 \
+  python - "$PAYLOAD_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+payload_path = Path(sys.argv[1])
+payload = payload_path.read_bytes()
+compile(payload, str(payload_path), "exec")
+print(f"PAYLOAD_COMPILE_GREEN bytes={len(payload)}")
+PY
+```
+
+发送给 tool 的 code 必须与该已编译文件 byte-for-byte 相同。CLI read-only probe
+先只返回 determinate `observations`（包括 raw 与 `bpy.path.abspath()` 后的 canonical
+path），controller 先持久化完整 response，再在 tool 外对 observation 做 exact
+assertion。不得在返回 observation 之前猜测 saved-path/list representation；否则一次
+blank assertion error 会同时丢失诊断值。语法失败也不得作为 MCP recovery 发送。
+
 断言返回字段前先读固定源码的响应 contract；官方 API 搜索结果字段是 `hits`，
 不得猜测为 `results`。Cylinder operator 的已验证查询为：
 
@@ -148,10 +223,21 @@ bpy.ops.mesh primitive_cylinder_add
 
 不要发送已知返回零结果的自然语言拆分形式。
 
+精确 member query 返回 `kind=partial, found=false` 是 determinate non-match，不是可把
+同一请求重试成 pass 的 transport failure；先原样保存该 response，再查询它的 owning
+type。`bpy.types.NodeSocket.identifier` 的固定 owning-type query 是
+`bpy.types.NodeSocket`，只接受 owning-type response 的 `found=true` 且
+`kind=exact`。不得把 member-level partial 改写成 found，也不得猜测另一个
+member path。
+
 Blender 保存时可能丢弃 zero-user image。需要在保存后仍存在的受控 missing-image
 fixture，保存前设置 `use_fake_user=True`，然后重新打开文件验证 image 和 missing
 路径。已有 fixture 保持不变；需要恢复时创建新的 derived fixture，并只对失败工具
 重试一次。
+
+library/image filepath 可能是 `//library_source.blend`。必须先调用
+`bpy.path.abspath(item.filepath)`，再交给 `Path(...).resolve()`；直接解析 `//`
+字符串会错误得到 `/library_source.blend`。
 
 ## 7. Blender 5.2 与上游限制
 
@@ -181,7 +267,8 @@ render 前从 Blender 读取 `bpy.app.tempdir` 并先做 `realpath`。安全检�
 absence，再只创建这一层 mode `0700` 目录；若已存在，则必须是当前 UID 所有的
 普通非 symlink 私有目录，否则停止。
 
-每次 render 使用包含 `RUN_STEM` 和唯一随机后缀的 basename。调用前分别对官方
+每次 render 使用包含所选 `attempt-000N`、call event ID 和 first/repeat identity 的
+唯一 basename。调用前分别对官方
 source target 和 run-root copy target 执行 `lstat`，两者都必须不存在；不能用
 `exists()` 代替，因为 broken symlink 也必须拒绝。
 
@@ -231,8 +318,24 @@ exec 9>"$EVENT_FIFO"
 必须是首个 event，唯一 Task end 必须是末个 event，所有 stage/call 都位于其间。
 failure end event 必须在 recovery start event 之前包含非空 `symptom`、调用者原样
 提供的 `first_hypothesis` 和 literal issue IDs；deviation 与 linked recovery end 也必须
-有非空 literal issue IDs。记录 `attempt`、`recovery_of`、MCP wall 和 Blender internal
-time；不推测缺失值。
+有非空 literal issue IDs。记录 `attempt` 与 `recovery_of`；只有 tool response
+明确提供的内部计时才可记录为 Blender internal time；缺失时省略 `internal_ms` 键，
+不要写 `unavailable`（recorder 只接受 JSON number，且禁止任何额外键，字符串会使整轮
+journal 被判 invalid 且不得编辑后重验）。
+audit-recorder 的 start/end envelope 永远不是 MCP wall，也不得写入 `internal_ms`
+冒充 tool 内部耗时。
+
+实际 MCP dispatch wall 只能由同一个同步 controller 在直接
+`await ClientSession.call_tool(...)` 前后调用 `time.monotonic_ns()` 得出，并以
+`controller_dispatch_wall_ms` 与 tool name、ordinal、attempt、canonical arguments
+SHA-256、完整 `CallToolResult` SHA-256 一起写入独立 evidence record。若 direct
+controller timing 不可用，明确记录 `unavailable`，不得生成 server-compute duration。
+recorder envelope 与 direct controller wall 的差值不做相减归因；只有同一 controller
+显式测得的非-MCP orchestration phase 才可称为 `unattributed orchestration`。
+
+recorder 因 identity、issue-ID 或 recovery-chain 拒绝输入时，保留 journal、stderr、
+PID 和 `clock_id` 并将整轮标记 invalid；不得编辑后重验。下一轮使用新私有 root、
+recorder 和 factory scene。
 
 结束时先发送 Task end，关闭 FD，等待 recorder 正常退出，再运行 `validate`：
 
@@ -249,9 +352,8 @@ wait "$RECORDER_PID"
   --config-catalog "$CONFIG_CATALOG"
 ```
 
-只有 validate 成功后才能报告 coverage、duration 或 recovery 结论。stage
-monotonic duration 减去 MCP wall 的剩余部分只能称为
-`unattributed orchestration`，不能称为 LLM time。
+只有 recorder、direct-controller evidence validator 与 repository `validate` 都成功后
+才能报告 coverage、duration 或 recovery 结论。
 
 潜在异常阈值为：summary/docs/navigation `5,000 ms`、screenshot `10,000 ms`、
 thumbnail `30,000 ms`、viewport `60,000 ms`。首次成功调用超过对应阈值时，保留
@@ -279,24 +381,24 @@ uv launcher 和 `blender-mcp` child 数量及 RSS；同时记录
 
 | Issue ID | Disposition | 规则 |
 |---|---|---|
-| `MODEL-SHELL-01` | `prevented_by_runbook` | 显式 Bash，避开 zsh `path` 特殊参数 |
+| `MODEL-SHELL-01` | `prevented_by_runbook` | 所有 Bash 语法显式 `/bin/bash` |
 | `MODEL-SDD-01` | `prevented_by_runbook` | helper 第三个 `OUTFILE`，禁止 stdout 覆盖 brief |
 | `MODEL-SDD-02` | `prevented_by_runbook` | run-scoped brief/report stem 与前后存在性检查 |
-| `MODEL-RUN-01` | `prevented_by_runbook` | 使用唯一稳定 RNA type，不依赖本地化 display name |
+| `MODEL-RUN-01` | `prevented_by_runbook` | 唯一 node type 与 `NodeSocket.identifier` |
 | `MODEL-RUN-02` | `prevented_by_runbook` | dirty 仅观察，exact structure 证明身份 |
 | `MODEL-RUN-03` | `prevented_by_audit` | 解析 exact table 和 literal issue IDs |
 | `MODEL-RUN-04` | `prevented_by_audit` | 单一 recorder、同一 clock ID 和成对事件 |
 | `MODEL-RUN-05` | `prevented_by_runbook` | 绝对 uv 与 Python 3.13 |
-| `MODEL-RUN-06` | `prevented_by_runbook` | missing image 使用 fake user 和 derived fixture |
+| `MODEL-RUN-06` | `prevented_by_runbook` | fake-user fixture；先 `bpy.path.abspath` 再 canonicalize |
 | `MODEL-RUN-07` | `prevented_by_runbook` | 有效 editable dependencies 与源码确认响应字段 |
 | `MODEL-RUN-08` | `mitigated_only` | 48 KB screenshot cap；上游传输根因未改动 |
 | `MODEL-RUN-09` | `mitigated_only` | 安全创建最终 scratch parent；上游未自动创建 |
 | `MODEL-RUN-10` | `diagnostic_only` | 只记录 process delta 并正常退出 host |
 | `MODEL-RUN-11` | `future_prevention_only` | 未来 failure 必须先持久化 first hypothesis；历史缺口保留 |
 | `MODEL-PLAN-01` | `prevented_by_runbook` | 运行时发现并读回 `BLENDER_EEVEE` |
-| `MODEL-PLAN-02` | `prevented_by_runbook` | transactional precondition、discard 和 full replay |
+| `MODEL-PLAN-02` | `prevented_by_runbook` | recorder identity、discard 和 full replay |
 | `MODEL-PLAN-03` | `prevented_by_runbook` | 精确声明 Scene/World/render/datablock 写入范围 |
-| `MODEL-PLAN-04` | `prevented_by_runbook` | exact sets、parents、data、bounds 与 summary 交叉验证 |
+| `MODEL-PLAN-04` | `prevented_by_runbook` | world-preserving parent 与 Vector bounds |
 | `MODEL-PLAN-05` | `prevented_by_runbook_and_audit` | one-clock journal 与机器校验 |
 | `MODEL-PLAN-06` | `prevented_by_runbook` | 使用 source-proven operator query |
 | `MODEL-PLAN-07` | `prevented_by_audit` | 动态 catalog equality 和结果表 `Counter` |
@@ -313,7 +415,8 @@ uv launcher 和 `blender-mcp` child 数量及 RSS；同时记录
 - [ ] 官方 source pin、SDK boundary、Blender version 和动态 catalog equality 通过；
 - [ ] recorder 在任何工作读取前启动，Task/stage/call events 全部成对；
 - [ ] 唯一 listener、factory scene、target absence 与 exact write allowlist 通过；
-- [ ] locale-safe RNA、dirty observation 和 transactional recovery 规则已执行；
+- [ ] locale-safe node/socket、dirty observation 和 transactional recovery 已执行；
+- [ ] world-preserving parent、Vector bounds、recorder/recovery identity 已执行；
 - [ ] fixture、docs query、48 KB screenshot 与 Blender engine contract 通过；
 - [ ] render source/copy 的 absence、containment、lstat、PNG 和 hash 通过；
 - [ ] exact structural assertion 与所有官方工具结果通过；
