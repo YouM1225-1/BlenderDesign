@@ -336,38 +336,164 @@ def record(output: str) -> dict[str, object]:
     return {"status": "ok", "clock_id": clock_id, "events": count}
 
 
-def read_owned_regular(raw_path: str, label: str) -> str:
-    try:
-        before = os.lstat(raw_path)
-    except OSError as exc:
-        raise AuditError("INPUT", f"{label}: unavailable") from exc
-    if (
-        stat.S_ISLNK(before.st_mode)
-        or not stat.S_ISREG(before.st_mode)
-        or before.st_uid != os.getuid()
-    ):
-        raise AuditError("INPUT", f"{label}: expected owned non-symlink regular file")
+JOURNAL_MAX_BYTES = 16 * 1024 * 1024
+AUDIT_MAX_BYTES = 4 * 1024 * 1024
+LIVE_CATALOG_MAX_BYTES = 1024 * 1024
+SOURCE_CATALOG_MAX_BYTES = 1024 * 1024
+CONFIG_CATALOG_MAX_BYTES = 1024 * 1024
+READ_CHUNK_BYTES = 64 * 1024
+INPUT_LIMITS = {
+    "journal": JOURNAL_MAX_BYTES,
+    "audit": AUDIT_MAX_BYTES,
+    "live catalog": LIVE_CATALOG_MAX_BYTES,
+    "source catalog": SOURCE_CATALOG_MAX_BYTES,
+    "config catalog": CONFIG_CATALOG_MAX_BYTES,
+}
 
-    fd = -1
+InputIdentity = tuple[int, int, int, int, int, int, int, int]
+ParentIdentity = InputIdentity
+
+
+def input_identity(info: os.stat_result) -> InputIdentity:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def parent_identity(info: os.stat_result) -> ParentIdentity:
+    return input_identity(info)
+
+
+def read_owned_regular(raw_path: str, label: str, limit: int) -> str:
+    allowed = INPUT_LIMITS.get(label)
+    if (
+        allowed is None
+        or limit <= 0
+        or limit > allowed
+        or not raw_path
+        or "\x00" in raw_path
+    ):
+        raise AuditError("INPUT", f"{label}: invalid path, role, or limit")
+    absolute = os.path.abspath(raw_path)
+    parent = os.path.dirname(absolute)
+    leaf = os.path.basename(absolute)
+    if (
+        not leaf
+        or leaf in {".", ".."}
+        or os.path.realpath(parent) != parent
+    ):
+        raise AuditError("INPUT", f"{label}: non-canonical parent or leaf")
+
     try:
-        fd = os.open(raw_path, os.O_RDONLY | os.O_NOFOLLOW)
-        after = os.fstat(fd)
+        parent_before = os.lstat(parent)
+    except OSError as exc:
+        raise AuditError("INPUT", f"{label}: parent unavailable") from exc
+    # Only `audit` is relaxed, and only because it is a git-tracked file: mode 0644 under
+    # a 0755 directory on every normal checkout, so requiring the writer's 0600/0700
+    # would reject the tracked active audit on every clean run. The other four labels are
+    # this run's own evidence, written by `new_output` at 0600 under a 0700 root, and are
+    # held to exactly that. Applying the tracked-file relaxation to all five was one
+    # rationale covering one label of the five it governed.
+    tracked = label == "audit"
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or (
+            stat.S_IMODE(parent_before.st_mode) & 0o022
+            if tracked
+            else stat.S_IMODE(parent_before.st_mode) != 0o700
+        )
+    ):
+        raise AuditError("INPUT", f"{label}: unsafe parent directory")
+
+    parent_fd = -1
+    descriptor = -1
+    try:
+        parent_fd = os.open(
+            parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        parent_opened = os.fstat(parent_fd)
+        parent_current = os.lstat(parent)
+        bound_parent = parent_identity(parent_before)
         if (
-            (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
-            or after.st_uid != os.getuid()
-            or not stat.S_ISREG(after.st_mode)
+            parent_identity(parent_opened) != bound_parent
+            or parent_identity(parent_current) != bound_parent
         ):
+            raise AuditError("INPUT", f"{label}: parent changed while opening")
+
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = input_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            # The leaf half of the same per-label rule. Only the parent half was
+            # implemented, so a `journal` leaf at 0755 under a 0700 parent was accepted
+            # while the comment claimed the four evidence labels were held to 0600.
+            or (
+                stat.S_IMODE(before.st_mode) & 0o022
+                if tracked
+                else stat.S_IMODE(before.st_mode) != 0o600
+            )
+            or before.st_size <= 0
+            or before.st_size > limit
+        ):
+            raise AuditError("INPUT", f"{label}: unsafe file metadata or size")
+
+        descriptor = os.open(
+            leaf,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+        opened = os.fstat(descriptor)
+        if input_identity(opened) != bound:
             raise AuditError("INPUT", f"{label}: changed while opening")
-        with open(fd, "rb", closefd=True) as handle:
-            fd = -1
-            payload = handle.read()
+
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(READ_CHUNK_BYTES, remaining))
+            if not chunk:
+                raise AuditError("INPUT", f"{label}: shrank while reading")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise AuditError("INPUT", f"{label}: grew while reading")
+
+        after = os.fstat(descriptor)
+        current = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        parent_after = os.fstat(parent_fd)
+        parent_path_after = os.lstat(parent)
+        if input_identity(after) != bound:
+            raise AuditError("INPUT", f"{label}: descriptor identity changed")
+        if input_identity(current) != bound:
+            raise AuditError("INPUT", f"{label}: leaf pathname identity changed")
+        if parent_identity(parent_after) != bound_parent:
+            raise AuditError("INPUT", f"{label}: parent descriptor identity changed")
+        if parent_identity(parent_path_after) != bound_parent:
+            raise AuditError("INPUT", f"{label}: parent pathname identity changed")
+        payload = b"".join(chunks)
+        if len(payload) != before.st_size:
+            raise AuditError("INPUT", f"{label}: byte count differs")
     except AuditError:
         raise
     except OSError as exc:
-        raise AuditError("INPUT", f"{label}: unsafe open failed") from exc
+        raise AuditError("INPUT", f"{label}: unsafe descriptor read failed") from exc
     finally:
-        if fd >= 0:
-            os.close(fd)
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_fd >= 0:
+            os.close(parent_fd)
     try:
         return payload.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -464,7 +590,11 @@ def tool_table(text: str) -> Counter[str]:
             raise AuditError("TABLE", "wall time must be finite and nonnegative")
         if not shape:
             raise AuditError("TABLE", "blank observed shape")
-        if not retry_cell.isdecimal() or retry_cell != str(int(retry_cell)):
+        if (
+            not retry_cell.isdecimal()
+            or len(retry_cell) > 9
+            or retry_cell != str(int(retry_cell))
+        ):
             raise AuditError("TABLE", "invalid retry count")
         retry = int(retry_cell)
         row_issues = table_issues(issue_cell)
@@ -563,17 +693,34 @@ def journal(text: str) -> tuple[int, str]:
 
 
 def validate(args: argparse.Namespace) -> dict[str, object]:
-    journal_text = read_owned_regular(cast(str, args.journal), "journal")
-    audit_text = read_owned_regular(cast(str, args.audit), "audit")
+    journal_text = read_owned_regular(
+        cast(str, args.journal), "journal", JOURNAL_MAX_BYTES
+    )
+    audit_text = read_owned_regular(
+        cast(str, args.audit), "audit", AUDIT_MAX_BYTES
+    )
     live = catalog(
-        read_owned_regular(cast(str, args.live_catalog), "live catalog"), "live catalog"
+        read_owned_regular(
+            cast(str, args.live_catalog),
+            "live catalog",
+            LIVE_CATALOG_MAX_BYTES,
+        ),
+        "live catalog"
     )
     source = catalog(
-        read_owned_regular(cast(str, args.source_catalog), "source catalog"),
+        read_owned_regular(
+            cast(str, args.source_catalog),
+            "source catalog",
+            SOURCE_CATALOG_MAX_BYTES,
+        ),
         "source catalog",
     )
     config = catalog(
-        read_owned_regular(cast(str, args.config_catalog), "config catalog"),
+        read_owned_regular(
+            cast(str, args.config_catalog),
+            "config catalog",
+            CONFIG_CATALOG_MAX_BYTES,
+        ),
         "config catalog",
     )
     if live != source or live != config:
