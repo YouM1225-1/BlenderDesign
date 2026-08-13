@@ -13,7 +13,10 @@ generation. The runbook owns human/LLM sequencing, Blender safety, upstream miti
 and the gate invariant. The CLI owns only machine-verifiable evidence: a single-process
 UTC/monotonic journal and dynamic catalog/audit validation. The active modeling audit
 records implementation and adversarial-retest evidence; it is not another remediation
-mechanism.
+mechanism. Post-Task-5 Task 6 hardens the CLI's validator reader without changing its
+interface. Task 7 then applies this Plan's exact amended runbook bytes to the runbook
+and active audit only; it retains two invalid r1 journals and proves a clean restarted
+r2 before terminal review.
 
 **Tech Stack:** Markdown, Python 3.13 standard library, JSON/NDJSON, Git, and the
 existing repository checks.
@@ -31,6 +34,13 @@ existing repository checks.
   specified by Task 1; no other gate edit is allowed.
 - Do not add a dependency, pytest file, Blender transaction wrapper, process manager,
   external-checkout patch, or `process-snapshot` CLI subcommand.
+- The post-Task-5 fix-forward may modify exactly this Plan, the Task 6-owned
+  `scripts/official_blender_mcp_audit.py`, the Task 7-owned
+  `docs/use-official-blender-mcp.md`, and the active modeling audit. It adds no tracked
+  Plan, fixture, helper, test, or evidence file. Ignored evidence stays below
+  `.superpowers/sdd/modeling-remediation/final-retest-r1/` and `final-retest-r2/`;
+  Plan-review reports use only the exact flat round-specific paths named by Task 0 and
+  P6.
 - The audit CLI must not hardcode `26`; live/source/config additions approved upstream
   must pass when all normalized inputs and the audit table agree.
 - `MODEL-RUN-10` is a soft lifecycle/resource diagnostic only. Do not claim the
@@ -60,10 +70,10 @@ existing repository checks.
 
 ## SDD dispatch contract
 
-Tasks 1–5 are implementation Tasks. Each uses one fresh implementer followed by one
+Tasks 1–7 are implementation Tasks. Each uses one fresh implementer followed by one
 fresh standard `subagent-driven-development/task-reviewer-prompt.md` reviewer. That
 single reviewer must return both specification and code-quality verdicts; do not create
-separate spec and quality reviewers. Task 0 and the terminal/merge phases are
+separate spec and quality reviewers. Task 0, Task 8, and the terminal/merge phases are
 controller-only gates and do not get task briefs.
 
 The controller resolves `SDD_SKILL_ROOT` from the loaded skill path and runs:
@@ -71,73 +81,500 @@ The controller resolves `SDD_SKILL_ROOT` from the loaded skill path and runs:
 ```bash
 /bin/bash -euo pipefail <<'BASH'
 : "${SDD_SKILL_ROOT:?set to the loaded subagent-driven-development skill directory}"
-: "${TASK_N:?set implementation Task 1..5}"
-case "$TASK_N" in 1|2|3|4|5) ;; *) exit 1 ;; esac
+: "${TASK_N:?set implementation Task 1..7}"
+case "$TASK_N" in 1|2|3|4|5|6|7) ;; *) exit 1 ;; esac
 PLAN=docs/superpowers/plans/2026-08-10-official-blender-mcp-modeling-remediation.md
 RUN_DIR=.superpowers/sdd/modeling-remediation
 BRIEF="$RUN_DIR/task-$TASK_N-brief.md"
 REPORT="$RUN_DIR/task-$TASK_N-report.md"
 UV="${UV:-$HOME/.local/bin/uv}"
 case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
-install -d -m 700 "$RUN_DIR"
-test ! -e "$BRIEF"
-test ! -e "$REPORT"
-"$SDD_SKILL_ROOT/scripts/task-brief" "$PLAN" "$TASK_N" "$BRIEF"
-test -s "$BRIEF"
-test ! -L "$BRIEF"
-"$UV" run --quiet --no-project --python 3.13 python - \
-  "$PLAN" "$BRIEF" "$TASK_N" <<'PY'
+ALLOCATED="$("$UV" run --quiet --no-project --python 3.13 python - \
+  "$SDD_SKILL_ROOT/scripts/task-brief" "$PLAN" "$TASK_N" "$RUN_DIR" <<'PY'
 from __future__ import annotations
 
 import hashlib
+import os
+import re
+import secrets
+import stat
+import subprocess
 import sys
 from pathlib import Path
 
-plan_path, brief_path = map(Path, sys.argv[1:3])
+helper = Path(os.path.abspath(sys.argv[1]))
+plan_path = Path(os.path.abspath(sys.argv[2]))
 task_n = sys.argv[3]
-plan = plan_path.read_bytes()
-brief = brief_path.read_bytes()
+run_dir = Path(os.path.abspath(sys.argv[4]))
+if re.fullmatch(r"[1-7]", task_n) is None:
+    raise RuntimeError("invalid implementation Task")
+# The one external executable in the dispatch path was the least verified input here:
+# every data file in this Plan gets an eight-field identity binding, while this got
+# non-symlink and S_ISREG and was then executed with the Plan bytes on a bound fd.
+# The one-element loop it replaces is what was left of a check that was once broader.
+if os.path.realpath(helper) != os.fspath(helper):
+    raise RuntimeError("helper path contains a symlink")
+helper_info = os.lstat(helper)
+if (
+    stat.S_ISLNK(helper_info.st_mode)
+    or not stat.S_ISREG(helper_info.st_mode)
+    or helper_info.st_uid != os.getuid()
+    or helper_info.st_nlink != 1
+    or stat.S_IMODE(helper_info.st_mode) & 0o022
+    or not stat.S_IMODE(helper_info.st_mode) & 0o100
+):
+    raise RuntimeError(
+        "helper must be an owned, single-link, owner-executable regular file that is "
+        "not group- or other-writable"
+    )
+if os.path.realpath(run_dir) != os.fspath(run_dir):
+    raise RuntimeError("run directory path contains a symlink")
+run_info = os.lstat(run_dir)
+if (
+    stat.S_ISLNK(run_info.st_mode)
+    or not stat.S_ISDIR(run_info.st_mode)
+    or run_info.st_uid != os.getuid()
+    or stat.S_IMODE(run_info.st_mode) != 0o700
+):
+    raise RuntimeError("owned native mode-0700 run directory required")
+
+
+# BOUNDED_SNAPSHOT_BEGIN
+PLAN_MAX_BYTES = 2 * 1024 * 1024
+READ_CHUNK_BYTES = 64 * 1024
+
+
+def snapshot_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def bounded_snapshot(
+    path: Path,
+    *,
+    label: str,
+    limit: int,
+    mode: int,
+) -> tuple[bytes, os.stat_result, os.stat_result]:
+    path = Path(os.path.abspath(path))
+    parent = path.parent
+    leaf = path.name
+    if (
+        limit <= 0
+        or leaf in {"", ".", ".."}
+        or os.path.realpath(parent) != os.fspath(parent)
+    ):
+        raise RuntimeError(f"unsafe {label} path")
+    parent_before = os.lstat(parent)
+    parent_bound = snapshot_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) & 0o022
+    ):
+        raise RuntimeError(f"unsafe {label} parent")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = -1
+    try:
+        if (
+            snapshot_identity(os.fstat(parent_fd)) != parent_bound
+            or snapshot_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = snapshot_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != mode
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+        ):
+            raise RuntimeError(f"unsafe {label} metadata")
+        descriptor = os.open(
+            leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
+        if snapshot_identity(os.fstat(descriptor)) != bound:
+            raise RuntimeError(f"{label} changed while opening")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(READ_CHUNK_BYTES, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading")
+        payload = b"".join(chunks)
+        if (
+            len(payload) != before.st_size
+            or snapshot_identity(os.fstat(descriptor)) != bound
+            or snapshot_identity(
+                os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            ) != bound
+            or snapshot_identity(os.fstat(parent_fd)) != parent_bound
+            or snapshot_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} snapshot changed")
+        return payload, before, parent_before
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
+def recheck_snapshot(
+    path: Path,
+    leaf_bound: os.stat_result,
+    parent_bound: os.stat_result,
+    *,
+    label: str,
+) -> None:
+    parent_fd = os.open(
+        path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    try:
+        if (
+            snapshot_identity(os.fstat(parent_fd))
+            != snapshot_identity(parent_bound)
+            or snapshot_identity(os.lstat(path.parent))
+            != snapshot_identity(parent_bound)
+            or snapshot_identity(
+                os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            ) != snapshot_identity(leaf_bound)
+        ):
+            raise RuntimeError(f"{label} changed after snapshot")
+    finally:
+        os.close(parent_fd)
+# BOUNDED_SNAPSHOT_END
+
+
+# HELPER_OUTPUT_READER_BEGIN
+HELPER_OUTPUT_MAX_BYTES = 64 * 1024 * 1024
+
+
+def helper_output_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def read_helper_output(
+    directory: int,
+    descriptor: int,
+    name: str,
+    created: os.stat_result,
+    *,
+    limit: int = HELPER_OUTPUT_MAX_BYTES,
+) -> bytes:
+    bound = os.fstat(descriptor)
+    current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(bound.st_mode)
+        or bound.st_uid != os.getuid()
+        or stat.S_IMODE(bound.st_mode) != 0o600
+        or bound.st_nlink != 1
+        or bound.st_size <= 0
+        or bound.st_size > limit
+        or (bound.st_dev, bound.st_ino) != (created.st_dev, created.st_ino)
+        or helper_output_identity(current) != helper_output_identity(bound)
+    ):
+        raise RuntimeError(f"unsafe helper output: {name}")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    remaining = bound.st_size
+    chunks: list[bytes] = []
+    while remaining:
+        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+        if not chunk:
+            raise RuntimeError(f"helper output shrank while reading: {name}")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    if os.read(descriptor, 1):
+        raise RuntimeError(f"helper output grew while reading: {name}")
+    payload = b"".join(chunks)
+    after = os.fstat(descriptor)
+    current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    if (
+        len(payload) != bound.st_size
+        or helper_output_identity(after) != helper_output_identity(bound)
+        or helper_output_identity(current) != helper_output_identity(bound)
+    ):
+        raise RuntimeError(f"helper output changed while reading: {name}")
+    return payload
+# HELPER_OUTPUT_READER_END
+
+
+def publish(directory: int, name: str, payload: bytes) -> os.stat_result:
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory,
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(payload)
+        while view:
+            view = view[os.write(descriptor, view):]
+        os.fsync(descriptor)
+        opened = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or opened.st_nlink != 1
+            or current.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise RuntimeError(f"unsafe published artifact: {name}")
+        return opened
+    finally:
+        os.close(descriptor)
+
+
+plan, plan_info, plan_parent_info = bounded_snapshot(
+    plan_path, label="Plan", limit=PLAN_MAX_BYTES, mode=0o644
+)
 headings = {
+    "A0": b"## Appendix A0: Exact initial/pre-live runbook bytes\n",
     "A": b"## Appendix A: Exact runbook bytes\n",
     "B1": b"## Appendix B1 \xe2\x80\x94 recorder-only complete bytes\n",
+    "B2I": b"## Appendix B2I \xe2\x80\x94 initial validator complete bytes\n",
     "B2": b"## Appendix B2 \xe2\x80\x94 final complete bytes\n",
+    "C0": b"## Appendix C0 \xe2\x80\x94 initial adversarial probe\n",
     "C": b"## Appendix C \xe2\x80\x94 complete adversarial probe\n",
     "D": b"## Appendix D: Exact no-write catalog and journal integration\n",
     "E": b"## Appendix E: Exact external-baseline capture\n",
+    "F": b"## Appendix F: Exact clean final-retest protocol\n",
 }
 required = {
-    "1": ("A",),
-    "2": ("B1", "C"),
-    "3": ("B2", "C"),
-    "4": ("A", "C", "D"),
-    "5": ("A", "C", "D"),
+    "1": ("A0",),
+    "2": ("B1", "C0"),
+    "3": ("B2I", "C0"),
+    "4": ("A0", "C0", "D"),
+    "5": ("A0", "C0", "D"),
+    "6": ("B2", "C"),
+    "7": ("A", "C", "D", "F"),
 }[task_n]
-positions = {name: plan.index(heading) for name, heading in headings.items()}
 if any(plan.count(heading) != 1 for heading in headings.values()):
     raise RuntimeError("expected one of every Appendix heading")
-pieces = [brief]
-for name in required:
-    start = positions[name]
-    end = min((position for position in positions.values() if position > start), default=len(plan))
-    pieces.extend((b"\n", plan[start:end]))
-payload = b"".join(pieces)
-brief_path.write_bytes(payload)
-present = tuple(
-    name for name, heading in headings.items() if payload.count(heading) == 1
-)
-if present != required:
-    raise RuntimeError(f"unexpected Appendix set: {present!r}")
-if task_n == "5":
-    for forbidden in (b"Controller Phase", b"merge --ff-only"):
-        if forbidden in payload:
-            raise RuntimeError(f"Task 5 brief leaked {forbidden!r}")
-print(f"brief_sha256={hashlib.sha256(payload).hexdigest()} appendices={','.join(required)}")
+positions = {name: plan.index(heading) for name, heading in headings.items()}
+run_fd = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+stage_name = f".task-{task_n}-brief-stage-{secrets.token_hex(16)}"
+stage_fd = -1
+helper_fd = -1
+plan_copy_fd = -1
+try:
+    opened_run = os.fstat(run_fd)
+    if (opened_run.st_dev, opened_run.st_ino) != (run_info.st_dev, run_info.st_ino):
+        raise RuntimeError("run directory changed while opening")
+    if task_n != "7":
+        try:
+            os.stat(
+                f"task-{task_n}-report.md",
+                dir_fd=run_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            raise RuntimeError("implementation report target already exists")
+    os.mkdir(stage_name, 0o700, dir_fd=run_fd)
+    stage_fd = os.open(
+        stage_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=run_fd
+    )
+    stage_info = os.fstat(stage_fd)
+    if (
+        not stat.S_ISDIR(stage_info.st_mode)
+        or stage_info.st_uid != os.getuid()
+        or stat.S_IMODE(stage_info.st_mode) != 0o700
+    ):
+        raise RuntimeError("unsafe brief staging directory")
+    helper_fd = os.open(
+        "helper-output",
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=stage_fd,
+    )
+    os.fchmod(helper_fd, 0o600)
+    helper_before = os.fstat(helper_fd)
+    plan_copy_fd = os.open(
+        "plan-snapshot",
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=stage_fd,
+    )
+    os.fchmod(plan_copy_fd, 0o600)
+    view = memoryview(plan)
+    while view:
+        view = view[os.write(plan_copy_fd, view):]
+    os.fsync(plan_copy_fd)
+    plan_copy_before = os.fstat(plan_copy_fd)
+    os.lseek(plan_copy_fd, 0, os.SEEK_SET)
+    completed = subprocess.run(
+        [helper, f"/dev/fd/{plan_copy_fd}", task_n, f"/dev/fd/{helper_fd}"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        pass_fds=(helper_fd, plan_copy_fd),
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"task-brief failed: {completed.returncode}: "
+            f"{completed.stderr.decode('utf-8', 'replace')}"
+        )
+    brief = read_helper_output(
+        stage_fd,
+        helper_fd,
+        "helper-output",
+        helper_before,
+        limit=2 * 1024 * 1024,
+    )
+    if read_helper_output(
+        stage_fd,
+        plan_copy_fd,
+        "plan-snapshot",
+        plan_copy_before,
+        limit=PLAN_MAX_BYTES,
+    ) != plan:
+        raise RuntimeError("task-brief did not consume the bound Plan bytes")
+    recheck_snapshot(
+        plan_path, plan_info, plan_parent_info, label="Plan"
+    )
+    pieces = [brief]
+    for name in required:
+        start = positions[name]
+        end = min(
+            (position for position in positions.values() if position > start),
+            default=len(plan),
+        )
+        pieces.extend((b"\n", plan[start:end]))
+    payload = b"".join(pieces)
+    present = tuple(
+        name for name, heading in headings.items() if payload.count(heading) == 1
+    )
+    if present != required:
+        raise RuntimeError(f"unexpected Appendix set: {present!r}")
+    # Tasks 1-4 had no list at all, so arbitrary non-heading text could reach those
+    # briefs. Two independent reviewers ran the helper on `/private/tmp` git fixtures
+    # and measured zero occurrences of all four strings in the Tasks 1-5 briefs, so
+    # widening the existing branch cannot fail closed on a correct Plan.
+    if task_n in {"1", "2", "3", "4", "5", "7"}:
+        for forbidden in (
+            b"Controller Phase",
+            b"merge --ff-only",
+            b"Phase R",
+            b"Phase M",
+        ):
+            if forbidden in payload:
+                raise RuntimeError(f"Task {task_n} brief leaked {forbidden!r}")
+    if task_n == "6":
+        for forbidden in (
+            b"### Task 7:",
+            b"final-retest-r1/",
+            b"final-retest-r2/",
+            b"Phase R",
+            b"Phase M",
+        ):
+            if forbidden in payload:
+                raise RuntimeError(f"Task 6 brief leaked {forbidden!r}")
+    # `Phase R` / `Phase M` are already checked for every task by the branch above, so
+    # repeating them here is unreachable for every one of the seven task numbers.
+    if task_n == "7":
+        for forbidden in (b"### Task 8:",):
+            if forbidden in payload:
+                raise RuntimeError(f"Task 7 brief leaked {forbidden!r}")
+    brief_name = f"task-{task_n}-brief.md"
+    brief_info = publish(run_fd, brief_name, payload)
+    report_dev = report_ino = 0
+    if task_n == "7":
+        report_name = "task-7-report.md"
+        report_fd = os.open(
+            report_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=run_fd,
+        )
+        try:
+            os.fchmod(report_fd, 0o600)
+            report_info = os.fstat(report_fd)
+            report_dev, report_ino = report_info.st_dev, report_info.st_ino
+            header = (
+                f"REPORT_DEV: {report_dev}\nREPORT_INO: {report_ino}\n"
+            ).encode("ascii")
+            os.write(report_fd, header)
+            os.fsync(report_fd)
+            current = os.stat(report_name, dir_fd=run_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(report_info.st_mode)
+                or report_info.st_uid != os.getuid()
+                or report_info.st_nlink != 1
+                or current.st_nlink != 1
+                or (current.st_dev, current.st_ino) != (report_dev, report_ino)
+            ):
+                raise RuntimeError("unsafe Task 7 report allocation")
+        finally:
+            os.close(report_fd)
+    os.fsync(run_fd)
+    print(
+        hashlib.sha256(payload).hexdigest(),
+        brief_info.st_dev,
+        brief_info.st_ino,
+        plan_info.st_dev,
+        plan_info.st_ino,
+        hashlib.sha256(plan).hexdigest(),
+        report_dev,
+        report_ino,
+    )
+finally:
+    if plan_copy_fd >= 0:
+        os.close(plan_copy_fd)
+    if helper_fd >= 0:
+        os.close(helper_fd)
+    if stage_fd >= 0:
+        try:
+            os.unlink("helper-output", dir_fd=stage_fd)
+            os.unlink("plan-snapshot", dir_fd=stage_fd)
+            os.fsync(stage_fd)
+        except FileNotFoundError:
+            pass
+        os.close(stage_fd)
+        os.rmdir(stage_name, dir_fd=run_fd)
+        os.fsync(run_fd)
+    os.close(run_fd)
 PY
-test -s "$BRIEF"
-test ! -L "$BRIEF"
+)"
+IFS=' ' read -r BRIEF_SHA256 BRIEF_DEV BRIEF_INO PLAN_DEV PLAN_INO PLAN_SHA256 \
+  REPORT_DEV REPORT_INO <<EOF
+$ALLOCATED
+EOF
 TASK_BASE="$(git rev-parse HEAD)"
-printf 'task=%s\nbase=%s\nbrief=%s\nreport=%s\n' \
-  "$TASK_N" "$TASK_BASE" "$BRIEF" "$REPORT"
+printf 'task=%s\nbase=%s\nbrief=%s\nbrief_sha256=%s\nbrief_dev=%s\nbrief_ino=%s\n' \
+  "$TASK_N" "$TASK_BASE" "$BRIEF" "$BRIEF_SHA256" "$BRIEF_DEV" "$BRIEF_INO"
+printf 'plan_dev=%s\nplan_ino=%s\nplan_sha256=%s\n' \
+  "$PLAN_DEV" "$PLAN_INO" "$PLAN_SHA256"
+printf 'report=%s\nreport_dev=%s\nreport_ino=%s\n' \
+  "$REPORT" "$REPORT_DEV" "$REPORT_INO"
 BASH
 ```
 
@@ -147,6 +584,15 @@ interfaces established by earlier Tasks, and any resolved ambiguity. The brief i
 single exact-value requirements source. The implementer commits and writes `STATUS`,
 `TASK_BASE`, all commits, every test command and output, self-review, and concerns to the
 report. Its chat return is only status, commits, a one-line test summary, and concerns.
+For Tasks 1–6, the implementer and reviewer each create only the assigned absent report
+as a current-UID native-`0600` regular file with `nlink=1` and
+`O_CREAT|O_EXCL|O_NOFOLLOW` (or equivalent exclusive no-clobber semantics).
+For Task 7 only, the controller native-`0600` creates the brief and report before
+dispatch. The controller records the report's creation `(st_dev, st_ino)` in its first
+two `REPORT_DEV:`/`REPORT_INO:` lines and in the dispatch output. The implementer must
+append through that opened, `O_NOFOLLOW`-verified inode, preserve those lines, and never
+replace it; the controller verifies the self-binding before dispatch and after every
+implementer return.
 
 After each implementation or fix round, set a fresh positive `ROUND` and preserve the
 original Task base (never `HEAD~1`):
@@ -154,26 +600,379 @@ original Task base (never `HEAD~1`):
 ```bash
 /bin/bash -euo pipefail <<'BASH'
 : "${SDD_SKILL_ROOT:?set the loaded skill directory}"
-: "${TASK_N:?set implementation Task 1..5}"
+: "${TASK_N:?set implementation Task 1..7}"
 : "${TASK_BASE:?use the base printed before implementer dispatch}"
 : "${ROUND:?set a fresh positive review round}"
-case "$TASK_N" in 1|2|3|4|5) ;; *) exit 1 ;; esac
+: "${BRIEF_SHA256:?use the controller-recorded brief SHA-256 from dispatch}"
+: "${BRIEF_DEV:?use the controller-recorded brief device from dispatch}"
+: "${BRIEF_INO:?use the controller-recorded brief inode from dispatch}"
+case "$BRIEF_SHA256" in [0-9a-f]*) ;; *) exit 1 ;; esac
+case "$TASK_N" in 1|2|3|4|5|6|7) ;; *) exit 1 ;; esac
 case "$ROUND" in 0|*[!0-9]*|'') exit 1 ;; esac
+UV="${UV:-$HOME/.local/bin/uv}"
+case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
 RUN_DIR=.superpowers/sdd/modeling-remediation
 BRIEF="$RUN_DIR/task-$TASK_N-brief.md"
 REPORT="$RUN_DIR/task-$TASK_N-report.md"
 PACKAGE="$RUN_DIR/task-$TASK_N-review-r$ROUND.diff"
 REVIEW="$RUN_DIR/task-$TASK_N-review-r$ROUND.md"
-test -s "$BRIEF"
-test -s "$REPORT"
-test ! -e "$PACKAGE"
-test ! -e "$REVIEW"
 TASK_HEAD="$(git rev-parse HEAD)"
-"$SDD_SKILL_ROOT/scripts/review-package" "$TASK_BASE" "$TASK_HEAD" "$PACKAGE"
-test -s "$PACKAGE"
-PACKAGE_SHA256="$(shasum -a 256 "$PACKAGE" | awk '{print $1}')"
+ALLOCATED="$("$UV" run --quiet --no-project --python 3.13 \
+  python - "$SDD_SKILL_ROOT/scripts/review-package" "$TASK_BASE" "$TASK_HEAD" \
+  "$RUN_DIR" "$TASK_N" "$ROUND" "$BRIEF_SHA256" "$BRIEF_DEV" "$BRIEF_INO" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import secrets
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+helper = Path(os.path.abspath(sys.argv[1]))
+task_base, task_head = sys.argv[2:4]
+run_dir = Path(os.path.abspath(sys.argv[4]))
+task_n, round_n = sys.argv[5:7]
+dispatched_brief_sha256 = sys.argv[7]
+dispatched_brief_identity = (int(sys.argv[8]), int(sys.argv[9]))
+if re.fullmatch(r"[1-7]", task_n) is None or re.fullmatch(r"[1-9][0-9]*", round_n) is None:
+    raise RuntimeError("invalid Task/review round")
+if re.fullmatch(r"[0-9a-f]{64}", dispatched_brief_sha256) is None:
+    raise RuntimeError("invalid dispatch-recorded brief SHA-256")
+if os.path.realpath(helper) != os.fspath(helper):
+    raise RuntimeError("review-package helper path contains a symlink")
+helper_info = os.lstat(helper)
+if stat.S_ISLNK(helper_info.st_mode) or not stat.S_ISREG(helper_info.st_mode):
+    raise RuntimeError("regular review-package helper required")
+if os.path.realpath(run_dir) != os.fspath(run_dir):
+    raise RuntimeError("run directory path contains a symlink")
+run_info = os.lstat(run_dir)
+if (
+    stat.S_ISLNK(run_info.st_mode)
+    or not stat.S_ISDIR(run_info.st_mode)
+    or run_info.st_uid != os.getuid()
+    or stat.S_IMODE(run_info.st_mode) != 0o700
+):
+    raise RuntimeError("owned native mode-0700 run directory required")
+
+
+# TASK_ARTIFACT_READER_BEGIN
+BRIEF_MAX_BYTES = 2 * 1024 * 1024
+REPORT_MAX_BYTES = 64 * 1024 * 1024
+PACKAGE_MAX_BYTES = 64 * 1024 * 1024
+REVIEW_MAX_BYTES = 8 * 1024 * 1024
+
+
+def artifact_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def read_owned_entry(
+    parent_path: Path,
+    name: str,
+    *,
+    label: str,
+    limit: int,
+    expected_identity: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    parent_path = Path(os.path.abspath(parent_path))
+    if name in {"", ".", ".."} or name != os.path.basename(name):
+        raise RuntimeError(f"unsafe {label} leaf: {name!r}")
+    if limit <= 0 or os.path.realpath(parent_path) != os.fspath(parent_path):
+        raise RuntimeError(f"unsafe {label} parent: {parent_path}")
+    parent_before = os.lstat(parent_path)
+    parent_bound = artifact_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) != 0o700
+    ):
+        raise RuntimeError(f"owned native mode-0700 {label} parent required")
+    parent_fd = os.open(
+        parent_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    descriptor = -1
+    try:
+        if (
+            artifact_identity(os.fstat(parent_fd)) != parent_bound
+            or artifact_identity(os.lstat(parent_path)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        bound = artifact_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+            or (
+                expected_identity is not None
+                and (before.st_dev, before.st_ino) != expected_identity
+            )
+        ):
+            raise RuntimeError(f"unsafe {label} artifact: {name}")
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
+        opened = os.fstat(descriptor)
+        if artifact_identity(opened) != bound:
+            raise RuntimeError(f"{label} changed while opening: {name}")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading: {name}")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading: {name}")
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        parent_after = os.fstat(parent_fd)
+        parent_current = os.lstat(parent_path)
+        if (
+            len(payload) != before.st_size
+            or artifact_identity(after) != bound
+            or artifact_identity(current) != bound
+            or artifact_identity(parent_after) != parent_bound
+            or artifact_identity(parent_current) != parent_bound
+        ):
+            raise RuntimeError(f"{label} changed while reading: {name}")
+        return payload, after
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+# TASK_ARTIFACT_READER_END
+
+
+# HELPER_OUTPUT_READER_BEGIN
+HELPER_OUTPUT_MAX_BYTES = 64 * 1024 * 1024
+
+
+def helper_output_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def read_helper_output(
+    directory: int,
+    descriptor: int,
+    name: str,
+    created: os.stat_result,
+    *,
+    limit: int = HELPER_OUTPUT_MAX_BYTES,
+) -> bytes:
+    bound = os.fstat(descriptor)
+    current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(bound.st_mode)
+        or bound.st_uid != os.getuid()
+        or stat.S_IMODE(bound.st_mode) != 0o600
+        or bound.st_nlink != 1
+        or bound.st_size <= 0
+        or bound.st_size > limit
+        or (bound.st_dev, bound.st_ino) != (created.st_dev, created.st_ino)
+        or helper_output_identity(current) != helper_output_identity(bound)
+    ):
+        raise RuntimeError(f"unsafe helper output: {name}")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    remaining = bound.st_size
+    chunks: list[bytes] = []
+    while remaining:
+        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+        if not chunk:
+            raise RuntimeError(f"helper output shrank while reading: {name}")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    if os.read(descriptor, 1):
+        raise RuntimeError(f"helper output grew while reading: {name}")
+    payload = b"".join(chunks)
+    after = os.fstat(descriptor)
+    current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    if (
+        len(payload) != bound.st_size
+        or helper_output_identity(after) != helper_output_identity(bound)
+        or helper_output_identity(current) != helper_output_identity(bound)
+    ):
+        raise RuntimeError(f"helper output changed while reading: {name}")
+    return payload
+# HELPER_OUTPUT_READER_END
+
+
+def publish(directory: int, name: str, payload: bytes) -> os.stat_result:
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory,
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(payload)
+        while view:
+            view = view[os.write(descriptor, view):]
+        os.fsync(descriptor)
+        opened = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or opened.st_nlink != 1
+            or current.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise RuntimeError(f"unsafe published artifact: {name}")
+        return opened
+    finally:
+        os.close(descriptor)
+
+
+run_fd = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+stage_name = f".task-{task_n}-review-stage-{round_n}-{secrets.token_hex(16)}"
+stage_fd = -1
+helper_fd = -1
+try:
+    opened_run = os.fstat(run_fd)
+    if (opened_run.st_dev, opened_run.st_ino) != (run_info.st_dev, run_info.st_ino):
+        raise RuntimeError("run directory changed while opening")
+    brief_name = f"task-{task_n}-brief.md"
+    report_name = f"task-{task_n}-report.md"
+    brief_payload, _ = read_owned_entry(
+        run_dir,
+        brief_name,
+        label="brief",
+        limit=BRIEF_MAX_BYTES,
+        expected_identity=dispatched_brief_identity,
+    )
+    if hashlib.sha256(brief_payload).hexdigest() != dispatched_brief_sha256:
+        raise RuntimeError("brief differs from the bytes recorded at dispatch")
+    report_payload, report_info = read_owned_entry(
+        run_dir, report_name, label="report", limit=REPORT_MAX_BYTES
+    )
+    if task_n == "7":
+        expected_header = (
+            f"REPORT_DEV: {report_info.st_dev}\n"
+            f"REPORT_INO: {report_info.st_ino}\n"
+        ).encode("ascii")
+        if not report_payload.startswith(expected_header):
+            raise RuntimeError("Task 7 report inode self-binding differs")
+    else:
+        review_name = f"task-{task_n}-review-r{round_n}.md"
+        try:
+            os.stat(review_name, dir_fd=run_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise RuntimeError("review report target already exists")
+    os.mkdir(stage_name, 0o700, dir_fd=run_fd)
+    stage_fd = os.open(
+        stage_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=run_fd
+    )
+    helper_fd = os.open(
+        "helper-output",
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=stage_fd,
+    )
+    os.fchmod(helper_fd, 0o600)
+    helper_before = os.fstat(helper_fd)
+    completed = subprocess.run(
+        [helper, task_base, task_head, f"/dev/fd/{helper_fd}"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        pass_fds=(helper_fd,),
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"review-package failed: {completed.returncode}: "
+            f"{completed.stderr.decode('utf-8', 'replace')}"
+        )
+    package_payload = read_helper_output(
+        stage_fd, helper_fd, "helper-output", helper_before
+    )
+    package_name = f"task-{task_n}-review-r{round_n}.diff"
+    publish(run_fd, package_name, package_payload)
+    review_dev = review_ino = 0
+    if task_n == "7":
+        review_name = f"task-7-review-r{round_n}.md"
+        review_fd = os.open(
+            review_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=run_fd,
+        )
+        try:
+            os.fchmod(review_fd, 0o600)
+            review_info = os.fstat(review_fd)
+            review_dev, review_ino = review_info.st_dev, review_info.st_ino
+            current = os.stat(review_name, dir_fd=run_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(review_info.st_mode)
+                or review_info.st_uid != os.getuid()
+                or review_info.st_nlink != 1
+                or current.st_nlink != 1
+                or (current.st_dev, current.st_ino) != (review_dev, review_ino)
+            ):
+                raise RuntimeError("unsafe Task 7 review allocation")
+        finally:
+            os.close(review_fd)
+    os.fsync(run_fd)
+    print(
+        hashlib.sha256(package_payload).hexdigest(),
+        hashlib.sha256(report_payload).hexdigest(),
+        review_dev,
+        review_ino,
+    )
+finally:
+    if helper_fd >= 0:
+        os.close(helper_fd)
+    if stage_fd >= 0:
+        try:
+            os.unlink("helper-output", dir_fd=stage_fd)
+            os.fsync(stage_fd)
+        except FileNotFoundError:
+            pass
+        os.close(stage_fd)
+        os.rmdir(stage_name, dir_fd=run_fd)
+        os.fsync(run_fd)
+    os.close(run_fd)
+PY
+)"
+IFS=' ' read -r PACKAGE_SHA256 REPORT_SHA256 REVIEW_DEV REVIEW_INO <<EOF
+$ALLOCATED
+EOF
 printf 'head=%s\npackage=%s\npackage_sha256=%s\nreview=%s\n' \
   "$TASK_HEAD" "$PACKAGE" "$PACKAGE_SHA256" "$REVIEW"
+printf 'report_sha256=%s\n' "$REPORT_SHA256"
+printf 'review_dev=%s\nreview_ino=%s\n' "$REVIEW_DEV" "$REVIEW_INO"
 BASH
 ```
 
@@ -190,17 +989,32 @@ IMPORTANT: 0
 MINOR: 0
 ```
 
+For Task 7 only, insert `REVIEW_DEV: <controller-printed-st_dev>` and
+`REVIEW_INO: <controller-printed-st_ino>` immediately after `PACKAGE_SHA256`. The
+reviewer opens the preallocated review without truncation, verifies that identity,
+then truncates and writes through the descriptor. The controller supplies those values
+in the prompt and verifies the same inode after the reviewer returns.
+
 The controller safely recomputes the package binding and parses the unique ordered
 leading block before marking the Task complete. A duplicate, contradictory, or unknown
 reserved marker invalidates the whole report:
 
 ```bash
 /bin/bash -euo pipefail <<'BASH'
-: "${TASK_N:?set implementation Task 1..5}"
+test -z "${PYTHONOPTIMIZE-}"
+: "${TASK_N:?set implementation Task 1..7}"
 : "${ROUND:?set the positive review round}"
 : "${TASK_HEAD:?reviewed Task HEAD required}"
-case "$TASK_N" in 1|2|3|4|5) ;; *) exit 1 ;; esac
+: "${REPORT_SHA256:?bounded implementation report SHA-256 required}"
+case "$TASK_N" in 1|2|3|4|5|6|7) ;; *) exit 1 ;; esac
 case "$ROUND" in 0|*[!0-9]*|'') exit 1 ;; esac
+if [ "$TASK_N" = 7 ]; then
+  : "${REVIEW_DEV:?controller-recorded Task 7 review st_dev required}"
+  : "${REVIEW_INO:?controller-recorded Task 7 review st_ino required}"
+else
+  REVIEW_DEV=0
+  REVIEW_INO=0
+fi
 case "$TASK_HEAD" in *[!0-9a-f]*) exit 1 ;; esac
 test "${#TASK_HEAD}" = 40
 UV="${UV:-$HOME/.local/bin/uv}"
@@ -208,13 +1022,16 @@ case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
 RUN_DIR=.superpowers/sdd/modeling-remediation
 PACKAGE="$RUN_DIR/task-$TASK_N-review-r$ROUND.diff"
 REVIEW="$RUN_DIR/task-$TASK_N-review-r$ROUND.md"
+REPORT="$RUN_DIR/task-$TASK_N-report.md"
 CURRENT_REF="$(git symbolic-ref -q HEAD)"
 test "$CURRENT_REF" = refs/heads/codex/official-blender-mcp-install
 test "$(git rev-parse HEAD)" = "$TASK_HEAD"
 test "$(git rev-parse "$CURRENT_REF")" = "$TASK_HEAD"
 
 "$UV" run --quiet --no-project --python 3.13 python - \
-  "$PACKAGE" "$REVIEW" "$TASK_HEAD" <<'PY'
+  "$PACKAGE" "$REVIEW" "$REPORT" "$REPORT_SHA256" "$TASK_HEAD" "$TASK_N" \
+  "$REVIEW_DEV" "$REVIEW_INO" <<'PY'
+# TASK_REVIEW_PARSER_BEGIN
 from __future__ import annotations
 
 import hashlib
@@ -224,40 +1041,137 @@ import stat
 import sys
 from pathlib import Path
 
+if not __debug__:
+    raise SystemExit("STOP: review parser requires assertions; unset PYTHONOPTIMIZE")
+
 RESERVED = re.compile(
     r"^(?P<key>(?:[A-Z][A-Z0-9_]*_VERDICT)|VERDICT|TASK_HEAD|REVIEWED_HEAD|"
-    r"REVIEW_BASE_HEAD|PACKAGE_SHA256|CRITICAL|IMPORTANT|MINOR):"
+    r"REVIEW_BASE_HEAD|PACKAGE_SHA256|REVIEW_DEV|REVIEW_INO|"
+    r"CRITICAL|IMPORTANT|MINOR):"
 )
 
 
-def owned_regular_bytes(raw_path: str) -> bytes:
-    path = Path(os.path.abspath(raw_path))
-    if os.path.realpath(path) != os.fspath(path):
-        raise RuntimeError(f"symlinked path component rejected: {path}")
-    before = os.lstat(path)
+# TASK_ARTIFACT_READER_BEGIN
+BRIEF_MAX_BYTES = 2 * 1024 * 1024
+REPORT_MAX_BYTES = 64 * 1024 * 1024
+PACKAGE_MAX_BYTES = 64 * 1024 * 1024
+REVIEW_MAX_BYTES = 8 * 1024 * 1024
+
+
+def artifact_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def read_owned_entry(
+    parent_path: Path,
+    name: str,
+    *,
+    label: str,
+    limit: int,
+    expected_identity: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    parent_path = Path(os.path.abspath(parent_path))
+    if name in {"", ".", ".."} or name != os.path.basename(name):
+        raise RuntimeError(f"unsafe {label} leaf: {name!r}")
+    if limit <= 0 or os.path.realpath(parent_path) != os.fspath(parent_path):
+        raise RuntimeError(f"unsafe {label} parent: {parent_path}")
+    parent_before = os.lstat(parent_path)
+    parent_bound = artifact_identity(parent_before)
     if (
-        stat.S_ISLNK(before.st_mode)
-        or not stat.S_ISREG(before.st_mode)
-        or before.st_uid != os.getuid()
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) != 0o700
     ):
-        raise RuntimeError(f"owned regular file required: {path}")
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        raise RuntimeError(f"owned native mode-0700 {label} parent required")
+    parent_fd = os.open(
+        parent_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    descriptor = -1
     try:
+        if (
+            artifact_identity(os.fstat(parent_fd)) != parent_bound
+            or artifact_identity(os.lstat(parent_path)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        bound = artifact_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+            or (
+                expected_identity is not None
+                and (before.st_dev, before.st_ino) != expected_identity
+            )
+        ):
+            raise RuntimeError(f"unsafe {label} artifact: {name}")
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
         opened = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-            raise RuntimeError(f"file changed while opening: {path}")
+        if artifact_identity(opened) != bound:
+            raise RuntimeError(f"{label} changed while opening: {name}")
+        remaining = before.st_size
         chunks: list[bytes] = []
-        while chunk := os.read(descriptor, 1024 * 1024):
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading: {name}")
             chunks.append(chunk)
-        current = os.lstat(path)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading: {name}")
+        payload = b"".join(chunks)
         after = os.fstat(descriptor)
-        if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
-            raise RuntimeError(f"file changed while reading: {path}")
-        if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
-            raise RuntimeError(f"file path changed while reading: {path}")
-        return b"".join(chunks)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        parent_after = os.fstat(parent_fd)
+        parent_current = os.lstat(parent_path)
+        if (
+            len(payload) != before.st_size
+            or artifact_identity(after) != bound
+            or artifact_identity(current) != bound
+            or artifact_identity(parent_after) != parent_bound
+            or artifact_identity(parent_current) != parent_bound
+        ):
+            raise RuntimeError(f"{label} changed while reading: {name}")
+        return payload, after
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+# TASK_ARTIFACT_READER_END
+
+
+def read_owned_path(
+    raw_path: str,
+    *,
+    label: str,
+    limit: int,
+    expected_identity: tuple[int, int] | None = None,
+) -> bytes:
+    path = Path(os.path.abspath(raw_path))
+    payload, _ = read_owned_entry(
+        path.parent,
+        path.name,
+        label=label,
+        limit=limit,
+        expected_identity=expected_identity,
+    )
+    return payload
 
 
 def parse_report(payload: bytes, expected: list[tuple[str, str]]) -> None:
@@ -283,38 +1197,1806 @@ def parse_report(payload: bytes, expected: list[tuple[str, str]]) -> None:
         raise RuntimeError("missing reserved marker")
 
 
-package = owned_regular_bytes(sys.argv[1])
-review = owned_regular_bytes(sys.argv[2])
-task_head = sys.argv[3]
+package = read_owned_path(
+    sys.argv[1], label="package", limit=PACKAGE_MAX_BYTES
+)
+report = read_owned_path(
+    sys.argv[3], label="report", limit=REPORT_MAX_BYTES
+)
+expected_report_sha = sys.argv[4]
+if (
+    re.fullmatch(r"[0-9a-f]{64}", expected_report_sha) is None
+    or hashlib.sha256(report).hexdigest() != expected_report_sha
+):
+    raise RuntimeError("implementation report digest differs")
+is_task7 = sys.argv[6] == "7"
+review_identity = (
+    (int(sys.argv[7]), int(sys.argv[8])) if is_task7 else None
+)
+review = read_owned_path(
+    sys.argv[2],
+    label="review",
+    limit=REVIEW_MAX_BYTES,
+    expected_identity=review_identity,
+)
+task_head = sys.argv[5]
 package_sha = hashlib.sha256(package).hexdigest()
-parse_report(
-    review,
+review_sha = hashlib.sha256(review).hexdigest()
+expected = [
+    ("TASK_HEAD", task_head),
+    ("PACKAGE_SHA256", package_sha),
+]
+if is_task7:
+    assert review_identity is not None
+    expected.extend(
+        [
+            ("REVIEW_DEV", str(review_identity[0])),
+            ("REVIEW_INO", str(review_identity[1])),
+        ]
+    )
+expected.extend(
     [
-        ("TASK_HEAD", task_head),
-        ("PACKAGE_SHA256", package_sha),
         ("SPEC_VERDICT", "PASS"),
         ("QUALITY_VERDICT", "APPROVED"),
         ("CRITICAL", "0"),
         ("IMPORTANT", "0"),
         ("MINOR", "0"),
-    ],
+    ]
 )
-print(f"TASK_REVIEW_READY head={task_head} package_sha256={package_sha}")
+parse_report(
+    review,
+    expected,
+)
+print(
+    f"TASK_REVIEW_READY head={task_head} package_sha256={package_sha} "
+    f"report_sha256={expected_report_sha} review_sha256={review_sha}"
+)
+# TASK_REVIEW_PARSER_END
 PY
 BASH
+```
+
+For Task 7, retain the emitted `report_sha256` and `review_sha256` values as
+`TASK7_REPORT_SHA256` and `TASK7_REVIEW_SHA256`; terminal allocation accepts no
+recomputed or manually transcribed substitute.
+
+Before any Task 1–7 review parser may emit `TASK_REVIEW_READY`, run this disposable
+reader/parser probe from the repository root. It extracts all four controller/P6/final-gate copies,
+requires their reader bytes to match, and exercises the exact parser source. It must
+never target a repository artifact:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+UV="${UV:-$HOME/.local/bin/uv}"
+case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
+test -z "${PYTHONOPTIMIZE-}"
+"$UV" run --quiet --no-project --python 3.13 python - <<'PY'
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Callable, cast
+
+if not __debug__:
+    raise SystemExit("STOP: review reader probe requires assertions; unset PYTHONOPTIMIZE")
+
+# GATE_SNAPSHOT_READER_BEGIN
+def gate_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def gate_snapshot(
+    raw: Path,
+    *,
+    label: str,
+    limit: int,
+    mode: int,
+    expected: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    path = Path(os.path.abspath(raw))
+    parent, leaf = path.parent, path.name
+    if limit <= 0 or leaf in {"", ".", ".."} or os.path.realpath(parent) != os.fspath(parent):
+        raise RuntimeError(f"unsafe {label} path")
+    parent_before = os.lstat(parent)
+    parent_bound = gate_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) & 0o022
+    ):
+        raise RuntimeError(f"unsafe {label} parent")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = -1
+    try:
+        if gate_identity(os.fstat(parent_fd)) != parent_bound or gate_identity(os.lstat(parent)) != parent_bound:
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = gate_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != mode
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+            or expected is not None
+            and (before.st_dev, before.st_ino) != expected
+        ):
+            raise RuntimeError(f"unsafe {label} metadata")
+        descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        if gate_identity(os.fstat(descriptor)) != bound:
+            raise RuntimeError(f"{label} changed while opening")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading")
+        payload = b"".join(chunks)
+        if (
+            len(payload) != before.st_size
+            or gate_identity(os.fstat(descriptor)) != bound
+            or gate_identity(os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)) != bound
+            or gate_identity(os.fstat(parent_fd)) != parent_bound
+            or gate_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} changed while reading")
+        return payload, before
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+# GATE_SNAPSHOT_READER_END
+
+
+PLAN = Path(
+    "docs/superpowers/plans/"
+    "2026-08-10-official-blender-mcp-modeling-remediation.md"
+)
+plan_bytes, _ = gate_snapshot(PLAN, label="Plan", limit=2 * 1024 * 1024, mode=0o644)
+text = plan_bytes.decode("utf-8")
+reader_blocks = re.findall(
+    r"(?ms)^# TASK_ARTIFACT_READER_BEGIN\n"
+    r"(.*?)^# TASK_ARTIFACT_READER_END$",
+    text,
+)
+if len(reader_blocks) != 4 or len(set(reader_blocks)) != 1:
+    raise RuntimeError("controller reader copies differ")
+def section_slice(source: str, opening: str, closing: str) -> str:
+    # Each anchor occurs exactly twice: once in this probe, once in the section it
+    # names. Take the second occurrence explicitly instead of relying on rindex and
+    # on this probe staying physically earlier in the Plan.
+    if source.count(opening) != 2 or source.count(closing) != 2:
+        raise RuntimeError("plan section anchor is not probe+section unique")
+    begin = source.index(opening, source.index(opening) + 1)
+    finish = source.index(closing, source.index(closing) + 1)
+    if finish <= begin:
+        raise RuntimeError("plan section anchors are out of order")
+    return source[begin:finish]
+
+
+p6_source = section_slice(
+    text,
+    "## Post-Task-5 continuation gate P6（controller-only）",
+    "Neither journal supports a pass claim.",
+)
+task7_gate_source = section_slice(
+    text,
+    "Run this self-contained final gate on the resulting immutable HEAD:",
+    "Expected: the exact A/C/D probes pass",
+)
+for marker in (
+    '(\n        "journal-attempt1.ndjson",\n        1628,',
+    '(\n        "journal-attempt2.ndjson",\n        18779,',
+    'label="retained journal",\n            limit=1024 * 1024,',
+    'label="published manifest",\n        limit=1024,',
+):
+    if marker not in p6_source:
+        raise RuntimeError(f"P6 bounded journal contract absent: {marker}")
+if "while chunk := os.read" in p6_source:
+    raise RuntimeError("P6 still has an EOF artifact read")
+for marker in (
+    'label="Task 7 report",\n    limit=REPORT_MAX_BYTES,',
+    'label="Task 7 report after append",',
+    "expected_header = (",
+    'len(payload) > REPORT_MAX_BYTES - opened.st_size',
+    'updated != last_payload[0] + payload',
+):
+    if marker not in task7_gate_source:
+        raise RuntimeError(f"Task 7 bounded report contract absent: {marker}")
+if (
+    "while chunk := os.read" in task7_gate_source
+    or task7_gate_source.index('label="Task 7 report"')
+    >= task7_gate_source.index("expected_header = (")
+):
+    raise RuntimeError("Task 7 report must be bounded before the final gate")
+parser_match = re.search(
+    r"(?ms)^# TASK_REVIEW_PARSER_BEGIN\n"
+    r"(.*?)^# TASK_REVIEW_PARSER_END$",
+    text,
+)
+if parser_match is None:
+    raise RuntimeError("unique Task review parser not found")
+parser_source = parser_match.group(1)
+ready_index = parser_source.index('f"TASK_REVIEW_READY')
+if (
+    parser_source.index("package = read_owned_path(") >= ready_index
+    or parser_source.index("report = read_owned_path(") >= ready_index
+    or parser_source.index("review = read_owned_path(") >= ready_index
+):
+    raise RuntimeError("reader must precede TASK_REVIEW_READY")
+compile(parser_source, "<task-review-parser>", "exec")
+namespace: dict[str, object] = {}
+exec(
+    "from __future__ import annotations\n"
+    "import os\nimport stat\nfrom pathlib import Path\n"
+    + reader_blocks[0],
+    namespace,
+)
+read_owned_entry = cast(
+    Callable[..., tuple[bytes, os.stat_result]],
+    namespace["read_owned_entry"],
+)
+
+
+def write_owned(path: Path, payload: bytes, mode: int = 0o600) -> None:
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        mode,
+    )
+    try:
+        os.fchmod(descriptor, mode)
+        view = memoryview(payload)
+        while view:
+            view = view[os.write(descriptor, view):]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def fresh(root: Path, tag: str, payload: bytes = b"reader-payload") -> tuple[Path, Path]:
+    parent = root / tag
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, 0o700)
+    path = parent / "artifact"
+    write_owned(path, payload)
+    return parent, path
+
+
+reader_positives: list[str] = []
+reader_negatives: list[str] = []
+parser_tasks: list[str] = []
+blocked_before_ready: list[str] = []
+
+
+def rejects(
+    parent: Path,
+    *,
+    limit: int = 64,
+    action: Callable[[], None] | None = None,
+    expected_identity: tuple[int, int] | None = None,
+) -> None:
+    reader_negatives.append(parent.name)
+    original_read = os.read
+    fired = False
+
+    def hooked(descriptor: int, count: int) -> bytes:
+        nonlocal fired
+        if not fired:
+            fired = True
+            assert action is not None
+            action()
+        return original_read(descriptor, count)
+
+    if action is not None:
+        os.read = hooked
+    try:
+        try:
+            read_owned_entry(
+                parent,
+                "artifact",
+                label="probe",
+                limit=limit,
+                expected_identity=expected_identity,
+            )
+        except (OSError, RuntimeError):
+            return
+        raise AssertionError("unsafe artifact was accepted")
+    finally:
+        os.read = original_read
+
+
+with tempfile.TemporaryDirectory(
+    prefix="modeling-task-review-reader-", dir="/private/tmp"
+) as raw_root:
+    root = Path(raw_root)
+    os.chmod(root, 0o700)
+
+    for label in ("brief", "report", "package", "review"):
+        parent, positive_path = fresh(
+            root, f"positive-{label}", label.encode("ascii")
+        )
+        payload, positive_info = read_owned_entry(
+            parent, "artifact", label=label, limit=64
+        )
+        assert payload == label.encode("ascii")
+        assert positive_info.st_ino == os.lstat(positive_path).st_ino
+        reader_positives.append(f"label-{label}")
+    exact_parent, exact_path = fresh(root, "positive-exact-limit", b"x" * 64)
+    exact, exact_info = read_owned_entry(
+        exact_parent, "artifact", label="probe", limit=64
+    )
+    assert exact == b"x" * 64
+    assert exact_info.st_ino == os.lstat(exact_path).st_ino
+    reader_positives.append("exact-limit")
+    p6_exact_parent, _ = fresh(
+        root, "positive-p6-exact-limit", b"p" * (1024 * 1024)
+    )
+    p6_exact, p6_exact_info = read_owned_entry(
+        p6_exact_parent,
+        "artifact",
+        label="retained journal",
+        limit=1024 * 1024,
+    )
+    assert len(p6_exact) == 1024 * 1024
+    assert p6_exact_info.st_size == 1024 * 1024
+    reader_positives.append("p6-exact-limit")
+    task7_exact_parent, _ = fresh(
+        root, "positive-task7-exact-limit", b"t" * (64 * 1024 * 1024)
+    )
+    task7_exact, task7_exact_info = read_owned_entry(
+        task7_exact_parent,
+        "artifact",
+        label="Task 7 report",
+        limit=64 * 1024 * 1024,
+    )
+    assert len(task7_exact) == 64 * 1024 * 1024
+    assert task7_exact_info.st_size == 64 * 1024 * 1024
+    reader_positives.append("task7-exact-limit")
+
+    empty_parent, _ = fresh(root, "negative-empty", b"")
+    rejects(empty_parent)
+    oversize_parent, _ = fresh(root, "negative-oversize", b"x" * 65)
+    rejects(oversize_parent)
+    mode_parent, mode_path = fresh(root, "negative-mode")
+    os.chmod(mode_path, 0o666)
+    rejects(mode_parent)
+    hardlink_parent, hardlink_path = fresh(root, "negative-hardlink")
+    os.link(hardlink_path, root / "hardlink-sentinel")
+    rejects(hardlink_parent)
+
+    leaf_parent, leaf_path = fresh(root, "negative-leaf-symlink")
+    leaf_path.rename(leaf_parent / "target")
+    leaf_path.symlink_to("target")
+    rejects(leaf_parent)
+    real_parent, _ = fresh(root, "negative-parent-symlink-real")
+    alias_parent = root / "negative-parent-symlink"
+    alias_parent.symlink_to(real_parent, target_is_directory=True)
+    rejects(alias_parent)
+
+    identity_parent, identity_path = fresh(root, "negative-identity")
+    identity = os.lstat(identity_path)
+    rejects(
+        identity_parent,
+        expected_identity=(identity.st_dev, identity.st_ino + 1),
+    )
+
+    grow_parent, grow_path = fresh(root, "negative-grow", b"g" * 32)
+
+    def grow() -> None:
+        with grow_path.open("ab") as stream:
+            stream.write(b"growth")
+
+    rejects(grow_parent, action=grow)
+    shrink_parent, shrink_path = fresh(root, "negative-shrink", b"s" * 32)
+    rejects(shrink_parent, action=lambda: os.truncate(shrink_path, 1))
+
+    mutate_parent, mutate_path = fresh(
+        root, "negative-restored-mtime-mutate", b"m" * 32
+    )
+
+    def mutate() -> None:
+        before = os.lstat(mutate_path)
+        descriptor = os.open(mutate_path, os.O_WRONLY | os.O_NOFOLLOW)
+        try:
+            os.write(descriptor, b"M" * 32)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.utime(
+            mutate_path,
+            ns=(before.st_atime_ns, before.st_mtime_ns),
+        )
+
+    rejects(mutate_parent, action=mutate)
+
+    pathname_parent, replace_path = fresh(
+        root, "negative-path-replace", b"r" * 32
+    )
+
+    def replace_pathname() -> None:
+        replace_path.rename(pathname_parent / "artifact-old")
+        write_owned(replace_path, b"replacement")
+
+    rejects(pathname_parent, action=replace_pathname)
+
+    parent_swap, _ = fresh(root, "negative-parent-replace", b"p" * 32)
+
+    def replace_parent_directory() -> None:
+        parent_swap.rename(root / "negative-parent-replace-old")
+        parent_swap.mkdir(mode=0o700)
+        os.chmod(parent_swap, 0o700)
+        write_owned(parent_swap / "artifact", b"replacement")
+
+    rejects(parent_swap, action=replace_parent_directory)
+
+    parser_path = root / "task-review-parser.py"
+    write_owned(parser_path, parser_source.encode("utf-8"))
+    head = "a" * 40
+    for task_n in map(str, range(1, 8)):
+        case = root / f"parser-task-{task_n}"
+        case.mkdir(mode=0o700)
+        os.chmod(case, 0o700)
+        package = case / "package.diff"
+        review = case / "review.md"
+        report = case / "report.md"
+        package_payload = f"package-{task_n}\n".encode("ascii")
+        report_payload = f"report-{task_n}\n".encode("ascii")
+        write_owned(package, package_payload)
+        write_owned(report, report_payload)
+        package_sha = hashlib.sha256(package_payload).hexdigest()
+        report_sha = hashlib.sha256(report_payload).hexdigest()
+        review_fd = os.open(
+            review,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            os.fchmod(review_fd, 0o600)
+            review_info = os.fstat(review_fd)
+            lines = [
+                f"TASK_HEAD: {head}",
+                f"PACKAGE_SHA256: {package_sha}",
+            ]
+            if task_n == "7":
+                lines.extend(
+                    [
+                        f"REVIEW_DEV: {review_info.st_dev}",
+                        f"REVIEW_INO: {review_info.st_ino}",
+                    ]
+                )
+            lines.extend(
+                [
+                    "SPEC_VERDICT: PASS",
+                    "QUALITY_VERDICT: APPROVED",
+                    "CRITICAL: 0",
+                    "IMPORTANT: 0",
+                    "MINOR: 0",
+                ]
+            )
+            os.write(review_fd, ("\n".join(lines) + "\n").encode("ascii"))
+            os.fsync(review_fd)
+        finally:
+            os.close(review_fd)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                parser_path,
+                package,
+                review,
+                report,
+                report_sha,
+                head,
+                task_n,
+                str(review_info.st_dev if task_n == "7" else 0),
+                str(review_info.st_ino if task_n == "7" else 0),
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        expected_marker = (
+            f"TASK_REVIEW_READY head={head} package_sha256={package_sha} "
+            f"report_sha256={report_sha} "
+            f"review_sha256={hashlib.sha256(review.read_bytes()).hexdigest()}\n"
+        )
+        if completed.returncode != 0 or completed.stdout != expected_marker:
+            raise RuntimeError(
+                f"Task {task_n} parser positive failed: {completed.stderr}"
+            )
+        reader_positives.append(f"parser-task-{task_n}")
+        parser_tasks.append(task_n)
+        if task_n == "1":
+            os.chmod(review, 0o666)
+            rejected = subprocess.run(
+                [
+                    sys.executable,
+                    parser_path,
+                    package,
+                    review,
+                    report,
+                    report_sha,
+                    head,
+                    task_n,
+                    "0",
+                    "0",
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if rejected.returncode == 0 or "TASK_REVIEW_READY" in rejected.stdout:
+                raise RuntimeError("unsafe review crossed the parse gate")
+            blocked_before_ready.append(task_n)
+
+if (
+    len(reader_positives) != 14
+    or len(set(reader_positives)) != 14
+    or len(reader_negatives) != 12
+    or len(set(reader_negatives)) != 12
+    or len(parser_tasks) != 7
+    or sorted(parser_tasks) != ["1", "2", "3", "4", "5", "6", "7"]
+    or len(blocked_before_ready) != 1
+):
+    raise RuntimeError(
+        "task review reader coverage differs: "
+        f"positives={sorted(reader_positives)} negatives={sorted(reader_negatives)} "
+        f"parser_tasks={sorted(parser_tasks)} blocked={blocked_before_ready}"
+    )
+print(
+    f"TASK_REVIEW_READER_GREEN positives={len(reader_positives)} "
+    f"negatives={len(reader_negatives)} "
+    f"parser_tasks={len(parser_tasks)} "
+    f"blocked_before_ready={len(blocked_before_ready)}"
+)
+PY
+BASH
+```
+
+Expected exactly:
+
+```text
+TASK_REVIEW_READER_GREEN positives=14 negatives=12 parser_tasks=7 blocked_before_ready=1
+```
+
+Before the first Task 7 dispatch and again before terminal allocation/merge, run this
+single disposable exact-name publication and terminal-reader probe. It extracts the
+byte-identical controller readers/manifest validators and must never target the
+repository. In addition to one competing-creator winner, it proves normal/exact-limit
+reads and deterministic empty/oversize/link/mode/grow/shrink/restored-mtime mutation,
+leaf/parent replacement, mutation-after-parse-before-freeze, and R2 aggregate-limit
+behavior without changing either sentinel:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+UV="${UV:-$HOME/.local/bin/uv}"
+case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
+test -z "${PYTHONOPTIMIZE-}"
+"$UV" run --quiet --no-project --python 3.13 python - <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import tempfile
+import threading
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import cast
+from unittest import mock
+
+if not __debug__:
+    raise SystemExit("STOP: terminal reader probe requires assertions; unset PYTHONOPTIMIZE")
+
+_ = (hashlib.sha256, stat.S_ISREG)
+
+FILES = (
+    "task-7-brief.md",
+    "task-7-report.md",
+    "task-7-review-r1.diff",
+    "task-7-review-r1.md",
+    "whole-branch.diff",
+    "code-review.md",
+    "adversarial-review.md",
+    "ponytail-review.md",
+    "terminal-manifest.json",
+    "postmerge-r1.txt",
+)
+
+
+def publish(directory: int, name: str, payload: bytes) -> os.stat_result:
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory,
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(payload)
+        while view:
+            view = view[os.write(descriptor, view):]
+        os.fsync(descriptor)
+        opened = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or opened.st_nlink != 1
+            or current.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise RuntimeError(f"unsafe published artifact: {name}")
+        return opened
+    finally:
+        os.close(descriptor)
+
+
+def rejects_identity(directory: int, name: str, expected: tuple[int, int]) -> bool:
+    before = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+    try:
+        opened = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        return (
+            before.st_nlink != 1
+            or opened.st_nlink != 1
+            or current.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != expected
+            or (current.st_dev, current.st_ino) != expected
+        )
+    finally:
+        os.close(descriptor)
+
+
+def marked_blocks(text: str, stem: str) -> list[str]:
+    begin = f"# {stem}_BEGIN\n"
+    end = f"# {stem}_END\n"
+    blocks: list[str] = []
+    position = 0
+    while True:
+        try:
+            start = text.index(begin, position)
+        except ValueError:
+            return blocks
+        finish = text.index(end, start) + len(end)
+        blocks.append(text[start:finish])
+        position = finish
+
+
+def section_slice(source: str, opening: str, closing: str) -> str:
+    # Each anchor occurs exactly twice: once in this probe, once in the section it
+    # names. Take the second occurrence explicitly instead of relying on rindex and
+    # on this probe staying physically earlier in the Plan.
+    if source.count(opening) != 2 or source.count(closing) != 2:
+        raise RuntimeError("plan section anchor is not probe+section unique")
+    begin = source.index(opening, source.index(opening) + 1)
+    finish = source.index(closing, source.index(closing) + 1)
+    if finish <= begin:
+        raise RuntimeError("plan section anchors are out of order")
+    return source[begin:finish]
+
+
+# GATE_SNAPSHOT_READER_BEGIN
+def gate_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def gate_snapshot(
+    raw: Path,
+    *,
+    label: str,
+    limit: int,
+    mode: int,
+    expected: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    path = Path(os.path.abspath(raw))
+    parent, leaf = path.parent, path.name
+    if limit <= 0 or leaf in {"", ".", ".."} or os.path.realpath(parent) != os.fspath(parent):
+        raise RuntimeError(f"unsafe {label} path")
+    parent_before = os.lstat(parent)
+    parent_bound = gate_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) & 0o022
+    ):
+        raise RuntimeError(f"unsafe {label} parent")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = -1
+    try:
+        if gate_identity(os.fstat(parent_fd)) != parent_bound or gate_identity(os.lstat(parent)) != parent_bound:
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = gate_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != mode
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+            or expected is not None
+            and (before.st_dev, before.st_ino) != expected
+        ):
+            raise RuntimeError(f"unsafe {label} metadata")
+        descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        if gate_identity(os.fstat(descriptor)) != bound:
+            raise RuntimeError(f"{label} changed while opening")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading")
+        payload = b"".join(chunks)
+        if (
+            len(payload) != before.st_size
+            or gate_identity(os.fstat(descriptor)) != bound
+            or gate_identity(os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)) != bound
+            or gate_identity(os.fstat(parent_fd)) != parent_bound
+            or gate_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} changed while reading")
+        return payload, before
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+# GATE_SNAPSHOT_READER_END
+
+
+plan_bytes, _ = gate_snapshot(Path(
+    "docs/superpowers/plans/2026-08-10-official-blender-mcp-modeling-remediation.md"
+), label="Plan", limit=2 * 1024 * 1024, mode=0o644)
+plan_text = plan_bytes.decode("utf-8")
+phase_r_source = section_slice(
+    plan_text,
+    "### Controller Phase R: Terminal whole-branch review",
+    "### Controller Phase M: Fast-forward the exact reviewed object",
+)
+reader_blocks = marked_blocks(plan_text, "TERMINAL_BOUNDED_READER")
+manifest_blocks = marked_blocks(plan_text, "TERMINAL_MANIFEST_VALIDATOR")
+helper_blocks = marked_blocks(plan_text, "HELPER_OUTPUT_READER")
+gate_blocks = marked_blocks(plan_text, "GATE_SNAPSHOT_READER")
+snapshot_blocks = marked_blocks(plan_text, "BOUNDED_SNAPSHOT")
+artifact_blocks = marked_blocks(plan_text, "TASK_ARTIFACT_READER")
+if (
+    len(reader_blocks) != 4
+    or len(set(reader_blocks)) != 1
+    or len(manifest_blocks) != 2
+    or len(set(manifest_blocks)) != 1
+    or len(helper_blocks) != 3
+    or len(set(helper_blocks)) != 1
+    or len(gate_blocks) != 6
+    or len(set(gate_blocks)) != 1
+    or len(snapshot_blocks) != 1
+    or len(artifact_blocks) != 4
+    or len(set(artifact_blocks)) != 1
+):
+    raise RuntimeError("controller bounded-reader copies differ")
+exec(compile(reader_blocks[0], "<terminal bounded reader>", "exec"), globals())
+read_terminal = cast(
+    Callable[..., tuple[bytes, os.stat_result]], globals()["read_bounded_entry"]
+)
+r2_aggregate = cast(
+    Callable[[int, list[int]], int], globals()["bounded_r2_aggregate"]
+)
+manifest_max = cast(int, globals()["MANIFEST_MAX_BYTES"])
+r2_entry_max = cast(int, globals()["R2_ENTRY_MAX_BYTES"])
+r2_aggregate_max = cast(int, globals()["R2_AGGREGATE_MAX_BYTES"])
+digest_match = re.search(
+    r"(?ms)^def digest_opened_entry\(\n.*?^    return digest\n",
+    phase_r_source,
+)
+if digest_match is None:
+    raise RuntimeError("unique Phase R bounded digest helper absent")
+exec(compile(digest_match.group(0), "<terminal bounded digest>", "exec"), globals())
+digest_opened = cast(Callable[..., str], globals()["digest_opened_entry"])
+for marker in (
+    'EVIDENCE_BINDING="$(\n',
+    'print(f"EVIDENCE_SHA256={evidence_sha256}")',
+    'test "$EVIDENCE_BINDING" = "EVIDENCE_SHA256=$EVIDENCE_SHA256"',
+    'files["evidence-sha256"]',
+):
+    if marker not in phase_r_source:
+        raise RuntimeError(f"Phase R bounded digest binding absent: {marker}")
+if 'shasum -a 256 "$REVIEW_DIR/evidence-sha256"' in phase_r_source:
+    raise RuntimeError("Phase R still hashes mutable evidence by pathname")
+
+
+def no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise RuntimeError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
+def reject_constant(value: str) -> None:
+    raise RuntimeError(f"non-finite JSON constant: {value}")
+
+
+def canonical(value: object) -> bytes:
+    return (
+        json.dumps(
+            value, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        ).encode("utf-8") + b"\n"
+    )
+
+
+exec(compile(manifest_blocks[0], "<terminal manifest validator>", "exec"), globals())
+make_terminal_manifest = cast(
+    Callable[..., dict[str, object]], globals()["terminal_manifest_value"]
+)
+check_terminal_manifest = cast(
+    Callable[..., None], globals()["validate_terminal_manifest"]
+)
+reader_positives: set[str] = set()
+reader_negatives: set[str] = set()
+
+
+def expect_reject(label: str, action: Callable[[], object]) -> None:
+    try:
+        action()
+    except (OSError, RuntimeError):
+        reader_negatives.add(label)
+    else:
+        raise AssertionError(f"terminal reader accepted {label}")
+
+
+with tempfile.TemporaryDirectory(
+    prefix="modeling-controller-publication-", dir="/private/tmp"
+) as raw_root:
+    root = Path(raw_root)
+    os.chmod(root, 0o700)
+
+    def prepare(label: str, payload: bytes, mode: int = 0o600) -> Path:
+        parent = root / f"reader-{label}"
+        parent.mkdir(mode=0o700)
+        os.chmod(parent, 0o700)
+        target = parent / "artifact"
+        target.write_bytes(payload)
+        os.chmod(target, mode)
+        return target
+
+    def read_target(target: Path, limit: int = 64) -> bytes:
+        payload, _ = read_terminal(
+            target.parent,
+            target.name,
+            parent_mode=0o700,
+            file_mode=0o600,
+            limit=limit,
+            label="terminal probe",
+        )
+        return payload
+
+    normal = prepare("normal", b"normal")
+    if read_target(normal) != b"normal":
+        raise RuntimeError("normal bounded read differs")
+    reader_positives.add("normal")
+    exact = prepare("exact", b"x" * 64)
+    if read_target(exact, 64) != b"x" * 64:
+        raise RuntimeError("exact-limit bounded read differs")
+    reader_positives.add("exact-limit")
+
+    def digest_target(target: Path, limit: int = 64) -> str:
+        directory = os.open(
+            target.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
+        descriptor = os.open(
+            target.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory
+        )
+        try:
+            return digest_opened(
+                directory,
+                target.parent,
+                target.name,
+                descriptor,
+                limit=limit,
+                label="terminal evidence digest probe",
+            )
+        finally:
+            os.close(descriptor)
+            os.close(directory)
+
+    digest_normal = prepare("digest-normal", b"digest")
+    if digest_target(digest_normal) != hashlib.sha256(b"digest").hexdigest():
+        raise RuntimeError("normal bounded digest differs")
+    reader_positives.add("digest-normal")
+    digest_exact = prepare("digest-exact", b"d" * manifest_max)
+    if digest_target(digest_exact, manifest_max) != hashlib.sha256(
+        b"d" * manifest_max
+    ).hexdigest():
+        raise RuntimeError("exact-limit bounded digest differs")
+    reader_positives.add("digest-exact-limit")
+
+    digest_empty = prepare("digest-empty", b"")
+    expect_reject("digest-empty", lambda: digest_target(digest_empty))
+    digest_oversize = prepare("digest-oversize", b"o" * 65)
+    expect_reject("digest-oversize", lambda: digest_target(digest_oversize))
+
+    def digest_race(
+        label: str,
+        payload: bytes,
+        action: Callable[[Path], None],
+    ) -> None:
+        target = prepare(f"digest-{label}", payload)
+        original_digest_read = os.read
+        state = {"done": False}
+
+        def mutate_then_read(descriptor: int, size: int) -> bytes:
+            if not state["done"]:
+                state["done"] = True
+                action(target)
+            return original_digest_read(descriptor, size)
+
+        with mock.patch.object(os, "read", side_effect=mutate_then_read):
+            expect_reject(f"digest-{label}", lambda: digest_target(target))
+
+    def digest_grow(target: Path) -> None:
+        target.write_bytes(b"g" * 32 + b"growth")
+
+    digest_race("grow", b"g" * 32, digest_grow)
+    digest_race("shrink", b"s" * 32, lambda target: os.truncate(target, 1))
+
+    def digest_same_size(target: Path) -> None:
+        identity = target.stat()
+        target.write_bytes(b"M" * 32)
+        os.chmod(target, 0o600)
+        os.utime(target, ns=(identity.st_atime_ns, identity.st_mtime_ns))
+
+    digest_race("restored-mtime", b"m" * 32, digest_same_size)
+
+    def digest_replace_leaf(target: Path) -> None:
+        target.rename(target.parent / "artifact-old")
+        target.write_bytes(b"replacement")
+        os.chmod(target, 0o600)
+
+    digest_race("leaf-replacement", b"leaf", digest_replace_leaf)
+
+    def digest_replace_parent(target: Path) -> None:
+        target.parent.rename(root / "reader-digest-parent-replacement-old")
+        target.parent.mkdir(mode=0o700)
+        os.chmod(target.parent, 0o700)
+        target.write_bytes(b"parent")
+        os.chmod(target, 0o600)
+
+    digest_race("parent-replacement", b"parent", digest_replace_parent)
+
+    digest_hash_race = prepare("digest-between-validation-hash", b"hash-race")
+    original_sha256 = hashlib.sha256
+    hash_state = {"done": False}
+
+    def mutate_before_hash(payload: bytes = b"") -> object:
+        if not hash_state["done"]:
+            hash_state["done"] = True
+            digest_hash_race.write_bytes(b"HASH-RACE")
+            os.chmod(digest_hash_race, 0o600)
+        return original_sha256(payload)
+
+    with mock.patch.object(hashlib, "sha256", side_effect=mutate_before_hash):
+        expect_reject(
+            "digest-mutation-between-validation-hash",
+            lambda: digest_target(digest_hash_race),
+        )
+
+    empty = prepare("empty", b"")
+    expect_reject("empty", lambda: read_target(empty))
+    oversize = prepare("oversize", b"x" * 65)
+    expect_reject("oversize", lambda: read_target(oversize))
+    unsafe_mode = prepare("unsafe-mode", b"mode", 0o666)
+    expect_reject("unsafe-mode", lambda: read_target(unsafe_mode))
+
+    symlink_parent = root / "reader-leaf-symlink"
+    symlink_parent.mkdir(mode=0o700)
+    os.chmod(symlink_parent, 0o700)
+    symlink_sentinel = root / "reader-symlink-sentinel"
+    symlink_sentinel.write_bytes(b"sentinel")
+    os.chmod(symlink_sentinel, 0o600)
+    os.symlink(symlink_sentinel, symlink_parent / "artifact")
+    expect_reject(
+        "leaf-symlink", lambda: read_target(symlink_parent / "artifact")
+    )
+
+    real_parent = root / "reader-real-parent"
+    real_parent.mkdir(mode=0o700)
+    os.chmod(real_parent, 0o700)
+    real_target = real_parent / "artifact"
+    real_target.write_bytes(b"parent")
+    os.chmod(real_target, 0o600)
+    parent_link = root / "reader-parent-symlink"
+    os.symlink(real_parent, parent_link)
+    expect_reject(
+        "parent-symlink", lambda: read_target(parent_link / "artifact")
+    )
+
+    hardlink = prepare("hardlink", b"linked")
+    os.link(hardlink, hardlink.parent / "external")
+    expect_reject("hardlink", lambda: read_target(hardlink))
+
+    original_read = os.read
+    grow = prepare("grow", b"g" * 32)
+    grow_state = {"done": False}
+
+    def grow_during_read(descriptor: int, size: int) -> bytes:
+        chunk = original_read(descriptor, size)
+        if not grow_state["done"]:
+            with grow.open("ab") as stream:
+                stream.write(b"GROW")
+            grow_state["done"] = True
+        return chunk
+
+    with mock.patch.object(os, "read", side_effect=grow_during_read):
+        expect_reject("grow", lambda: read_target(grow))
+
+    shrink = prepare("shrink", b"s" * 32)
+    shrink_state = {"done": False}
+
+    def shrink_during_read(descriptor: int, size: int) -> bytes:
+        if not shrink_state["done"]:
+            os.truncate(shrink, 8)
+            shrink_state["done"] = True
+        return original_read(descriptor, size)
+
+    with mock.patch.object(os, "read", side_effect=shrink_during_read):
+        expect_reject("shrink", lambda: read_target(shrink))
+
+    same_size = prepare("same-size", b"a" * 32)
+    same_before = same_size.stat()
+    mutation_state = {"done": False}
+
+    def mutate_during_read(descriptor: int, size: int) -> bytes:
+        if not mutation_state["done"]:
+            time.sleep(0.002)
+            with same_size.open("r+b") as stream:
+                stream.write(b"b" * 32)
+            os.utime(
+                same_size,
+                ns=(same_before.st_atime_ns, same_before.st_mtime_ns),
+            )
+            mutation_state["done"] = True
+        return original_read(descriptor, size)
+
+    with mock.patch.object(os, "read", side_effect=mutate_during_read):
+        expect_reject("same-size-restored-mtime", lambda: read_target(same_size))
+
+    replace = prepare("leaf-replace", b"original")
+    replacement_state = {"done": False}
+
+    def replace_during_read(descriptor: int, size: int) -> bytes:
+        if not replacement_state["done"]:
+            replace.rename(replace.parent / "old-artifact")
+            replace.write_bytes(b"changed!")
+            os.chmod(replace, 0o600)
+            replacement_state["done"] = True
+        return original_read(descriptor, size)
+
+    with mock.patch.object(os, "read", side_effect=replace_during_read):
+        expect_reject("leaf-replacement", lambda: read_target(replace))
+
+    parent_swap = prepare("parent-replace", b"parent")
+    parent_state = {"done": False}
+
+    def replace_parent_during_read(descriptor: int, size: int) -> bytes:
+        if not parent_state["done"]:
+            old_parent = root / "reader-parent-replace-old"
+            parent_swap.parent.rename(old_parent)
+            parent_swap.parent.mkdir(mode=0o700)
+            os.chmod(parent_swap.parent, 0o700)
+            parent_swap.write_bytes(b"parent")
+            os.chmod(parent_swap, 0o600)
+            parent_state["done"] = True
+        return original_read(descriptor, size)
+
+    with mock.patch.object(os, "read", side_effect=replace_parent_during_read):
+        expect_reject("parent-replacement", lambda: read_target(parent_swap))
+
+    parsed_path = prepare("parsed-mutation", b"before")
+    parsed_payload = read_target(parsed_path)
+    parsed_before = parsed_path.stat()
+    time.sleep(0.002)
+    parsed_path.write_bytes(b"after!")
+    os.chmod(parsed_path, 0o600)
+    os.utime(
+        parsed_path,
+        ns=(parsed_before.st_atime_ns, parsed_before.st_mtime_ns),
+    )
+
+    def prefreeze_recheck() -> None:
+        current = read_target(parsed_path)
+        if current != parsed_payload:
+            raise RuntimeError("parsed terminal payload changed before freeze")
+
+    expect_reject("mutation-after-parse-before-freeze", prefreeze_recheck)
+
+    exact_sizes = [r2_entry_max] * 7 + [62 * 1024 * 1024]
+    if r2_aggregate(manifest_max, exact_sizes) != r2_aggregate_max:
+        raise RuntimeError("exact aggregate limit differs")
+    reader_positives.add("aggregate-exact")
+    expect_reject(
+        "aggregate-oversize",
+        lambda: r2_aggregate(
+            manifest_max,
+            [r2_entry_max] * 7 + [62 * 1024 * 1024 + 1],
+        ),
+    )
+    expect_reject(
+        "entry-oversize",
+        lambda: r2_aggregate(1, [r2_entry_max + 1]),
+    )
+
+    manifest_parent = root / "reader-terminal-manifest"
+    manifest_parent.mkdir(mode=0o700)
+    os.chmod(manifest_parent, 0o700)
+    manifest_path = manifest_parent / "terminal-manifest.json"
+    manifest_fd = os.open(
+        manifest_path,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        os.fchmod(manifest_fd, 0o600)
+        manifest_info = os.fstat(manifest_fd)
+    finally:
+        os.close(manifest_fd)
+    manifest_r2 = manifest_parent / "r2-evidence"
+    manifest_r2.mkdir(mode=0o700)
+    os.chmod(manifest_r2, 0o700)
+    actor_inodes: dict[str, object] = {
+        "reports": {},
+        "review_dir": {
+            "dev": manifest_parent.stat().st_dev,
+            "ino": manifest_parent.stat().st_ino,
+        },
+        "version": 1,
+    }
+    manifest_payloads = {"actor-inodes.json": b"actor\n"}
+    manifest_r2_payloads = {"evidence-manifest.json": b"r2\n"}
+    manifest_raw = canonical(
+        make_terminal_manifest(
+            manifest_payloads,
+            manifest_r2_payloads,
+            manifest_parent.stat(),
+            manifest_r2.stat(),
+            actor_inodes,
+            manifest_info,
+        )
+    )
+    manifest_payloads["terminal-manifest.json"] = manifest_raw
+    check_terminal_manifest(
+        manifest_raw,
+        manifest_payloads,
+        manifest_r2_payloads,
+        manifest_parent.stat(),
+        manifest_r2.stat(),
+        actor_inodes,
+        manifest_info,
+    )
+    reader_positives.add("terminal-manifest")
+    tampered_payloads = dict(manifest_payloads)
+    tampered_payloads["actor-inodes.json"] = b"changed\n"
+    expect_reject(
+        "terminal-manifest-tamper",
+        lambda: check_terminal_manifest(
+            manifest_raw,
+            tampered_payloads,
+            manifest_r2_payloads,
+            manifest_parent.stat(),
+            manifest_r2.stat(),
+            actor_inodes,
+            manifest_info,
+        ),
+    )
+
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        # The truncating-helper lane writes only the exclusively allocated stage inode.
+        os.mkdir("stage", 0o700, dir_fd=directory)
+        stage = os.open(
+            "stage", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory
+        )
+        helper_output = os.open(
+            "helper-output",
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=stage,
+        )
+        subprocess.run(
+            ["/bin/bash", "-c", "printf staged > \"$1\"", "bash", f"/dev/fd/{helper_output}"],
+            check=True,
+            pass_fds=(helper_output,),
+        )
+        os.lseek(helper_output, 0, os.SEEK_SET)
+        assert os.read(helper_output, 64) == b"staged"
+        os.close(helper_output)
+        os.unlink("helper-output", dir_fd=stage)
+        os.close(stage)
+        os.rmdir("stage", dir_fd=directory)
+
+        for index, name in enumerate(FILES):
+            barrier = threading.Barrier(2)
+            outcomes: list[str] = []
+
+            def creator(value: bytes) -> None:
+                barrier.wait()
+                try:
+                    publish(directory, name, value)
+                except FileExistsError:
+                    outcomes.append("occupied")
+                else:
+                    outcomes.append("winner")
+
+            threads = [
+                threading.Thread(target=creator, args=(f"{index}-{side}".encode(),))
+                for side in range(2)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            assert sorted(outcomes) == ["occupied", "winner"]
+            os.unlink(name, dir_fd=directory)
+
+        outcomes = []
+        barrier = threading.Barrier(2)
+
+        def directory_creator() -> None:
+            barrier.wait()
+            try:
+                os.mkdir("terminal-r1", 0o700, dir_fd=directory)
+            except FileExistsError:
+                outcomes.append("occupied")
+            else:
+                outcomes.append("winner")
+
+        threads = [threading.Thread(target=directory_creator) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert sorted(outcomes) == ["occupied", "winner"]
+        os.rmdir("terminal-r1", dir_fd=directory)
+
+        sentinel = root / "sentinel"
+        sentinel.write_bytes(b"sentinel")
+        os.symlink(sentinel, root / "task-7-brief.md")
+        try:
+            publish(directory, "task-7-brief.md", b"clobber")
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("symlink creator won")
+        assert sentinel.read_bytes() == b"sentinel"
+        os.unlink("task-7-brief.md", dir_fd=directory)
+
+        published = publish(directory, "task-7-report.md", b"owned")
+        identity = (published.st_dev, published.st_ino)
+        os.link(root / "task-7-report.md", root / "external-hardlink")
+        assert rejects_identity(directory, "task-7-report.md", identity)
+        assert (root / "external-hardlink").read_bytes() == b"owned"
+        os.unlink("external-hardlink", dir_fd=directory)
+        os.unlink("task-7-report.md", dir_fd=directory)
+
+        published = publish(directory, "task-7-review-r1.md", b"original")
+        identity = (published.st_dev, published.st_ino)
+        opened = os.open(
+            "task-7-review-r1.md", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory
+        )
+        os.rename(
+            "task-7-review-r1.md",
+            "replaced-review",
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
+        )
+        publish(directory, "task-7-review-r1.md", b"replacement")
+        current = os.stat(
+            "task-7-review-r1.md", dir_fd=directory, follow_symlinks=False
+        )
+        assert (os.fstat(opened).st_dev, os.fstat(opened).st_ino) == identity
+        assert (current.st_dev, current.st_ino) != identity
+        os.close(opened)
+        assert (root / "replaced-review").read_bytes() == b"original"
+        assert (root / "task-7-review-r1.md").read_bytes() == b"replacement"
+        os.unlink("replaced-review", dir_fd=directory)
+        os.unlink("task-7-review-r1.md", dir_fd=directory)
+
+        os.mkdir("terminal-r2", 0o700, dir_fd=directory)
+        terminal = os.open(
+            "terminal-r2",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=directory,
+        )
+        terminal_identity = os.fstat(terminal)
+        os.rename(
+            "terminal-r2", "replaced-terminal", src_dir_fd=directory, dst_dir_fd=directory
+        )
+        os.mkdir("terminal-r2", 0o700, dir_fd=directory)
+        replacement = os.stat(
+            "terminal-r2", dir_fd=directory, follow_symlinks=False
+        )
+        assert (replacement.st_dev, replacement.st_ino) != (
+            terminal_identity.st_dev,
+            terminal_identity.st_ino,
+        )
+        os.close(terminal)
+        os.rmdir("replaced-terminal", dir_fd=directory)
+        os.rmdir("terminal-r2", dir_fd=directory)
+    finally:
+        os.close(directory)
+if len(reader_positives) != 6 or len(reader_negatives) != 23:
+    raise RuntimeError(
+        "terminal reader coverage differs: "
+        f"positives={sorted(reader_positives)} negatives={sorted(reader_negatives)}"
+    )
+print(
+    "CONTROLLER_TERMINAL_READER_GREEN "
+    f"positives={len(reader_positives)} negatives={len(reader_negatives)} "
+    "competing=11 symlink=1 hardlink=1 inode_replace=1 directory_swap=1"
+)
+PY
+BASH
+```
+
+Expected exactly:
+
+```text
+CONTROLLER_TERMINAL_READER_GREEN positives=6 negatives=23 competing=11 symlink=1 hardlink=1 inode_replace=1 directory_swap=1
 ```
 
 Every finding is fixed by the owning implementer. Its report is appended with the
 covering test file, command, and output; then a new package and one new standard review
 are generated. Only a clean combined verdict permits
-`Task N: complete (commits <base7>..<head7>, spec pass, quality approved)` in
+`Task N: complete (commits <baseN>..<headN>, spec pass, quality approved)` in
 `.superpowers/sdd/progress.md`.
 
 All subagent dispatches use `fork_turns="none"`. Tasks 1–3 use `gpt-5.6-terra` at
-medium effort; Tasks 4–5 and combined Task, Plan, or whole-branch reviewers use
+medium effort; Tasks 4–7 and combined Task, Plan, or whole-branch reviewers use
 `gpt-5.6-sol` at high effort. The terminal requesting-code-review reviewer uses the
 most capable available model. Every reviewer receives file paths rather than copied
 session history.
+
+---
+
+## Post-Task-5 continuation gate P6（controller-only）
+
+This section is intentionally outside every numeric Task so the standard task-brief
+helper cannot include it. On a fresh full execution, Task 0 reviews the initial Plan and
+the controller does not execute P6 when first reading this section; it returns here only
+after Task 5 has a clean combined review. In the current post-Task-5 continuation, P6
+must be complete before `task-6-brief.md` is generated.
+
+Publication is one-shot and irreversible. If
+`.superpowers/sdd/modeling-remediation/final-retest-r1/invalid-journals.sha256` already
+exists, P6 is published and immutable: do **not** re-run the retention block below — it
+aborts by design with `invalid-journals manifest already exists` — and never delete,
+truncate, move or rewrite that file. Deleting it to "recover" would destroy P6
+immutability and invalidate the digest every post-P6 reviewer prompt and report is bound
+to. Run this verification instead and continue at the three-lens review:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+UV="${UV:-$HOME/.local/bin/uv}"
+case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
+"$UV" run --quiet --no-project --python 3.13 python - <<'PY'
+from __future__ import annotations
+
+import hashlib
+import os
+import stat
+from pathlib import Path
+
+# The published branch of P6 used five independent resolutions of one pathname -- `test
+# -f`, `test ! -L`, `stat`, `shasum`, `grep -c` -- and combined their answers into a
+# single assertion. Unlike Task 0's two deliberate bare reads, nothing outside this
+# process consumes the result, so there is no reason not to bind one descriptor.
+MANIFEST = Path(
+    ".superpowers/sdd/modeling-remediation/final-retest-r1/invalid-journals.sha256"
+)
+MANIFEST_SHA256 = "8292ac78073804687faab381181881ac7f522da1edea2dffe625626c1482c535"
+
+# P6_MANIFEST_READER_BEGIN
+path = Path(os.path.abspath(MANIFEST))
+parent, leaf = path.parent, path.name
+if os.path.realpath(parent) != os.fspath(parent):
+    raise SystemExit("STOP: non-canonical invalid-journals manifest parent")
+parent_before = os.lstat(parent)
+if (
+    stat.S_ISLNK(parent_before.st_mode)
+    or not stat.S_ISDIR(parent_before.st_mode)
+    or parent_before.st_uid != os.getuid()
+    or stat.S_IMODE(parent_before.st_mode) & 0o022
+):
+    raise SystemExit("STOP: unsafe invalid-journals manifest parent")
+parent_bound = (parent_before.st_dev, parent_before.st_ino)
+parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+descriptor = -1
+try:
+    if (os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino) != parent_bound:
+        raise SystemExit("STOP: manifest parent changed while opening")
+    before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+    bound = (
+        before.st_dev, before.st_ino, before.st_uid, before.st_mode, before.st_nlink,
+        before.st_size, before.st_mtime_ns, before.st_ctime_ns,
+    )
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_nlink != 1
+        or before.st_size != 180
+    ):
+        raise SystemExit("STOP: unsafe invalid-journals manifest metadata")
+    descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    opened = os.fstat(descriptor)
+    if (
+        opened.st_dev, opened.st_ino, opened.st_uid, opened.st_mode, opened.st_nlink,
+        opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns,
+    ) != bound:
+        raise SystemExit("STOP: manifest changed while opening")
+    remaining = before.st_size
+    chunks: list[bytes] = []
+    while remaining:
+        chunk = os.read(descriptor, remaining)
+        if not chunk:
+            raise SystemExit("STOP: manifest shrank while reading")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    if os.read(descriptor, 1):
+        raise SystemExit("STOP: manifest grew while reading")
+    payload = b"".join(chunks)
+    after = os.fstat(descriptor)
+    current = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+    if (
+        len(payload) != before.st_size
+        or (
+            after.st_dev, after.st_ino, after.st_uid, after.st_mode, after.st_nlink,
+            after.st_size, after.st_mtime_ns, after.st_ctime_ns,
+        ) != bound
+        or (
+            current.st_dev, current.st_ino, current.st_uid, current.st_mode,
+            current.st_nlink, current.st_size, current.st_mtime_ns, current.st_ctime_ns,
+        ) != bound
+        or (os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino) != parent_bound
+        or (os.lstat(parent).st_dev, os.lstat(parent).st_ino) != parent_bound
+    ):
+        raise SystemExit("STOP: manifest or parent identity changed while reading")
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+    os.close(parent_fd)
+# P6_MANIFEST_READER_END
+if hashlib.sha256(payload).hexdigest() != MANIFEST_SHA256:
+    raise SystemExit("STOP: invalid-journals manifest digest differs")
+rows = payload.count(b"\n")
+if rows != 2 or not payload.endswith(b"\n"):
+    raise SystemExit("STOP: invalid-journals manifest row count differs")
+print(f"R1_INVALID_MANIFEST_VERIFIED rows={rows} sha256={MANIFEST_SHA256}")
+PY
+BASH
+```
+
+Expected exactly `R1_INVALID_MANIFEST_VERIFIED rows=2 sha256=8292ac78073804687faab381181881ac7f522da1edea2dffe625626c1482c535`.
+
+Only when that manifest is absent does the controller publish it. Export `TASK_BASE`
+to the reviewed Task 5 HEAD before running the block: publication is irreversible and
+its stated precondition -- that Task 5 has a clean combined review -- was prose that
+nothing inspected. First retain both invalid r1 journals without editing them:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+# Publication is the one irreversible step in this Plan and its only preconditions were
+# the r1 root's ownership and mode and the two journal digests: nothing inspected HEAD,
+# the branch name, progress.md or any Task 5 review artifact, so the binding to a clean
+# Task 5 review existed only in prose. Tasks 6 and 7 both carry exactly this guard; the
+# irreversible step did not. The verification branch above is deliberately left without
+# it: it is read-only, it is the branch an operator runs precisely when they are unsure
+# what state P6 is in, and requiring a reviewed HEAD to ask that question would make the
+# safe branch harder to reach than the irreversible one.
+: "${TASK_BASE:?reviewed Task 5 HEAD required}"
+case "$TASK_BASE" in *[!0-9a-f]*) echo 'STOP: TASK_BASE must be a 40-hex object' >&2; exit 1 ;; esac
+test "${#TASK_BASE}" = 40
+test "$(git rev-parse HEAD)" = "$TASK_BASE"
+test "$(git status --porcelain=v1 --untracked-files=all)" = ''
+R1=.superpowers/sdd/modeling-remediation/final-retest-r1
+UV="${UV:-$HOME/.local/bin/uv}"
+case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
+"$UV" run --quiet --no-project --python 3.13 python - "$R1" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import os
+import secrets
+import stat
+import sys
+from pathlib import Path
+
+EXPECTED = (
+    (
+        "journal-attempt1.ndjson",
+        1628,
+        "b6f2568116080d4936a3d753a419c771c00233a67111ed626cc2bbe169c79f0e",
+    ),
+    (
+        "journal-attempt2.ndjson",
+        18779,
+        "909fb6510a7ae4f115688add9d1eb0b25430ec9d4f490d16fb56b72343b24e7b",
+    ),
+)
+OUTPUT = "invalid-journals.sha256"
+root = Path(os.path.abspath(sys.argv[1]))
+if os.path.realpath(root) != os.fspath(root):
+    raise RuntimeError("r1 root contains a symlink")
+root_info = os.lstat(root)
+if (
+    stat.S_ISLNK(root_info.st_mode)
+    or not stat.S_ISDIR(root_info.st_mode)
+    or root_info.st_uid != os.getuid()
+    or stat.S_IMODE(root_info.st_mode) != 0o700
+):
+    raise RuntimeError("owned native mode-0700 r1 root required")
+
+
+# TASK_ARTIFACT_READER_BEGIN
+BRIEF_MAX_BYTES = 2 * 1024 * 1024
+REPORT_MAX_BYTES = 64 * 1024 * 1024
+PACKAGE_MAX_BYTES = 64 * 1024 * 1024
+REVIEW_MAX_BYTES = 8 * 1024 * 1024
+
+
+def artifact_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def read_owned_entry(
+    parent_path: Path,
+    name: str,
+    *,
+    label: str,
+    limit: int,
+    expected_identity: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    parent_path = Path(os.path.abspath(parent_path))
+    if name in {"", ".", ".."} or name != os.path.basename(name):
+        raise RuntimeError(f"unsafe {label} leaf: {name!r}")
+    if limit <= 0 or os.path.realpath(parent_path) != os.fspath(parent_path):
+        raise RuntimeError(f"unsafe {label} parent: {parent_path}")
+    parent_before = os.lstat(parent_path)
+    parent_bound = artifact_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) != 0o700
+    ):
+        raise RuntimeError(f"owned native mode-0700 {label} parent required")
+    parent_fd = os.open(
+        parent_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    descriptor = -1
+    try:
+        if (
+            artifact_identity(os.fstat(parent_fd)) != parent_bound
+            or artifact_identity(os.lstat(parent_path)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        bound = artifact_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+            or (
+                expected_identity is not None
+                and (before.st_dev, before.st_ino) != expected_identity
+            )
+        ):
+            raise RuntimeError(f"unsafe {label} artifact: {name}")
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
+        opened = os.fstat(descriptor)
+        if artifact_identity(opened) != bound:
+            raise RuntimeError(f"{label} changed while opening: {name}")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading: {name}")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading: {name}")
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        parent_after = os.fstat(parent_fd)
+        parent_current = os.lstat(parent_path)
+        if (
+            len(payload) != before.st_size
+            or artifact_identity(after) != bound
+            or artifact_identity(current) != bound
+            or artifact_identity(parent_after) != parent_bound
+            or artifact_identity(parent_current) != parent_bound
+        ):
+            raise RuntimeError(f"{label} changed while reading: {name}")
+        return payload, after
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+# TASK_ARTIFACT_READER_END
+
+
+directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+temporary: str | None = None
+temporary_fd: int | None = None
+try:
+    opened_root = os.fstat(directory_fd)
+    if (opened_root.st_dev, opened_root.st_ino) != (
+        root_info.st_dev,
+        root_info.st_ino,
+    ):
+        raise RuntimeError("r1 root changed while opening")
+    try:
+        os.stat(OUTPUT, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        raise RuntimeError("invalid-journals manifest already exists")
+
+    rows: list[str] = []
+    for name, expected_size, expected_digest in EXPECTED:
+        payload, _ = read_owned_entry(
+            root,
+            name,
+            label="retained journal",
+            limit=1024 * 1024,
+        )
+        digest = hashlib.sha256(payload).hexdigest()
+        if len(payload) != expected_size or digest != expected_digest:
+            raise RuntimeError(f"retained journal digest differs: {name}")
+        rows.append(f"{digest}  {name}\n")
+
+    manifest = "".join(rows).encode("ascii")
+    if (
+        len(manifest) != 180
+        or hashlib.sha256(manifest).hexdigest()
+        != "8292ac78073804687faab381181881ac7f522da1edea2dffe625626c1482c535"
+    ):
+        raise RuntimeError("invalid-journals manifest bytes differ")
+
+    temporary = f".{OUTPUT}.tmp-{os.getpid()}-{secrets.token_hex(8)}"
+    temporary_fd = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory_fd,
+    )
+    view = memoryview(manifest)
+    while view:
+        view = view[os.write(temporary_fd, view):]
+    os.fsync(temporary_fd)
+    temporary_info = os.fstat(temporary_fd)
+    if (
+        not stat.S_ISREG(temporary_info.st_mode)
+        or temporary_info.st_uid != os.getuid()
+        or temporary_info.st_nlink != 1
+        or stat.S_IMODE(temporary_info.st_mode) != 0o600
+    ):
+        raise RuntimeError("unsafe unpublished manifest")
+    os.link(
+        temporary,
+        OUTPUT,
+        src_dir_fd=directory_fd,
+        dst_dir_fd=directory_fd,
+        follow_symlinks=False,
+    )
+    os.unlink(temporary, dir_fd=directory_fd)
+    temporary = None
+    os.fsync(directory_fd)
+    output_info = os.stat(OUTPUT, dir_fd=directory_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(output_info.st_mode)
+        or output_info.st_uid != os.getuid()
+        or output_info.st_nlink != 1
+        or stat.S_IMODE(output_info.st_mode) != 0o600
+        or output_info.st_size != len(manifest)
+    ):
+        raise RuntimeError("published manifest metadata differs")
+    if (output_info.st_dev, output_info.st_ino) != (
+        temporary_info.st_dev,
+        temporary_info.st_ino,
+    ):
+        raise RuntimeError("published manifest is not the inode that was created")
+    published, _ = read_owned_entry(
+        root,
+        OUTPUT,
+        label="published manifest",
+        limit=1024,
+        expected_identity=(temporary_info.st_dev, temporary_info.st_ino),
+    )
+    if published != manifest:
+        raise RuntimeError("published manifest bytes differ")
+    print(
+        "R1_INVALID_MANIFEST_READY "
+        f"rows=2 sha256={hashlib.sha256(manifest).hexdigest()}"
+    )
+finally:
+    if temporary_fd is not None:
+        os.close(temporary_fd)
+    if temporary is not None:
+        try:
+            os.unlink(temporary, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+    os.close(directory_fd)
+PY
+BASH
+```
+
+Expected exactly:
+
+```text
+R1_INVALID_MANIFEST_READY rows=2 sha256=8292ac78073804687faab381181881ac7f522da1edea2dffe625626c1482c535
+```
+
+Neither journal supports a pass claim. Re-run Task 0's exact three-lens Plan-review
+contract on the amended Plan SHA with a fresh round. All three fresh reviewers receive
+the whole Plan, current runbook/audit, this r1 manifest and literal r1 symptoms. Any
+finding amends only this Plan and restarts all three lenses in a new round. Commit the
+Plan only after the same SHA receives three zero-finding PASS verdicts. Only then may
+the controller generate and dispatch Task 6; Task 7 remains blocked until Task 6 has a
+clean combined review at the current clean HEAD.
 
 ---
 
@@ -335,19 +3017,70 @@ Use exactly these ignored review reports for round `N`:
 .superpowers/sdd/modeling-remediation/plan-ponytail-review-rN.md
 ```
 
-For this self-contained post-cleanup evidence revision set `N=18`; do not reuse any
-r13/r15/r16/r17 report or aborted r14 reviewer state. If r18 finds anything, use the
-next unused integer for the complete corrected bytes.
+The self-contained post-cleanup evidence revision used `N=18`; its reports are completed
+historical evidence only. Do not reuse any r13/r15/r16/r17 report, aborted r14 reviewer
+state, or r18 report as executable state. R24 is likewise pre-P6 evidence only and must
+not be reused for the post-P6 review.
 
-Before dispatch, compute `shasum -a 256` for the Plan. Each reviewer prompt and report
-must name that digest; a verdict on another digest is invalid. This is a tracked
-Plan-only fix-forward revision: require the Plan to be the only tracked worktree change,
-run `git diff --check`, and also run `git diff --no-index --check /dev/null "$PLAN"`,
-accepting only the normal no-index difference status and empty diagnostic output.
+After P6 publication, the controller is the sole round allocator. It must enumerate
+every numeric suffix already present across all three exact report families above,
+including partial rounds, take their union, set `N` to the global maximum plus one, and
+confirm that all three target paths for that `N` are absent before dispatch. The
+controller allocates that common `N` exactly once and supplies it to all three fresh
+reviewers; a reviewer must neither choose nor change `N`.
+
+Before dispatch, compute `shasum -a 256` for the exact current Plan. Every reviewer
+prompt and every report must bind both that Plan digest and the exact published P6
+`invalid-journals.sha256` SHA-256
+`8292ac78073804687faab381181881ac7f522da1edea2dffe625626c1482c535`; a verdict bound
+to either different input is invalid. Give every fresh reviewer the complete post-P6
+input set defined above and require each lens to review it from scratch.
+
+Exclusive creation lives in the allocator and nowhere else. The controller allocates
+`N` and creates all three targets in one exclusive step, so a partial round cannot
+exist; a reviewer that also demanded `O_CREAT|O_EXCL` could never write the file the
+allocator just created for it. Each reviewer/report writer therefore opens **only** its
+own preallocated report without truncation, verifies that it is a non-symlink regular
+file it owns with mode `0600`, `nlink == 1` and size `0`, and only then truncates and
+writes through that same descriptor. A reviewer never creates, unlinks, renames or
+replaces a report path and never writes through a second descriptor. If an assigned
+target is absent or already non-empty, any reviewer aborts, or only part of a round is
+written, burn the whole round: preserve every artifact, stop the remaining work for that
+round, and restart all three lenses only with a larger `N` allocated by the controller
+under the same rule. Never combine verdicts from different rounds.
+
+That rule is mechanical, not advisory. The suffix grammar is exactly `r<digits>`; any
+other `plan-*-review-*` name is a hard failure rather than something to skip, because a
+lenient parse is how a non-numeric suffix silently stops counting toward the maximum.
+Moving such a name into a subdirectory is not a fix either, so the allocator also
+rejects any review-like name in an immediate subdirectory of the run root. `archive/` is
+the single sanctioned terminal sink for retired review evidence: its entries are
+read-only history and are never reused, and an archived name that parses **does** raise
+the maximum, so retiring a round cannot make its number allocatable a second time. An
+archived name that does not parse contributes nothing and raises nothing -- that is the
+stated cost of keeping historical names archivable. Review-like names are rejected at any
+depth below the run root, not only in an immediate subdirectory:
+
+The allocator is no longer a separate command. It is the second half of the
+payload-identity block below, reached only when that gate has just printed its green
+line in the same process tree, so a review round cannot be allocated over a Plan whose
+declared payload identities disagree with its bytes. Run that block with `ALLOCATE=1`
+to allocate; it then prints exactly two lines, the gate's and
+`PLAN_REVIEW_ROUND_ALLOCATED n=<N> lenses=3`. If any of the three creates fails, none
+survives; a rollback that removes all three leaves the next allocation free to reuse
+the same `N`, and any target that does survive forces a larger one. The three files it
+leaves behind are the reviewers' zero-byte descriptors, not occupied targets.
+
+This is a tracked Plan-only fix-forward revision: require the Plan to be the only tracked
+worktree change, run `git diff --check`, and also run
+`git diff --no-index --check /dev/null "$PLAN"`, accepting only the normal no-index
+difference status and empty diagnostic output.
 
 ```bash
 /bin/bash -euo pipefail <<'BASH'
 PLAN=docs/superpowers/plans/2026-08-10-official-blender-mcp-modeling-remediation.md
+test -f "$PLAN"
+test ! -L "$PLAN"
 test "$(git status --short --untracked-files=all)" = " M $PLAN"
 git diff --check
 set +e
@@ -356,9 +3089,1495 @@ NOINDEX_EXIT=$?
 set -e
 test "$NOINDEX_EXIT" = 1
 test -z "$NOINDEX_OUTPUT"
+stat -f 'plan_dev=%d plan_ino=%i plan_size=%z plan_nlink=%l plan_mode=%Lp' "$PLAN"
 shasum -a 256 "$PLAN"
 BASH
 ```
+
+These two reads are deliberately bare, and the reason is materiality plus reviewer-side
+binding -- not any bootstrap barrier. `shasum -a 256 "$PLAN"` makes no in-process
+security decision: its stdout is a transcription label carried into three independent
+reviewer prompts, and the fail-closed mechanism is the three-reviewer digest binding
+above, under which a mid-flight substitution surfaces as digest disagreement between
+reviewers who each read the file by path. Under the stated same-UID model no in-process
+inode binding can close that, because three external reviewers must read the same
+pathname themselves. The cheap hardening is applied regardless: the clean-tree assertion
+runs before the read rather than after, `test ! -L` rejects the symlink vector directly
+(`git status` also reports it as ` T`, not ` M`), and the `(dev, ino, size, nlink, mode)`
+line lets a reviewer re-bind the inode rather than only the digest. The residual gap is
+an inode substitution that keeps a ` M` status, which the reviewer-side digest agreement
+is what actually catches.
+
+Identity drift between a marked payload and the numbers the Plan declares for it has
+produced a Critical finding in three consecutive rounds, and each time only some of the
+three declared values were updated. The class is closed here, and the closure is wired to
+the one action it has to precede: this block also allocates the review round, so a round
+cannot be allocated over a Plan whose declared identities disagree with its bytes. Run it
+from the repository root with `ALLOCATE=1` to dispatch reviewers and with `ALLOCATE=0` to
+verify only; Step 5 re-runs these exact bytes with `ALLOCATE=0` before it commits, by
+extracting this fence from the Plan rather than by keeping a second copy of it.
+
+What it enforces, all measured rather than asserted:
+
+- every marked payload is extracted with the Plan's own delimiters, and its line count,
+  byte count and SHA-256 are measured from those bytes;
+- every 64-hex literal in the Plan is accounted for by name. A payload digest must appear
+  exactly the declared number of times, and any other 64-hex literal must be one of the
+  named external digests. One stale copy among seven, a decoy digest dropped beside a
+  claim, and an abbreviated `startswith` prefix that no live digest starts with each fail
+  closed with the exact Plan line. Requiring only that some correct copy existed left 28
+  of the 37 payload digest sites free to hold a stale value, including the executable
+  `PROBE_SHA256=` and `CONTROLLER_SHA256=` bindings and the `R2_INPUTS_GREEN` banner a
+  reviewer compares against;
+- every line/byte claim within four lines of a declared digest is attributed to it and
+  compared, in the plain, hyphenated-singular and constant-assignment forms alike; the
+  six claims that name a payload from outside that range -- the two hyphenated prose
+  claims and the `MODEL_BODY_LINES`/`CLI_BODY_LINES` constants and their asserts -- are
+  each pinned by their own anchor with an exact occurrence count;
+- every `# NAME_BEGIN`/`# NAME_END` marked block family is held by an exact copy count and
+  by the SHA-256 of its copies, so what is pinned is each copy's bytes and not its shape.
+  This block used to hold none of them: it walked the same markers only to exclude their
+  lines from the free-definition census, so any copy of `TERMINAL_BOUNDED_READER`,
+  `TASK_ARTIFACT_READER`, `HELPER_OUTPUT_READER`, `TERMINAL_MANIFEST_VALIDATOR` or
+  `GATE_SNAPSHOT_READER` could be rewritten -- including dropping `O_NOFOLLOW` from a leaf
+  open -- with the gate green. The two dispatch-contract probes did compare the copies,
+  but the first of them runs after a review round has been allocated and after Step 5 has
+  committed, which inverts the order this Plan asserts; they are now a run-time backstop
+  behind a gate that has already refused the same drift, rather than the only thing
+  holding it. A copy count plus cross-copy agreement would not have sufficed either: one
+  search-and-replace weakens every copy identically, and `BOUNDED_SNAPSHOT` and the P6
+  manifest reader have a single copy each and so no sibling to disagree with. The
+  two module-level identity-binding reader programs are held the same way, each by its
+  own `# NAME_BEGIN` / `# NAME_END` family. They were located positionally once -- the
+  last heredoc opener before a guard's failure message -- and that was wrong twice over:
+  one anchor resolved to a different heredoc entirely, and a decoy line ending in the
+  opener shifted the region's start and end together, leaving length and digest both
+  unmoved while attacker code ran ahead of every check. Delimiters do not have that
+  failure mode. The four exempt Appendix D reader bodies are held by
+  the free-definition census below, like every other free copy; a separate table of their
+  four digests hashed byte-identical input, so it caught nothing the census does not and
+  cost a second hand-maintained digest for every edit to one of them;
+- the free copies that no marked family covers are discovered, not listed. Every function
+  returning an eight-field stat-identity tuple is found by body shape whatever it is named
+  and whatever its return annotation says, and is held to an exact per-field-order count,
+  so a rename, a deletion, or a swap of two fields inside a single copy all move a number.
+  "Whatever it is named" is now true of the definition scanner itself, which matched
+  `def` followed by exactly one space and a lowercase initial: a CamelCase definition
+  returning the canonical tuple, an `async def`, and a definition written with two spaces
+  after `def` were each entered into no table and digested by nothing.
+  Every function whose body calls `os.read` must be a declared member or a named
+  exemption *with its exact definition count*: a name set gave every exemption a free
+  pass, so a brand-new `def read_limited(...)` anywhere in the Plan stayed green. The
+  `os.read` calls written at module level, outside every `def`, are declared line by line
+  with their counts, because a census that walks function bodies could not see them and
+  two full copies of the identity-binding reader algorithm already lived there. Both are
+  additionally held to the reader control tokens and to the empty-file floor. The module-
+  family loop applies no byte-cap token: only the failure-ack program shares the Appendix
+  D/E `before.st_size > limit` spelling, and that helper cap is already checked by the
+  free-reader loop. The snapshot program's `64_000_000` cap and the failure-ack program's
+  `final_info.st_size > 64_000_000` cap remain family-digest-only. The five
+  identity-binding Appendix D/E readers must keep their byte cap *with its value* -- as a
+  bare substring the cap was satisfied by `limit * 4096` -- their size-floor role, and each
+  of their `O_NOFOLLOW`, `dir_fd=`, `follow_symlinks=False`, `st_nlink`, `st_uid` and
+  symlink/regular-file controls on the leaf **and** on the parent; the parent half was
+  untokenised, so one search-and-replace removed every parent symlink, type, owner and
+  group/other-writable check from all five with the gate still green. Their bodies are
+  compared with indentation and trailing bytes intact and with the signature included:
+  normalising indentation away let one copy move a `raise` into a branch while the gate
+  still called the copies equal, right-stripping held a body only modulo trailing
+  whitespace while the comment claimed byte-for-byte, and excluding the signature left
+  every default argument of every held definition free -- a writer's `mode: int = 0o600`
+  became `0o666` with the gate green, and all six of its call sites omit `mode`. The
+  no-clobber
+  `publish` copies are compared with their message strings normalised away, which is the
+  only difference they are allowed;
+- every `def` that is inside neither a digest-bound payload nor a marked family is counted
+  by name, the number of distinct bodies per name is exact, and one digest is taken over
+  every one of those bodies. Three copies of `validate_actor_inodes` were three different
+  bodies of one predicate and nothing compared them, so a safety clause was deleted from
+  one of them in test and the gate stayed green; `no_duplicates` had two spellings across
+  four copies. Those four converged on one body, but the second spelling survives as the
+  separate `reject_duplicates` entry, and that is recorded as accepted rather than fixed:
+  both names are pinned at one distinct body, their refusal messages differ usefully, and
+  merging them would strengthen nothing. The per-name pair and both totals are a
+  projection of the shape, and the shape is not the content: a copy that is the only
+  instance of its body -- most free copies are, including `digest_opened_entry`,
+  `verify_identity` and `validate_r2_snapshot` -- can be rewritten with every number
+  unmoved, and a copy that drifts onto another already-declared variant of the same name
+  moves none of them either. Both escapes were demonstrated. The census digest is what
+  holds the bodies; the numbers are the diagnosis;
+- every 40-hex git commit pin is counted by value. The digest census recognises only 64
+  hex characters, so eleven of the fourteen pins sat outside every dimension;
+- this block's own bytes are measured and its SHA-256 must be declared exactly twice
+  outside this fence, in the prose below it and in the Step 5 acceptance literal that
+  re-hashes the extracted bytes before executing them. Nothing bound the one mechanical
+  gate on Plan identity;
+- every remaining byte of the Plan is held by a single digest over the whole file, with
+  only its own declaration line's hex value masked before hashing so the fixed point
+  exists. Every dimension above holds a *region*, and measured against this Plan the
+  union of all of them leaves a share of its lines -- one that moves with every edit --
+  outside every one. That residue is not inert: mutations that each deleted or inverted a
+  live guard were green, among them a
+  call site losing `private=True` on the run root, an absolute-path `case` guard deleted
+  outright, a clean-tree assertion inverted from `test -z` to `test -n`, and a stderr
+  capture widened from truncate to append. Naming a ninth region would only move the
+  boundary and leave the next review a fresh residue to find, so the complement is held
+  by construction instead. This dimension detects and cannot localise; the ones above it
+  are what say *which* region moved, and they are no longer the boundary of what is held;
+- the green banner is built from the measured numbers -- every field of it, where two
+  fields used to be the declared constants they are checked against -- and must already
+  appear twice in the Plan, so the numbers a reviewer compares against cannot disagree
+  with the numbers the block will print.
+
+What it does not enforce, so that no reviewer skips a manual check on its account: a
+line/byte claim more than four lines from a digest and without an anchor here is attributed
+to nothing, and a claim *within* those four lines whose wording matches none of the seven
+shapes above is attributed to nothing either; the anchors, the external-digest table and
+the commit-pin table are maintained by hand alongside the Plan; the reader control checks
+are substring-presence checks, so a control a body states twice -- `follow_symlinks=False`
+appears on both the pre-open `stat` and the re-verify `stat` -- can lose one of its two
+sites with the token still satisfied, and an abbreviated `startswith` prefix only has to
+belong to some declared digest rather than to its own; the reader census recognises the
+literal `os.read` call spelling, so a read reached through an alias is outside every
+reader dimension, which is a property of a drift detector against honest edits rather
+than of a sandbox; the module-level read lines are held as literal lines with exact
+counts, and each module-level reader program is held by the bytes between its own
+family's markers, the same way every other family is; a marked family is held by the
+bytes *between* its markers, so where a family sits
+in the Plan is governed by the surrounding fence rather than by this dimension; and the
+leaf-pathname re-check inside Appendix B2's reader still has no negative case that
+isolates it from the descriptor re-check.
+
+The whole-file digest closes the coverage question and not the trust question. An editor
+who changes the Plan and regenerates that one line is green, and so is one who regenerates
+every declared digest in the block; nothing self-contained can do better, because the
+declarations and the bytes they describe are the same file. What it does close is the
+partial edit -- the class that has actually cost this Plan rounds, where a payload's
+digest is updated and its byte count beside it is not. Authenticity is anchored outside:
+in the Plan triple each review report records at its head and at its foot, and after
+Step 5 in git.
+
+Measured against mutation campaigns that delete or invert a live guard: with the
+whole-file digest left stale, **every** mutation is red, and the dimension that holds it
+names it in that same run -- the comparison is sequenced after every named dimension
+precisely so that a drift someone can localise is localised rather than reported as a
+bare file-level mismatch. That part is structural and does not depend on the sample.
+
+What survives when the whole-file digest is regenerated as well is **not** a fixed
+fraction: independent campaigns measured ten of fourteen and sixteen of thirty-eight,
+and both are honest counts of different samples. A ratio here would be a property of
+whoever drew the mutations, so the residue is stated as classes instead. No named
+dimension holds:
+
+- shell bytes -- a deleted absolute-path `case`, an inverted `test -z`, a widened `2>`;
+- call-site bytes -- a module-level `safe_directory(...)` losing `private=True`, a
+  `gate_snapshot(..., mode=0o644, limit=...)` whose mode or limit is widened. The same
+  mutation at a call site *inside* a free definition is caught, so this class is about
+  position, not about call sites as such;
+- module-level Python outside every marked family --
+  a rebound `MANIFEST = Path(...)`, a relaxed `stat.S_IMODE(...) != 0o700`, a widened
+  bounded-read cap. The two module-level identity-binding programs are now delimited by
+  their own marked families and held byte for byte like every other one, which removed
+  the worst of this class; what remains is module-level code that no family brackets.
+
+Every one of those is a Plan byte and therefore inside the whole-file digest, which is
+the reason the complement is held rather than a ninth named region being added.
+
+The block writes nothing except the three preallocated report files, and only when
+`ALLOCATE=1`:
+
+<!-- PLAN_IDENTITY_GATE_BEGIN -->
+```bash
+/bin/bash -euo pipefail <<'BASH'
+UV="${UV:-$HOME/.local/bin/uv}"
+case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
+ALLOCATE="${ALLOCATE:?set to 1 to allocate the next review round, 0 to verify only}"
+case "$ALLOCATE" in 0|1) ;; *) echo 'STOP: ALLOCATE must be 0 or 1' >&2; exit 1 ;; esac
+"$UV" run --quiet --no-project --python 3.13 python -P - <<'PY'
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import stat
+from pathlib import Path
+import sys
+
+if not sys.flags.safe_path:
+    raise SystemExit("STOP: payload-identity gate requires safe-path mode")
+
+# GATE_SNAPSHOT_READER_BEGIN
+def gate_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def gate_snapshot(
+    raw: Path,
+    *,
+    label: str,
+    limit: int,
+    mode: int,
+    expected: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    path = Path(os.path.abspath(raw))
+    parent, leaf = path.parent, path.name
+    if limit <= 0 or leaf in {"", ".", ".."} or os.path.realpath(parent) != os.fspath(parent):
+        raise RuntimeError(f"unsafe {label} path")
+    parent_before = os.lstat(parent)
+    parent_bound = gate_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) & 0o022
+    ):
+        raise RuntimeError(f"unsafe {label} parent")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = -1
+    try:
+        if gate_identity(os.fstat(parent_fd)) != parent_bound or gate_identity(os.lstat(parent)) != parent_bound:
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = gate_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != mode
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+            or expected is not None
+            and (before.st_dev, before.st_ino) != expected
+        ):
+            raise RuntimeError(f"unsafe {label} metadata")
+        descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        if gate_identity(os.fstat(descriptor)) != bound:
+            raise RuntimeError(f"{label} changed while opening")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading")
+        payload = b"".join(chunks)
+        if (
+            len(payload) != before.st_size
+            or gate_identity(os.fstat(descriptor)) != bound
+            or gate_identity(os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)) != bound
+            or gate_identity(os.fstat(parent_fd)) != parent_bound
+            or gate_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} changed while reading")
+        return payload, before
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+# GATE_SNAPSHOT_READER_END
+
+
+PLAN = Path(
+    "docs/superpowers/plans/"
+    "2026-08-10-official-blender-mcp-modeling-remediation.md"
+)
+plan_bytes, _ = gate_snapshot(PLAN, label="Plan", limit=2 * 1024 * 1024, mode=0o644)
+text = plan_bytes.decode("utf-8")
+lines = text.split("\n")
+
+TICK = chr(96)
+FENCE3 = TICK * 3
+FENCE4 = TICK * 4
+WINDOW = 4
+
+# --------------------------------------------------------------- this block's own bytes
+# Everything below is declared inside this fence, and nothing used to bind the fence
+# itself: it is not a marked payload, it has no DIGEST_SITES entry, and no external digest
+# named it, so a consistent edit to a table here plus the two banner literals outside it
+# stayed green while this is the sole mechanical gate on Plan identity and the sole round
+# allocator. Measure these bytes here; the digest has to be declared exactly twice outside
+# this fence, and Step 5 re-hashes the extracted bytes against that literal before running
+# them. The markers are assembled from pieces so this block is not itself a second
+# occurrence of either one.
+GATE_OPENER = "<!-- PLAN_IDENTITY" + "_GATE_BEGIN -->\n" + FENCE3 + "bash\n"
+GATE_CLOSER = "\n" + FENCE3 + "\n<!-- PLAN_IDENTITY" + "_GATE_END -->"
+if text.count(GATE_OPENER) != 1 or text.count(GATE_CLOSER) != 1:
+    raise RuntimeError("payload-identity gate markers are not unique")
+gate_start = text.index(GATE_OPENER) + len(GATE_OPENER)
+gate_bytes = text[gate_start:text.index(GATE_CLOSER, gate_start) + 1].encode("utf-8")
+GATE_SHA256 = hashlib.sha256(gate_bytes).hexdigest()
+
+# ---------------------------------------------------- every byte outside a declaration
+# The named dimensions below hold regions, and a third of this Plan's lines are outside
+# all of them -- a share that moves with every edit, which is the point: it is not a
+# number anyone should be maintaining. The residue was never inert; mutations that each
+# deleted or inverted a live security guard in it were all green. Naming a ninth region
+# only moves the boundary, and the residue of that one would be the next round's
+# finding. This holds the complement by construction: the whole Plan, with only its own
+# declaration line's hex value masked, so the fixed point exists and the coverage claim
+# cannot drift away from the code.
+#
+# It detects and it cannot localise -- that is what every named dimension below is for.
+# Their claim is no longer "this is the boundary of what is held"; it is "this is which
+# region moved". A drift that is red here and green everywhere below is a drift in a
+# region no dimension names, which is a diagnosis rather than a gap.
+#
+# What this still cannot do: an editor who changes the Plan and regenerates the value
+# on the declaration line is green. Nothing self-contained can close that -- authenticity
+# lives in the Plan triple each review report records at its head and foot, and after
+# Step 5 in git. This closes partial edits, not authorised ones.
+BODY_DECL = re.compile(r"(?m)^(PLAN_BODY_DIGEST )([0-9a-f]{64})$")
+body_sites = BODY_DECL.findall(text)
+if len(body_sites) != 1:
+    raise RuntimeError(f"PLAN_BODY_DIGEST is declared {len(body_sites)} times, not once")
+PLAN_BODY_DIGEST = body_sites[0][1]
+measured_body = hashlib.sha256(
+    BODY_DECL.sub(lambda found: found.group(1) + "0" * 64, text).encode("utf-8")
+).hexdigest()
+# Measured here, compared at the very end. Raising here made the localisers unreachable:
+# every drift, including the ones a dimension names exactly, reported only 'the Plan's
+# bytes drifted' and stopped. The comparison below runs after every named dimension has
+# had its say, so a drift a dimension holds is named by that dimension in the same run,
+# and a drift none of them holds is what reaches the message at the bottom.
+
+# Every marked payload, located by its own delimiters -- never by a copied literal of
+# the heading or fence markers, because a second literal copy would itself break the
+# single-occurrence invariants this Plan already enforces.
+APPENDIX_PAYLOADS = {
+    "A0": (FENCE4, "markdown"),
+    "A": (FENCE4, "markdown"),
+    "B1": (FENCE3, "python"),
+    "B2I": (FENCE3, "python"),
+    "B2": (FENCE3, "python"),
+    "C0": (FENCE3, "python"),
+    "C": (FENCE3, "python"),
+}
+R2_PAYLOADS = {
+    "R2_FIXTURE_SETUP": FENCE3,
+    "R2_MODEL_BODY": FENCE3,
+    "R2_CLI_BODY": FENCE3,
+    "R2_CONTROLLER": FENCE4,
+}
+
+heading_at: dict[str, int] = {}
+for match in re.finditer(r"(?m)^## Appendix ([0-9A-Z]+)\b", text):
+    key = match.group(1)
+    if key in heading_at:
+        raise RuntimeError(f"duplicate Appendix heading: {key}")
+    heading_at[key] = match.start()
+if not set(APPENDIX_PAYLOADS) <= set(heading_at):
+    raise RuntimeError("an Appendix payload heading is missing")
+
+payloads: dict[str, bytes] = {}
+for key, (fence, language) in APPENDIX_PAYLOADS.items():
+    opener = fence + language + "\n"
+    closer = "\n" + fence + "\n"
+    start = text.index(opener, heading_at[key]) + len(opener)
+    payloads[key] = text[start:text.index(closer, start) + 1].encode("utf-8")
+for key, fence in R2_PAYLOADS.items():
+    opener = f"<!-- {key}_BEGIN -->\n" + fence + "python\n"
+    closer = "\n" + fence + f"\n<!-- {key}_END -->"
+    if text.count(opener) != 1 or text.count(closer) != 1:
+        raise RuntimeError(f"marked fence boundary differs: {key}")
+    start = text.index(opener) + len(opener)
+    payloads[key] = text[start:text.index(closer, start) + 1].encode("utf-8")
+
+identity = {
+    key: (
+        len(value.splitlines()),
+        len(value),
+        hashlib.sha256(value).hexdigest(),
+    )
+    for key, value in payloads.items()
+}
+by_digest = {sha: key for key, (_, _, sha) in identity.items()}
+if len(by_digest) != len(identity):
+    raise RuntimeError("two marked payloads share one digest")
+
+# ---------------------------------------------------------------- digest dimension
+# Every 64-hex literal in the Plan is accounted for by name. A payload digest must
+# appear exactly as many times as declared here, and any other 64-hex literal must be
+# one of the external digests below. Requiring only "at least one correct copy" left
+# every redundant copy free to hold a stale value: measured, 28 of the 37 payload
+# digest sites could be corrupted one at a time without the gate reacting, including
+# the executable `PROBE_SHA256=`/`CONTROLLER_SHA256=` bindings and the
+# `R2_INPUTS_GREEN` banner a reviewer compares against.
+DIGEST_SITES = {
+    "A0": 6,
+    "A": 3,
+    "B1": 1,
+    "B2I": 2,
+    "B2": 2,
+    "C0": 4,
+    "C": 3,
+    "R2_FIXTURE_SETUP": 2,
+    "R2_MODEL_BODY": 4,
+    "R2_CLI_BODY": 4,
+    "R2_CONTROLLER": 7,
+}
+EXTERNAL_DIGESTS = {
+    "8292ac78073804687faab381181881ac7f522da1edea2dffe625626c1482c535": 8,
+    "b6f2568116080d4936a3d753a419c771c00233a67111ed626cc2bbe169c79f0e": 1,
+    "909fb6510a7ae4f115688add9d1eb0b25430ec9d4f490d16fb56b72343b24e7b": 1,
+    "ebd57eee1c24b90c4a68d71b112c2682cf879f5ca345231960071661131edbd5": 4,
+    "c0798f66b9b1ac6ed7e85b772adc0cca24b6c5f69ebb5df2e1b742a7c745307e": 4,
+    "48b21860a2c8c76a5f66ee7fc41fe5ad5f7e61fba4fa17abb6f0634dc8fb0506": 4,
+    "9e34c9a96ec59a1f7ceda557dfd77c3ca3a461f929e477ae50588176a61a8f62": 2,
+    "248c0f22fd46d9b45cb93fd736a1decec94c436fcb66bf5bf2fa01843a46ff12": 2,
+    "bd5ac7a7955e70c8902ac46ac753975e4b60605b6eb30cca759765d68a54b9f5": 2,
+    "7a4799be69540a5faa24080d6d24cdfd23050ef692651d5be92881aae66f4bcb": 2,
+    "1bde67e12dbb50fb7dc1a94a69b484dbcfa410e60164b484a475b2c5fdcd8e14": 2,
+    "71bf2b089c360a8cc74c6bb5071fe87c54fd9327e71b22a0fcf7c87a7d4a889d": 2,
+    "80e300e8d9ffd02620df7568a87ecf6699c93086fc7419de413f8cc0fc5bbd3f": 2,
+    "d97c8d806505a2d0ade7063644c5de0b3f30c31dc4b4f91153989de65b680ae8": 2,
+    "30e34c1836486cf4418b51790ba431685de368ebc5d9444e032974170478b5aa": 2,
+    "4e3ce3f97b448f2abdccb3ddd30157a3d070d9e9611d0e1cff5d61a568209d94": 1,
+    "19d4fc39ada3725d762aef5bd68a6adf7a678299bef92885e466cbda8f0fde71": 1,
+    "957b7a6178af7b6217fb336fbddbe861512ee13bee5fa7de915849e1b51cee69": 1,
+}
+# Digests this block measures from the Plan's own bytes instead of from a payload fence.
+# One per marked block family -- which now includes the two module-level reader programs
+# -- and one over the whole free-definition census. They are
+# declared together here so the census below accounts for them; each is enforced in its
+# own section further down. Holding every copy's bytes is the point. A copy count plus
+# cross-copy agreement is blind in two directions that were both demonstrated against the
+# previous revision: one search-and-replace weakens every copy identically and leaves
+# count and agreement untouched, and a family with a single copy has no sibling to
+# disagree with at all. The same is true of a free definition that is the only instance of
+# its body shape, which most of them are.
+MARKED_BLOCKS = {
+    "BOUNDED_SNAPSHOT": (1, "f01eca10a89e99adb375a90b772e57dcd715275ae0d28412c182f36681b67d6b"),
+    "FAILURE_ACK_APPEND_READER": (1, "9e2a6777dae9403236916576ad4921e9e36dc6e26562dc9b5a6ed120a81dd8eb"),
+    "GATE_SNAPSHOT_READER": (7, "f340e472b27d108b0fccc13692618d731200fe924f7dd1731dea9c1f24db65a8"),
+    "HELPER_OUTPUT_READER": (3, "045c83716908f916b4359c8f7cf2559f52c1000e8eabff5c92e96b735c7ed079"),
+    "P6_MANIFEST_READER": (1, "ddfbecc8357e10a95578a3fcfe4b49e0cd426e005f6e333f1ae456f6a35be5c4"),
+    "TASK_REPORT_SNAPSHOT_READER": (1, "7f99bbe472fb470d816e245d188a063ed43cff63fcc605d4b1f1cf9777c3b623"),
+    "TASK_ARTIFACT_READER": (4, "570c8fb1afabd4b9e452ce2e8b4dda78013452b51645b328397f8ed4ab45980b"),
+    "TASK_REVIEW_PARSER": (1, "283c5506f33d992511b3016d51f7ba02561ba9031b8d358cc61717e7f4c7e574"),
+    "TERMINAL_BOUNDED_READER": (4, "91fe59f357272548e772670588c1325a488455058e4899789fad187bc7331b8e"),
+    "TERMINAL_MANIFEST_VALIDATOR": (2, "1b7c3af254f36bf8d7976f0a028b170c41d20de1402ad330ab1210ee4bc48956"),
+}
+# The two module-level identity-binding programs, named by the marked family that now
+# delimits each of them. Locating them positionally -- last heredoc opener before an
+# anchor -- was wrong twice over: one anchor resolved to a different heredoc entirely,
+# 630 lines spanning shell and two programs, and a decoy line ending in the opener
+# inserted at the region's first byte shifted start and end together, leaving length
+# *and* digest unchanged while running attacker code before any check. A second number
+# beside the digest cannot fix that; a delimiter can, and `MARKED_BLOCKS` already is
+# one, with an eleven-of-eleven mutation record. These entries now only carry the
+# control-token set, which byte-holding is a proxy for; the bytes are held above.
+MODULE_READERS = (
+    "TASK_REPORT_SNAPSHOT_READER",
+    "FAILURE_ACK_APPEND_READER",
+)
+FREE_DEF_DIGEST = "b4725dcc0b9eb242dc1f1fe9be472d50f89b3e6d406c3b307cd68db2dd8f3d1b"
+INTERNAL_DIGESTS: dict[str, int] = {}
+for _internal in (
+    [sha for _, sha in MARKED_BLOCKS.values()]
+    + [FREE_DEF_DIGEST]
+):
+    INTERNAL_DIGESTS[_internal] = INTERNAL_DIGESTS.get(_internal, 0) + 1
+if set(EXTERNAL_DIGESTS) & set(by_digest):
+    raise RuntimeError("an external digest collides with a payload digest")
+if set(INTERNAL_DIGESTS) & (set(by_digest) | set(EXTERNAL_DIGESTS)):
+    raise RuntimeError("a measured Plan-internal digest collides with a declared digest")
+
+# Each external digest is written once more than the table above says: that table is
+# itself in the Plan, so its own entry is the extra occurrence. Payload digests are
+# never literals here -- the gate measures them -- so their counts need no adjustment.
+expected_counts = {sha: DIGEST_SITES[key] for sha, key in by_digest.items()}
+expected_counts.update({sha: count + 1 for sha, count in EXTERNAL_DIGESTS.items()})
+# The internal digests are written nowhere but the tables above, which are inside this
+# fence, so their occurrence count is exactly what those tables hold.
+expected_counts.update(INTERNAL_DIGESTS)
+if set(DIGEST_SITES) != set(identity):
+    raise RuntimeError("declared digest-site table does not cover the payloads")
+if GATE_SHA256 in expected_counts:
+    raise RuntimeError("this block's own digest collides with a declared digest")
+# The prose paragraph below this fence and the Step 5 acceptance literal, both outside it.
+expected_counts[GATE_SHA256] = 2
+if PLAN_BODY_DIGEST in expected_counts:
+    raise RuntimeError("the Plan body digest collides with a declared digest")
+# Its one declaration line, whose hex value the body measurement above masks.
+expected_counts[PLAN_BODY_DIGEST] = 1
+seen_counts: dict[str, int] = {}
+for number, line in enumerate(lines):
+    for found in re.findall(r"[0-9a-f]{64}", line):
+        if found not in expected_counts:
+            raise RuntimeError(
+                f"plan line {number + 1} holds an undeclared 64-hex digest: {found}. "
+                "A stale payload digest, a decoy, a new external digest, or a fence "
+                "inserted under an Appendix heading ahead of that appendix's own "
+                "payload -- which retargets the positional extractor -- all land "
+                "here; add it to EXTERNAL_DIGESTS only after identifying which"
+            )
+        seen_counts[found] = seen_counts.get(found, 0) + 1
+for sha, want in sorted(expected_counts.items()):
+    got = seen_counts.get(sha, 0)
+    if got != want:
+        owner = by_digest.get(sha, "external digest")
+        where = [
+            number + 1 for number, line in enumerate(lines) if sha in line
+        ]
+        raise RuntimeError(
+            f"digest {sha} ({owner}) appears {got} times, not {want}; "
+            f"current sites: {where}"
+        )
+
+# The census above is per line and lowercase by construction, so two shapes would evade
+# it: an uppercase literal, and a hex value written as adjacent string literals. Neither
+# occurs in this Plan today -- the first is rejected three lines below and the second by
+# the rejoin pass after it. Both checks exist to keep it that way.
+for match in re.finditer(r"(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])", text):
+    if match.group(0) != match.group(0).lower():
+        number = text.count("\n", 0, match.start()) + 1
+        raise RuntimeError(
+            f"plan line {number} holds an uppercase 64-hex literal: {match.group(0)}"
+        )
+# Adjacent string literals are one string however they are separated, and enumerating
+# the separators is a losing game: whitespace, `+`, a backslash continuation, an
+# interposed comment and a `\N{...}` escape each defeat one more rule, and each produces
+# the attacker's digest at run time. `\s` does not match a backslash, so the
+# line-continued split was never rejoined at all. Two passes now, and the second does
+# not enumerate anything.
+#
+# Pass one still rejoins, so a split anywhere in the Plan is seen; the line is recovered
+# by tracking the offset back, because a digest that exists only after rejoining cannot
+# be grepped for and every other census error names a line.
+def rejoin(document: str) -> tuple[str, list[int]]:
+    # A comment is also a legal separator between adjacent literals inside brackets, and
+    # two live sites -- the P6 invalid-journals comparison target and an R1 journal digest
+    # in `EXPECTED`, both binding inputs of every review round -- were reachable through
+    # it at a site the shape pass below cannot name.
+    # A string prefix (`r`, `b`, `f`, and their combinations) sits between the closing
+    # quote and the next opening one and is the fourth form this has to absorb.
+    separator = re.compile(r"[\"'](?:\s|\\\n|\+|\#[^\n]*\n)*[A-Za-z]*[\"']")
+    pieces: list[str] = []
+    origin: list[int] = []
+    cursor = 0
+    for gap in separator.finditer(document):
+        pieces.append(document[cursor:gap.start()])
+        origin.extend(range(cursor, gap.start()))
+        cursor = gap.end()
+    pieces.append(document[cursor:])
+    origin.extend(range(cursor, len(document)))
+    return "".join(pieces), origin
+
+
+joined, joined_origin = rejoin(text)
+for hidden in re.finditer(r"[0-9a-f]{64}", joined):
+    if hidden.group(0) in seen_counts:
+        continue
+    where = text.count(chr(10), 0, joined_origin[hidden.start()]) + 1
+    raise RuntimeError(
+        f"plan line {where} splits a string literal around an undeclared 64-hex "
+        f"digest: {hidden.group(0)}"
+    )
+
+# Pass two checks the shape of the value instead of the shape of the separator, and it
+# is a localiser for the common forms rather than a proof of anything. It reaches only
+# line-initial bindings whose name ends in a digest, pin or source word -- `PINNED_SOURCE`
+# is four of its five live sites -- and whose value already looks like hex, except for the
+# bare-environment-reference rule below, which fires on a value carrying no hex at all.
+# Indirection through a differently-named constant, a multi-statement
+# line, an `if True:` prefix and an opening parenthesis alone on the binding line all
+# get past it. What it adds over pass one is the escape class that leaves no hex run to
+# rejoin -- `\N{LATIN SMALL LETTER D}ead...` and friends -- at the bindings that
+# authorise executing code. Neither pass is the boundary: the whole-file digest is, and
+# every one of these forms changes the Plan's bytes.
+HEX_BINDING = re.compile(
+    r"(?m)^[ \t]*([A-Za-z_][A-Za-z0-9_]*(?:SHA256|SHA|DIGEST|PIN|PINS|SOURCE))"
+    r"[ \t]*=[ \t]*(.*)$"
+)
+ONE_TOKEN = re.compile(
+    r"\A(?:" + chr(34) + r"[0-9a-f]{40}" + chr(34) + r"|" + chr(34) + r"[0-9a-f]{64}"
+    + chr(34) + r"|" + chr(39) + r"[0-9a-f]{40}" + chr(39) + r"|" + chr(39)
+    + r"[0-9a-f]{64}" + chr(39) + r"|[0-9a-f]{40}|[0-9a-f]{64})[ \t]*(?:#.*)?\Z"
+)
+# `$(...)` computes the value in this fence; `${VAR#prefix}` trims one the fence has
+# already bound and checked. A bare `${VAR}` is neither -- it takes the digest straight
+# from the operator's environment, which is the thing every pin in this Plan exists to
+# prevent, and it carries no hex for the rejoin pass to catch.
+COMPUTED = re.compile(
+    r"\A" + chr(34) + r"?\$\(|\A" + chr(34) + r"\$\{[A-Za-z_][A-Za-z0-9_]*[#%]"
+)
+for binding in HEX_BINDING.finditer(text):
+    value = binding.group(2)
+    if ONE_TOKEN.match(value) or COMPUTED.match(value):
+        continue
+    # A bare environment reference carries no hex, so the run check below would skip it.
+    if re.match(r"\A" + chr(34) + r"?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?" + chr(34) + r"?\Z", value):
+        where = text.count(chr(10), 0, binding.start()) + 1
+        raise RuntimeError(
+            f"plan line {where} takes {binding.group(1)} from the environment "
+            f"instead of pinning it: {value}"
+        )
+    # Only when the value already carries a hex run: without this the rule reddens a
+    # perfectly ordinary `OFFICIAL_SOURCE="$HOME/src/..."` or a list of two words.
+    if re.search(r"[0-9a-f]{8}", value) is None:
+        continue
+    if chr(34) in value or chr(39) in value:
+        where = text.count(chr(10), 0, binding.start()) + 1
+        raise RuntimeError(
+            f"plan line {where} binds {binding.group(1)} to something other than one "
+            f"unbroken hex token: {value}"
+        )
+
+# ---------------------------------------------------------------- commit-pin dimension
+# The 40-hex git commit pins sat outside every dimension here: the digest census only
+# recognises 64 hex characters, so eleven of the fourteen pins could be corrupted one at a
+# time with no reaction. Drift only ever misrejects a correct source -- `production_git_pin`
+# compares HEAD against `SOURCE_PIN` and fails closed -- which is exactly why it would have
+# been found late and by hand. Counts exclude this table's own occurrence, as above.
+COMMIT_PINS = {
+    "4309a39646e644261624bfcd2bca669b343b7621": 9,
+    "4f1913c364c995c93432bb24b1cc3c9ad1b8590f": 4,
+    "09bf5c2089fe27b8dcdaa9af8115ec4d151359c3": 1,
+}
+expected_pins = {pin: count + 1 for pin, count in COMMIT_PINS.items()}
+pin_counts: dict[str, int] = {}
+for number, line in enumerate(lines):
+    for found in re.findall(
+        r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])", re.sub(r"[0-9a-f]{64}", "", line)
+    ):
+        if found not in expected_pins:
+            raise RuntimeError(
+                f"plan line {number + 1} holds an undeclared 40-hex commit pin: {found}"
+            )
+        pin_counts[found] = pin_counts.get(found, 0) + 1
+if pin_counts != expected_pins:
+    raise RuntimeError(
+        f"commit pins drifted: measured {pin_counts}, declared {expected_pins}"
+    )
+# The same evasion reaches a 40-hex pin, which authorises a source checkout. Same two
+# passes; the shape pass above already covers `PINNED_SOURCE` by name.
+for hidden in re.finditer(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])", joined):
+    if hidden.group(0) in pin_counts:
+        continue
+    if any(sha.find(hidden.group(0)) >= 0 for sha in seen_counts):
+        continue
+    where = text.count(chr(10), 0, joined_origin[hidden.start()]) + 1
+    raise RuntimeError(
+        f"plan line {where} splits a string literal around an undeclared 40-hex "
+        f"commit pin: {hidden.group(0)}"
+    )
+
+# Abbreviated digest literals are checked the same way: `startswith("534f38")` covers
+# six of sixty-four characters, so it must at least still be a prefix of a live digest.
+for match in re.finditer(r"startswith\(\"([0-9a-f]{4,63})\"\)", text):
+    prefix = match.group(1)
+    if not any(sha.startswith(prefix) for sha in expected_counts):
+        number = text.count("\n", 0, match.start()) + 1
+        raise RuntimeError(
+            f"plan line {number} holds a digest prefix that no declared digest "
+            f"starts with: {prefix}"
+        )
+
+# ------------------------------------------------------------ line/byte dimension
+# Claim shapes. The hyphenated singular and the constant-assignment forms were both
+# invisible to the earlier tuple, which is how the two hyphenated prose claims and the
+# `MODEL_BODY_LINES` / `CLI_BODY_LINES` constants sat outside the gate. No payload
+# number is written literally in this block: every one of them is measured.
+CLAIMS = (
+    re.compile(r"(?<![\d,])(\d[\d,]*)\s+lines\b"),
+    re.compile(r"(?<![\d,])(\d[\d,]{2,})\s+(?:UTF-8\s+)?bytes\b"),
+    re.compile(r"(?<![\d,])(\d[\d,]*)-(?:line|byte)s?\b"),
+    re.compile(r"len\([A-Za-z_][A-Za-z0-9_]*\.splitlines\(\)\)\s*!=\s*(\d+)"),
+    re.compile(r"len\([A-Za-z_][A-Za-z0-9_]*\)\s*!=\s*(\d+)"),
+    re.compile(r"wc -[lc]\b.*?=\s*\"?(\d+)\"?\s*$"),
+    re.compile(r"^\s+(\d{2,9}),\s*$"),
+)
+
+# Sites that name a payload in prose or in a constant instead of sitting beside that
+# payload's digest. Nearest-digest attribution cannot reach them -- two of them are
+# nearer another payload's digest -- so each is pinned by its own anchor with an exact
+# occurrence count, and the anchored lines are removed from the proximity pass.
+# Every anchor here captures a line count by construction, so there is no slot field to
+# choose: the byte slot was never reachable and the generality was never exercised.
+ANCHORED_CLAIMS = (
+    ("R2_MODEL_BODY", r"It binds the (\d[\d,]*)-line model body", 1),
+    ("R2_CLI_BODY", r"model body and (\d[\d,]*)-line CLI body", 1),
+    ("R2_MODEL_BODY", r"(?m)^MODEL_BODY_LINES = (\d+)$", 1),
+    ("R2_CLI_BODY", r"(?m)^CLI_BODY_LINES = (\d+)$", 1),
+    ("R2_MODEL_BODY", r"assert MODEL_BODY_LINES == (\d+)", 1),
+    ("R2_CLI_BODY", r"assert CLI_BODY_LINES == (\d+)", 1),
+)
+# Exact per-payload counts of attributed claim sites. Without them a claim could be
+# orphaned rather than corrupted: move a digest more than four lines from its prose and
+# the stale number beside it stops being attributed to anything, which is how a wrong
+# line count survived while some other site still declared the right one.
+CLAIM_SITES = {
+    "A0": 12,
+    "A": 6,
+    "B1": 2,
+    "B2I": 4,
+    "B2": 4,
+    "C0": 2,
+    "C": 2,
+    "R2_FIXTURE_SETUP": 2,
+    "R2_MODEL_BODY": 6,
+    "R2_CLI_BODY": 6,
+    "R2_CONTROLLER": 10,
+}
+observed: dict[str, set[int]] = {key: set() for key in identity}
+site_counts: dict[str, int] = {key: 0 for key in identity}
+anchored_lines: set[int] = set()
+declarations = 0
+for owner, pattern, count in ANCHORED_CLAIMS:
+    matches = list(re.finditer(pattern, text))
+    if len(matches) != count:
+        raise RuntimeError(
+            f"anchored claim for {owner} matched {len(matches)} times, not {count}: "
+            f"{pattern}"
+        )
+    for match in matches:
+        number = text.count("\n", 0, match.start()) + 1
+        anchored_lines.add(number - 1)
+        value = int(match.group(1).replace(",", ""))
+        if value != identity[owner][0]:
+            raise RuntimeError(
+                f"plan line {number} declares {value} for payload {owner}, "
+                f"whose measured identity is {identity[owner][0]} lines / "
+                f"{identity[owner][1]} bytes"
+            )
+        observed[owner].add(value)
+        site_counts[owner] += 1
+        declarations += 1
+
+# A digest constant with one value everywhere stands for that digest wherever its name
+# is used; a name bound to several digests is skipped, because its own assignment line
+# always carries the literal anyway.
+bound: dict[str, set[str]] = {}
+for match in re.finditer(
+    r"(?m)^\s*([A-Z][A-Z0-9_]*(?:SHA256|SHA|DIGEST))\s*=\s*\"?([0-9a-f]{64})\"?", text
+):
+    bound.setdefault(match.group(1), set()).add(match.group(2))
+named = {name: values.pop() for name, values in bound.items() if len(values) == 1}
+
+digest_line: dict[int, str] = {}
+for number, line in enumerate(lines):
+    seen = {found for found in re.findall(r"[0-9a-f]{64}", line)}
+    seen |= {named[name] for name in named if re.search(rf"\b{name}\b", line)}
+    if len(seen) == 1:
+        digest_line[number] = seen.pop()
+    elif len(seen) > 1:
+        raise RuntimeError(f"plan line {number + 1} declares two digests at once")
+
+for number, line in enumerate(lines):
+    if number in anchored_lines:
+        continue
+    values = {int(found.replace(",", "")) for pattern in CLAIMS for found in pattern.findall(line)}
+    if not values:
+        continue
+    near = [
+        (abs(other - number), other)
+        for other in digest_line
+        if abs(other - number) <= WINDOW
+    ]
+    if not near:
+        continue
+    near.sort()
+    if len(near) > 1 and near[0][0] == near[1][0] and digest_line[near[0][1]] != digest_line[near[1][1]]:
+        raise RuntimeError(f"plan line {number + 1} is equidistant from two digests")
+    owner = by_digest.get(digest_line[near[0][1]])
+    if owner is None:
+        continue
+    expected_lines, expected_bytes, _ = identity[owner]
+    for value in sorted(values):
+        if value not in (expected_lines, expected_bytes):
+            raise RuntimeError(
+                f"plan line {number + 1} declares {value} for payload {owner}, "
+                f"whose measured identity is {expected_lines} lines / {expected_bytes} bytes"
+            )
+        observed[owner].add(value)
+        site_counts[owner] += 1
+        declarations += 1
+if site_counts != CLAIM_SITES:
+    raise RuntimeError(
+        f"attributed line/byte claim sites drifted: measured {site_counts}, declared "
+        f"{CLAIM_SITES}"
+    )
+for key, (expected_lines, expected_bytes, sha) in identity.items():
+    if {expected_lines, expected_bytes} - observed[key]:
+        raise RuntimeError(
+            f"payload {key} has no executable or prose declaration of "
+            f"{sorted({expected_lines, expected_bytes} - observed[key])}"
+        )
+
+# --------------------------------------------------- marked block families, byte for byte
+# Every `# NAME_BEGIN`/`# NAME_END` family is held here by an exact copy count and by the
+# SHA-256 of its copies. Nothing in this block used to hold them: `guard_range` walked the
+# same markers only to exclude their lines from the free-definition census, so any copy of
+# `TERMINAL_BOUNDED_READER`, `TASK_ARTIFACT_READER`, `HELPER_OUTPUT_READER`,
+# `TERMINAL_MANIFEST_VALIDATOR` or `GATE_SNAPSHOT_READER` could be rewritten -- including
+# dropping `O_NOFOLLOW` from a leaf open -- and the gate stayed green. The two
+# dispatch-contract probes did compare the copies, but they run after the review round has
+# been allocated and after Step 5 has committed, so they inverted the order the Plan
+# asserts. Copy counts and cross-copy agreement alone would not have been enough either:
+# a single search-and-replace weakens every copy the same way, and `BOUNDED_SNAPSHOT` and
+# the P6 manifest reader have one copy each.
+BLOCK_BEGIN = re.compile(r"^# ([A-Z][A-Z0-9_]*)_BEGIN$")
+BLOCK_END = re.compile(r"^# ([A-Z][A-Z0-9_]*)_END$")
+open_blocks: dict[str, list[int]] = {}
+marked_bodies: dict[str, list[str]] = {}
+for number, line in enumerate(lines):
+    opened = BLOCK_BEGIN.match(line)
+    if opened is not None:
+        open_blocks.setdefault(opened.group(1), []).append(number)
+        continue
+    closed = BLOCK_END.match(line)
+    if closed is None:
+        continue
+    starts = open_blocks.get(closed.group(1))
+    if not starts:
+        raise RuntimeError(
+            f"marked block {closed.group(1)} closes at plan line {number + 1} "
+            "without an opening marker"
+        )
+    marked_bodies.setdefault(closed.group(1), []).append(
+        chr(10).join(lines[starts.pop() + 1:number])
+    )
+if any(starts for starts in open_blocks.values()):
+    raise RuntimeError(
+        "a marked block family is left open: "
+        f"{sorted(name for name, starts in open_blocks.items() if starts)}"
+    )
+measured_blocks: dict[str, tuple[int, str]] = {}
+for name, bodies in marked_bodies.items():
+    seen = sorted({hashlib.sha256(body.encode("utf-8")).hexdigest() for body in bodies})
+    if len(seen) != 1:
+        raise RuntimeError(f"marked block copies differ: {name}: {seen}")
+    measured_blocks[name] = (len(bodies), seen[0])
+if measured_blocks != MARKED_BLOCKS:
+    raise RuntimeError(
+        f"marked block families drifted: measured {measured_blocks}, declared "
+        f"{MARKED_BLOCKS}"
+    )
+
+# --------------------------------------------------- free copies outside the families
+# Discovery, not a hand-kept list: every function in the Plan that returns an eight
+# field stat-identity tuple is held, whatever it is named and whatever its return
+# annotation says, and every function whose body calls `os.read` must be classified.
+
+
+SPANS: dict[int, int] = {}
+HEADS: dict[int, int] = {}
+
+
+def function_body(start: int) -> str:
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    head = start
+    while head < len(lines) and not lines[head].rstrip().endswith(":"):
+        head += 1
+    if head >= len(lines):
+        raise RuntimeError(f"unterminated definition at plan line {start + 1}")
+    HEADS[start] = head
+    end = head + 1
+    collected: list[str] = []
+    while end < len(lines):
+        item = lines[end]
+        if item.strip() == "":
+            following = end + 1
+            while following < len(lines) and lines[following].strip() == "":
+                following += 1
+            if following >= len(lines):
+                break
+            if len(lines[following]) - len(lines[following].lstrip()) <= indent:
+                break
+            collected.append(item)
+            end += 1
+            continue
+        if len(item) - len(item.lstrip()) <= indent:
+            break
+        collected.append(item)
+        end += 1
+    # Indentation is retained: normalising it away let one copy of a reader move a
+    # `raise` into or out of a branch while the gate still called the copies equal.
+    # Trailing bytes are retained for the same reason and no weaker one: a body that is
+    # right-stripped before hashing is held modulo trailing whitespace, not byte for byte,
+    # and the comment above claimed the stronger property.
+    SPANS[start] = end
+    return "\n".join(collected)
+
+
+# A definition this does not match is never entered into `definitions`, never counted
+# and never digested. `def ` with exactly one space and a lowercase initial missed
+# three legal spellings, and `def Ident(info):` returning the canonical eight-field
+# stat-identity tuple was invisible to every dimension in this block.
+DEF_LINE = re.compile(r"^(\s*)(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+IDENTITY_BODY = re.compile(
+    r"\Areturn \(\s*((?:[a-z_][A-Za-z0-9_]*\.st_[a-z_]+,\s+){7}"
+    r"[a-z_][A-Za-z0-9_]*\.st_[a-z_]+,?)\s*\)\Z"
+)
+CANONICAL_ORDER = (
+    "st_dev", "st_ino", "st_uid", "st_mode", "st_nlink",
+    "st_size", "st_mtime_ns", "st_ctime_ns",
+)
+CONTROLLER_ORDER = (
+    "st_dev", "st_ino", "st_size", "st_mode", "st_uid",
+    "st_nlink", "st_mtime_ns", "st_ctime_ns",
+)
+# Exact counts, not a floor. A floor of 22 against 25 measured copies meant three
+# identity guards could be deleted or renamed out of the regex in silence, and keying
+# only on the field *set* meant two fields could be swapped inside one copy without
+# any counter moving.
+IDENTITY_ORDERS = {CANONICAL_ORDER: 27, CONTROLLER_ORDER: 1}
+
+orders: dict[tuple[str, ...], set[str]] = {}
+order_counts: dict[tuple[str, ...], int] = {}
+identity_copies = 0
+for number, line in enumerate(lines):
+    match = DEF_LINE.match(line)
+    if match is None:
+        continue
+    body = function_body(number)
+    normalised = " ".join(body.split())
+    shape = IDENTITY_BODY.match(normalised)
+    if shape is None:
+        continue
+    fields = tuple(re.findall(r"st_[a-z_]+", shape.group(1)))
+    if len(fields) != 8 or len(set(fields)) != 8:
+        raise RuntimeError(f"stat-identity tuple at plan line {number + 1} is not 8 fields")
+    if fields not in IDENTITY_ORDERS:
+        raise RuntimeError(
+            f"stat-identity tuple at plan line {number + 1} uses an undeclared field "
+            f"order: {fields}"
+        )
+    orders.setdefault(fields, set()).add(normalised)
+    order_counts[fields] = order_counts.get(fields, 0) + 1
+    identity_copies += 1
+if order_counts != IDENTITY_ORDERS:
+    raise RuntimeError(
+        f"stat-identity tuples drifted: measured {order_counts}, declared "
+        f"{IDENTITY_ORDERS}"
+    )
+if any(len(variants) != 1 for variants in orders.values()):
+    raise RuntimeError("two stat-identity bodies share a field order but differ")
+
+# Every function in the Plan whose body calls `os.read`, classified. A sixth free
+# Appendix D reader, or a new reader anywhere, changes this set and stops the round.
+# name -> (definition count, whether the body rejects an empty file). One table: two
+# tables over one key set needed a guard whose only job was to keep them in sync.
+FREE_READERS = {
+    "bounded_owned_bytes": (1, True),
+    "owned_regular": (1, True),
+    "read_bounded": (1, False),
+    "safe_file_bytes": (1, False),
+    "file_bytes": (2, False),
+}
+# Exact per-name definition counts, not a name set. A set comparison gave every exempt
+# name a free pass with no body check and no count: a brand-new
+# `def read_limited(path): return os.read(0, 1)` could be inserted anywhere in the Plan and
+# the census stayed green, because the *name* was already declared.
+EXEMPT_READERS = {
+    # Appendix D, narrower role, deliberately not identity-binding.
+    "read_limited": 1,
+    "capture": 1,
+    "drain_app_stderr": 1,
+    "read_app_response": 1,
+    # Inside a marked reader family: held byte-for-byte by the family copy checks.
+    "bounded_snapshot": 1,
+    "gate_snapshot": 7,
+    "read_bounded_entry": 4,
+    "read_helper_output": 3,
+    "read_owned_entry": 4,
+    # Not in a family: a single definition inside the Phase R block, exempt because its
+    # role is digesting an already-opened descriptor rather than binding an identity.
+    "digest_opened_entry": 1,
+    # Inside a digest-bound payload: held by that payload's SHA-256.
+    "read_owned_regular": 1,
+    "production_app_request": 1,
+    "production_atomic_publish": 1,
+    "production_drain_app_stderr": 1,
+    "production_git": 1,
+    "production_probe": 1,
+    "production_snapshot_path": 1,
+    "drive_close_failure": 1,
+    "_drain": 1,
+}
+# Scope, stated once: this census and the definition census are `os.read`- and
+# `def`-shaped. A reader bound as a lambda, or one that reads through `open(p).read()`,
+# is in neither -- inserting either changes the Plan's bytes, so it is not free, but it
+# is not named by a dimension either.
+# `os.read` written at module level, outside every `def`, is invisible to a census that
+# walks function bodies -- and two full copies of the identity-binding reader algorithm
+# already lived there. Each such line is declared verbatim with its exact count, so a new
+# module-level reader, or a changed read shape in an existing one, moves a number.
+MODULE_READ_LINES = {
+    'assert os.read(helper_output, 64) == b"staged"': 1,
+    "chunk = os.read(descriptor, remaining)": 1,
+    "if os.read(descriptor, 1):": 2,
+    "part = os.read(evidence_fd, min(1024 * 1024, remaining))": 1,
+    "if os.read(evidence_fd, 1):": 1,
+    "chunk = os.read(fd, min(65_536, remaining))": 1,
+    "if os.read(fd, 1):": 1,
+    "chunk = os.read(descriptor, min(65_536, remaining))": 1,
+}
+def token(*pieces: str) -> re.Pattern[str]:
+    """Assemble a required token from pieces, anchored so a prefix cannot satisfy it.
+
+    Two reasons for the pieces. A single search-and-replace that stripped a control
+    from every reader would otherwise rewrite this table in the same pass and leave
+    the gate green. And the leading identifier boundary matters: every reader also
+    checks its *parent*, so a bare `st_uid != os.getuid()` stayed satisfied by
+    `parent_before.st_uid` after the leaf test was deleted.
+    """
+    return re.compile(r"(?<![A-Za-z_])" + re.escape("".join(pieces)))
+
+
+# Each entry is a set of accepted spellings of one required control. Deleting the
+# hardlink, owner or symlink guard, or dropping `O_NOFOLLOW` from the leaf open, used
+# to leave the gate green as long as every copy dropped it the same way.
+READER_TOKENS = (
+    # The leaf open specifically: every reader also opens its parent with
+    # `O_NOFOLLOW`, so a bare token would stay satisfied after the leaf lost it.
+    (token("leaf, os.O_RDONLY | os.O", "_NOFOLLOW, dir_fd=parent_fd"),),
+    (token("dir_fd", "=parent_fd"),),
+    (token("follow_symlinks", "=False"),),
+    (token("before.st_nlink != ", "1"),),
+    (token("before.st_uid != os.", "getuid()"), token("before.st_uid != ", "UID")),
+    (token("stat.S_ISLNK", "(before.st_mode)"),),
+    (token("stat.S_ISREG", "(before.st_mode)"),),
+    # The parent-side half of the same guard set. None of it was tokenised, so a single
+    # search-and-replace removed every parent symlink, type, owner and group/other-writable
+    # check, and the parent `O_NOFOLLOW`, from all five readers with the gate still green.
+    (token("os.O_RDONLY | os.O_DIRECTORY | os.O", "_NOFOLLOW"),),
+    (token("stat.S_ISLNK", "(parent_before.st_mode)"),),
+    (token("not stat.S_ISDIR", "(parent_before.st_mode)"),),
+    (
+        token("parent_before.st_uid != os.", "getuid()"),
+        token("parent_before.st_uid != ", "UID"),
+    ),
+    (token("stat.S_IMODE(parent_before.st_mode) & 0o", "022"),),
+)
+# Anchored on the right as well: as a bare substring this was satisfied by
+# `before.st_size > limit * 4096`, so the cap's presence was checked and its value was not.
+READER_CAP = re.compile(
+    r"(?<![A-Za-z_])" + re.escape("before.st_size > " + "limit") + r"(?![A-Za-z0-9_ ]*[*+])"
+)
+READER_FLOOR = token("or before.st_size <= ", "0")
+
+definitions: dict[str, list[str]] = {}
+covered: set[int] = set()
+for number, line in enumerate(lines):
+    match = DEF_LINE.match(line)
+    if match is None:
+        continue
+    body = function_body(number)
+    covered.update(range(number, SPANS[number]))
+    if "os.read(" in body:
+        definitions.setdefault(match.group(2), []).append(body)
+declared_readers = {name: copies for name, (copies, _) in FREE_READERS.items()}
+declared_readers.update(EXEMPT_READERS)
+if set(definitions) != set(declared_readers):
+    missing = sorted(set(declared_readers) - set(definitions))
+    extra = sorted(set(definitions) - set(declared_readers))
+    raise RuntimeError(f"reader census differs: missing={missing} undeclared={extra}")
+measured_readers = {name: len(bodies) for name, bodies in definitions.items()}
+if measured_readers != declared_readers:
+    raise RuntimeError(
+        f"reader definition counts drifted: measured {measured_readers}, declared "
+        f"{declared_readers}"
+    )
+# The four Appendix D exemptions get no control-token set, because their roles differ
+# from the identity-binding readers. Their bytes are held by the free-definition census
+# like every other free copy: a separate table of their four body digests hashed input
+# byte-identical to what the census already hashes, so it held no byte the census did
+# not, caught no mutation the census does not, and could itself be deleted entirely
+# with the gate green -- while costing a second hand-maintained digest per edit.
+gate_first = text.count(chr(10), 0, gate_start)
+gate_last = gate_first + gate_bytes.decode("utf-8").count(chr(10))
+covered.update(range(gate_first, gate_last + 1))
+module_reads: dict[str, int] = {}
+for number, line in enumerate(lines):
+    if "os.read(" in line and number not in covered:
+        stripped = line.strip()
+        module_reads[stripped] = module_reads.get(stripped, 0) + 1
+if module_reads != MODULE_READ_LINES:
+    raise RuntimeError(
+        f"module-level os.read sites drifted: measured {module_reads}, declared "
+        f"{MODULE_READ_LINES}"
+    )
+# Both module-level identity-binding programs are held to the READER_TOKENS control set
+# and to the empty-file floor -- both spell `or before.st_size <= 0` exactly. Neither is
+# held to `READER_CAP` here: `TASK_REPORT_SNAPSHOT_READER` spells its cap
+# `before.st_size > 64_000_000` rather than `> limit`, so requiring it reddens the
+# unmutated Plan, and the ack program's `> limit` cap already reaches the free-reader
+# loop below through `bounded_owned_bytes`. Widening either `64_000_000` cap is caught
+# by the family digest above and by nothing here, which is the one control this
+# dimension does not carry.
+if set(MODULE_READERS) - set(measured_blocks):
+    raise RuntimeError("a module-level reader names no marked family")
+for label in MODULE_READERS:
+    program = marked_bodies[label][0]
+    for spellings in READER_TOKENS:
+        if not any(spelling.search(program) for spelling in spellings):
+            raise RuntimeError(
+                f"module-level reader dropped {spellings[0].pattern}: {label}"
+            )
+    if READER_FLOOR.search(program) is None:
+        raise RuntimeError(f"module-level reader dropped its empty-file floor: {label}")
+for name, (_, rejects_empty) in FREE_READERS.items():
+    bodies = set(definitions[name])
+    if len(bodies) != 1:
+        raise RuntimeError(f"free bounded reader copies differ: {name}")
+    body = bodies.pop()
+    if READER_CAP.search(body) is None:
+        raise RuntimeError(f"free bounded reader has no byte cap: {name}")
+    if (READER_FLOOR.search(body) is not None) != rejects_empty:
+        raise RuntimeError(f"free bounded reader size floor differs from Appendix D: {name}")
+    for spellings in READER_TOKENS:
+        if not any(spelling.search(body) for spelling in spellings):
+            raise RuntimeError(
+                f"free bounded reader dropped {spellings[0].pattern}: {name}"
+            )
+
+# The no-clobber publication primitive also lives outside every marked family. Copies
+# are compared with their message strings normalised away, which is the only thing
+# they are allowed to differ in.
+PUBLISH_SHAPES = (4,)
+PUBLISH_TOKENS = (
+    token("os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O", "_NOFOLLOW"),
+    token("0o", "600"),
+    token("dir_fd", "=directory"),
+    token("os.fchmod(descriptor, 0o", "600)"),
+    token("opened.st_nlink != ", "1"),
+    token("current.st_nlink != ", "1"),
+    token("(current.st_dev, current.st_ino) != ", "(opened.st_dev, opened.st_ino)"),
+)
+publish_shapes: dict[str, int] = {}
+for number, line in enumerate(lines):
+    if not line.startswith("def publish("):
+        continue
+    body = function_body(number)
+    for required in PUBLISH_TOKENS:
+        if required.search(body) is None:
+            raise RuntimeError(
+                f"publish copy at plan line {number + 1} dropped {required.pattern}"
+            )
+    stripped = re.sub(r"\"[^\"]*\"", '""', re.sub(r"'[^']*'", "''", body))
+    publish_shapes[stripped] = publish_shapes.get(stripped, 0) + 1
+if tuple(sorted(publish_shapes.values(), reverse=True)) != PUBLISH_SHAPES:
+    raise RuntimeError(
+        f"publish copies drifted: measured {sorted(publish_shapes.values(), reverse=True)}, "
+        f"declared {list(PUBLISH_SHAPES)}"
+    )
+
+# ------------------------------------------------- free definitions outside every family
+# Every `def` that is inside neither a digest-bound payload nor a marked block family is
+# free to drift, and three of them were: `validate_actor_inodes` existed as three different
+# bodies of one predicate, `no_duplicates` as two spellings, and a safety clause could be
+# deleted from one copy of either with nothing reacting. Both totals and both per-name
+# numbers are exact, so a new free helper, a deleted copy and an added copy each move a
+# number. Drift *inside* a copy does not always move one of them -- see the census digest
+# below, which is what actually holds the bodies.
+FREE_DEFS = {
+    "append": (2, 2),
+    "canonical": (4, 1),
+    "canonical_path": (3, 1),
+    "controller_from_brief": (3, 1),
+    "evidence_sha256": (2, 1),
+    "fail": (2, 2),
+    "file_bytes": (2, 1),
+    "git": (2, 1),
+    "no_duplicates": (4, 1),
+    "parse_report": (2, 1),
+    "publish": (4, 2),
+    "r2_snapshot": (2, 1),
+    "reject_constant": (4, 1),
+    "reject_duplicates": (2, 1),
+    "section_slice": (2, 1),
+    "snapshot_identity": (5, 1),
+    "validate_actor_inodes": (3, 1),
+}
+FREE_DEF_NAMES = 102
+FREE_DEF_COUNT = 133
+
+guarded: set[int] = set()
+
+
+def guard_range(begin: int, finish: int) -> None:
+    guarded.update(range(text.count(chr(10), 0, begin), text.count(chr(10), 0, finish) + 1))
+
+
+for key, (fence, language) in APPENDIX_PAYLOADS.items():
+    opener = fence + language + chr(10)
+    closer = chr(10) + fence + chr(10)
+    begin = text.index(opener, heading_at[key]) + len(opener)
+    guard_range(begin, text.index(closer, begin))
+for key, fence in R2_PAYLOADS.items():
+    opener = f"<!-- {key}_BEGIN -->" + chr(10) + fence + "python" + chr(10)
+    closer = chr(10) + fence + chr(10) + f"<!-- {key}_END -->"
+    begin = text.index(opener) + len(opener)
+    guard_range(begin, text.index(closer, begin))
+for match in re.finditer(r"(?ms)^# ([A-Z][A-Z0-9_]*)_BEGIN\n.*?^# \1_END$", text):
+    guard_range(match.start(), match.end())
+
+free_defs: dict[str, list[str]] = {}
+for number, line in enumerate(lines):
+    match = DEF_LINE.match(line)
+    if match is None or number in guarded:
+        continue
+    width = len(match.group(1))
+    body = function_body(number)
+    # The signature is part of the definition. Excluding it left every default argument
+    # of every held copy outside the digest: `def write_owned(path, payload, mode: int =
+    # 0o600)` -> `0o666` was green, and all six call sites omit `mode`.
+    source = lines[number:HEADS[number] + 1] + body.split(chr(10))
+    # Only the definition's own indentation is removed, never the relative indentation
+    # inside it: that is what let a copy move a `raise` into a branch unnoticed.
+    dedented = chr(10).join(
+        item[width:] if not item[:width].strip() else item for item in source
+    )
+    free_defs.setdefault(match.group(2), []).append(dedented)
+measured_free = {
+    name: (len(bodies), len(set(bodies)))
+    for name, bodies in free_defs.items()
+    if len(bodies) > 1
+}
+if measured_free != FREE_DEFS:
+    raise RuntimeError(
+        f"free duplicate definitions drifted: measured {measured_free}, declared "
+        f"{FREE_DEFS}"
+    )
+if len(free_defs) != FREE_DEF_NAMES or sum(len(v) for v in free_defs.values()) != FREE_DEF_COUNT:
+    raise RuntimeError(
+        f"free definition census drifted: measured {len(free_defs)} names / "
+        f"{sum(len(v) for v in free_defs.values())} definitions, declared "
+        f"{FREE_DEF_NAMES} / {FREE_DEF_COUNT}"
+    )
+# Keyed on name, so this census is position-independent: relocating a definition verbatim
+# to another appendix moves nothing here. That is now closed one level up -- relocation
+# changes the Plan's bytes and the whole-file digest is red -- rather than by anchoring
+# each definition to the program it belongs to, which this dimension does not do.
+# The two numbers above are a projection of the shape, not of the content: a copy that is
+# the only instance of its body -- most of them are -- can be rewritten with both numbers
+# unmoved, and a copy that drifts onto another already-declared variant of the same name
+# moves neither. Both were demonstrated. This digest is over the bodies themselves, so
+# every free copy is held byte for byte and the numbers above are only the diagnosis.
+# Each body is hashed before it is joined, so no body can forge a separator.
+census = chr(10).join(
+    name + chr(9) + chr(9).join(
+        hashlib.sha256(body.encode("utf-8")).hexdigest() for body in bodies
+    )
+    for name, bodies in sorted(free_defs.items())
+)
+measured_census = hashlib.sha256(census.encode("utf-8")).hexdigest()
+if measured_census != FREE_DEF_DIGEST:
+    # The case the prose above calls the common one -- a copy that is the only instance
+    # of its body -- moves no count, so without the rows an aggregate digest mismatch is
+    # the entire diagnosis and names nothing.
+    sys.stderr.write(census + chr(10))
+    raise RuntimeError(
+        f"free definition bodies drifted: measured census digest {measured_census}, "
+        f"declared {FREE_DEF_DIGEST}. The per-name rows are on stderr above; diff them "
+        "against the previous revision to name the definition that moved"
+    )
+
+# The banner is built from the measured numbers and must already be written twice in the
+# Plan: the prose paragraph below this fence and Step 5's acceptance literal. Those
+# numbers were hand-maintained and matched by no pattern here, so a reviewer could be
+# handed a Plan whose stated banner and real banner disagreed. Every field is a
+# measurement of the Plan; two of them used to be the declared constants instead, which
+# was harmless only because each is equality-checked against its measurement above.
+banner = (
+    f"PLAN_PAYLOAD_IDENTITY_GREEN payloads={len(identity)} "
+    f"digest_sites={sum(seen_counts[sha] for sha in by_digest)} "
+    f"claims={declarations} "
+    f"identity_copies={identity_copies} "
+    f"readers={len(definitions)} "
+    f"blocks={sum(count for count, _ in measured_blocks.values())} "
+    f"free_defs={sum(len(bodies) for bodies in free_defs.values())} "
+    f"commit_pins={sum(pin_counts.values())} "
+    f"publish_copies={sum(publish_shapes.values())}"
+)
+if text.count(banner) != 2:
+    raise RuntimeError(
+        f"the measured banner is written {text.count(banner)} times in the Plan, not "
+        f"twice: {banner}"
+    )
+# Last, so "every dimension above ran first" is true of the banner count too.
+if measured_body != PLAN_BODY_DIGEST:
+    raise RuntimeError(
+        f"the Plan's bytes drifted: measured {measured_body}, declared "
+        f"{PLAN_BODY_DIGEST}. Every dimension above ran first and none of them named it, so the drift is in a region no dimension holds"
+    )
+print(banner)
+PY
+if [ "$ALLOCATE" = 1 ]; then
+  "$UV" run --quiet --no-project --python 3.13 python -P - <<'PY'
+from __future__ import annotations
+
+import os
+import re
+import stat
+from pathlib import Path
+import sys
+
+if not sys.flags.safe_path:
+    raise SystemExit("STOP: review round allocator requires safe-path mode")
+
+LENSES = ("spec", "execution", "ponytail")
+EXACT = re.compile(r"plan-(spec|execution|ponytail)-review-r(\d+)\.md\Z")
+ANY = re.compile(r"plan-.*-review-.*")
+ARCHIVE = "archive"
+MAX_DEPTH = 32
+
+
+def reject_hidden(directory_fd: int, where: str, depth: int) -> None:
+    """Refuse a review-like name at any depth below the run root, not just one level.
+
+    The rule this enforces is that moving a review report into a subdirectory is not a
+    way to stop it counting toward the maximum. The previous form listed only the
+    immediate subdirectories, so a name two levels down -- and directories of that shape
+    already exist in the run root -- was neither counted nor rejected, which is exactly
+    the move the rule says it closes. Symlinked entries are skipped rather than followed,
+    every descent is `O_NOFOLLOW`, and the depth is bounded so a deep tree fails closed.
+    """
+    if depth > MAX_DEPTH:
+        raise RuntimeError(f"review directory tree is deeper than the allocator walks: {where}")
+    for entry in sorted(os.listdir(directory_fd)):
+        entry_info = os.stat(entry, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISLNK(entry_info.st_mode):
+            continue
+        if stat.S_ISDIR(entry_info.st_mode):
+            child_fd = os.open(
+                entry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd
+            )
+            try:
+                reject_hidden(child_fd, f"{where}/{entry}", depth + 1)
+            finally:
+                os.close(child_fd)
+            continue
+        if ANY.fullmatch(entry):
+            raise RuntimeError(f"review report hidden below the run root: {where}/{entry}")
+
+room = Path(".superpowers/sdd/modeling-remediation")
+info = room.lstat()
+if (
+    stat.S_ISLNK(info.st_mode)
+    or not stat.S_ISDIR(info.st_mode)
+    or info.st_uid != os.getuid()
+    or stat.S_IMODE(info.st_mode) != 0o700
+):
+    raise RuntimeError("owned native mode-0700 review directory required")
+bound = (info.st_dev, info.st_ino)
+# Every other reader in this Plan binds its parent by descriptor; the allocator used to
+# resolve this one pathname five separate times instead, and never checked its mode.
+room_fd = os.open(room, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    opened = os.fstat(room_fd)
+    if (
+        (opened.st_dev, opened.st_ino) != bound
+        or stat.S_IMODE(opened.st_mode) != 0o700
+        or opened.st_uid != os.getuid()
+    ):
+        raise RuntimeError("review directory changed while opening")
+
+    rounds: set[int] = set()
+    for name in sorted(os.listdir(room_fd)):
+        entry_info = os.stat(name, dir_fd=room_fd, follow_symlinks=False)
+        if stat.S_ISDIR(entry_info.st_mode) and not stat.S_ISLNK(entry_info.st_mode):
+            if name == ARCHIVE:
+                # Archived rounds still count. Skipping them outright let a number be
+                # allocated a second time -- reviewer prompts and reports are bound by
+                # these exact pathnames, so a re-used number makes the round ambiguous.
+                # Only the round number is taken from here; the hidden-report rule below
+                # is deliberately not applied, because archiving is what this directory is.
+                archive_fd = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=room_fd
+                )
+                try:
+                    for archived in sorted(os.listdir(archive_fd)):
+                        retired = EXACT.fullmatch(archived)
+                        if retired is not None:
+                            rounds.add(int(retired.group(2)))
+                        # Deliberately no `else: raise` here, unlike the live room. The
+                        # archive holds `plan-execution-review-r8b.md`, a real historical
+                        # name that `EXACT` does not match, so raising on it stops the
+                        # allocator outright -- measured: rc 1, zero files, no round can
+                        # be opened at all. Archived names contribute a round number when
+                        # they parse and nothing when they do not; a suffixed `-r31b`
+                        # therefore raises no maximum, which is the stated cost of
+                        # keeping historical names archivable.
+                finally:
+                    os.close(archive_fd)
+                continue
+            nested_fd = os.open(
+                name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=room_fd
+            )
+            try:
+                reject_hidden(nested_fd, name, 1)
+            finally:
+                os.close(nested_fd)
+            continue
+        if not ANY.fullmatch(name):
+            continue
+        if stat.S_ISLNK(entry_info.st_mode) or not stat.S_ISREG(entry_info.st_mode):
+            raise RuntimeError(f"review report entry is not an owned regular file: {name}")
+        if entry_info.st_uid != os.getuid() or entry_info.st_nlink != 1:
+            raise RuntimeError(f"review report entry is not exclusively owned: {name}")
+        matched = EXACT.fullmatch(name)
+        if matched is None:
+            raise RuntimeError(f"unparseable review report name: {name}")
+        rounds.add(int(matched.group(2)))
+    if not rounds:
+        raise RuntimeError("no prior review round found")
+
+    allocated = max(rounds) + 1
+    created: list[str] = []
+    try:
+        for lens in LENSES:
+            name = f"plan-{lens}-review-r{allocated}.md"
+            descriptor = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=room_fd,
+            )
+            os.close(descriptor)
+            created.append(name)
+        current = os.fstat(room_fd)
+        pathname = room.lstat()
+        if (
+            (current.st_dev, current.st_ino) != bound
+            or (pathname.st_dev, pathname.st_ino) != bound
+        ):
+            raise RuntimeError("review directory changed while allocating")
+    except BaseException:
+        for name in created:
+            os.unlink(name, dir_fd=room_fd)
+        raise
+finally:
+    os.close(room_fd)
+print(f"PLAN_REVIEW_ROUND_ALLOCATED n={allocated} lenses={len(created)}")
+PY
+fi
+BASH
+```
+<!-- PLAN_IDENTITY_GATE_END -->
+
+The SHA-256 of the fence body above, measured between its own markers, is
+`2947f916b4a9d7faac7179e463ba05cddce9889a8a1ba4fab6c28a61cef157cc`. The block measures that itself and requires this
+line and the Step 5 acceptance literal to be its only two declarations, and Step 5
+re-hashes the extracted bytes against the same value before executing them.
+
+The SHA-256 of this whole file, with the hex value on the declaration line below
+masked to zeros before hashing, is that line's own value. It is the one dimension
+whose coverage is not a claim: every byte outside those 64 characters is inside it.
+It detects and does not localise; every dimension inside the fence above exists to
+say *which* region moved. Regenerate it with the Plan, last, after every other edit.
+
+PLAN_BODY_DIGEST b1bf8c0c5ed8f45166ffbce1217e3eb17cf6a79a559ae6313bf7f6e36b9d0f60
+
+Expected with `ALLOCATE=0` exactly one line, `PLAN_PAYLOAD_IDENTITY_GREEN payloads=11 digest_sites=38 claims=56 identity_copies=28 readers=24 blocks=25 free_defs=133 commit_pins=17 publish_copies=4`; with `ALLOCATE=1` that same line followed by `PLAN_REVIEW_ROUND_ALLOCATED n=<N> lenses=3`. Any other output, including a partial one, blocks the round: fix the Plan and rerun before a reviewer sees these bytes.
 
 - [ ] **Step 1: Run the specification and safety review**
 
@@ -392,15 +4611,48 @@ reports.
 
 - [ ] **Step 5: Commit the approved Plan only**
 
-Only then run:
+Only then run this. It extracts the payload-identity fence from the Plan by its markers
+and runs those exact bytes with `ALLOCATE=0`, so the commit is gated by the same code the
+round allocation was gated by, with no second copy of it to drift:
 
 ```bash
-git add -- docs/superpowers/plans/2026-08-10-official-blender-mcp-modeling-remediation.md
+/bin/bash -euo pipefail <<'BASH'
+UV="${UV:-$HOME/.local/bin/uv}"
+case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
+PLAN=docs/superpowers/plans/2026-08-10-official-blender-mcp-modeling-remediation.md
+GATE_SOURCE="$("$UV" run --quiet --no-project --python 3.13 python - "$PLAN" <<'PY'
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+tick = chr(96)
+# Assembled from pieces so this extractor is not itself a second marker occurrence.
+opener = "<!-- PLAN_IDENTITY" + "_GATE_BEGIN -->\n" + tick * 3 + "bash\n"
+closer = "\n" + tick * 3 + "\n<!-- PLAN_IDENTITY" + "_GATE_END -->"
+if text.count(opener) != 1 or text.count(closer) != 1:
+    raise SystemExit("STOP: payload-identity gate markers are not unique")
+start = text.index(opener) + len(opener)
+sys.stdout.write(text[start:text.index(closer, start) + 1])
+PY
+)"
+# The block verifies every other identity in the Plan and used to be the one thing nothing
+# verified. Its own bytes are pinned here and re-hashed before they are executed.
+GATE_SHA256="$(printf '%s\n' "$GATE_SOURCE" | "$UV" run --quiet --no-project \
+  --python 3.13 python -P -c \
+  'import hashlib, sys; sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+test "$GATE_SHA256" = '2947f916b4a9d7faac7179e463ba05cddce9889a8a1ba4fab6c28a61cef157cc'
+GATE_OUTPUT="$(ALLOCATE=0 /bin/bash -euo pipefail -c "$GATE_SOURCE")"
+test "$GATE_OUTPUT" = 'PLAN_PAYLOAD_IDENTITY_GREEN payloads=11 digest_sites=38 claims=56 identity_copies=28 readers=24 blocks=25 free_defs=133 commit_pins=17 publish_copies=4'
+git add -- "$PLAN"
+# Task 6 Step 4 and Task 7 Step 1 both assert the staged set and this commit did not,
+# so a path staged before this block ran was swept into the Plan-only commit.
+test "$(git diff --cached --name-only)" = "$PLAN"
 git diff --cached --check
 git commit -m "docs: revise official MCP modeling remediation plan"
+BASH
 ```
 
-Expected: the Plan-only commit is clean. Task 1 is still blocked by Steps 6–7.
+Expected: the gate line matches exactly and the Plan-only commit is clean. Task 1 is
+still blocked by Steps 6–7.
 
 - [ ] **Step 6: Verify the executed r1 gate failure and restored environment**
 
@@ -493,7 +4745,32 @@ if stat.S_ISLNK(evidence_info.st_mode) or not stat.S_ISREG(evidence_info.st_mode
     raise SystemExit("STOP: regular failure evidence required")
 if evidence_info.st_uid != os.getuid() or evidence_info.st_mode & stat.S_IWOTH:
     raise SystemExit("STOP: unsafe failure evidence ownership/mode")
-payload = evidence.read_bytes()
+if (
+    evidence_info.st_nlink != 1
+    or evidence_info.st_size <= 0
+    or evidence_info.st_size > 4 * 1024 * 1024
+):
+    raise SystemExit("STOP: unsafe failure evidence link count or size")
+evidence_fd = os.open(evidence, os.O_RDONLY | os.O_NOFOLLOW)
+try:
+    if (os.fstat(evidence_fd).st_dev, os.fstat(evidence_fd).st_ino) != (
+        evidence_info.st_dev,
+        evidence_info.st_ino,
+    ):
+        raise SystemExit("STOP: failure evidence changed while opening")
+    parts: list[bytes] = []
+    remaining = evidence_info.st_size
+    while remaining:
+        part = os.read(evidence_fd, min(1024 * 1024, remaining))
+        if not part:
+            raise SystemExit("STOP: failure evidence shrank while reading")
+        parts.append(part)
+        remaining -= len(part)
+    if os.read(evidence_fd, 1):
+        raise SystemExit("STOP: failure evidence grew while reading")
+finally:
+    os.close(evidence_fd)
+payload = b"".join(parts)
 if hashlib.sha256(payload).hexdigest() != (
     "ebd57eee1c24b90c4a68d71b112c2682cf879f5ca345231960071661131edbd5"
 ):
@@ -517,7 +4794,7 @@ BASH
 
 Expected: the one exact marker above. No command in this Step changes flags, installs a
 package, mutates `.venv`, reruns pytest, or converts the failed gate into success.
-Only Task 1 is authorized to harden `scripts/checks.sh`; Tasks 2–5 remain blocked until
+Only Task 1 is authorized to harden `scripts/checks.sh`; Tasks 2–7 remain blocked until
 Task 1 commits the final gate bytes and passes its post-commit full 369-test/tmp-cwd
 entrypoint gate.
 
@@ -576,8 +4853,9 @@ runbook disposition table or audit-CLI issue-ID fields.
 
 At capture both main fields equal the uniquely resolved clean main HEAD. It never prints
 or stores config/preference contents or unrelated values. Any absent, symlinked,
-foreign-owned, non-regular, or world-writable protected input stops the run. Tasks 4–5 pass
-`EXPECTED_MAIN_ANCHOR=<initial_main_anchor>` to Appendix D.
+foreign-owned, non-regular, or world-writable protected input stops the run. Tasks 4, 5 and 7 pass
+`EXPECTED_MAIN_ANCHOR` to Appendix D left empty, which is what Appendix D asks for: an
+empty value makes it use Appendix E's initial anchor rather than a hand-copied one.
 
 ---
 
@@ -614,7 +4892,10 @@ Expected: exit `0`; no pre-existing file is overwritten.
 
 - [ ] **Step 2: Write only the durable rules justified by the audit**
 
-Create `docs/use-official-blender-mcp.md` with these concise sections:
+Create `docs/use-official-blender-mcp.md` from Appendix A0's exact initial payload
+(322 lines, 16,202 bytes, SHA-256
+`81f7216f1f1f454276c177804f26aa9260ab41a1bc5e71e2015a91781aa4c50b`).
+It has these concise sections:
 
 1. **Boundary and prerequisites** — official `blender` MCP only, pinned source/SDK,
    Blender `>=5.2`, disposable factory scene, no user `.blend` open/save/overwrite.
@@ -680,12 +4961,27 @@ tracked sources. Do not add `chflags`, `PYTHONPATH`, a second script, or a test 
 
 - [ ] **Step 4: Run the deterministic pre-commit contracts**
 
-Run Appendix A's exact uv-Python 3.13 probe. It asserts the file is a regular
+Run Appendix A0's exact initial uv-Python 3.13 probe. It asserts the file is a regular
 non-symlink, contains each section heading and the exact 24-ID disposition map, and
 rejects false fix claims, `_NEXT` as the 5.2 engine, a 3 MB screenshot recommendation,
 instructions to kill retained servers, or a gate workaround using a `chflags` command,
 a `PYTHONPATH` assignment, or fewer tests. Expected: `issue_rows=24` and
 `contract=ok`.
+
+The contract probe alone cannot tell Appendix A0 from the amended Appendix A -- the
+amended body satisfies every one of its assertions -- so bind the exact A0 identity
+as well:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+RUNBOOK=docs/use-official-blender-mcp.md
+test -f "$RUNBOOK"
+test ! -L "$RUNBOOK"
+test "$(wc -l <"$RUNBOOK" | tr -d ' ')" = 322
+test "$(wc -c <"$RUNBOOK" | tr -d ' ')" = 16202
+test "$(shasum -a 256 "$RUNBOOK" | awk '{print $1}')" = 81f7216f1f1f454276c177804f26aa9260ab41a1bc5e71e2015a91781aa4c50b
+BASH
+```
 
 Then prove the gate change is exactly two additions and is valid Bash:
 
@@ -707,15 +5003,20 @@ Expected: exit `0`; no full gate runs against an uncommitted tree.
 Run:
 
 ```bash
+set -euo pipefail  # this fence commits; it must not depend on the caller's options
 git diff --check
 git add -- docs/use-official-blender-mcp.md scripts/checks.sh
+# A path staged before this fence runs is swept into a commit whose message and whose
+# `git add` both name a single file. Round 7 added this to Step 5 only.
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' docs/use-official-blender-mcp.md scripts/checks.sh)"
 git diff --cached --check
 git commit -m "docs: add official MCP runbook and harden checks"
 ```
 
 Expected: the commit contains exactly the new runbook and the two-line
 `scripts/checks.sh` hardening; the test inventory remains 369 and the worktree is
-clean.
+clean. The committed runbook must still have the exact Appendix A0 line/byte/digest
+identity; an amended Appendix A byte at this point is a hard failure.
 
 - [ ] **Step 6: Run the clean post-commit full gate and tmp-cwd entrypoint**
 
@@ -786,7 +5087,7 @@ nested-import, and `ALL CHECKS PASSED`; the tmp-cwd lane reports
 `TMP_CWD_ENTRYPOINT_GREEN exit=0`; the final marker binds the
 clean committed HEAD. If it fails, Task 1 remains incomplete: fix forward within Task
 1's two-file scope, commit the new final bytes, rerun Steps 4 and 6 on the new clean
-HEAD, and obtain the combined Task 1 review. Tasks 2–5 remain blocked until this gate is
+HEAD, and obtain the combined Task 1 review. Tasks 2–7 remain blocked until this gate is
 green. In this real-worktree step, do not use `chflags`, set `PYTHONPATH`, or
 reduce/skip tests. The sole `chflags` exception is the explicitly bounded disposable
 clone adversary in Step 7 below.
@@ -1002,7 +5303,7 @@ output markers, old/current adapter SHA-256 values, and final Task 1 HEAD to
 
 - [ ] **Step 1: Run the recorder RED probe**
 
-Write the exact ignored probe from Appendix C to the Task 2 run directory and run its
+Write the exact ignored probe from Appendix C0 to the Task 2 run directory and run its
 `record-red` case with uv-managed Python 3.13. Expected RED category:
 `SCRIPT_ABSENT`; no repository file is written.
 
@@ -1011,10 +5312,10 @@ Write the exact ignored probe from Appendix C to the Task 2 run directory and ru
 Write Appendix B1 exactly. Use only the Python standard library and do not redesign the
 schema. This first commit exposes only `record`; `validate` must still be an argparse
 invalid choice. The final schema is documented here so the second Task can extend it
-without changing recorder behavior. Appendix B1 has only `record`; Appendix B2 has
+without changing recorder behavior. Appendix B1 has only `record`; Appendix B2I has
 exactly `record` and `validate`:
 
-- final Appendix B2 has one `argparse` parser with exactly `record` and `validate`
+- initial Appendix B2I has one `argparse` parser with exactly `record` and `validate`
   subcommands; recorder-only Appendix B1 has exactly `record`;
 - one generated UUID `clock_id` per `record` process;
 - RFC 3339 UTC strings ending in `Z` and integer monotonic nanoseconds;
@@ -1041,7 +5342,7 @@ exactly `record` and `validate`:
 
 - [ ] **Step 3: Make the recorder probes GREEN**
 
-Run Appendix C `record-green`. It must cover a real pipe, pass and fail events, a
+Run Appendix C0 `record-green`. It must cover a real pipe, pass and fail events, a
 persisted failure before a linked recovery start, unknown/bad fields, unfinished events,
 existing target, target symlink, parent symlink/mode, output mode/UID, and inode/hash
 preservation on rejected paths.
@@ -1050,6 +5351,13 @@ Run:
 
 ```bash
 UV="${UV:-$HOME/.local/bin/uv}"
+# The Plan enforces "an interpreter path must be absolute" twenty-one times and this
+# fence was one of seven that did not. `UV_BIN` is the process that launches every other
+# check, including the one that validates `CODEX_BIN`, so it runs before anything
+# validates anything; a non-absolute value resolves through `PATH` and the journal then
+# attests to a run driven by an interpreter nobody identified.
+case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
+test -x "$UV"
 "$UV" run --frozen --python 3.13 ruff check scripts/official_blender_mcp_audit.py
 "$UV" run --frozen --python 3.13 mypy --strict \
   scripts/official_blender_mcp_audit.py
@@ -1065,7 +5373,9 @@ Expected: `RECORD_GREEN`; Ruff, strict mypy, compile, and whitespace checks pass
 Run:
 
 ```bash
+set -euo pipefail  # this fence commits; it must not depend on the caller's options
 git add -- scripts/official_blender_mcp_audit.py
+test "$(git diff --cached --name-only)" = scripts/official_blender_mcp_audit.py
 git diff --cached --check
 git commit -m "tools: add official Blender MCP audit recorder"
 ```
@@ -1088,12 +5398,12 @@ contains exactly the script.
 
 - [ ] **Step 1: Run the validator RED probe**
 
-Run Appendix C `validate-red` against the recorder-only commit. Expected: argparse
+Run Appendix C0 `validate-red` against the recorder-only commit. Expected: argparse
 rejects `validate`; the probe reports `VALIDATOR_ABSENT` and makes no tracked change.
 
 - [ ] **Step 2: Replace the script with the exact final bytes**
 
-Replace the file with Appendix B2 exactly. Relative to B1, recorder behavior and error
+Replace the file with Appendix B2I exactly. Relative to B1, recorder behavior and error
 categories must remain byte-for-byte equivalent. Validator requirements are:
 
 - safe-open all five inputs as current-UID, non-symlink regular files and verify the
@@ -1107,16 +5417,16 @@ categories must remain byte-for-byte equivalent. Validator requirements are:
   UTC and monotonic ordering, nonempty literal issue IDs for fail, deviation, and
   linked recovery ends, caller-provided fail fields, and prior failed-end linkage for
   recovery starts;
-- print the fixed success/error schemas from Appendix B2. Never hardcode a count.
+- print the fixed success/error schemas from Appendix B2I. Never hardcode a count.
 
 - [ ] **Step 3: Run the complete adversarial probe**
 
-Run Appendix C `all-green`. It proves three-name and four-name positive inputs, plus
+Run Appendix C0 `all-green`. It proves three-name and four-name positive inputs, plus
 the exact negative category matrix for unsafe files, catalog schema/mismatch, zero or
 multiple/bad tables, ordinal/outcome/wall/retry/issue errors, journal JSON/schema,
 mixed clocks, sequences, pairing, time reversal, fail fields and recovery ordering.
 
-Run Appendix C's exact B2 commands: targeted Ruff, strict mypy, uv-Python compile, and
+Run Appendix C0's exact B2I commands: targeted Ruff, strict mypy, uv-Python compile, and
 `all-green`. Expected: `ALL_GREEN` and all three static checks pass.
 
 - [ ] **Step 4: Commit the final validator only**
@@ -1124,8 +5434,10 @@ Run Appendix C's exact B2 commands: targeted Ruff, strict mypy, uv-Python compil
 Run:
 
 ```bash
+set -euo pipefail  # this fence commits; it must not depend on the caller's options
 git diff --check
 git add -- scripts/official_blender_mcp_audit.py
+test "$(git diff --cached --name-only)" = scripts/official_blender_mcp_audit.py
 git diff --cached --check
 git commit -m "tools: add official Blender MCP audit validator"
 ```
@@ -1186,29 +5498,145 @@ state checks. Close the writer FD and wait for the recorder to exit successfully
 the journal is complete. Only then run `validate` against the active audit and the three
 normalized arrays. Measure that final validation with an external uv-Python 3.13
 UTC/monotonic bracket; do not put validation of a journal inside the journal itself.
+Before that, bind Appendix A0's exact identity. Task 4 consumes the runbook and its
+contract probe passes against the amended Appendix A body too, so the probe alone
+cannot prove the runbook is still the initial payload:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+RUNBOOK=docs/use-official-blender-mcp.md
+test -f "$RUNBOOK"
+test ! -L "$RUNBOOK"
+test "$(wc -l <"$RUNBOOK" | tr -d ' ')" = 322
+test "$(wc -c <"$RUNBOOK" | tr -d ' ')" = 16202
+test "$(shasum -a 256 "$RUNBOOK" | awk '{print $1}')" = 81f7216f1f1f454276c177804f26aa9260ab41a1bc5e71e2015a91781aa4c50b
+BASH
+```
+
 Run Appendix D with this literal extraction command. It executes the one committed
 Appendix D Bash fence without creating a persistent helper:
 
 ```bash
 /bin/bash -euo pipefail <<'BASH'
 UV_BIN="${UV_BIN:-$HOME/.local/bin/uv}"
+case "$UV_BIN" in /*) ;; *) echo 'STOP: UV_BIN must be absolute' >&2; exit 1 ;; esac
+test -x "$UV_BIN"
 BRIEF=.superpowers/sdd/modeling-remediation/task-4-brief.md
+: "${BRIEF_SHA256:?use the controller-recorded Task 4 brief SHA-256}"
+: "${BRIEF_DEV:?use the controller-recorded Task 4 brief device}"
+: "${BRIEF_INO:?use the controller-recorded Task 4 brief inode}"
 export TASK_N=4
 export EXPECTED_ACTIVE_AUDIT_DIRTY=1
 export TASK_REPORT=.superpowers/sdd/modeling-remediation/task-4-report.md
 export EXPECTED_MAIN_ANCHOR="${EXPECTED_MAIN_ANCHOR:-}"
 
-"$UV_BIN" run --quiet --no-project --python 3.13 python - "$BRIEF" <<'PY' | /bin/bash -euo pipefail
+"$UV_BIN" run --quiet --no-project --python 3.13 python - \
+  "$BRIEF" "$BRIEF_SHA256" "$BRIEF_DEV" "$BRIEF_INO" <<'PY' | /bin/bash -euo pipefail
+import hashlib
+import os
+import stat
 from pathlib import Path
 import sys
 
-text = Path(sys.argv[1]).read_text(encoding="utf-8")
+# GATE_SNAPSHOT_READER_BEGIN
+def gate_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def gate_snapshot(
+    raw: Path,
+    *,
+    label: str,
+    limit: int,
+    mode: int,
+    expected: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    path = Path(os.path.abspath(raw))
+    parent, leaf = path.parent, path.name
+    if limit <= 0 or leaf in {"", ".", ".."} or os.path.realpath(parent) != os.fspath(parent):
+        raise RuntimeError(f"unsafe {label} path")
+    parent_before = os.lstat(parent)
+    parent_bound = gate_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) & 0o022
+    ):
+        raise RuntimeError(f"unsafe {label} parent")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = -1
+    try:
+        if gate_identity(os.fstat(parent_fd)) != parent_bound or gate_identity(os.lstat(parent)) != parent_bound:
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = gate_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != mode
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+            or expected is not None
+            and (before.st_dev, before.st_ino) != expected
+        ):
+            raise RuntimeError(f"unsafe {label} metadata")
+        descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        if gate_identity(os.fstat(descriptor)) != bound:
+            raise RuntimeError(f"{label} changed while opening")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading")
+        payload = b"".join(chunks)
+        if (
+            len(payload) != before.st_size
+            or gate_identity(os.fstat(descriptor)) != bound
+            or gate_identity(os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)) != bound
+            or gate_identity(os.fstat(parent_fd)) != parent_bound
+            or gate_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} changed while reading")
+        return payload, before
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+# GATE_SNAPSHOT_READER_END
+
+
+brief, _ = gate_snapshot(
+    Path(sys.argv[1]),
+    label="Task 4 brief",
+    limit=2 * 1024 * 1024,
+    mode=0o600,
+    expected=(int(sys.argv[3]), int(sys.argv[4])),
+)
+if hashlib.sha256(brief).hexdigest() != sys.argv[2]:
+    raise RuntimeError("Task 4 brief digest differs from controller allocation")
+text = brief.decode("utf-8")
 heading = "## Appendix D: Exact no-write catalog and journal integration\n"
 if text.count(heading) != 1:
     raise RuntimeError("expected one Appendix D heading")
-section = text.split(heading, 1)[1].split(
-    "\n## Appendix E: Exact external-baseline capture\n", 1
-)[0]
+# Appendix D is the last section a Task 4/5 brief carries -- `required` is
+# ("A0", "C0", "D") and Appendix E is never routed here -- so everything after the D
+# heading is the D section. The old second `split` named an Appendix E heading that
+# occurs zero times in any real brief and therefore never cut anything; the invariant
+# it was standing in for is stated here and enforced by the two fence counts below.
+section = text.split(heading, 1)[1]
+if "\n## Appendix E" in section or "\n## Appendix F" in section:
+    raise RuntimeError("a section after Appendix D reached this brief")
 if section.count("```bash\n") != 2:
     raise RuntimeError("expected caller-resume and integration Bash fences")
 body = section.rsplit("```bash\n", 1)[1]
@@ -1310,8 +5738,10 @@ Set `Status: remediation implemented; final adversarial audit pending`.
 Run:
 
 ```bash
+set -euo pipefail  # this fence commits; it must not depend on the caller's options
 git diff --check
 git add -- docs/audits/2026-08-10-official-blender-mcp-modeling-validation.md
+test "$(git diff --cached --name-only)" = docs/audits/2026-08-10-official-blender-mcp-modeling-validation.md
 git diff --cached --check
 git commit -m "docs: record official MCP modeling remediation"
 ```
@@ -1332,31 +5762,146 @@ implementer has committed, written the Task report, and returned.
 
 - [ ] **Step 1: Run focused probes before finalizing evidence**
 
-Re-run Appendix A's runbook probe, Appendix C's `all-green` helper probe, and Appendix
+Re-run Appendix A0's initial runbook probe, Appendix C0's `all-green` helper probe, and Appendix
 D's clean lane with this literal extraction command. Leave `EXPECTED_MAIN_ANCHOR`
-empty for the initial pre-integration round; a clean Phase M gate-failure round supplies
+empty for the initial pre-integration round; a clean post-merge gate-failure round supplies
 the prior reviewed HEAD.
+
+The contract probe passes against the amended Appendix A body as well, so bind A0's
+exact identity first. These Tasks consume the runbook and must never see an amended one:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+RUNBOOK=docs/use-official-blender-mcp.md
+test -f "$RUNBOOK"
+test ! -L "$RUNBOOK"
+test "$(wc -l <"$RUNBOOK" | tr -d ' ')" = 322
+test "$(wc -c <"$RUNBOOK" | tr -d ' ')" = 16202
+test "$(shasum -a 256 "$RUNBOOK" | awk '{print $1}')" = 81f7216f1f1f454276c177804f26aa9260ab41a1bc5e71e2015a91781aa4c50b
+BASH
+```
 
 ```bash
 /bin/bash -euo pipefail <<'BASH'
 UV_BIN="${UV_BIN:-$HOME/.local/bin/uv}"
+case "$UV_BIN" in /*) ;; *) echo 'STOP: UV_BIN must be absolute' >&2; exit 1 ;; esac
+test -x "$UV_BIN"
 BRIEF=.superpowers/sdd/modeling-remediation/task-5-brief.md
+: "${BRIEF_SHA256:?use the controller-recorded Task 5 brief SHA-256}"
+: "${BRIEF_DEV:?use the controller-recorded Task 5 brief device}"
+: "${BRIEF_INO:?use the controller-recorded Task 5 brief inode}"
 export TASK_N=5
 export EXPECTED_ACTIVE_AUDIT_DIRTY=0
 export TASK_REPORT=.superpowers/sdd/modeling-remediation/task-5-report.md
 export EXPECTED_MAIN_ANCHOR="${EXPECTED_MAIN_ANCHOR:-}"
 
-"$UV_BIN" run --quiet --no-project --python 3.13 python - "$BRIEF" <<'PY' | /bin/bash -euo pipefail
+"$UV_BIN" run --quiet --no-project --python 3.13 python - \
+  "$BRIEF" "$BRIEF_SHA256" "$BRIEF_DEV" "$BRIEF_INO" <<'PY' | /bin/bash -euo pipefail
+import hashlib
+import os
+import stat
 from pathlib import Path
 import sys
 
-text = Path(sys.argv[1]).read_text(encoding="utf-8")
+# GATE_SNAPSHOT_READER_BEGIN
+def gate_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def gate_snapshot(
+    raw: Path,
+    *,
+    label: str,
+    limit: int,
+    mode: int,
+    expected: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    path = Path(os.path.abspath(raw))
+    parent, leaf = path.parent, path.name
+    if limit <= 0 or leaf in {"", ".", ".."} or os.path.realpath(parent) != os.fspath(parent):
+        raise RuntimeError(f"unsafe {label} path")
+    parent_before = os.lstat(parent)
+    parent_bound = gate_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) & 0o022
+    ):
+        raise RuntimeError(f"unsafe {label} parent")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = -1
+    try:
+        if gate_identity(os.fstat(parent_fd)) != parent_bound or gate_identity(os.lstat(parent)) != parent_bound:
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = gate_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != mode
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+            or expected is not None
+            and (before.st_dev, before.st_ino) != expected
+        ):
+            raise RuntimeError(f"unsafe {label} metadata")
+        descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        if gate_identity(os.fstat(descriptor)) != bound:
+            raise RuntimeError(f"{label} changed while opening")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading")
+        payload = b"".join(chunks)
+        if (
+            len(payload) != before.st_size
+            or gate_identity(os.fstat(descriptor)) != bound
+            or gate_identity(os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)) != bound
+            or gate_identity(os.fstat(parent_fd)) != parent_bound
+            or gate_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} changed while reading")
+        return payload, before
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+# GATE_SNAPSHOT_READER_END
+
+
+brief, _ = gate_snapshot(
+    Path(sys.argv[1]),
+    label="Task 5 brief",
+    limit=2 * 1024 * 1024,
+    mode=0o600,
+    expected=(int(sys.argv[3]), int(sys.argv[4])),
+)
+if hashlib.sha256(brief).hexdigest() != sys.argv[2]:
+    raise RuntimeError("Task 5 brief digest differs from controller allocation")
+text = brief.decode("utf-8")
 heading = "## Appendix D: Exact no-write catalog and journal integration\n"
 if text.count(heading) != 1:
     raise RuntimeError("expected one Appendix D heading")
-section = text.split(heading, 1)[1].split(
-    "\n## Appendix E: Exact external-baseline capture\n", 1
-)[0]
+# Appendix D is the last section a Task 4/5 brief carries -- `required` is
+# ("A0", "C0", "D") and Appendix E is never routed here -- so everything after the D
+# heading is the D section. The old second `split` named an Appendix E heading that
+# occurs zero times in any real brief and therefore never cut anything; the invariant
+# it was standing in for is stated here and enforced by the two fence counts below.
+section = text.split(heading, 1)[1]
+if "\n## Appendix E" in section or "\n## Appendix F" in section:
+    raise RuntimeError("a section after Appendix D reached this brief")
 if section.count("```bash\n") != 2:
     raise RuntimeError("expected caller-resume and integration Bash fences")
 body = section.rsplit("```bash\n", 1)[1]
@@ -1378,14 +5923,19 @@ external-baseline comparisons, official source pin/clean state, historical fixtu
 hashes explicitly labeled unavailable/not remeasured, and the prior validated unsaved
 Blender state explicitly labeled historical. Do not claim
 that the post-commit full gate has already run. Set `Status: remediation implementation
-complete; final gate evidence is bound in the ignored Task 5 report and terminal review`.
-No tracked edit follows this final audit commit.
+complete through Task 5; validator-reader hardening is pending Task 6 and clean
+final-retest evidence is pending Task 7`. After
+this commit only the post-Task-5 continuation gate, Task 6's exact CLI hardening, and
+Task 7's exact Plan-payload/runbook/active-audit fix-forward edits allowed by Global
+Constraints may proceed; Task 5 evidence must never be described as final r2 evidence.
 
 - [ ] **Step 3: Commit only the final audit evidence**
 
 ```bash
+set -euo pipefail  # this fence commits; it must not depend on the caller's options
 git diff --check
 git add -- docs/audits/2026-08-10-official-blender-mcp-modeling-validation.md
+test "$(git diff --cached --name-only)" = docs/audits/2026-08-10-official-blender-mcp-modeling-validation.md
 git diff --cached --check
 git commit -m "docs: close official MCP modeling remediation"
 ```
@@ -1413,8 +5963,8 @@ BASH
 
 Append every exact focused/full-gate command and its literal output to the ignored
 Task report as it runs. After the final audit commit, no tracked file may be written;
-the ignored Task report is the only evidence file updated. Expected: the Appendix A,
-Appendix C, Appendix D, 369-test, Ruff, mypy, vendor, nested-import, whitespace, HEAD,
+the ignored Task report is the only evidence file updated. Expected: the Appendix A0,
+Appendix C0, Appendix D, 369-test, Ruff, mypy, vendor, nested-import, whitespace, HEAD,
 and cleanliness gates all pass on `FINAL_TRACKED_HEAD`.
 
 - [ ] **Step 5: Finish the ignored Task report and return**
@@ -1431,18 +5981,731 @@ Expected: Task 5 completes only with `SPEC_VERDICT: PASS`,
 
 ---
 
-### Task 6: Controller-only numeric boundary — never dispatch
+### Task 6: Harden every validator input read
 
-This heading exists only so the installed `task-brief` helper terminates Task 5 at a
-numeric Task boundary. The SDD dispatch case permits only Tasks 1–5; do not extract,
-dispatch, implement, review, or commit Task 6.
+**Files:**
+- Modify: `scripts/official_blender_mcp_audit.py`
+- Report, ignored: `.superpowers/sdd/modeling-remediation/task-6-report.md`
+
+**Interfaces:**
+- Consumes: the clean reviewed Task 5 HEAD and Appendices B2 and C only.
+- Produces: one real CLI-only commit with the bounded descriptor reader, the complete
+  reader adversarial matrix, and one clean standard combined review.
+
+**Role boundary:** A fresh implementer owns every Step in this Task. It receives only
+this Task plus Appendices B2 and C. It must not dispatch reviewers, write a review
+verdict, invoke Blender or MCP, or modify the runbook, audit, Plan, gate, dependencies,
+helpers, or services. Orchestration resumes only after the implementer commits, writes
+the report, and returns; the controller then runs the one standard combined review.
+
+- [ ] **Step 1: Prove the current reader fails the new contract**
+
+Require a clean reviewed Task 5 HEAD. The current CLI must be the exact initial B2I
+payload: 626 lines, 24,168 bytes, SHA-256
+`4a45f69f8aae1f72711119e9ecd4e4f6a91a3fcfe88488b737c7c154696ec3fe`.
+Extract Appendix C's sole Python fence to the ignored
+`.superpowers/sdd/modeling-remediation/appendix-c-probe.py`, mode `0600`, then run
+Appendix C's exact RED block. Record its literal output in `task-6-report.md`.
+
+Expected: `READER_HARDENING_RED`; a green result is a stop condition.
+
+- [ ] **Step 2: Install the exact hardened CLI bytes**
+
+Extract Appendix B2's sole Python fence and replace only
+`scripts/official_blender_mcp_audit.py`. Preserve its tracked mode -- it is 0644 and is
+always run as an argument to the interpreter, never executed directly. Before and
+after the write, bind the target's non-symlink regular-file identity and verify the
+extracted 773 lines / 29,338 bytes / SHA-256
+`a67525432beca49a09c14b3ce266c46109900344cb4f2515f23fccd9a3de530d`
+against the in-brief payload. The new bytes must differ
+from the Step 1 hash, and this command must succeed:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+test -n "${TASK_BASE:?Task base required}"
+test "$(git rev-parse HEAD)" = "$TASK_BASE"
+test "$(git status --short --untracked-files=all)" = " M scripts/official_blender_mcp_audit.py"
+test "$(git diff --name-only -- scripts/official_blender_mcp_audit.py | wc -l | tr -d ' ')" = 1
+if git diff --quiet -- scripts/official_blender_mcp_audit.py; then
+  echo "hardened CLI unexpectedly produced no diff" >&2
+  exit 1
+fi
+BASH
+```
+
+The Appendix B2 reader must cover every validator input. It opens a canonical,
+current-UID, non-writable parent and leaf through directory/file descriptors; rejects
+symlinks, non-regular files, foreign ownership, group/world-writable modes, link counts
+other than one, empty files, and each explicit per-input byte limit; binds pre-open
+size and opened device, inode, UID, mode, link count, timestamps, and size; reads
+exactly that positive bound; and rechecks the descriptor, current pathname, parent
+descriptor, and parent pathname before decoding UTF-8.
+
+- [ ] **Step 3: Run the focused and full green gates**
+
+Run Appendix C's exact GREEN block, including Ruff `--no-cache`, strict mypy with its
+exclusive `/private/tmp` cache, compilation of both extracted files, `reader-green`,
+and `all-green`. Then run:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+./scripts/checks.sh
+git diff --check
+test "$(git diff --name-only)" = scripts/official_blender_mcp_audit.py
+BASH
+```
+
+Expected: the normal and exact-limit positives pass; parent/leaf symlink, hardlink,
+unsafe-mode, oversize, grow, shrink, in-place mutation, and pathname-replacement cases
+all fail closed; the repository gate reports exactly 369 passed.
+
+- [ ] **Step 4: Commit the real CLI delta and finish the report**
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+: "${TASK_BASE:?Task base required}"
+git diff --check
+git add -- scripts/official_blender_mcp_audit.py
+test "$(git diff --cached --name-only)" = scripts/official_blender_mcp_audit.py
+git diff --cached --check
+git commit -m "fix: harden official MCP audit inputs"
+TASK_HEAD="$(git rev-parse HEAD)"
+test "$TASK_HEAD" != "$TASK_BASE"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+test "$(git diff --name-only "$TASK_BASE..$TASK_HEAD")" = scripts/official_blender_mcp_audit.py
+if git diff --quiet "$TASK_BASE..$TASK_HEAD" -- scripts/official_blender_mcp_audit.py; then
+  echo "Task 6 CLI commit is a no-op" >&2
+  exit 1
+fi
+BASH
+```
+
+Append the exact RED/GREEN/full-gate commands and output, base/head/commit, extracted
+payload identity, self-review, and concerns to `task-6-report.md`, then return. Any
+combined-review finding returns to this implementer, requires a covering rerun and a
+new CLI-only commit, and receives another standard combined review.
+
+Expected: Task 6 completes only with `SPEC_VERDICT: PASS`,
+`QUALITY_VERDICT: APPROVED`, zero findings, and a clean reviewed HEAD.
+
+---
+
+### Task 7: Fix final-retest defects and prove a clean all-tool rerun
+
+**Files:**
+- Modify: `docs/use-official-blender-mcp.md`
+- Modify: `docs/audits/2026-08-10-official-blender-mcp-modeling-validation.md`
+- Evidence, ignored: `.superpowers/sdd/modeling-remediation/final-retest-r1/`
+- Evidence, ignored: `.superpowers/sdd/modeling-remediation/final-retest-r2/`
+- Report, ignored: `.superpowers/sdd/modeling-remediation/task-7-report.md`
+
+**Interfaces:**
+- Consumes: the clean reviewed Task 6 HEAD, Appendices A, C, D, F, and both immutable
+  invalid r1 journals.
+- Produces: exact runbook bytes, r1 root cause plus validated clean-r2 audit evidence,
+  one reviewed Task 7 HEAD, and the standard progress-ledger completion line.
+
+**Role boundary:** P6 must already have approved and committed the exact Plan bytes,
+Task 6 must have a clean combined review at the current clean HEAD, and the Task 7 base
+must equal that reviewed Task 6 HEAD before the controller generates this brief. One
+fresh `gpt-5.6-sol` high-effort
+implementer receives only the standard generated `task-7-brief.md` and edits the
+controller-created `task-7-report.md`. It owns every Step below, commits, and returns
+before the controller dispatches one fresh standard combined reviewer. It may not write
+a verdict or dispatch another agent.
+
+- [ ] **Step 1: Apply the exact durable corrections**
+
+Before copying, prove the tracked runbook is still Task 1's exact initial payload; this
+is mandatory in both a fresh replay and this continuation:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+RUNBOOK=docs/use-official-blender-mcp.md
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+test -f "$RUNBOOK"
+test ! -L "$RUNBOOK"
+stat -f 'runbook_dev=%d runbook_ino=%i runbook_size=%z runbook_nlink=%l' "$RUNBOOK"
+test "$(wc -l <"$RUNBOOK" | tr -d ' ')" = 322
+test "$(wc -c <"$RUNBOOK" | tr -d ' ')" = 16202
+test "$(shasum -a 256 "$RUNBOOK" | awk '{print $1}')" = 81f7216f1f1f454276c177804f26aa9260ab41a1bc5e71e2015a91781aa4c50b
+BASH
+```
+
+Copy Appendix A's exact amended bytes to the runbook and run its amended probe. Then
+prove the payload is 425 lines, 21,493 bytes, SHA-256
+`39b2665064ee8e1be72bb73318a60a46b467c01da636eed4dab5c05945c6d610`, and that
+`git diff --quiet -- docs/use-official-blender-mcp.md` exits nonzero. A no-op is a
+hard failure. The amended identity is a hard gate, not prose:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+RUNBOOK=docs/use-official-blender-mcp.md
+test -f "$RUNBOOK"
+test ! -L "$RUNBOOK"
+test "$(wc -l <"$RUNBOOK" | tr -d ' ')" = 425
+test "$(wc -c <"$RUNBOOK" | tr -d ' ')" = 21493
+test "$(shasum -a 256 "$RUNBOOK" | awk '{print $1}')" = 39b2665064ee8e1be72bb73318a60a46b467c01da636eed4dab5c05945c6d610
+set +e
+git diff --quiet -- "$RUNBOOK"
+DIFF_EXIT=$?
+set -e
+test "$DIFF_EXIT" != 0
+BASH
+```
+ The runbook must
+state and the active audit must map without new issue IDs:
+
+1. unique node `type`, then unique `NodeSocket.identifier`; Blender 5.2 metallic is
+   `Metallic`, not guessed `Metallic IOR Level` (`MODEL-RUN-01`);
+2. `matrix_world @ Vector(corner)` for bounds (`MODEL-PLAN-04`);
+3. save/restore `matrix_world` across parenting and assert exact hierarchy/bounds
+   (`MODEL-PLAN-04`);
+4. every Bash-semantics command uses `/bin/bash -euo pipefail` (`MODEL-SHELL-01`);
+5. one recorder PID/clock; linked recovery keeps identical issue IDs; a distinct second
+   failure invalidates/retains the run and restarts at attempt zero (`MODEL-PLAN-02/05`);
+6. Blender `//` paths use `bpy.path.abspath()` before `Path.resolve()`
+   (`MODEL-RUN-06`): record the absolute-path failure and its corrected pass exactly
+   as Appendix A states them. Appendix A's bytes are authoritative and are copied
+   verbatim; do not add measured millisecond values that those bytes do not contain,
+   because the runbook must remain byte-identical to Appendix A;
+7. every complete GUI/CLI Python payload is native-0600/exclusive, uv-Python-3.13
+   precompiled, and sent byte-for-byte; CLI read-only code returns observations before
+   controller-side assertions (`MODEL-RUN-06`);
+8. a docs member-level `partial` is retained as a determinate non-match, then the fixed
+   owning type is queried (`MODEL-RUN-07`);
+9. RNA float readback uses `1e-6` tolerance and World Background sockets use unique
+   `NodeSocket.identifier` values (`MODEL-RUN-01`);
+10. audit-recorder envelopes are never MCP wall; Task 7 uses Appendix F's direct
+    `controller_dispatch_wall_ms` and records unavailable server-internal timing rather
+    than inventing a server-compute duration (`MODEL-PLAN-05/10`).
+
+Run Appendix A's probe, `git diff --check`, then commit only the runbook:
+
+```bash
+set -euo pipefail  # this fence commits; it must not depend on the caller's options
+: "${TASK_BASE:?reviewed Task 6 HEAD required}"
+test "$(git rev-parse HEAD)" = "$TASK_BASE"
+# Working tree as well as index: seven of the nine commit fences carry both, and the
+# prose above this one names this check.
+git diff --check
+git add -- docs/use-official-blender-mcp.md
+test "$(git diff --cached --name-only)" = docs/use-official-blender-mcp.md
+git diff --cached --check
+git commit -m "docs: harden final Blender retest workflow"
+TASK7_RUNBOOK_HEAD="$(git rev-parse HEAD)"
+test "$TASK7_RUNBOOK_HEAD" != "$TASK_BASE"
+test "$(git diff --name-only "$TASK_BASE..$TASK7_RUNBOOK_HEAD")" = docs/use-official-blender-mcp.md
+if git diff --quiet "$TASK_BASE..$TASK7_RUNBOOK_HEAD" -- docs/use-official-blender-mcp.md; then
+  echo "Task 7 amended runbook commit is a no-op" >&2
+  exit 1
+fi
+```
+
+Expected: `docs/use-official-blender-mcp.md` is committed and the tree is clean. The
+Appendix D rerun in Step 3 therefore runs its clean lane, not a dirty one.
+
+- [ ] **Step 2: Run Appendix F's clean r2**
+
+Execute Appendix F completely. A first-issued failure, recorder/wall-recorder failure,
+unsafe mode/path, catalog mismatch, exact-scene mismatch, PNG failure, threshold-repeat
+failure, or validator failure invalidates the whole run. Retain it unchanged, fix Step 1
+if needed, restart Blender without saving, and use a new numbered root; never repair or
+concatenate journals.
+
+Expected: direct-session/App-live/source/effective-config/on-disk-config catalog equality;
+one pass row per dynamic name; zero recoveries; exact 14 objects/5 materials/8
+parents/bounds; valid journal and direct-dispatch manifest; every retained PNG (including
+any threshold-repeat or safe-future image artifact) inspected and acknowledged;
+thresholds classified; audit validator exit zero.
+
+- [ ] **Step 3: Freeze, gate, report, and review**
+
+Replace the active audit's sole `## Tool results` table with the exact unique table from
+the selected clean attempt's `r2-report.md`. Add exactly one occurrence of each canonical
+binding line: `R2_ATTEMPT_ID`, `R2_CONTROLLER_SHA256`, `R2_REPORT_SHA256`,
+`R2_DISPATCH_MANIFEST_SHA256`, `R2_EVIDENCE_MANIFEST_SHA256`,
+`R2_VISUAL_RUN_END_SHA256`, `R2_VISUAL_REPORT_SHA256`,
+`R2_VISUAL_EVIDENCE_MANIFEST_SHA256`, and `R2_VISUAL_ACK_SHA256`; each value comes
+from that selected immutable attempt. Add exactly one `## R2 visual acknowledgement`
+heading and its exact
+manifest-derived table: one row for every retained PNG, including every threshold
+repeat and safe-future image, in run-end order; each row binds the artifact path and
+SHA-256 and has literal result `pass`. Missing, extra, duplicate, reordered, or
+non-pass rows fail validation.
+Record literal r1 invalid evidence and all r2
+timings/hashes/scene/five-lane-catalog/validator/threshold/visual facts, but do not
+convert r1 to pass evidence. Set `Status: clean final retest complete; final gate
+evidence is bound in task-7-report.md, the selected r2 evidence manifest/report, the
+combined Task 7 review, and terminal review`. Commit:
+
+```bash
+set -euo pipefail  # this fence commits; it must not depend on the caller's options
+git diff --check
+git add -- docs/audits/2026-08-10-official-blender-mcp-modeling-validation.md
+test "$(git diff --cached --name-only)" = docs/audits/2026-08-10-official-blender-mcp-modeling-validation.md
+git diff --cached --check
+git commit -m "docs: record clean Blender final retest"
+```
+
+Rerun Appendix A's exact contract probe and Appendix C's exact `ALL_GREEN` probe, then
+run Appendix D with this literal extraction command. The exports and the extraction
+pipeline are one fence because each Bash fence is executed with its own `/bin/bash`:
+exports in a fence of their own die with that shell, and Appendix D then stops at
+`TASK_N: set to 4, 5, or 7` before recording anything. Step 3 above committed the audit,
+so this is the clean lane:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+UV_BIN="${UV_BIN:-$HOME/.local/bin/uv}"
+case "$UV_BIN" in /*) ;; *) echo 'STOP: UV_BIN must be absolute' >&2; exit 1 ;; esac
+test -x "$UV_BIN"
+BRIEF=.superpowers/sdd/modeling-remediation/task-7-brief.md
+: "${BRIEF_SHA256:?use the controller-recorded Task 7 brief SHA-256}"
+: "${BRIEF_DEV:?use the controller-recorded Task 7 brief device}"
+: "${BRIEF_INO:?use the controller-recorded Task 7 brief inode}"
+export TASK_N=7
+export EXPECTED_ACTIVE_AUDIT_DIRTY=0
+export TASK_REPORT=.superpowers/sdd/modeling-remediation/task-7-report.md
+export EXPECTED_MAIN_ANCHOR="${EXPECTED_MAIN_ANCHOR:-}"
+
+"$UV_BIN" run --quiet --no-project --python 3.13 python - \
+  "$BRIEF" "$BRIEF_SHA256" "$BRIEF_DEV" "$BRIEF_INO" <<'PY' | /bin/bash -euo pipefail
+import hashlib
+import os
+import stat
+from pathlib import Path
+import sys
+
+# GATE_SNAPSHOT_READER_BEGIN
+def gate_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def gate_snapshot(
+    raw: Path,
+    *,
+    label: str,
+    limit: int,
+    mode: int,
+    expected: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    path = Path(os.path.abspath(raw))
+    parent, leaf = path.parent, path.name
+    if limit <= 0 or leaf in {"", ".", ".."} or os.path.realpath(parent) != os.fspath(parent):
+        raise RuntimeError(f"unsafe {label} path")
+    parent_before = os.lstat(parent)
+    parent_bound = gate_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) & 0o022
+    ):
+        raise RuntimeError(f"unsafe {label} parent")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = -1
+    try:
+        if gate_identity(os.fstat(parent_fd)) != parent_bound or gate_identity(os.lstat(parent)) != parent_bound:
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = gate_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != mode
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+            or expected is not None
+            and (before.st_dev, before.st_ino) != expected
+        ):
+            raise RuntimeError(f"unsafe {label} metadata")
+        descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        if gate_identity(os.fstat(descriptor)) != bound:
+            raise RuntimeError(f"{label} changed while opening")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading")
+        payload = b"".join(chunks)
+        if (
+            len(payload) != before.st_size
+            or gate_identity(os.fstat(descriptor)) != bound
+            or gate_identity(os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)) != bound
+            or gate_identity(os.fstat(parent_fd)) != parent_bound
+            or gate_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} changed while reading")
+        return payload, before
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+# GATE_SNAPSHOT_READER_END
+
+
+brief, _ = gate_snapshot(
+    Path(sys.argv[1]),
+    label="Task 7 brief",
+    limit=2 * 1024 * 1024,
+    mode=0o600,
+    expected=(int(sys.argv[3]), int(sys.argv[4])),
+)
+if hashlib.sha256(brief).hexdigest() != sys.argv[2]:
+    raise RuntimeError("Task 7 brief digest differs from controller allocation")
+text = brief.decode("utf-8")
+heading = "## Appendix D: Exact no-write catalog and journal integration\n"
+if text.count(heading) != 1:
+    raise RuntimeError("expected one Appendix D heading")
+# A Task 7 brief carries `required` = ("A", "C", "D", "F"), so Appendix F follows the D
+# section and Appendix E is never routed here. The D section therefore ends at the next
+# Appendix heading, not at the end of the brief, and the two fence counts below hold the
+# slice that remains.
+section = text.split(heading, 1)[1]
+if "\n## Appendix E" in section or section.count("\n## Appendix F") != 1:
+    raise RuntimeError("a Task 7 brief carries Appendix F after Appendix D and no E")
+section = section.split("\n## Appendix F", 1)[0]
+if section.count("```bash\n") != 2:
+    raise RuntimeError("expected caller-resume and integration Bash fences")
+body = section.rsplit("```bash\n", 1)[1]
+if body.count("\n```") != 1:
+    raise RuntimeError("expected one Appendix D closing fence")
+sys.stdout.write(body.split("\n```", 1)[0] + "\n")
+PY
+BASH
+```
+
+Validation now consumes
+the committed active audit and selected r2 report; the historical Task 5 table cannot
+satisfy this gate. Append each literal command/output to `task-7-report.md`, including
+Appendix F's final `R2_ACTIVE_VALIDATION_BEGIN`…`R2_ACTIVE_VALIDATION_END` block copied
+verbatim; the gate below rejects the report without exactly one such block.
+
+Run this self-contained final gate on the resulting immutable HEAD:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+TASK_REPORT=.superpowers/sdd/modeling-remediation/task-7-report.md
+UV="${UV:-$HOME/.local/bin/uv}"
+case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
+"$UV" run --quiet --no-project --python 3.13 python - "$TASK_REPORT" <<'PY'
+from __future__ import annotations
+
+import os
+import re
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+
+# TASK_ARTIFACT_READER_BEGIN
+BRIEF_MAX_BYTES = 2 * 1024 * 1024
+REPORT_MAX_BYTES = 64 * 1024 * 1024
+PACKAGE_MAX_BYTES = 64 * 1024 * 1024
+REVIEW_MAX_BYTES = 8 * 1024 * 1024
+
+
+def artifact_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def read_owned_entry(
+    parent_path: Path,
+    name: str,
+    *,
+    label: str,
+    limit: int,
+    expected_identity: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    parent_path = Path(os.path.abspath(parent_path))
+    if name in {"", ".", ".."} or name != os.path.basename(name):
+        raise RuntimeError(f"unsafe {label} leaf: {name!r}")
+    if limit <= 0 or os.path.realpath(parent_path) != os.fspath(parent_path):
+        raise RuntimeError(f"unsafe {label} parent: {parent_path}")
+    parent_before = os.lstat(parent_path)
+    parent_bound = artifact_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) != 0o700
+    ):
+        raise RuntimeError(f"owned native mode-0700 {label} parent required")
+    parent_fd = os.open(
+        parent_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    descriptor = -1
+    try:
+        if (
+            artifact_identity(os.fstat(parent_fd)) != parent_bound
+            or artifact_identity(os.lstat(parent_path)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        bound = artifact_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+            or (
+                expected_identity is not None
+                and (before.st_dev, before.st_ino) != expected_identity
+            )
+        ):
+            raise RuntimeError(f"unsafe {label} artifact: {name}")
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
+        opened = os.fstat(descriptor)
+        if artifact_identity(opened) != bound:
+            raise RuntimeError(f"{label} changed while opening: {name}")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading: {name}")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading: {name}")
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        parent_after = os.fstat(parent_fd)
+        parent_current = os.lstat(parent_path)
+        if (
+            len(payload) != before.st_size
+            or artifact_identity(after) != bound
+            or artifact_identity(current) != bound
+            or artifact_identity(parent_after) != parent_bound
+            or artifact_identity(parent_current) != parent_bound
+        ):
+            raise RuntimeError(f"{label} changed while reading: {name}")
+        return payload, after
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+# TASK_ARTIFACT_READER_END
+
+
+report = Path(os.path.abspath(sys.argv[1]))
+if os.path.realpath(report) != os.fspath(report):
+    raise RuntimeError("Task 7 report path contains a symlink")
+report_payload, before = read_owned_entry(
+    report.parent,
+    report.name,
+    label="Task 7 report",
+    limit=REPORT_MAX_BYTES,
+)
+parent_before = os.lstat(report.parent)
+parent_bound = artifact_identity(parent_before)
+parent_fd = os.open(
+    report.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+)
+descriptor = os.open(
+    report.name,
+    os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW,
+    dir_fd=parent_fd,
+)
+last_identity = [artifact_identity(before)]
+last_payload = [report_payload]
+
+
+def verify_identity(expected: tuple[int, ...] | None) -> os.stat_result:
+    opened = os.fstat(descriptor)
+    current = os.stat(report.name, dir_fd=parent_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_uid != os.getuid()
+        or opened.st_nlink != 1
+        or current.st_nlink != 1
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or opened.st_size <= 0
+        or opened.st_size > REPORT_MAX_BYTES
+        or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        or artifact_identity(current) != artifact_identity(opened)
+        or artifact_identity(os.fstat(parent_fd)) != parent_bound
+        or artifact_identity(os.lstat(report.parent)) != parent_bound
+        or (expected is not None and artifact_identity(opened) != expected)
+    ):
+        raise RuntimeError("Task 7 report inode changed")
+    return opened
+
+
+def append(payload: bytes) -> None:
+    opened = verify_identity(last_identity[0])
+    if not payload or len(payload) > REPORT_MAX_BYTES - opened.st_size:
+        raise RuntimeError("Task 7 report append exceeds cap")
+    view = memoryview(payload)
+    while view:
+        view = view[os.write(descriptor, view):]
+    os.fsync(descriptor)
+    current = verify_identity(None)
+    if current.st_size != opened.st_size + len(payload):
+        raise RuntimeError("Task 7 report append size differs")
+    updated, snapshot = read_owned_entry(
+        report.parent,
+        report.name,
+        label="Task 7 report after append",
+        limit=REPORT_MAX_BYTES,
+        expected_identity=(before.st_dev, before.st_ino),
+    )
+    if (
+        artifact_identity(snapshot) != artifact_identity(current)
+        or updated != last_payload[0] + payload
+    ):
+        raise RuntimeError("Task 7 report bytes changed across append")
+    last_payload[0] = updated
+    last_identity[0] = artifact_identity(snapshot)
+
+
+try:
+    verify_identity(last_identity[0])
+    expected_header = (
+        f"REPORT_DEV: {before.st_dev}\nREPORT_INO: {before.st_ino}\n"
+    ).encode("ascii")
+    if not report_payload.startswith(expected_header):
+        raise RuntimeError("Task 7 report inode self-binding differs")
+    if (
+        report_payload.count(b"\nR2_ACTIVE_VALIDATION_BEGIN\n") != 1
+        or report_payload.count(b"\nR2_ACTIVE_VALIDATION_END\n") != 1
+    ):
+        raise RuntimeError("Task 7 report needs exactly one active-validation block")
+    active_block = report_payload.split(
+        b"\nR2_ACTIVE_VALIDATION_BEGIN\n", 1
+    )[1].split(b"\nR2_ACTIVE_VALIDATION_END\n", 1)[0].splitlines()
+    if (
+        len(active_block) != 3
+        or re.fullmatch(rb"ACTIVE_AUDIT_BLOB: [0-9a-f]{40}", active_block[0]) is None
+        or not active_block[1].startswith(b"CONTROLLER_ACTIVE_VALIDATION: {")
+        or b'"status":"ok"' not in active_block[1]
+        or active_block[2] != b"TRACKED_AUDIT_VALIDATION: ok"
+    ):
+        raise RuntimeError("Task 7 report active-validation block differs")
+    repo = Path.cwd()
+    final_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if re.fullmatch(r"[0-9a-f]{40}", final_head) is None:
+        raise RuntimeError("invalid final Task 7 HEAD")
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    if status:
+        raise RuntimeError("Task 7 gate requires a clean worktree")
+    gate = subprocess.run(
+        ["./scripts/checks.sh"],
+        cwd=repo,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    gate_output = gate.stdout
+    append(
+        b"$ ./scripts/checks.sh\n"
+        + gate_output
+        + (b"" if gate_output.endswith(b"\n") else b"\n")
+    )
+    if gate.returncode != 0:
+        raise RuntimeError(f"Task 7 full gate failed: {gate.returncode}")
+    if len(re.findall(rb"(?m)^369 passed in ", gate_output)) != 1:
+        raise RuntimeError("Task 7 gate did not report exactly one 369-pass summary")
+    subprocess.run(["git", "diff", "--check"], check=True)
+    current_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    current_status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    if current_head != final_head or current_status:
+        raise RuntimeError("Task 7 HEAD/worktree changed during the gate")
+    marker = (
+        f"FINAL_TASK7_GATE_GREEN head={final_head} "
+        "tests=369 install=noneditable\n"
+    ).encode("ascii")
+    append(marker)
+    print(marker.decode("ascii"), end="")
+finally:
+    os.close(descriptor)
+    os.close(parent_fd)
+PY
+BASH
+```
+
+Expected: the exact A/C/D probes pass and the only final marker is
+`FINAL_TASK7_GATE_GREEN head=<40hex> tests=369 install=noneditable`. The Task 7 report
+contains the literal full-gate output; no Task 5 report is updated.
+
+The controller then uses the standard SDD review-package and safe review parser for one
+fresh combined Task 7 reviewer. Findings return to the same implementer and require a
+fresh combined review. Only zero findings permit:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+: "${TASK_BASE:?Task 7 base required}"
+: "${TASK_HEAD:?approved Task 7 head required}"
+PROGRESS=.superpowers/sdd/progress.md
+test "${#TASK_BASE}" = 40
+test "${#TASK_HEAD}" = 40
+test "$(grep -c '^Task 7: complete ' "$PROGRESS" || true)" = 0
+printf 'Task 7: complete (commits %.7s..%.7s, spec pass, quality approved)\n' \
+  "$TASK_BASE" "$TASK_HEAD" >>"$PROGRESS"
+BASH
+```
+
+---
+
+### Task 8: Controller-only numeric boundary — never dispatch
+
+This heading terminates Task 7. The dispatch case permits only Tasks 1–7; do not
+extract, dispatch, implement, review, or commit Task 8.
 
 ---
 
 ### Controller Phase R: Terminal whole-branch review
 
 This is not an implementation Task and has no task brief. It starts only after Tasks
-1–5 have clean combined reviews. One immutable package is reviewed by three fresh,
+1–7 have clean combined reviews and Task 7 has a clean validated r2 on its reviewed
+HEAD. One immutable package is reviewed by three fresh,
 independent reviewers with non-duplicated lenses:
 
 1. the required `requesting-code-review/code-reviewer.md` reviewer owns broad
@@ -1458,20 +6721,220 @@ Generate the package and handoff paths:
 /bin/bash -euo pipefail <<'BASH'
 : "${SDD_SKILL_ROOT:?set the loaded skill directory}"
 : "${ROUND:?set the positive terminal review round}"
+: "${R2_ATTEMPT:?selected clean attempt-000N required}"
+: "${TASK7_REVIEW:?latest clean combined Task 7 review path required}"
+: "${TASK7_REPORT_SHA256:?parser-approved Task 7 report SHA-256 required}"
+: "${TASK7_REVIEW_SHA256:?parser-approved Task 7 review SHA-256 required}"
 case "$ROUND" in 0|*[!0-9]*|'') exit 1 ;; esac
+case "$R2_ATTEMPT" in attempt-[0-9][0-9][0-9][0-9]) ;; *) exit 1 ;; esac
+test "$R2_ATTEMPT" != attempt-0000
 UV="${UV:-$HOME/.local/bin/uv}"
+case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
 BASELINE=.superpowers/sdd/modeling-remediation/external-baseline/baseline.json
 REVIEW_DIR=.superpowers/sdd/modeling-remediation/terminal-r$ROUND
-test ! -e "$REVIEW_DIR"
-install -d -m 700 "$REVIEW_DIR"
-BASE_VALUES="$("$UV" run --quiet --no-project --python 3.13 python - \
+BASE_VALUES="$("$UV" run --quiet --no-project --python 3.13 python -P - \
   "$BASELINE" <<'PY'
 import json
+import os
 import re
+import stat
 import sys
+from pathlib import Path
 
-with open(sys.argv[1], encoding="utf-8") as handle:
-    value = json.load(handle)
+if not sys.flags.safe_path:
+    raise SystemExit("STOP: terminal baseline reader requires safe-path mode")
+
+
+# TERMINAL_BOUNDED_READER_BEGIN
+BRIEF_MAX_BYTES = 2 * 1024 * 1024
+REPORT_MAX_BYTES = 64 * 1024 * 1024
+PACKAGE_MAX_BYTES = 64 * 1024 * 1024
+REVIEW_MAX_BYTES = 8 * 1024 * 1024
+MANIFEST_MAX_BYTES = 2 * 1024 * 1024
+SMALL_BINDING_MAX_BYTES = 1024
+R2_ENTRY_MAX_BYTES = 64 * 1024 * 1024
+R2_AGGREGATE_MAX_BYTES = 512 * 1024 * 1024
+
+
+def bounded_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def terminal_file_limit(name: str) -> int:
+    if name == "task-7-brief.md":
+        return BRIEF_MAX_BYTES
+    if name == "task-7-report.md":
+        return REPORT_MAX_BYTES
+    if name in {
+        "task-7-review.md",
+        "code-review.md",
+        "adversarial-review.md",
+        "ponytail-review.md",
+    }:
+        return REVIEW_MAX_BYTES
+    if name == "whole-branch.diff":
+        return PACKAGE_MAX_BYTES
+    if name in {
+        "actor-inodes.json",
+        "evidence-sha256",
+        "invalid-journals.sha256",
+        "terminal-manifest.json",
+    }:
+        return MANIFEST_MAX_BYTES
+    if name in {
+        "review-base-head",
+        "initial-main-anchor",
+        "candidate-head",
+        "package-sha256",
+        "reviewed-head",
+    }:
+        return SMALL_BINDING_MAX_BYTES
+    raise RuntimeError(f"missing terminal file cap: {name}")
+
+
+def bounded_r2_aggregate(manifest_size: int, entry_sizes: list[int]) -> int:
+    if manifest_size <= 0 or manifest_size > MANIFEST_MAX_BYTES:
+        raise RuntimeError("r2 manifest size exceeds cap")
+    aggregate = manifest_size
+    for size in entry_sizes:
+        if (
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or size <= 0
+            or size > R2_ENTRY_MAX_BYTES
+        ):
+            raise RuntimeError("r2 entry size exceeds cap")
+        aggregate += size
+        if aggregate > R2_AGGREGATE_MAX_BYTES:
+            raise RuntimeError("r2 aggregate exceeds cap")
+    return aggregate
+
+
+def read_bounded_entry(
+    parent_path: Path,
+    name: str,
+    *,
+    parent_mode: int,
+    file_mode: int,
+    limit: int,
+    label: str,
+    expected_identity: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    parent_path = Path(os.path.abspath(parent_path))
+    if name in {"", ".", ".."} or name != os.path.basename(name):
+        raise RuntimeError(f"unsafe {label} leaf: {name!r}")
+    if limit <= 0 or os.path.realpath(parent_path) != os.fspath(parent_path):
+        raise RuntimeError(f"unsafe {label} parent: {parent_path}")
+    parent_before = os.lstat(parent_path)
+    parent_bound = bounded_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) != parent_mode
+    ):
+        raise RuntimeError(f"unsafe {label} parent metadata")
+    parent_fd = os.open(
+        parent_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    descriptor = -1
+    try:
+        if (
+            bounded_identity(os.fstat(parent_fd)) != parent_bound
+            or bounded_identity(os.lstat(parent_path)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        bound = bounded_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != file_mode
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+            or (
+                expected_identity is not None
+                and (before.st_dev, before.st_ino) != expected_identity
+            )
+        ):
+            raise RuntimeError(f"unsafe {label} artifact: {name}")
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
+        opened = os.fstat(descriptor)
+        if bounded_identity(opened) != bound:
+            raise RuntimeError(f"{label} changed while opening: {name}")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading: {name}")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading: {name}")
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        parent_after = os.fstat(parent_fd)
+        parent_current = os.lstat(parent_path)
+        if (
+            len(payload) != before.st_size
+            or bounded_identity(after) != bound
+            or bounded_identity(current) != bound
+            or bounded_identity(parent_after) != parent_bound
+            or bounded_identity(parent_current) != parent_bound
+        ):
+            raise RuntimeError(f"{label} changed while reading: {name}")
+        return payload, after
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
+def read_bounded_path(
+    raw_path: Path,
+    *,
+    parent_mode: int,
+    file_mode: int,
+    limit: int,
+    label: str,
+    expected_identity: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    path = Path(os.path.abspath(raw_path))
+    return read_bounded_entry(
+        path.parent,
+        path.name,
+        parent_mode=parent_mode,
+        file_mode=file_mode,
+        limit=limit,
+        label=label,
+        expected_identity=expected_identity,
+    )
+# TERMINAL_BOUNDED_READER_END
+
+
+raw, _ = read_bounded_path(
+    Path(sys.argv[1]),
+    parent_mode=0o700,
+    file_mode=0o600,
+    limit=MANIFEST_MAX_BYTES,
+    label="external baseline",
+)
+value = json.loads(raw)
 items = (value.get("review_base_head"), value.get("initial_main_anchor"))
 if not all(isinstance(item, str) and re.fullmatch(r"[0-9a-f]{40}", item) for item in items):
     raise SystemExit("invalid review base/main anchor")
@@ -1484,29 +6947,598 @@ REVIEWED_CANDIDATE="$(git rev-parse HEAD)"
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
 git merge-base --is-ancestor "$REVIEW_BASE_HEAD" "$REVIEWED_CANDIDATE"
 PACKAGE="$REVIEW_DIR/whole-branch.diff"
-"$SDD_SKILL_ROOT/scripts/review-package" \
-  "$REVIEW_BASE_HEAD" "$REVIEWED_CANDIDATE" "$PACKAGE"
-test -s "$PACKAGE"
-PACKAGE_SHA256="$(shasum -a 256 "$PACKAGE" | awk '{print $1}')"
-printf '%s\n' "$REVIEW_BASE_HEAD" >"$REVIEW_DIR/review-base-head"
-printf '%s\n' "$INITIAL_MAIN_ANCHOR" >"$REVIEW_DIR/initial-main-anchor"
-printf '%s\n' "$REVIEWED_CANDIDATE" >"$REVIEW_DIR/candidate-head"
-printf '%s\n' "$PACKAGE_SHA256" >"$REVIEW_DIR/package-sha256"
-"$UV" run --quiet --no-project --python 3.13 python - "$REVIEW_DIR" <<'PY'
+PACKAGE_SHA256="$("$UV" run --quiet --no-project --python 3.13 python -P - \
+  "$SDD_SKILL_ROOT/scripts/review-package" \
+  ".superpowers/sdd/modeling-remediation" "$REVIEW_DIR" \
+  "$REVIEW_BASE_HEAD" "$REVIEWED_CANDIDATE" "$INITIAL_MAIN_ANCHOR" <<'PY'
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import re
+import secrets
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+if not sys.flags.safe_path:
+    raise SystemExit("STOP: review package builder requires safe-path mode")
+
+
+# HELPER_OUTPUT_READER_BEGIN
+HELPER_OUTPUT_MAX_BYTES = 64 * 1024 * 1024
+
+
+def helper_output_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def read_helper_output(
+    directory: int,
+    descriptor: int,
+    name: str,
+    created: os.stat_result,
+    *,
+    limit: int = HELPER_OUTPUT_MAX_BYTES,
+) -> bytes:
+    bound = os.fstat(descriptor)
+    current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(bound.st_mode)
+        or bound.st_uid != os.getuid()
+        or stat.S_IMODE(bound.st_mode) != 0o600
+        or bound.st_nlink != 1
+        or bound.st_size <= 0
+        or bound.st_size > limit
+        or (bound.st_dev, bound.st_ino) != (created.st_dev, created.st_ino)
+        or helper_output_identity(current) != helper_output_identity(bound)
+    ):
+        raise RuntimeError(f"unsafe helper output: {name}")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    remaining = bound.st_size
+    chunks: list[bytes] = []
+    while remaining:
+        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+        if not chunk:
+            raise RuntimeError(f"helper output shrank while reading: {name}")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    if os.read(descriptor, 1):
+        raise RuntimeError(f"helper output grew while reading: {name}")
+    payload = b"".join(chunks)
+    after = os.fstat(descriptor)
+    current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    if (
+        len(payload) != bound.st_size
+        or helper_output_identity(after) != helper_output_identity(bound)
+        or helper_output_identity(current) != helper_output_identity(bound)
+    ):
+        raise RuntimeError(f"helper output changed while reading: {name}")
+    return payload
+# HELPER_OUTPUT_READER_END
+
+
+helper = Path(os.path.abspath(sys.argv[1]))
+run_dir = Path(os.path.abspath(sys.argv[2]))
+review_path = Path(os.path.abspath(sys.argv[3]))
+base, candidate, main_anchor = sys.argv[4:7]
+if (
+    review_path.parent != run_dir
+    or re.fullmatch(r"terminal-r[1-9][0-9]*", review_path.name) is None
+):
+    raise RuntimeError("unexpected terminal review directory")
+if not all(re.fullmatch(r"[0-9a-f]{40}", item) for item in (base, candidate, main_anchor)):
+    raise RuntimeError("invalid terminal Git binding")
+for path, kind in ((helper, "helper"), (run_dir, "run directory")):
+    if os.path.realpath(path) != os.fspath(path):
+        raise RuntimeError(f"{kind} path contains a symlink")
+helper_info = os.lstat(helper)
+if stat.S_ISLNK(helper_info.st_mode) or not stat.S_ISREG(helper_info.st_mode):
+    raise RuntimeError("regular review-package helper required")
+run_info = os.lstat(run_dir)
+if (
+    stat.S_ISLNK(run_info.st_mode)
+    or not stat.S_ISDIR(run_info.st_mode)
+    or run_info.st_uid != os.getuid()
+    or stat.S_IMODE(run_info.st_mode) != 0o700
+):
+    raise RuntimeError("owned native mode-0700 run directory required")
+
+
+def publish(directory: int, name: str, payload: bytes) -> os.stat_result:
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory,
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(payload)
+        while view:
+            view = view[os.write(descriptor, view):]
+        os.fsync(descriptor)
+        opened = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or opened.st_nlink != 1
+            or current.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise RuntimeError(f"unsafe terminal artifact: {name}")
+        return opened
+    finally:
+        os.close(descriptor)
+
+
+run_fd = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+review_fd = -1
+stage_fd = -1
+helper_fd = -1
+stage_name = f".terminal-stage-{secrets.token_hex(16)}"
+try:
+    opened_run = os.fstat(run_fd)
+    if (opened_run.st_dev, opened_run.st_ino) != (run_info.st_dev, run_info.st_ino):
+        raise RuntimeError("run directory changed while opening")
+    os.mkdir(review_path.name, 0o700, dir_fd=run_fd)
+    review_fd = os.open(
+        review_path.name,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=run_fd,
+    )
+    review_info = os.fstat(review_fd)
+    if (
+        not stat.S_ISDIR(review_info.st_mode)
+        or review_info.st_uid != os.getuid()
+        or stat.S_IMODE(review_info.st_mode) != 0o700
+    ):
+        raise RuntimeError("unsafe terminal review directory allocation")
+    os.mkdir(stage_name, 0o700, dir_fd=run_fd)
+    stage_fd = os.open(
+        stage_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=run_fd
+    )
+    helper_fd = os.open(
+        "helper-output",
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=stage_fd,
+    )
+    os.fchmod(helper_fd, 0o600)
+    helper_before = os.fstat(helper_fd)
+    completed = subprocess.run(
+        [helper, base, candidate, f"/dev/fd/{helper_fd}"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        pass_fds=(helper_fd,),
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"review-package failed: {completed.returncode}: "
+            f"{completed.stderr.decode('utf-8', 'replace')}"
+        )
+    package = read_helper_output(
+        stage_fd, helper_fd, "helper-output", helper_before
+    )
+    package_sha = hashlib.sha256(package).hexdigest()
+    publish(review_fd, "whole-branch.diff", package)
+    for name, value in (
+        ("review-base-head", base),
+        ("initial-main-anchor", main_anchor),
+        ("candidate-head", candidate),
+        ("package-sha256", package_sha),
+    ):
+        publish(review_fd, name, (value + "\n").encode("ascii"))
+    reports: dict[str, dict[str, int]] = {}
+    for name in ("code-review.md", "adversarial-review.md", "ponytail-review.md"):
+        info = publish(review_fd, name, b"")
+        reports[name] = {"dev": info.st_dev, "ino": info.st_ino}
+    actor_inodes = {
+        "reports": reports,
+        "review_dir": {"dev": review_info.st_dev, "ino": review_info.st_ino},
+        "version": 1,
+    }
+    identity_payload = (
+        json.dumps(
+            actor_inodes,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        + b"\n"
+    )
+    publish(review_fd, "actor-inodes.json", identity_payload)
+    os.fsync(review_fd)
+    os.fsync(run_fd)
+    print(package_sha)
+finally:
+    if helper_fd >= 0:
+        os.close(helper_fd)
+    if stage_fd >= 0:
+        try:
+            os.unlink("helper-output", dir_fd=stage_fd)
+            os.fsync(stage_fd)
+        except FileNotFoundError:
+            pass
+        os.close(stage_fd)
+        os.rmdir(stage_name, dir_fd=run_fd)
+        os.fsync(run_fd)
+    if review_fd >= 0:
+        os.close(review_fd)
+    os.close(run_fd)
+PY
+)"
+EVIDENCE_BINDING="$(
+"$UV" run --quiet --no-project --python 3.13 python -P - \
+  "$REVIEW_DIR" "$R2_ATTEMPT" "$TASK7_REVIEW" \
+  "$TASK7_REPORT_SHA256" "$TASK7_REVIEW_SHA256" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
 import stat
 import sys
 from pathlib import Path
 
-EXPECTED = {
+if not sys.flags.safe_path:
+    raise SystemExit("STOP: terminal review reader requires safe-path mode")
+
+ACTOR_REPORTS = {
+    "code-review.md",
+    "adversarial-review.md",
+    "ponytail-review.md",
+}
+INITIAL = {
     "whole-branch.diff",
     "review-base-head",
     "initial-main-anchor",
     "candidate-head",
     "package-sha256",
+    "actor-inodes.json",
+} | ACTOR_REPORTS
+EVIDENCE = {
+    "task-7-brief.md",
+    "task-7-report.md",
+    "task-7-review.md",
+    "invalid-journals.sha256",
 }
+R2_EVIDENCE = "r2-evidence"
+EXPECTED = INITIAL | EVIDENCE | {R2_EVIDENCE, "evidence-sha256"}
+PINNED_SOURCE = "4309a39646e644261624bfcd2bca669b343b7621"
+TIMING = "controller_dispatch_wall_ms; not pure server compute"
+HEX64 = re.compile(r"[0-9a-f]{64}")
+R1_MANIFEST_SHA256 = "8292ac78073804687faab381181881ac7f522da1edea2dffe625626c1482c535"
+CONTROLLER_SHA256 = "cc325e471aa0d1a0349deade58d0f7517575c35d901fb99f00ee1cc4de7f640a"
+CONTROLLER_BEGIN = b"<!-- R2_CONTROLLER_BEGIN -->\n````python\n"
+CONTROLLER_END = b"````\n<!-- R2_CONTROLLER_END -->"
+
+
+# TERMINAL_BOUNDED_READER_BEGIN
+BRIEF_MAX_BYTES = 2 * 1024 * 1024
+REPORT_MAX_BYTES = 64 * 1024 * 1024
+PACKAGE_MAX_BYTES = 64 * 1024 * 1024
+REVIEW_MAX_BYTES = 8 * 1024 * 1024
+MANIFEST_MAX_BYTES = 2 * 1024 * 1024
+SMALL_BINDING_MAX_BYTES = 1024
+R2_ENTRY_MAX_BYTES = 64 * 1024 * 1024
+R2_AGGREGATE_MAX_BYTES = 512 * 1024 * 1024
+
+
+def bounded_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def terminal_file_limit(name: str) -> int:
+    if name == "task-7-brief.md":
+        return BRIEF_MAX_BYTES
+    if name == "task-7-report.md":
+        return REPORT_MAX_BYTES
+    if name in {
+        "task-7-review.md",
+        "code-review.md",
+        "adversarial-review.md",
+        "ponytail-review.md",
+    }:
+        return REVIEW_MAX_BYTES
+    if name == "whole-branch.diff":
+        return PACKAGE_MAX_BYTES
+    if name in {
+        "actor-inodes.json",
+        "evidence-sha256",
+        "invalid-journals.sha256",
+        "terminal-manifest.json",
+    }:
+        return MANIFEST_MAX_BYTES
+    if name in {
+        "review-base-head",
+        "initial-main-anchor",
+        "candidate-head",
+        "package-sha256",
+        "reviewed-head",
+    }:
+        return SMALL_BINDING_MAX_BYTES
+    raise RuntimeError(f"missing terminal file cap: {name}")
+
+
+def bounded_r2_aggregate(manifest_size: int, entry_sizes: list[int]) -> int:
+    if manifest_size <= 0 or manifest_size > MANIFEST_MAX_BYTES:
+        raise RuntimeError("r2 manifest size exceeds cap")
+    aggregate = manifest_size
+    for size in entry_sizes:
+        if (
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or size <= 0
+            or size > R2_ENTRY_MAX_BYTES
+        ):
+            raise RuntimeError("r2 entry size exceeds cap")
+        aggregate += size
+        if aggregate > R2_AGGREGATE_MAX_BYTES:
+            raise RuntimeError("r2 aggregate exceeds cap")
+    return aggregate
+
+
+def read_bounded_entry(
+    parent_path: Path,
+    name: str,
+    *,
+    parent_mode: int,
+    file_mode: int,
+    limit: int,
+    label: str,
+    expected_identity: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    parent_path = Path(os.path.abspath(parent_path))
+    if name in {"", ".", ".."} or name != os.path.basename(name):
+        raise RuntimeError(f"unsafe {label} leaf: {name!r}")
+    if limit <= 0 or os.path.realpath(parent_path) != os.fspath(parent_path):
+        raise RuntimeError(f"unsafe {label} parent: {parent_path}")
+    parent_before = os.lstat(parent_path)
+    parent_bound = bounded_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) != parent_mode
+    ):
+        raise RuntimeError(f"unsafe {label} parent metadata")
+    parent_fd = os.open(
+        parent_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    descriptor = -1
+    try:
+        if (
+            bounded_identity(os.fstat(parent_fd)) != parent_bound
+            or bounded_identity(os.lstat(parent_path)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        bound = bounded_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != file_mode
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+            or (
+                expected_identity is not None
+                and (before.st_dev, before.st_ino) != expected_identity
+            )
+        ):
+            raise RuntimeError(f"unsafe {label} artifact: {name}")
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
+        opened = os.fstat(descriptor)
+        if bounded_identity(opened) != bound:
+            raise RuntimeError(f"{label} changed while opening: {name}")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading: {name}")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading: {name}")
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        parent_after = os.fstat(parent_fd)
+        parent_current = os.lstat(parent_path)
+        if (
+            len(payload) != before.st_size
+            or bounded_identity(after) != bound
+            or bounded_identity(current) != bound
+            or bounded_identity(parent_after) != parent_bound
+            or bounded_identity(parent_current) != parent_bound
+        ):
+            raise RuntimeError(f"{label} changed while reading: {name}")
+        return payload, after
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
+def read_bounded_path(
+    raw_path: Path,
+    *,
+    parent_mode: int,
+    file_mode: int,
+    limit: int,
+    label: str,
+    expected_identity: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    path = Path(os.path.abspath(raw_path))
+    return read_bounded_entry(
+        path.parent,
+        path.name,
+        parent_mode=parent_mode,
+        file_mode=file_mode,
+        limit=limit,
+        label=label,
+        expected_identity=expected_identity,
+    )
+# TERMINAL_BOUNDED_READER_END
+
+
+def validate_actor_inodes(
+    directory: int,
+    directory_path: Path,
+    directory_info: os.stat_result,
+    *,
+    mode: int,
+    reports_empty: bool,
+    label: str,
+) -> dict[str, object]:
+    # One form for all three phases. The three free copies this replaces were three
+    # different bodies of the same predicate -- partial evaluation showed the widest
+    # one already implied the other two -- and nothing compared them, so a safety
+    # clause could be, and was, deleted from one copy alone without any gate moving.
+    raw, _ = read_bounded_entry(
+        directory_path,
+        "actor-inodes.json",
+        parent_mode=0o700 if mode == 0o600 else 0o500,
+        file_mode=mode,
+        limit=MANIFEST_MAX_BYTES,
+        label=label,
+    )
+    value = json.loads(raw)
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"reports", "review_dir", "version"}
+        or value["version"] != 1
+        or isinstance(value["version"], bool)
+        or value["review_dir"] != {
+            "dev": directory_info.st_dev,
+            "ino": directory_info.st_ino,
+        }
+        or not isinstance(value["reports"], dict)
+        or set(value["reports"]) != ACTOR_REPORTS
+    ):
+        raise RuntimeError(f"{label} binding differs")
+    canonical_identity = (
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        + b"\n"
+    )
+    if raw != canonical_identity:
+        raise RuntimeError(f"{label} record is not canonical")
+    for name in ACTOR_REPORTS:
+        binding = value["reports"][name]
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if (
+            not isinstance(binding, dict)
+            or set(binding) != {"dev", "ino"}
+            or not all(
+                isinstance(binding[key], int)
+                and not isinstance(binding[key], bool)
+                and binding[key] >= 0
+                for key in ("dev", "ino")
+            )
+            or stat.S_ISLNK(current.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_uid != os.getuid()
+            or current.st_nlink != 1
+            or stat.S_IMODE(current.st_mode) != mode
+            or (current.st_dev, current.st_ino)
+            != (binding["dev"], binding["ino"])
+            or (reports_empty and current.st_size != 0)
+            or (not reports_empty and current.st_size == 0)
+        ):
+            raise RuntimeError(f"{label} report differs: {name}")
+    return value
+
+
+def digest_opened_entry(
+    directory: int,
+    directory_path: Path,
+    name: str,
+    descriptor: int,
+    *,
+    limit: int,
+    label: str,
+) -> str:
+    parent_before = os.fstat(directory)
+    parent_bound = bounded_identity(parent_before)
+    before = os.fstat(descriptor)
+    bound = bounded_identity(before)
+    current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    if (
+        bounded_identity(os.lstat(directory_path)) != parent_bound
+        or stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_nlink != 1
+        or before.st_size <= 0
+        or before.st_size > limit
+        or bounded_identity(current) != bound
+    ):
+        raise RuntimeError(f"unsafe {label}: {name}")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    remaining = before.st_size
+    chunks: list[bytes] = []
+    while remaining:
+        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+        if not chunk:
+            raise RuntimeError(f"{label} shrank while hashing: {name}")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    if os.read(descriptor, 1):
+        raise RuntimeError(f"{label} grew while hashing: {name}")
+    payload = b"".join(chunks)
+    digest = hashlib.sha256(payload).hexdigest()
+    after = os.fstat(descriptor)
+    current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    parent_after = os.fstat(directory)
+    parent_current = os.lstat(directory_path)
+    if (
+        len(payload) != before.st_size
+        or bounded_identity(after) != bound
+        or bounded_identity(current) != bound
+        or bounded_identity(parent_after) != parent_bound
+        or bounded_identity(parent_current) != parent_bound
+    ):
+        raise RuntimeError(f"{label} changed while hashing: {name}")
+    return digest
+
+
 path = Path(os.path.abspath(sys.argv[1]))
 if os.path.realpath(path) != os.fspath(path):
     raise RuntimeError("review directory path contains a symlink")
@@ -1524,9 +7556,409 @@ try:
     opened_dir = os.fstat(directory_fd)
     if (opened_dir.st_dev, opened_dir.st_ino) != (before.st_dev, before.st_ino):
         raise RuntimeError("review directory changed while opening")
-    if set(os.listdir(directory_fd)) != EXPECTED:
+    if set(os.listdir(directory_fd)) != INITIAL:
         raise RuntimeError("initial review directory allowlist differs")
-    for name in sorted(EXPECTED):
+    validate_actor_inodes(
+        directory_fd, path, opened_dir, mode=0o600, reports_empty=True,
+        label="actor identity",
+    )
+    repo = Path.cwd().resolve()
+    run_dir = repo / ".superpowers/sdd/modeling-remediation"
+    attempt_id = sys.argv[2]
+    if (
+        re.fullmatch(r"attempt-[0-9]{4}", attempt_id) is None
+        or attempt_id == "attempt-0000"
+    ):
+        raise RuntimeError("invalid selected r2 attempt")
+    attempt_root = run_dir / "final-retest-r2" / attempt_id
+    attempt_info = os.lstat(attempt_root)
+    if (
+        stat.S_ISLNK(attempt_info.st_mode)
+        or not stat.S_ISDIR(attempt_info.st_mode)
+        or attempt_info.st_uid != os.getuid()
+        or stat.S_IMODE(attempt_info.st_mode) != 0o700
+        or os.path.realpath(attempt_root) != os.fspath(attempt_root)
+    ):
+        raise RuntimeError("owned canonical mode-0700 selected attempt required")
+
+    task7_review = Path(os.path.abspath(sys.argv[3]))
+    if (
+        task7_review.parent != run_dir
+        or re.fullmatch(r"task-7-review-r[1-9][0-9]*[.]md", task7_review.name)
+        is None
+    ):
+        raise RuntimeError("unexpected Task 7 combined-review path")
+    approved_source_sha = {
+        "task-7-report.md": sys.argv[4],
+        "task-7-review.md": sys.argv[5],
+    }
+    if any(HEX64.fullmatch(value) is None for value in approved_source_sha.values()):
+        raise RuntimeError("invalid parser-approved Task 7 digest")
+    sources = {
+        "task-7-brief.md": run_dir / "task-7-brief.md",
+        "task-7-report.md": run_dir / "task-7-report.md",
+        "task-7-review.md": task7_review,
+        "invalid-journals.sha256": (
+            run_dir / "final-retest-r1" / "invalid-journals.sha256"
+        ),
+    }
+
+    def read_source(source: Path, destination: str) -> bytes:
+        payload, _ = read_bounded_path(
+            source,
+            parent_mode=0o700,
+            file_mode=0o600,
+            limit=terminal_file_limit(destination),
+            label=f"terminal source {destination}",
+        )
+        return payload
+
+    def reject_constant(value: str) -> None:
+        raise RuntimeError(f"non-finite JSON constant: {value}")
+
+    def no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise RuntimeError(f"duplicate JSON key: {key}")
+            value[key] = item
+        return value
+
+    def canonical(value: object) -> bytes:
+        return (
+            json.dumps(
+                value, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            ).encode("utf-8") + b"\n"
+        )
+
+    def controller_from_brief(payload: bytes) -> bytes:
+        if payload.count(CONTROLLER_BEGIN) != 1 or payload.count(CONTROLLER_END) != 1:
+            raise RuntimeError("Task 7 brief controller fence boundary differs")
+        begin = payload.index(CONTROLLER_BEGIN) + len(CONTROLLER_BEGIN)
+        finish = payload.index(CONTROLLER_END, begin)
+        value = payload[begin:finish]
+        if (
+            len(value.splitlines()) != 6193
+            or len(value) != 254319
+            or hashlib.sha256(value).hexdigest() != CONTROLLER_SHA256
+        ):
+            raise RuntimeError("Task 7 brief controller bytes differ")
+        return value
+
+    def validate_r2_snapshot(root: Path, directory_mode: int, file_mode: int) -> dict[str, bytes]:
+        if os.path.realpath(root) != os.fspath(root):
+            raise RuntimeError("r2 evidence directory contains a symlink")
+        before_root = os.lstat(root)
+        if (
+            stat.S_ISLNK(before_root.st_mode)
+            or not stat.S_ISDIR(before_root.st_mode)
+            or before_root.st_uid != os.getuid()
+            or stat.S_IMODE(before_root.st_mode) != directory_mode
+        ):
+            raise RuntimeError("unsafe r2 evidence directory")
+        root_bound = bounded_identity(before_root)
+        descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            opened_root = os.fstat(descriptor)
+            if bounded_identity(opened_root) != root_bound:
+                raise RuntimeError("r2 evidence directory changed while opening")
+            manifest_bytes, _ = read_bounded_entry(
+                root,
+                "evidence-manifest.json",
+                parent_mode=directory_mode,
+                file_mode=file_mode,
+                limit=MANIFEST_MAX_BYTES,
+                label="r2 evidence manifest",
+            )
+            manifest = json.loads(
+                manifest_bytes,
+                object_pairs_hook=no_duplicates,
+                parse_constant=reject_constant,
+            )
+            top = {
+                "version", "attempt_id", "source_pin", "catalog_count",
+                "timing_semantics", "report_sha256", "journal_sha256",
+                "dispatch_manifest_sha256", "files",
+            }
+            if not isinstance(manifest, dict) or set(manifest) != top:
+                raise RuntimeError("r2 evidence manifest top-level differs")
+            if manifest_bytes != canonical(manifest):
+                raise RuntimeError("r2 evidence manifest is not canonical JSON")
+            if (
+                manifest["version"] != 1
+                or isinstance(manifest["version"], bool)
+                or manifest["attempt_id"] != attempt_id
+                or manifest["source_pin"] != PINNED_SOURCE
+                or manifest["timing_semantics"] != TIMING
+                or not isinstance(manifest["catalog_count"], int)
+                or isinstance(manifest["catalog_count"], bool)
+                or manifest["catalog_count"] <= 0
+                or any(
+                    not isinstance(manifest[key], str)
+                    or HEX64.fullmatch(manifest[key]) is None
+                    for key in (
+                        "report_sha256", "journal_sha256",
+                        "dispatch_manifest_sha256",
+                    )
+                )
+            ):
+                raise RuntimeError("r2 evidence manifest binding differs")
+            entries = manifest["files"]
+            if not isinstance(entries, list) or not entries:
+                raise RuntimeError("r2 evidence file list absent")
+            paths: list[str] = []
+            entry_by_path: dict[str, dict[str, object]] = {}
+            entry_sizes: list[int] = []
+            for entry in entries:
+                if not isinstance(entry, dict) or set(entry) != {
+                    "path", "bytes", "mode", "sha256"
+                }:
+                    raise RuntimeError("r2 evidence file entry differs")
+                name = entry["path"]
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or name in {".", "..", "evidence-manifest.json"}
+                    or "/" in name
+                    or "\\" in name
+                    or Path(name).name != name
+                    or not isinstance(entry["bytes"], int)
+                    or isinstance(entry["bytes"], bool)
+                    or entry["bytes"] <= 0
+                    or entry["bytes"] > R2_ENTRY_MAX_BYTES
+                    or entry["mode"] != "0600"
+                    or not isinstance(entry["sha256"], str)
+                    or HEX64.fullmatch(entry["sha256"]) is None
+                ):
+                    raise RuntimeError("unsafe r2 evidence file entry")
+                paths.append(name)
+                entry_by_path[name] = entry
+                entry_sizes.append(entry["bytes"])
+            bounded_r2_aggregate(len(manifest_bytes), entry_sizes)
+            if paths != sorted(paths) or len(paths) != len(set(paths)):
+                raise RuntimeError("r2 evidence paths are not unique sorted basenames")
+            base_evidence = {
+                "r2_controller.py", "fixture_setup.py", "model_body.py", "cli_body.py",
+                "library_source.blend", "fixture.blend", "direct-catalog.json",
+                "app-live-catalog.json", "source-catalog.json",
+                "effective-config-catalog.json", "on-disk-config-catalog.json",
+                "tool-schema.json", "catalog-bindings.json", "events.ndjson",
+                "dispatch-manifest.ndjson", "r2-report.md",
+                "dispatch-validation.json", "area-screenshot.png",
+                "window-screenshot.png", "thumbnail.png", "viewport.png",
+            }
+            extras = set(paths) - base_evidence
+            if not base_evidence <= set(paths):
+                raise RuntimeError("r2 evidence base allowlist differs")
+            if set(os.listdir(descriptor)) != set(paths) | {"evidence-manifest.json"}:
+                raise RuntimeError("r2 evidence directory allowlist differs")
+            payloads = {"evidence-manifest.json": manifest_bytes}
+            for name in paths:
+                payload, _ = read_bounded_entry(
+                    root,
+                    name,
+                    parent_mode=directory_mode,
+                    file_mode=file_mode,
+                    limit=R2_ENTRY_MAX_BYTES,
+                    label=f"r2 evidence {name}",
+                )
+                entry = entry_by_path[name]
+                if (
+                    len(payload) != entry["bytes"]
+                    or hashlib.sha256(payload).hexdigest() != entry["sha256"]
+                ):
+                    raise RuntimeError(f"r2 evidence digest differs: {name}")
+                payloads[name] = payload
+            dispatch = payloads["dispatch-manifest.ndjson"]
+            if not dispatch.endswith(b"\n"):
+                raise RuntimeError("r2 dispatch manifest final newline absent")
+            dynamic_artifacts: set[str] = set()
+            for line in dispatch.splitlines():
+                if not line:
+                    raise RuntimeError("blank r2 dispatch manifest row")
+                row = json.loads(
+                    line,
+                    object_pairs_hook=no_duplicates,
+                    parse_constant=reject_constant,
+                )
+                if not isinstance(row, dict):
+                    raise RuntimeError("r2 dispatch manifest row is not an object")
+                if row.get("record_type") == "call" and row.get("artifact") is not None:
+                    if row.get("outcome") != "pass":
+                        raise RuntimeError("failed call cannot bind dynamic evidence")
+                    artifact = row["artifact"]
+                    if not isinstance(artifact, dict):
+                        raise RuntimeError("invalid dynamic artifact binding")
+                    artifact_path = artifact.get("path")
+                    if artifact_path in base_evidence:
+                        continue
+                    acceptance = row.get("acceptance")
+                    valid_repeat = (
+                        row.get("classification") == "threshold_repeat"
+                        and isinstance(artifact_path, str)
+                        and re.fullmatch(r"r2-repeat-[0-9]{4}[.]png", artifact_path)
+                        is not None
+                    )
+                    valid_future_first = (
+                        row.get("classification") == "first"
+                        and isinstance(acceptance, dict)
+                        and acceptance.get("lane") == "future_readonly_empty_smoke"
+                        and isinstance(artifact_path, str)
+                        and re.fullmatch(r"r2-future-[0-9]{4}[.]png", artifact_path)
+                        is not None
+                    )
+                    if (
+                        not isinstance(artifact_path, str)
+                        or not (valid_repeat or valid_future_first)
+                        or artifact_path in dynamic_artifacts
+                    ):
+                        raise RuntimeError("invalid/duplicate dynamic artifact binding")
+                    dynamic_artifacts.add(artifact_path)
+            if extras != dynamic_artifacts:
+                raise RuntimeError("r2 dynamic artifacts differ from dispatch rows")
+            if (
+                hashlib.sha256(payloads["r2-report.md"]).hexdigest()
+                != manifest["report_sha256"]
+                or hashlib.sha256(payloads["events.ndjson"]).hexdigest()
+                != manifest["journal_sha256"]
+                or hashlib.sha256(payloads["dispatch-manifest.ndjson"]).hexdigest()
+                != manifest["dispatch_manifest_sha256"]
+            ):
+                raise RuntimeError("r2 evidence top-level digest differs")
+            direct = json.loads(
+                payloads["direct-catalog.json"],
+                object_pairs_hook=no_duplicates,
+                parse_constant=reject_constant,
+            )
+            if (
+                not isinstance(direct, list)
+                or not all(isinstance(name, str) and name for name in direct)
+                or direct != sorted(direct)
+                or len(direct) != len(set(direct))
+                or len(direct) != manifest["catalog_count"]
+            ):
+                raise RuntimeError("r2 direct catalog/count differs")
+            for catalog_name in (
+                "app-live-catalog.json", "source-catalog.json",
+                "effective-config-catalog.json", "on-disk-config-catalog.json",
+            ):
+                if payloads[catalog_name] != payloads["direct-catalog.json"]:
+                    raise RuntimeError(f"r2 catalog bytes differ: {catalog_name}")
+            if (
+                set(os.listdir(descriptor)) != set(paths) | {"evidence-manifest.json"}
+                or bounded_identity(os.fstat(descriptor)) != root_bound
+                or bounded_identity(os.lstat(root)) != root_bound
+            ):
+                raise RuntimeError("r2 evidence changed while validating")
+            return payloads
+        finally:
+            os.close(descriptor)
+
+    r2_payloads = validate_r2_snapshot(attempt_root, 0o700, 0o600)
+    source_payloads = {
+        name: read_source(source, name)
+        for name, source in sorted(sources.items())
+    }
+    for name, expected_sha in approved_source_sha.items():
+        if hashlib.sha256(source_payloads[name]).hexdigest() != expected_sha:
+            raise RuntimeError(f"parser-approved Task 7 digest differs: {name}")
+    task7_brief_payload = source_payloads["task-7-brief.md"]
+    if controller_from_brief(task7_brief_payload) != r2_payloads["r2_controller.py"]:
+        raise RuntimeError("Task 7 brief/evidence controller bytes differ")
+    os.mkdir(R2_EVIDENCE, 0o700, dir_fd=directory_fd)
+    r2_fd = os.open(
+        R2_EVIDENCE,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=directory_fd,
+    )
+    try:
+        for name, payload in sorted(r2_payloads.items()):
+            output = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=r2_fd,
+            )
+            try:
+                view = memoryview(payload)
+                while view:
+                    view = view[os.write(output, view):]
+                os.fsync(output)
+            finally:
+                os.close(output)
+        os.fsync(r2_fd)
+    finally:
+        os.close(r2_fd)
+    copied_r2 = validate_r2_snapshot(path / R2_EVIDENCE, 0o700, 0o600)
+    if copied_r2 != r2_payloads:
+        raise RuntimeError("frozen r2 evidence bytes differ from selected attempt")
+    if validate_r2_snapshot(attempt_root, 0o700, 0o600) != r2_payloads:
+        raise RuntimeError("selected r2 evidence changed while copying")
+
+    digests: dict[str, str] = {}
+    for destination in sorted(sources):
+        payload = source_payloads[destination]
+        if (
+            destination == "invalid-journals.sha256"
+            and hashlib.sha256(payload).hexdigest() != R1_MANIFEST_SHA256
+        ):
+            raise RuntimeError("frozen r1 journal manifest differs")
+        destination_fd = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        try:
+            view = memoryview(payload)
+            while view:
+                view = view[os.write(destination_fd, view):]
+            os.fsync(destination_fd)
+        finally:
+            os.close(destination_fd)
+        digests[destination] = hashlib.sha256(payload).hexdigest()
+
+    for destination, source in sorted(sources.items()):
+        copied, _ = read_bounded_entry(
+            path,
+            destination,
+            parent_mode=0o700,
+            file_mode=0o600,
+            limit=terminal_file_limit(destination),
+            label=f"terminal copy {destination}",
+        )
+        if (
+            copied != source_payloads[destination]
+            or read_source(source, destination) != source_payloads[destination]
+        ):
+            raise RuntimeError(f"source/copy/source-after differs: {destination}")
+
+    nested_manifest = f"{R2_EVIDENCE}/evidence-manifest.json"
+    digests[nested_manifest] = hashlib.sha256(
+        r2_payloads["evidence-manifest.json"]
+    ).hexdigest()
+    evidence_names = EVIDENCE | {nested_manifest}
+    evidence_payload = "".join(
+        f"{digests[name]}  {name}\n" for name in sorted(evidence_names)
+    ).encode("ascii")
+    evidence_fd = os.open(
+        "evidence-sha256",
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        view = memoryview(evidence_payload)
+        while view:
+            view = view[os.write(evidence_fd, view):]
+        os.fsync(evidence_fd)
+    finally:
+        os.close(evidence_fd)
+    os.fsync(directory_fd)
+    if set(os.listdir(directory_fd)) != EXPECTED:
+        raise RuntimeError("evidence-bound review allowlist differs")
+    for name in sorted(EXPECTED - {R2_EVIDENCE}):
         before_file = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         if (
             stat.S_ISLNK(before_file.st_mode)
@@ -1564,6 +7996,10 @@ try:
         os.fchmod(descriptor, 0o600)
     if set(os.listdir(directory_fd)) != EXPECTED:
         raise RuntimeError("initial review directory changed while setting modes")
+    validate_actor_inodes(
+        directory_fd, path, opened_dir, mode=0o600, reports_empty=True,
+        label="actor identity",
+    )
     for name, descriptor in files.items():
         opened_file = os.fstat(descriptor)
         current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -1577,38 +8013,78 @@ try:
                (opened_file.st_dev, opened_file.st_ino)
         ):
             raise RuntimeError(f"mode-0600 review file differs: {name}")
+    if validate_r2_snapshot(path / R2_EVIDENCE, 0o700, 0o600) != r2_payloads:
+        raise RuntimeError("r2 evidence changed before terminal handoff")
+    evidence_sha256 = digest_opened_entry(
+        directory_fd,
+        path,
+        "evidence-sha256",
+        files["evidence-sha256"],
+        limit=MANIFEST_MAX_BYTES,
+        label="terminal evidence digest",
+    )
 finally:
     for descriptor in files.values():
         os.close(descriptor)
     os.close(directory_fd)
+print(f"EVIDENCE_SHA256={evidence_sha256}")
 PY
+)"
+EVIDENCE_SHA256="${EVIDENCE_BINDING#EVIDENCE_SHA256=}"
+test "$EVIDENCE_BINDING" = "EVIDENCE_SHA256=$EVIDENCE_SHA256"
+test "${#EVIDENCE_SHA256}" = 64
+case "$EVIDENCE_SHA256" in
+  *[!0-9a-f]*|'') echo 'invalid bounded evidence SHA-256' >&2; exit 1 ;;
+esac
 CODE_REVIEW_TEMPLATE="$SDD_SKILL_ROOT/../requesting-code-review/code-reviewer.md"
 test -s "$CODE_REVIEW_TEMPLATE"
 printf 'review_base_head=%s\ninitial_main_anchor=%s\nreviewed_candidate=%s\n' \
   "$REVIEW_BASE_HEAD" "$INITIAL_MAIN_ANCHOR" "$REVIEWED_CANDIDATE"
 printf 'package=%s\npackage_sha256=%s\ncode_review_template=%s\n' \
   "$PACKAGE" "$PACKAGE_SHA256" "$CODE_REVIEW_TEMPLATE"
+printf 'evidence_sha256=%s\ntask7_brief=%s\ntask7_report=%s\ntask7_review=%s\n' \
+  "$EVIDENCE_SHA256" "$REVIEW_DIR/task-7-brief.md" \
+  "$REVIEW_DIR/task-7-report.md" "$REVIEW_DIR/task-7-review.md"
+printf 'r1_manifest=%s\nr2_evidence=%s\nr2_manifest=%s\nr2_report=%s\n' \
+  "$REVIEW_DIR/invalid-journals.sha256" \
+  "$REVIEW_DIR/r2-evidence" \
+  "$REVIEW_DIR/r2-evidence/evidence-manifest.json" \
+  "$REVIEW_DIR/r2-evidence/r2-report.md"
 printf 'code_review=%s\nadversarial_review=%s\nponytail_review=%s\n' \
   "$REVIEW_DIR/code-review.md" "$REVIEW_DIR/adversarial-review.md" \
   "$REVIEW_DIR/ponytail-review.md"
+printf 'actor_inodes=%s\n' "$REVIEW_DIR/actor-inodes.json"
 BASH
 ```
 
-Dispatch all three with `fork_turns="none"`, the strongest available model, and only
-the Plan, Task 5 report, package, binding values, and lens. The requesting-code-review
-reviewer uses the printed template. Each report begins with:
+Dispatch all three terminal reviewers with `fork_turns="none"`, the strongest available
+model, and only the Plan, frozen-input paths printed from this terminal directory,
+whole-branch package, binding values, latest Task 7 combined-review copy, and lens. The
+requesting-code-review reviewer uses the printed template. Reviewers receive and bind
+the frozen Task 7 report and clean combined Task 7 review; they receive neither the Task
+5 report nor a prior Task 7 round. Each reviewer must inspect the frozen
+`r2-evidence/` bytes themselves: tool schema and five catalog lanes, complete raw
+request/response dispatch rows, `r2_controller.py`, fixture/model/CLI payloads and
+fixture inputs, journal/validation/report, and every manifest-listed PNG (including
+safe-future images and repeats). The manifest is a verified index, not a substitute
+for those bytes. Before and after each reviewer, the controller validates
+`actor-inodes.json` against the terminal directory and all three preallocated report
+paths. Each reviewer opens only its assigned report without truncation, verifies its
+recorded `(st_dev, st_ino)`, then truncates and writes through that descriptor; it must
+not create, replace, or write another report. Each report begins with:
 
 ```text
 REVIEWED_HEAD: <candidate-head>
 REVIEW_BASE_HEAD: <review-base-head>
 PACKAGE_SHA256: <package-sha256>
+EVIDENCE_SHA256: <sha256-of-evidence-sha256>
 CRITICAL: 0
 IMPORTANT: 0
 MINOR: 0
 VERDICT: APPROVED
 ```
 
-These seven lines are one ordered leading binding block. Any duplicate, contradictory,
+These eight lines are one ordered leading binding block. Any duplicate, contradictory,
 or unknown reserved verdict/count/binding marker invalidates the whole report.
 
 Verify all reports and freeze the reviewed object. This is the only source of
@@ -1619,11 +8095,12 @@ Verify all reports and freeze the reviewed object. This is the only source of
 : "${REVIEW_DIR:?exact terminal-rN directory required}"
 UV="${UV:-$HOME/.local/bin/uv}"
 case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
-BINDINGS="$("$UV" run --quiet --no-project --python 3.13 python - \
+BINDINGS="$("$UV" run --quiet --no-project --python 3.13 python -P - \
   "$REVIEW_DIR" <<'PY'
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import stat
@@ -1631,19 +8108,294 @@ import subprocess
 import sys
 from pathlib import Path
 
+if not sys.flags.safe_path:
+    raise SystemExit("STOP: terminal evidence binder requires safe-path mode")
+
+EVIDENCE = {
+    "task-7-brief.md",
+    "task-7-report.md",
+    "task-7-review.md",
+    "invalid-journals.sha256",
+}
+R2_EVIDENCE = "r2-evidence"
+ACTOR_REPORTS = {
+    "code-review.md",
+    "adversarial-review.md",
+    "ponytail-review.md",
+}
 BEFORE = {
     "whole-branch.diff", "review-base-head", "initial-main-anchor",
     "candidate-head", "package-sha256", "code-review.md",
-    "adversarial-review.md", "ponytail-review.md",
-}
-AFTER = BEFORE | {"reviewed-head"}
+    "adversarial-review.md", "ponytail-review.md", "actor-inodes.json",
+} | EVIDENCE | {R2_EVIDENCE, "evidence-sha256"}
+AFTER = BEFORE | {"reviewed-head", "terminal-manifest.json"}
 REPORTS = ("code-review.md", "adversarial-review.md", "ponytail-review.md")
 RESERVED = re.compile(
     r"^(?P<key>(?:[A-Z][A-Z0-9_]*_VERDICT)|VERDICT|TASK_HEAD|REVIEWED_HEAD|"
-    r"REVIEW_BASE_HEAD|PACKAGE_SHA256|CRITICAL|IMPORTANT|MINOR):"
+    r"REVIEW_BASE_HEAD|PACKAGE_SHA256|EVIDENCE_SHA256|CRITICAL|IMPORTANT|MINOR):"
 )
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
+PINNED_SOURCE = "4309a39646e644261624bfcd2bca669b343b7621"
+TIMING = "controller_dispatch_wall_ms; not pure server compute"
+CONTROLLER_SHA256 = "cc325e471aa0d1a0349deade58d0f7517575c35d901fb99f00ee1cc4de7f640a"
+CONTROLLER_BEGIN = b"<!-- R2_CONTROLLER_BEGIN -->\n````python\n"
+CONTROLLER_END = b"````\n<!-- R2_CONTROLLER_END -->"
+
+
+# TERMINAL_BOUNDED_READER_BEGIN
+BRIEF_MAX_BYTES = 2 * 1024 * 1024
+REPORT_MAX_BYTES = 64 * 1024 * 1024
+PACKAGE_MAX_BYTES = 64 * 1024 * 1024
+REVIEW_MAX_BYTES = 8 * 1024 * 1024
+MANIFEST_MAX_BYTES = 2 * 1024 * 1024
+SMALL_BINDING_MAX_BYTES = 1024
+R2_ENTRY_MAX_BYTES = 64 * 1024 * 1024
+R2_AGGREGATE_MAX_BYTES = 512 * 1024 * 1024
+
+
+def bounded_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def terminal_file_limit(name: str) -> int:
+    if name == "task-7-brief.md":
+        return BRIEF_MAX_BYTES
+    if name == "task-7-report.md":
+        return REPORT_MAX_BYTES
+    if name in {
+        "task-7-review.md",
+        "code-review.md",
+        "adversarial-review.md",
+        "ponytail-review.md",
+    }:
+        return REVIEW_MAX_BYTES
+    if name == "whole-branch.diff":
+        return PACKAGE_MAX_BYTES
+    if name in {
+        "actor-inodes.json",
+        "evidence-sha256",
+        "invalid-journals.sha256",
+        "terminal-manifest.json",
+    }:
+        return MANIFEST_MAX_BYTES
+    if name in {
+        "review-base-head",
+        "initial-main-anchor",
+        "candidate-head",
+        "package-sha256",
+        "reviewed-head",
+    }:
+        return SMALL_BINDING_MAX_BYTES
+    raise RuntimeError(f"missing terminal file cap: {name}")
+
+
+def bounded_r2_aggregate(manifest_size: int, entry_sizes: list[int]) -> int:
+    if manifest_size <= 0 or manifest_size > MANIFEST_MAX_BYTES:
+        raise RuntimeError("r2 manifest size exceeds cap")
+    aggregate = manifest_size
+    for size in entry_sizes:
+        if (
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or size <= 0
+            or size > R2_ENTRY_MAX_BYTES
+        ):
+            raise RuntimeError("r2 entry size exceeds cap")
+        aggregate += size
+        if aggregate > R2_AGGREGATE_MAX_BYTES:
+            raise RuntimeError("r2 aggregate exceeds cap")
+    return aggregate
+
+
+def read_bounded_entry(
+    parent_path: Path,
+    name: str,
+    *,
+    parent_mode: int,
+    file_mode: int,
+    limit: int,
+    label: str,
+    expected_identity: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    parent_path = Path(os.path.abspath(parent_path))
+    if name in {"", ".", ".."} or name != os.path.basename(name):
+        raise RuntimeError(f"unsafe {label} leaf: {name!r}")
+    if limit <= 0 or os.path.realpath(parent_path) != os.fspath(parent_path):
+        raise RuntimeError(f"unsafe {label} parent: {parent_path}")
+    parent_before = os.lstat(parent_path)
+    parent_bound = bounded_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) != parent_mode
+    ):
+        raise RuntimeError(f"unsafe {label} parent metadata")
+    parent_fd = os.open(
+        parent_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    descriptor = -1
+    try:
+        if (
+            bounded_identity(os.fstat(parent_fd)) != parent_bound
+            or bounded_identity(os.lstat(parent_path)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        bound = bounded_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != file_mode
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+            or (
+                expected_identity is not None
+                and (before.st_dev, before.st_ino) != expected_identity
+            )
+        ):
+            raise RuntimeError(f"unsafe {label} artifact: {name}")
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
+        opened = os.fstat(descriptor)
+        if bounded_identity(opened) != bound:
+            raise RuntimeError(f"{label} changed while opening: {name}")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading: {name}")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading: {name}")
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        parent_after = os.fstat(parent_fd)
+        parent_current = os.lstat(parent_path)
+        if (
+            len(payload) != before.st_size
+            or bounded_identity(after) != bound
+            or bounded_identity(current) != bound
+            or bounded_identity(parent_after) != parent_bound
+            or bounded_identity(parent_current) != parent_bound
+        ):
+            raise RuntimeError(f"{label} changed while reading: {name}")
+        return payload, after
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
+def read_bounded_path(
+    raw_path: Path,
+    *,
+    parent_mode: int,
+    file_mode: int,
+    limit: int,
+    label: str,
+    expected_identity: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    path = Path(os.path.abspath(raw_path))
+    return read_bounded_entry(
+        path.parent,
+        path.name,
+        parent_mode=parent_mode,
+        file_mode=file_mode,
+        limit=limit,
+        label=label,
+        expected_identity=expected_identity,
+    )
+# TERMINAL_BOUNDED_READER_END
+
+
+def validate_actor_inodes(
+    directory: int,
+    directory_path: Path,
+    directory_info: os.stat_result,
+    *,
+    mode: int,
+    reports_empty: bool,
+    label: str,
+) -> dict[str, object]:
+    # One form for all three phases. The three free copies this replaces were three
+    # different bodies of the same predicate -- partial evaluation showed the widest
+    # one already implied the other two -- and nothing compared them, so a safety
+    # clause could be, and was, deleted from one copy alone without any gate moving.
+    raw, _ = read_bounded_entry(
+        directory_path,
+        "actor-inodes.json",
+        parent_mode=0o700 if mode == 0o600 else 0o500,
+        file_mode=mode,
+        limit=MANIFEST_MAX_BYTES,
+        label=label,
+    )
+    value = json.loads(raw)
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"reports", "review_dir", "version"}
+        or value["version"] != 1
+        or isinstance(value["version"], bool)
+        or value["review_dir"] != {
+            "dev": directory_info.st_dev,
+            "ino": directory_info.st_ino,
+        }
+        or not isinstance(value["reports"], dict)
+        or set(value["reports"]) != ACTOR_REPORTS
+    ):
+        raise RuntimeError(f"{label} binding differs")
+    canonical_identity = (
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        + b"\n"
+    )
+    if raw != canonical_identity:
+        raise RuntimeError(f"{label} record is not canonical")
+    for name in ACTOR_REPORTS:
+        binding = value["reports"][name]
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if (
+            not isinstance(binding, dict)
+            or set(binding) != {"dev", "ino"}
+            or not all(
+                isinstance(binding[key], int)
+                and not isinstance(binding[key], bool)
+                and binding[key] >= 0
+                for key in ("dev", "ino")
+            )
+            or stat.S_ISLNK(current.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_uid != os.getuid()
+            or current.st_nlink != 1
+            or stat.S_IMODE(current.st_mode) != mode
+            or (current.st_dev, current.st_ino)
+            != (binding["dev"], binding["ino"])
+            or (reports_empty and current.st_size != 0)
+            or (not reports_empty and current.st_size == 0)
+        ):
+            raise RuntimeError(f"{label} report differs: {name}")
+    return value
 
 
 def parse_report(payload: bytes, expected: list[tuple[str, str]]) -> None:
@@ -1669,6 +8421,387 @@ def parse_report(payload: bytes, expected: list[tuple[str, str]]) -> None:
         raise RuntimeError("missing reserved marker")
 
 
+def no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise RuntimeError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
+def reject_constant(value: str) -> None:
+    raise RuntimeError(f"non-finite JSON constant: {value}")
+
+
+def canonical(value: object) -> bytes:
+    return (
+        json.dumps(
+            value, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        ).encode("utf-8") + b"\n"
+    )
+
+
+def controller_from_brief(payload: bytes) -> bytes:
+    if payload.count(CONTROLLER_BEGIN) != 1 or payload.count(CONTROLLER_END) != 1:
+        raise RuntimeError("Task 7 brief controller fence boundary differs")
+    begin = payload.index(CONTROLLER_BEGIN) + len(CONTROLLER_BEGIN)
+    finish = payload.index(CONTROLLER_END, begin)
+    value = payload[begin:finish]
+    if (
+        len(value.splitlines()) != 6193
+        or len(value) != 254319
+        or hashlib.sha256(value).hexdigest() != CONTROLLER_SHA256
+    ):
+        raise RuntimeError("Task 7 brief controller bytes differ")
+    return value
+
+
+def r2_snapshot(root: Path, directory_mode: int, file_mode: int) -> dict[str, bytes]:
+    if os.path.realpath(root) != os.fspath(root):
+        raise RuntimeError("frozen r2 path contains a symlink")
+    before = os.lstat(root)
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISDIR(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != directory_mode
+    ):
+        raise RuntimeError("unsafe frozen r2 directory")
+    root_bound = bounded_identity(before)
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(directory)
+        if bounded_identity(opened) != root_bound:
+            raise RuntimeError("frozen r2 directory changed while opening")
+        raw, _ = read_bounded_entry(
+            root,
+            "evidence-manifest.json",
+            parent_mode=directory_mode,
+            file_mode=file_mode,
+            limit=MANIFEST_MAX_BYTES,
+            label="frozen r2 manifest",
+        )
+        manifest = json.loads(
+            raw, object_pairs_hook=no_duplicates, parse_constant=reject_constant
+        )
+        exact_top = {
+            "version", "attempt_id", "source_pin", "catalog_count",
+            "timing_semantics", "report_sha256", "journal_sha256",
+            "dispatch_manifest_sha256", "files",
+        }
+        if not isinstance(manifest, dict) or set(manifest) != exact_top:
+            raise RuntimeError("frozen r2 manifest top-level differs")
+        if raw != canonical(manifest):
+            raise RuntimeError("frozen r2 manifest is not canonical JSON")
+        if (
+            manifest["version"] != 1
+            or isinstance(manifest["version"], bool)
+            or not isinstance(manifest["attempt_id"], str)
+            or re.fullmatch(r"attempt-[0-9]{4}", manifest["attempt_id"]) is None
+            or manifest["attempt_id"] == "attempt-0000"
+            or manifest["source_pin"] != PINNED_SOURCE
+            or manifest["timing_semantics"] != TIMING
+            or not isinstance(manifest["catalog_count"], int)
+            or isinstance(manifest["catalog_count"], bool)
+            or manifest["catalog_count"] <= 0
+        ):
+            raise RuntimeError("frozen r2 manifest binding differs")
+        for key in ("report_sha256", "journal_sha256", "dispatch_manifest_sha256"):
+            if not isinstance(manifest[key], str) or HEX64.fullmatch(manifest[key]) is None:
+                raise RuntimeError(f"invalid frozen r2 digest: {key}")
+        entries = manifest["files"]
+        if not isinstance(entries, list) or not entries:
+            raise RuntimeError("frozen r2 file list absent")
+        paths: list[str] = []
+        by_path: dict[str, dict[str, object]] = {}
+        entry_sizes: list[int] = []
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) != {
+                "path", "bytes", "mode", "sha256"
+            }:
+                raise RuntimeError("frozen r2 file entry differs")
+            name = entry["path"]
+            if (
+                not isinstance(name, str)
+                or not name
+                or name in {".", "..", "evidence-manifest.json"}
+                or "/" in name
+                or "\\" in name
+                or Path(name).name != name
+                or not isinstance(entry["bytes"], int)
+                or isinstance(entry["bytes"], bool)
+                or entry["bytes"] <= 0
+                or entry["bytes"] > R2_ENTRY_MAX_BYTES
+                or entry["mode"] != "0600"
+                or not isinstance(entry["sha256"], str)
+                or HEX64.fullmatch(entry["sha256"]) is None
+            ):
+                raise RuntimeError("unsafe frozen r2 file entry")
+            paths.append(name)
+            by_path[name] = entry
+            entry_sizes.append(entry["bytes"])
+        bounded_r2_aggregate(len(raw), entry_sizes)
+        if paths != sorted(paths) or len(paths) != len(set(paths)):
+            raise RuntimeError("frozen r2 paths are not unique/sorted")
+        base_evidence = {
+            "r2_controller.py", "fixture_setup.py", "model_body.py", "cli_body.py",
+            "library_source.blend", "fixture.blend", "direct-catalog.json",
+            "app-live-catalog.json", "source-catalog.json",
+            "effective-config-catalog.json", "on-disk-config-catalog.json",
+            "tool-schema.json", "catalog-bindings.json", "events.ndjson",
+            "dispatch-manifest.ndjson", "r2-report.md",
+            "dispatch-validation.json", "area-screenshot.png",
+            "window-screenshot.png", "thumbnail.png", "viewport.png",
+        }
+        extras = set(paths) - base_evidence
+        if not base_evidence <= set(paths):
+            raise RuntimeError("frozen r2 base allowlist differs")
+        if set(os.listdir(directory)) != set(paths) | {"evidence-manifest.json"}:
+            raise RuntimeError("frozen r2 directory allowlist differs")
+        payloads = {"evidence-manifest.json": raw}
+        for name in paths:
+            payload, _ = read_bounded_entry(
+                root,
+                name,
+                parent_mode=directory_mode,
+                file_mode=file_mode,
+                limit=R2_ENTRY_MAX_BYTES,
+                label=f"frozen r2 {name}",
+            )
+            entry = by_path[name]
+            if (
+                len(payload) != entry["bytes"]
+                or hashlib.sha256(payload).hexdigest() != entry["sha256"]
+            ):
+                raise RuntimeError(f"frozen r2 file digest differs: {name}")
+            payloads[name] = payload
+        dispatch = payloads["dispatch-manifest.ndjson"]
+        if not dispatch.endswith(b"\n"):
+            raise RuntimeError("frozen r2 dispatch final newline absent")
+        dynamic_artifacts: set[str] = set()
+        for line in dispatch.splitlines():
+            if not line:
+                raise RuntimeError("blank frozen r2 dispatch row")
+            row = json.loads(
+                line,
+                object_pairs_hook=no_duplicates,
+                parse_constant=reject_constant,
+            )
+            if not isinstance(row, dict):
+                raise RuntimeError("frozen r2 dispatch row is not an object")
+            if row.get("record_type") == "call" and row.get("artifact") is not None:
+                if row.get("outcome") != "pass":
+                    raise RuntimeError("failed frozen call cannot bind dynamic evidence")
+                artifact = row["artifact"]
+                if not isinstance(artifact, dict):
+                    raise RuntimeError("invalid frozen dynamic artifact binding")
+                artifact_path = artifact.get("path")
+                if artifact_path in base_evidence:
+                    continue
+                acceptance = row.get("acceptance")
+                valid_repeat = (
+                    row.get("classification") == "threshold_repeat"
+                    and isinstance(artifact_path, str)
+                    and re.fullmatch(r"r2-repeat-[0-9]{4}[.]png", artifact_path)
+                    is not None
+                )
+                valid_future_first = (
+                    row.get("classification") == "first"
+                    and isinstance(acceptance, dict)
+                    and acceptance.get("lane") == "future_readonly_empty_smoke"
+                    and isinstance(artifact_path, str)
+                    and re.fullmatch(r"r2-future-[0-9]{4}[.]png", artifact_path)
+                    is not None
+                )
+                if (
+                    not isinstance(artifact_path, str)
+                    or not (valid_repeat or valid_future_first)
+                    or artifact_path in dynamic_artifacts
+                ):
+                    raise RuntimeError("invalid/duplicate frozen dynamic artifact")
+                dynamic_artifacts.add(artifact_path)
+        if extras != dynamic_artifacts:
+            raise RuntimeError("frozen dynamic artifacts differ from dispatch rows")
+        if (
+            hashlib.sha256(payloads["r2-report.md"]).hexdigest()
+            != manifest["report_sha256"]
+            or hashlib.sha256(payloads["events.ndjson"]).hexdigest()
+            != manifest["journal_sha256"]
+            or hashlib.sha256(payloads["dispatch-manifest.ndjson"]).hexdigest()
+            != manifest["dispatch_manifest_sha256"]
+        ):
+            raise RuntimeError("frozen r2 top-level digest differs")
+        direct = json.loads(
+            payloads["direct-catalog.json"],
+            object_pairs_hook=no_duplicates,
+            parse_constant=reject_constant,
+        )
+        if (
+            not isinstance(direct, list)
+            or direct != sorted(direct)
+            or len(direct) != len(set(direct))
+            or not all(isinstance(name, str) and name for name in direct)
+            or len(direct) != manifest["catalog_count"]
+        ):
+            raise RuntimeError("frozen r2 catalog/count differs")
+        for catalog_name in (
+            "app-live-catalog.json", "source-catalog.json",
+            "effective-config-catalog.json", "on-disk-config-catalog.json",
+        ):
+            if payloads[catalog_name] != payloads["direct-catalog.json"]:
+                raise RuntimeError(f"frozen r2 catalog differs: {catalog_name}")
+        if (
+            set(os.listdir(directory)) != set(paths) | {"evidence-manifest.json"}
+            or bounded_identity(os.fstat(directory)) != root_bound
+            or bounded_identity(os.lstat(root)) != root_bound
+        ):
+            raise RuntimeError("frozen r2 directory changed while reading")
+        return payloads
+    finally:
+        os.close(directory)
+
+
+def evidence_sha256(payloads: dict[str, bytes], r2_manifest: bytes) -> str:
+    if hashlib.sha256(payloads["invalid-journals.sha256"]).hexdigest() != (
+        "8292ac78073804687faab381181881ac7f522da1edea2dffe625626c1482c535"
+    ):
+        raise RuntimeError("frozen r1 journal manifest differs")
+    hashes = {
+        name: hashlib.sha256(payloads[name]).hexdigest()
+        for name in EVIDENCE
+    }
+    hashes[f"{R2_EVIDENCE}/evidence-manifest.json"] = hashlib.sha256(
+        r2_manifest
+    ).hexdigest()
+    expected = "".join(
+        f"{hashes[name]}  {name}\n" for name in sorted(hashes)
+    ).encode("ascii")
+    if payloads["evidence-sha256"] != expected:
+        raise RuntimeError("terminal evidence digest manifest differs")
+    return hashlib.sha256(expected).hexdigest()
+
+
+# TERMINAL_MANIFEST_VALIDATOR_BEGIN
+def terminal_manifest_value(
+    payloads: dict[str, bytes],
+    r2_payloads: dict[str, bytes],
+    review_info: os.stat_result,
+    r2_info: os.stat_result,
+    actor_inodes: dict[str, object],
+    manifest_info: os.stat_result,
+) -> dict[str, object]:
+    file_payloads = {
+        name: payload
+        for name, payload in payloads.items()
+        if name != "terminal-manifest.json"
+    }
+    file_payloads.update(
+        {f"r2-evidence/{name}": payload for name, payload in r2_payloads.items()}
+    )
+    files = [
+        {
+            "bytes": len(file_payloads[name]),
+            "mode": "0400",
+            "path": name,
+            "sha256": hashlib.sha256(file_payloads[name]).hexdigest(),
+        }
+        for name in sorted(file_payloads)
+    ]
+    return {
+        "actor_inodes": actor_inodes,
+        "files": files,
+        "r2_directory": {
+            "dev": r2_info.st_dev,
+            "ino": r2_info.st_ino,
+            "mode": "0500",
+        },
+        "review_directory": {
+            "dev": review_info.st_dev,
+            "ino": review_info.st_ino,
+            "mode": "0500",
+        },
+        "self": {"dev": manifest_info.st_dev, "ino": manifest_info.st_ino},
+        "version": 1,
+    }
+
+
+def validate_terminal_manifest(
+    raw: bytes,
+    payloads: dict[str, bytes],
+    r2_payloads: dict[str, bytes],
+    review_info: os.stat_result,
+    r2_info: os.stat_result,
+    actor_inodes: dict[str, object],
+    manifest_info: os.stat_result,
+) -> None:
+    value = json.loads(
+        raw,
+        object_pairs_hook=no_duplicates,
+        parse_constant=reject_constant,
+    )
+    expected = terminal_manifest_value(
+        payloads,
+        r2_payloads,
+        review_info,
+        r2_info,
+        actor_inodes,
+        manifest_info,
+    )
+    if value != expected or raw != canonical(value):
+        raise RuntimeError("terminal manifest binding/canonical bytes differ")
+# TERMINAL_MANIFEST_VALIDATOR_END
+
+
+def freeze_r2(root: Path, expected_payloads: dict[str, bytes]) -> None:
+    before = os.lstat(root)
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptors: dict[str, int] = {}
+    try:
+        if (
+            before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != 0o700
+            or (os.fstat(directory).st_dev, os.fstat(directory).st_ino)
+            != (before.st_dev, before.st_ino)
+            or set(os.listdir(directory)) != set(expected_payloads)
+        ):
+            raise RuntimeError("r2 evidence changed before freeze")
+        for name in sorted(expected_payloads):
+            before_file = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            descriptor = os.open(
+                name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory
+            )
+            opened = os.fstat(descriptor)
+            current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or opened.st_nlink != 1
+                or current.st_nlink != 1
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or (opened.st_dev, opened.st_ino)
+                != (before_file.st_dev, before_file.st_ino)
+                or (current.st_dev, current.st_ino)
+                != (opened.st_dev, opened.st_ino)
+            ):
+                os.close(descriptor)
+                raise RuntimeError(f"unsafe r2 file before freeze: {name}")
+            descriptors[name] = descriptor
+        for descriptor in descriptors.values():
+            os.fchmod(descriptor, 0o400)
+            os.fsync(descriptor)
+        os.fsync(directory)
+        os.fchmod(directory, 0o500)
+        os.fsync(directory)
+    finally:
+        for descriptor in descriptors.values():
+            os.close(descriptor)
+        os.close(directory)
+    if r2_snapshot(root, 0o500, 0o400) != expected_payloads:
+        raise RuntimeError("r2 evidence changed while freezing")
+
+
 path = Path(os.path.abspath(sys.argv[1]))
 if os.path.realpath(path) != os.fspath(path):
     raise RuntimeError("review directory path contains a symlink")
@@ -1691,38 +8824,24 @@ try:
         raise RuntimeError("review directory changed while opening")
     if set(os.listdir(directory_fd)) != BEFORE:
         raise RuntimeError("pre-freeze review directory allowlist differs")
-    for name in sorted(BEFORE):
-        before_file = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        if (
-            stat.S_ISLNK(before_file.st_mode)
-            or not stat.S_ISREG(before_file.st_mode)
-            or before_file.st_uid != os.getuid()
-            or before_file.st_nlink != 1
-        ):
-            raise RuntimeError(f"owned regular review file required: {name}")
-        descriptor = os.open(
-            name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd
-        )
-        opened_file = os.fstat(descriptor)
-        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        if (
-            opened_file.st_nlink != 1
-            or current.st_nlink != 1
-            or (opened_file.st_dev, opened_file.st_ino) !=
-               (before_file.st_dev, before_file.st_ino)
-            or (current.st_dev, current.st_ino) !=
-               (opened_file.st_dev, opened_file.st_ino)
-        ):
-            os.close(descriptor)
-            raise RuntimeError(f"review file changed while opening: {name}")
-        files[name] = descriptor
-
+    actor_inodes = validate_actor_inodes(
+        directory_fd, path, opened_dir, mode=0o600, reports_empty=False,
+        label="actor identity",
+    )
+    r2_payloads = r2_snapshot(path / R2_EVIDENCE, 0o700, 0o600)
     payloads: dict[str, bytes] = {}
-    for name, descriptor in files.items():
-        chunks: list[bytes] = []
-        while chunk := os.read(descriptor, 1024 * 1024):
-            chunks.append(chunk)
-        payloads[name] = b"".join(chunks)
+    payload_infos: dict[str, os.stat_result] = {}
+    for name in sorted(BEFORE - {R2_EVIDENCE}):
+        payloads[name], payload_infos[name] = read_bounded_entry(
+            path,
+            name,
+            parent_mode=0o700,
+            file_mode=0o600,
+            limit=terminal_file_limit(name),
+            label=f"terminal pre-freeze {name}",
+        )
+    if controller_from_brief(payloads["task-7-brief.md"]) != r2_payloads["r2_controller.py"]:
+        raise RuntimeError("frozen Task 7 brief/evidence controller bytes differ")
     head = payloads["candidate-head"].decode("ascii").removesuffix("\n")
     base = payloads["review-base-head"].decode("ascii").removesuffix("\n")
     main_anchor = payloads["initial-main-anchor"].decode("ascii").removesuffix("\n")
@@ -1733,10 +8852,14 @@ try:
         raise RuntimeError("invalid main anchor/package digest")
     if hashlib.sha256(payloads["whole-branch.diff"]).hexdigest() != package_sha:
         raise RuntimeError("whole-branch package digest differs")
+    evidence_sha = evidence_sha256(
+        payloads, r2_payloads["evidence-manifest.json"]
+    )
     expected = [
         ("REVIEWED_HEAD", head),
         ("REVIEW_BASE_HEAD", base),
         ("PACKAGE_SHA256", package_sha),
+        ("EVIDENCE_SHA256", evidence_sha),
         ("CRITICAL", "0"),
         ("IMPORTANT", "0"),
         ("MINOR", "0"),
@@ -1773,70 +8896,175 @@ try:
         0o600,
         dir_fd=directory_fd,
     )
-    files["reviewed-head"] = reviewed_fd
-    reviewed_info = os.fstat(reviewed_fd)
-    reviewed_current = os.stat(
-        "reviewed-head", dir_fd=directory_fd, follow_symlinks=False
+    try:
+        os.fchmod(reviewed_fd, 0o600)
+        reviewed_payload = (head + "\n").encode("ascii")
+        view = memoryview(reviewed_payload)
+        while view:
+            view = view[os.write(reviewed_fd, view):]
+        os.fsync(reviewed_fd)
+        reviewed_info = os.fstat(reviewed_fd)
+        reviewed_current = os.stat(
+            "reviewed-head", dir_fd=directory_fd, follow_symlinks=False
+        )
+        if (
+            not stat.S_ISREG(reviewed_info.st_mode)
+            or reviewed_info.st_uid != os.getuid()
+            or reviewed_info.st_nlink != 1
+            or stat.S_IMODE(reviewed_info.st_mode) != 0o600
+            or bounded_identity(reviewed_current) != bounded_identity(reviewed_info)
+        ):
+            raise RuntimeError("unsafe reviewed-head")
+    finally:
+        os.close(reviewed_fd)
+    payloads["reviewed-head"] = reviewed_payload
+    if set(os.listdir(directory_fd)) != AFTER - {"terminal-manifest.json"}:
+        raise RuntimeError("pre-manifest review directory allowlist differs")
+
+    if r2_snapshot(path / R2_EVIDENCE, 0o700, 0o600) != r2_payloads:
+        raise RuntimeError("r2 evidence changed after review parsing")
+    if validate_actor_inodes(
+        directory_fd, path, opened_dir, mode=0o600, reports_empty=False,
+        label="actor identity",
+    ) != actor_inodes:
+        raise RuntimeError("actor identity changed after review parsing")
+    for name, expected_payload in sorted(payloads.items()):
+        current_payload, payload_infos[name] = read_bounded_entry(
+            path,
+            name,
+            parent_mode=0o700,
+            file_mode=0o600,
+            limit=terminal_file_limit(name),
+            label=f"terminal pre-manifest {name}",
+        )
+        if current_payload != expected_payload:
+            raise RuntimeError(f"terminal payload changed after parsing: {name}")
+
+    manifest_fd = os.open(
+        "terminal-manifest.json",
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory_fd,
     )
-    if (
-        not stat.S_ISREG(reviewed_info.st_mode)
-        or reviewed_info.st_uid != os.getuid()
-        or reviewed_info.st_nlink != 1
-        or reviewed_current.st_nlink != 1
-        or (reviewed_current.st_dev, reviewed_current.st_ino) !=
-           (reviewed_info.st_dev, reviewed_info.st_ino)
-    ):
-        raise RuntimeError("unsafe reviewed-head before chmod")
-    os.fchmod(reviewed_fd, 0o600)
-    payload = (head + "\n").encode("ascii")
-    view = memoryview(payload)
-    while view:
-        view = view[os.write(reviewed_fd, view):]
-    os.fsync(reviewed_fd)
-    reviewed_info = os.fstat(reviewed_fd)
-    if (
-        not stat.S_ISREG(reviewed_info.st_mode)
-        or reviewed_info.st_uid != os.getuid()
-        or reviewed_info.st_nlink != 1
-    ):
-        raise RuntimeError("unsafe reviewed-head")
+    try:
+        os.fchmod(manifest_fd, 0o600)
+        manifest_created = os.fstat(manifest_fd)
+        r2_info = os.lstat(path / R2_EVIDENCE)
+        manifest_payload = canonical(
+            terminal_manifest_value(
+                payloads,
+                r2_payloads,
+                opened_dir,
+                r2_info,
+                actor_inodes,
+                manifest_created,
+            )
+        )
+        if len(manifest_payload) > MANIFEST_MAX_BYTES:
+            raise RuntimeError("terminal manifest exceeds cap")
+        view = memoryview(manifest_payload)
+        while view:
+            view = view[os.write(manifest_fd, view):]
+        os.fsync(manifest_fd)
+    finally:
+        os.close(manifest_fd)
+    manifest_payload, manifest_info = read_bounded_entry(
+        path,
+        "terminal-manifest.json",
+        parent_mode=0o700,
+        file_mode=0o600,
+        limit=MANIFEST_MAX_BYTES,
+        label="terminal manifest",
+        expected_identity=(manifest_created.st_dev, manifest_created.st_ino),
+    )
+    payloads["terminal-manifest.json"] = manifest_payload
+    payload_infos["terminal-manifest.json"] = manifest_info
+    validate_terminal_manifest(
+        manifest_payload,
+        payloads,
+        r2_payloads,
+        opened_dir,
+        r2_info,
+        actor_inodes,
+        manifest_info,
+    )
     if set(os.listdir(directory_fd)) != AFTER:
         raise RuntimeError("final review directory allowlist differs")
+
+    for name, expected_payload in sorted(payloads.items()):
+        current_payload, current_info = read_bounded_entry(
+            path,
+            name,
+            parent_mode=0o700,
+            file_mode=0o600,
+            limit=terminal_file_limit(name),
+            label=f"terminal final pre-freeze {name}",
+        )
+        if current_payload != expected_payload:
+            raise RuntimeError(f"terminal payload changed before freeze: {name}")
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd
+        )
+        if bounded_identity(os.fstat(descriptor)) != bounded_identity(current_info):
+            os.close(descriptor)
+            raise RuntimeError(f"terminal file changed before freeze: {name}")
+        files[name] = descriptor
+        payload_infos[name] = current_info
+
+    freeze_r2(path / R2_EVIDENCE, r2_payloads)
     for name, descriptor in files.items():
         opened_file = os.fstat(descriptor)
         current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         if (
-            opened_file.st_nlink != 1
-            or current.st_nlink != 1
-            or (current.st_dev, current.st_ino) !=
-               (opened_file.st_dev, opened_file.st_ino)
+            bounded_identity(opened_file) != bounded_identity(payload_infos[name])
+            or bounded_identity(current) != bounded_identity(payload_infos[name])
         ):
             raise RuntimeError(f"review file changed before freeze: {name}")
         os.fchmod(descriptor, 0o400)
+        os.fsync(descriptor)
     os.fchmod(directory_fd, 0o500)
+    os.fsync(directory_fd)
     if stat.S_IMODE(os.fstat(directory_fd).st_mode) != 0o500:
         raise RuntimeError("review directory freeze failed")
-    for name, descriptor in files.items():
-        opened_file = os.fstat(descriptor)
-        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(opened_file.st_mode)
-            or opened_file.st_uid != os.getuid()
-            or opened_file.st_nlink != 1
-            or current.st_nlink != 1
-            or stat.S_IMODE(opened_file.st_mode) != 0o400
-            or (current.st_dev, current.st_ino) !=
-               (opened_file.st_dev, opened_file.st_ino)
-        ):
-            raise RuntimeError(f"frozen review file differs: {name}")
-    print(head, base, main_anchor, package_sha)
+    actor_frozen = validate_actor_inodes(
+        directory_fd, path, opened_dir, mode=0o400, reports_empty=False,
+        label="frozen actor identity",
+    )
+    if actor_frozen != actor_inodes:
+        raise RuntimeError("frozen actor identity differs")
+    frozen_payloads: dict[str, bytes] = {}
+    frozen_infos: dict[str, os.stat_result] = {}
+    for name, expected_payload in sorted(payloads.items()):
+        frozen_payloads[name], frozen_infos[name] = read_bounded_entry(
+            path,
+            name,
+            parent_mode=0o500,
+            file_mode=0o400,
+            limit=terminal_file_limit(name),
+            label=f"terminal frozen {name}",
+        )
+        if frozen_payloads[name] != expected_payload:
+            raise RuntimeError(f"frozen terminal payload differs: {name}")
+    frozen_r2 = r2_snapshot(path / R2_EVIDENCE, 0o500, 0o400)
+    if frozen_r2 != r2_payloads:
+        raise RuntimeError("frozen r2 evidence changed after review freeze")
+    validate_terminal_manifest(
+        frozen_payloads["terminal-manifest.json"],
+        frozen_payloads,
+        frozen_r2,
+        os.fstat(directory_fd),
+        os.lstat(path / R2_EVIDENCE),
+        actor_frozen,
+        frozen_infos["terminal-manifest.json"],
+    )
+    print(head, base, main_anchor, package_sha, evidence_sha)
 finally:
     for descriptor in files.values():
         os.close(descriptor)
     os.close(directory_fd)
 PY
 )"
-IFS=' ' read -r HEAD_SHA BASE_SHA INITIAL_MAIN_ANCHOR PACKAGE_SHA <<EOF
+IFS=' ' read -r HEAD_SHA BASE_SHA INITIAL_MAIN_ANCHOR PACKAGE_SHA EVIDENCE_SHA <<EOF
 $BINDINGS
 EOF
 test "$(git rev-parse HEAD)" = "$HEAD_SHA"
@@ -1850,22 +9078,34 @@ BASH
 
 Before accepting a terminal round, reproduce the three review-file checks in a
 current-UID mode-`0700` disposable `/private/tmp` fixture. Hardlink one required
-report to an external mode-`0600` file. Generation and freeze must reject it before
-any `fchmod`, the external file's mode and SHA-256 must remain unchanged, and the
-Phase M frozen reader must reject the same `st_nlink > 1` inode. Remove the fixture
-after recording those results; never run this adversary against the real review
-directory.
+top-level report and, in a separate fixture, one manifest-listed `r2-evidence/` file
+to external mode-`0600` files. Generation and freeze must reject each before any
+`fchmod`, the external file's mode and SHA-256 must remain unchanged, and the Phase M
+frozen reader must reject the same `st_nlink > 1` inode. Also prove added/missing
+nested evidence and a rehashed-but-noncanonical manifest fail closed. Remove each
+fixture after recording those results; never run this adversary against the real
+review directory.
 
-Any finding dispatches one fix implementer with the complete findings list. It appends
-covering commands/output to Task 5's report, commits fix-forward, reruns Task 5's focused
-and full gates, passes one new combined Task 5 review, and starts a new terminal round.
-Old review directories are never overwritten.
+Any terminal finding dispatches one fix-forward implementer with the complete finding
+list, but evidence and review are appended to the report of the Task that owns each
+changed tracked path. The Plan remains controller-owned and requires a fresh P6
+three-lens Plan round before commit; `scripts/checks.sh` routes to Task 1;
+`scripts/official_blender_mcp_audit.py` routes to Task 6; the amended runbook and active
+audit route to Task 7. A multi-owner fix receives a fresh combined review for every
+owner whose path changed. A CLI fix first regenerates the Task 6 B2/C brief, runs its
+reader/full probes and 369-test gate, and obtains a clean Task 6 combined review. After
+every owning review is clean, regenerate the Task 7 brief from the approved Plan, run
+all Task 7 A/C/D/F clean-r2 probes and the 369-test gate on the new
+HEAD, append only `task-7-report.md`, and obtain a fresh clean combined Task 7 review.
+Then start a fresh terminal round. Never append Task 7 or terminal-fix evidence to the
+Task 5 report. Old review directories are never overwritten.
 
 ---
 
 ### Controller Phase M: Fast-forward the exact reviewed object and verify `main`
 
-This replaces Task 6 and is controller-only. Run one self-contained block from the
+This controller-only merge phase runs only after approved Task 7 and Phase R; it does
+not replace Task 7 and never dispatches Task 8. Run one self-contained block from the
 feature worktree. For the first merge set `EXPECTED_MAIN_ANCHOR` to the captured
 `initial_main_anchor` and leave `PREVIOUS_REVIEW_DIR` unset. For a clean postmerge
 fix-forward retry set `EXPECTED_MAIN_ANCHOR` to the old reviewed HEAD and
@@ -1882,29 +9122,306 @@ case "$EXPECTED_MAIN_ANCHOR" in *[!0-9a-f]*) exit 1 ;; esac
 test "${#EXPECTED_MAIN_ANCHOR}" = 40
 test -z "${PYTHONPATH-}"
 PREVIOUS_REVIEW_DIR="${PREVIOUS_REVIEW_DIR-}"
-BINDINGS="$("$UV" run --quiet --no-project --python 3.13 python - \
+BINDINGS="$("$UV" run --quiet --no-project --python 3.13 python -P - \
   "$REVIEW_DIR" "$PREVIOUS_REVIEW_DIR" <<'PY'
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import stat
 import sys
 from pathlib import Path
 
+if not sys.flags.safe_path:
+    raise SystemExit("STOP: merge evidence binder requires safe-path mode")
+
+EVIDENCE = {
+    "task-7-brief.md",
+    "task-7-report.md",
+    "task-7-review.md",
+    "invalid-journals.sha256",
+}
+R2_EVIDENCE = "r2-evidence"
+ACTOR_REPORTS = {
+    "code-review.md",
+    "adversarial-review.md",
+    "ponytail-review.md",
+}
 EXPECTED = {
     "whole-branch.diff", "review-base-head", "initial-main-anchor",
     "candidate-head", "package-sha256", "code-review.md",
-    "adversarial-review.md", "ponytail-review.md", "reviewed-head",
-}
+    "adversarial-review.md", "ponytail-review.md", "actor-inodes.json",
+    "reviewed-head", "terminal-manifest.json",
+} | EVIDENCE | {R2_EVIDENCE, "evidence-sha256"}
 REPORTS = ("code-review.md", "adversarial-review.md", "ponytail-review.md")
 RESERVED = re.compile(
     r"^(?P<key>(?:[A-Z][A-Z0-9_]*_VERDICT)|VERDICT|TASK_HEAD|REVIEWED_HEAD|"
-    r"REVIEW_BASE_HEAD|PACKAGE_SHA256|CRITICAL|IMPORTANT|MINOR):"
+    r"REVIEW_BASE_HEAD|PACKAGE_SHA256|EVIDENCE_SHA256|CRITICAL|IMPORTANT|MINOR):"
 )
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
+PINNED_SOURCE = "4309a39646e644261624bfcd2bca669b343b7621"
+TIMING = "controller_dispatch_wall_ms; not pure server compute"
+CONTROLLER_SHA256 = "cc325e471aa0d1a0349deade58d0f7517575c35d901fb99f00ee1cc4de7f640a"
+CONTROLLER_BEGIN = b"<!-- R2_CONTROLLER_BEGIN -->\n````python\n"
+CONTROLLER_END = b"````\n<!-- R2_CONTROLLER_END -->"
+
+
+# TERMINAL_BOUNDED_READER_BEGIN
+BRIEF_MAX_BYTES = 2 * 1024 * 1024
+REPORT_MAX_BYTES = 64 * 1024 * 1024
+PACKAGE_MAX_BYTES = 64 * 1024 * 1024
+REVIEW_MAX_BYTES = 8 * 1024 * 1024
+MANIFEST_MAX_BYTES = 2 * 1024 * 1024
+SMALL_BINDING_MAX_BYTES = 1024
+R2_ENTRY_MAX_BYTES = 64 * 1024 * 1024
+R2_AGGREGATE_MAX_BYTES = 512 * 1024 * 1024
+
+
+def bounded_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def terminal_file_limit(name: str) -> int:
+    if name == "task-7-brief.md":
+        return BRIEF_MAX_BYTES
+    if name == "task-7-report.md":
+        return REPORT_MAX_BYTES
+    if name in {
+        "task-7-review.md",
+        "code-review.md",
+        "adversarial-review.md",
+        "ponytail-review.md",
+    }:
+        return REVIEW_MAX_BYTES
+    if name == "whole-branch.diff":
+        return PACKAGE_MAX_BYTES
+    if name in {
+        "actor-inodes.json",
+        "evidence-sha256",
+        "invalid-journals.sha256",
+        "terminal-manifest.json",
+    }:
+        return MANIFEST_MAX_BYTES
+    if name in {
+        "review-base-head",
+        "initial-main-anchor",
+        "candidate-head",
+        "package-sha256",
+        "reviewed-head",
+    }:
+        return SMALL_BINDING_MAX_BYTES
+    raise RuntimeError(f"missing terminal file cap: {name}")
+
+
+def bounded_r2_aggregate(manifest_size: int, entry_sizes: list[int]) -> int:
+    if manifest_size <= 0 or manifest_size > MANIFEST_MAX_BYTES:
+        raise RuntimeError("r2 manifest size exceeds cap")
+    aggregate = manifest_size
+    for size in entry_sizes:
+        if (
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or size <= 0
+            or size > R2_ENTRY_MAX_BYTES
+        ):
+            raise RuntimeError("r2 entry size exceeds cap")
+        aggregate += size
+        if aggregate > R2_AGGREGATE_MAX_BYTES:
+            raise RuntimeError("r2 aggregate exceeds cap")
+    return aggregate
+
+
+def read_bounded_entry(
+    parent_path: Path,
+    name: str,
+    *,
+    parent_mode: int,
+    file_mode: int,
+    limit: int,
+    label: str,
+    expected_identity: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    parent_path = Path(os.path.abspath(parent_path))
+    if name in {"", ".", ".."} or name != os.path.basename(name):
+        raise RuntimeError(f"unsafe {label} leaf: {name!r}")
+    if limit <= 0 or os.path.realpath(parent_path) != os.fspath(parent_path):
+        raise RuntimeError(f"unsafe {label} parent: {parent_path}")
+    parent_before = os.lstat(parent_path)
+    parent_bound = bounded_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) != parent_mode
+    ):
+        raise RuntimeError(f"unsafe {label} parent metadata")
+    parent_fd = os.open(
+        parent_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    descriptor = -1
+    try:
+        if (
+            bounded_identity(os.fstat(parent_fd)) != parent_bound
+            or bounded_identity(os.lstat(parent_path)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        bound = bounded_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != file_mode
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+            or (
+                expected_identity is not None
+                and (before.st_dev, before.st_ino) != expected_identity
+            )
+        ):
+            raise RuntimeError(f"unsafe {label} artifact: {name}")
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
+        opened = os.fstat(descriptor)
+        if bounded_identity(opened) != bound:
+            raise RuntimeError(f"{label} changed while opening: {name}")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading: {name}")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading: {name}")
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        parent_after = os.fstat(parent_fd)
+        parent_current = os.lstat(parent_path)
+        if (
+            len(payload) != before.st_size
+            or bounded_identity(after) != bound
+            or bounded_identity(current) != bound
+            or bounded_identity(parent_after) != parent_bound
+            or bounded_identity(parent_current) != parent_bound
+        ):
+            raise RuntimeError(f"{label} changed while reading: {name}")
+        return payload, after
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
+def read_bounded_path(
+    raw_path: Path,
+    *,
+    parent_mode: int,
+    file_mode: int,
+    limit: int,
+    label: str,
+    expected_identity: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    path = Path(os.path.abspath(raw_path))
+    return read_bounded_entry(
+        path.parent,
+        path.name,
+        parent_mode=parent_mode,
+        file_mode=file_mode,
+        limit=limit,
+        label=label,
+        expected_identity=expected_identity,
+    )
+# TERMINAL_BOUNDED_READER_END
+
+
+def validate_actor_inodes(
+    directory: int,
+    directory_path: Path,
+    directory_info: os.stat_result,
+    *,
+    mode: int,
+    reports_empty: bool,
+    label: str,
+) -> dict[str, object]:
+    # One form for all three phases. The three free copies this replaces were three
+    # different bodies of the same predicate -- partial evaluation showed the widest
+    # one already implied the other two -- and nothing compared them, so a safety
+    # clause could be, and was, deleted from one copy alone without any gate moving.
+    raw, _ = read_bounded_entry(
+        directory_path,
+        "actor-inodes.json",
+        parent_mode=0o700 if mode == 0o600 else 0o500,
+        file_mode=mode,
+        limit=MANIFEST_MAX_BYTES,
+        label=label,
+    )
+    value = json.loads(raw)
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"reports", "review_dir", "version"}
+        or value["version"] != 1
+        or isinstance(value["version"], bool)
+        or value["review_dir"] != {
+            "dev": directory_info.st_dev,
+            "ino": directory_info.st_ino,
+        }
+        or not isinstance(value["reports"], dict)
+        or set(value["reports"]) != ACTOR_REPORTS
+    ):
+        raise RuntimeError(f"{label} binding differs")
+    canonical_identity = (
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        + b"\n"
+    )
+    if raw != canonical_identity:
+        raise RuntimeError(f"{label} record is not canonical")
+    for name in ACTOR_REPORTS:
+        binding = value["reports"][name]
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if (
+            not isinstance(binding, dict)
+            or set(binding) != {"dev", "ino"}
+            or not all(
+                isinstance(binding[key], int)
+                and not isinstance(binding[key], bool)
+                and binding[key] >= 0
+                for key in ("dev", "ino")
+            )
+            or stat.S_ISLNK(current.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_uid != os.getuid()
+            or current.st_nlink != 1
+            or stat.S_IMODE(current.st_mode) != mode
+            or (current.st_dev, current.st_ino)
+            != (binding["dev"], binding["ino"])
+            or (reports_empty and current.st_size != 0)
+            or (not reports_empty and current.st_size == 0)
+        ):
+            raise RuntimeError(f"{label} report differs: {name}")
+    return value
 
 
 def parse_report(payload: bytes, expected: list[tuple[str, str]]) -> None:
@@ -1930,7 +9447,340 @@ def parse_report(payload: bytes, expected: list[tuple[str, str]]) -> None:
         raise RuntimeError("missing reserved marker")
 
 
-def frozen_directory(raw_path: str) -> dict[str, bytes]:
+def no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise RuntimeError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
+def reject_constant(value: str) -> None:
+    raise RuntimeError(f"non-finite JSON constant: {value}")
+
+
+def canonical(value: object) -> bytes:
+    return (
+        json.dumps(
+            value, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        ).encode("utf-8") + b"\n"
+    )
+
+
+def controller_from_brief(payload: bytes) -> bytes:
+    if payload.count(CONTROLLER_BEGIN) != 1 or payload.count(CONTROLLER_END) != 1:
+        raise RuntimeError("Task 7 brief controller fence boundary differs")
+    begin = payload.index(CONTROLLER_BEGIN) + len(CONTROLLER_BEGIN)
+    finish = payload.index(CONTROLLER_END, begin)
+    value = payload[begin:finish]
+    if (
+        len(value.splitlines()) != 6193
+        or len(value) != 254319
+        or hashlib.sha256(value).hexdigest() != CONTROLLER_SHA256
+    ):
+        raise RuntimeError("Task 7 brief controller bytes differ")
+    return value
+
+
+def r2_snapshot(root: Path, directory_mode: int, file_mode: int) -> dict[str, bytes]:
+    if os.path.realpath(root) != os.fspath(root):
+        raise RuntimeError("frozen r2 path contains a symlink")
+    before = os.lstat(root)
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISDIR(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != directory_mode
+    ):
+        raise RuntimeError("unsafe frozen r2 directory")
+    root_bound = bounded_identity(before)
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(directory)
+        if bounded_identity(opened) != root_bound:
+            raise RuntimeError("frozen r2 directory changed while opening")
+        raw, _ = read_bounded_entry(
+            root,
+            "evidence-manifest.json",
+            parent_mode=directory_mode,
+            file_mode=file_mode,
+            limit=MANIFEST_MAX_BYTES,
+            label="frozen r2 manifest",
+        )
+        manifest = json.loads(
+            raw, object_pairs_hook=no_duplicates, parse_constant=reject_constant
+        )
+        exact_top = {
+            "version", "attempt_id", "source_pin", "catalog_count",
+            "timing_semantics", "report_sha256", "journal_sha256",
+            "dispatch_manifest_sha256", "files",
+        }
+        if not isinstance(manifest, dict) or set(manifest) != exact_top:
+            raise RuntimeError("frozen r2 manifest top-level differs")
+        if raw != canonical(manifest):
+            raise RuntimeError("frozen r2 manifest is not canonical JSON")
+        if (
+            manifest["version"] != 1
+            or isinstance(manifest["version"], bool)
+            or not isinstance(manifest["attempt_id"], str)
+            or re.fullmatch(r"attempt-[0-9]{4}", manifest["attempt_id"]) is None
+            or manifest["attempt_id"] == "attempt-0000"
+            or manifest["source_pin"] != PINNED_SOURCE
+            or manifest["timing_semantics"] != TIMING
+            or not isinstance(manifest["catalog_count"], int)
+            or isinstance(manifest["catalog_count"], bool)
+            or manifest["catalog_count"] <= 0
+        ):
+            raise RuntimeError("frozen r2 manifest binding differs")
+        for key in ("report_sha256", "journal_sha256", "dispatch_manifest_sha256"):
+            if not isinstance(manifest[key], str) or HEX64.fullmatch(manifest[key]) is None:
+                raise RuntimeError(f"invalid frozen r2 digest: {key}")
+        entries = manifest["files"]
+        if not isinstance(entries, list) or not entries:
+            raise RuntimeError("frozen r2 file list absent")
+        paths: list[str] = []
+        by_path: dict[str, dict[str, object]] = {}
+        entry_sizes: list[int] = []
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) != {
+                "path", "bytes", "mode", "sha256"
+            }:
+                raise RuntimeError("frozen r2 file entry differs")
+            name = entry["path"]
+            if (
+                not isinstance(name, str)
+                or not name
+                or name in {".", "..", "evidence-manifest.json"}
+                or "/" in name
+                or "\\" in name
+                or Path(name).name != name
+                or not isinstance(entry["bytes"], int)
+                or isinstance(entry["bytes"], bool)
+                or entry["bytes"] <= 0
+                or entry["bytes"] > R2_ENTRY_MAX_BYTES
+                or entry["mode"] != "0600"
+                or not isinstance(entry["sha256"], str)
+                or HEX64.fullmatch(entry["sha256"]) is None
+            ):
+                raise RuntimeError("unsafe frozen r2 file entry")
+            paths.append(name)
+            by_path[name] = entry
+            entry_sizes.append(entry["bytes"])
+        bounded_r2_aggregate(len(raw), entry_sizes)
+        if paths != sorted(paths) or len(paths) != len(set(paths)):
+            raise RuntimeError("frozen r2 paths are not unique/sorted")
+        base_evidence = {
+            "r2_controller.py", "fixture_setup.py", "model_body.py", "cli_body.py",
+            "library_source.blend", "fixture.blend", "direct-catalog.json",
+            "app-live-catalog.json", "source-catalog.json",
+            "effective-config-catalog.json", "on-disk-config-catalog.json",
+            "tool-schema.json", "catalog-bindings.json", "events.ndjson",
+            "dispatch-manifest.ndjson", "r2-report.md",
+            "dispatch-validation.json", "area-screenshot.png",
+            "window-screenshot.png", "thumbnail.png", "viewport.png",
+        }
+        extras = set(paths) - base_evidence
+        if not base_evidence <= set(paths):
+            raise RuntimeError("frozen r2 base allowlist differs")
+        if set(os.listdir(directory)) != set(paths) | {"evidence-manifest.json"}:
+            raise RuntimeError("frozen r2 directory allowlist differs")
+        payloads = {"evidence-manifest.json": raw}
+        for name in paths:
+            payload, _ = read_bounded_entry(
+                root,
+                name,
+                parent_mode=directory_mode,
+                file_mode=file_mode,
+                limit=R2_ENTRY_MAX_BYTES,
+                label=f"frozen r2 {name}",
+            )
+            entry = by_path[name]
+            if (
+                len(payload) != entry["bytes"]
+                or hashlib.sha256(payload).hexdigest() != entry["sha256"]
+            ):
+                raise RuntimeError(f"frozen r2 file digest differs: {name}")
+            payloads[name] = payload
+        dispatch = payloads["dispatch-manifest.ndjson"]
+        if not dispatch.endswith(b"\n"):
+            raise RuntimeError("frozen r2 dispatch final newline absent")
+        dynamic_artifacts: set[str] = set()
+        for line in dispatch.splitlines():
+            if not line:
+                raise RuntimeError("blank frozen r2 dispatch row")
+            row = json.loads(
+                line,
+                object_pairs_hook=no_duplicates,
+                parse_constant=reject_constant,
+            )
+            if not isinstance(row, dict):
+                raise RuntimeError("frozen r2 dispatch row is not an object")
+            if row.get("record_type") == "call" and row.get("artifact") is not None:
+                if row.get("outcome") != "pass":
+                    raise RuntimeError("failed frozen call cannot bind dynamic evidence")
+                artifact = row["artifact"]
+                if not isinstance(artifact, dict):
+                    raise RuntimeError("invalid frozen dynamic artifact binding")
+                artifact_path = artifact.get("path")
+                if artifact_path in base_evidence:
+                    continue
+                acceptance = row.get("acceptance")
+                valid_repeat = (
+                    row.get("classification") == "threshold_repeat"
+                    and isinstance(artifact_path, str)
+                    and re.fullmatch(r"r2-repeat-[0-9]{4}[.]png", artifact_path)
+                    is not None
+                )
+                valid_future_first = (
+                    row.get("classification") == "first"
+                    and isinstance(acceptance, dict)
+                    and acceptance.get("lane") == "future_readonly_empty_smoke"
+                    and isinstance(artifact_path, str)
+                    and re.fullmatch(r"r2-future-[0-9]{4}[.]png", artifact_path)
+                    is not None
+                )
+                if (
+                    not isinstance(artifact_path, str)
+                    or not (valid_repeat or valid_future_first)
+                    or artifact_path in dynamic_artifacts
+                ):
+                    raise RuntimeError("invalid/duplicate frozen dynamic artifact")
+                dynamic_artifacts.add(artifact_path)
+        if extras != dynamic_artifacts:
+            raise RuntimeError("frozen dynamic artifacts differ from dispatch rows")
+        if (
+            hashlib.sha256(payloads["r2-report.md"]).hexdigest()
+            != manifest["report_sha256"]
+            or hashlib.sha256(payloads["events.ndjson"]).hexdigest()
+            != manifest["journal_sha256"]
+            or hashlib.sha256(payloads["dispatch-manifest.ndjson"]).hexdigest()
+            != manifest["dispatch_manifest_sha256"]
+        ):
+            raise RuntimeError("frozen r2 top-level digest differs")
+        direct = json.loads(
+            payloads["direct-catalog.json"],
+            object_pairs_hook=no_duplicates,
+            parse_constant=reject_constant,
+        )
+        if (
+            not isinstance(direct, list)
+            or direct != sorted(direct)
+            or len(direct) != len(set(direct))
+            or not all(isinstance(name, str) and name for name in direct)
+            or len(direct) != manifest["catalog_count"]
+        ):
+            raise RuntimeError("frozen r2 catalog/count differs")
+        for catalog_name in (
+            "app-live-catalog.json", "source-catalog.json",
+            "effective-config-catalog.json", "on-disk-config-catalog.json",
+        ):
+            if payloads[catalog_name] != payloads["direct-catalog.json"]:
+                raise RuntimeError(f"frozen r2 catalog differs: {catalog_name}")
+        if (
+            set(os.listdir(directory)) != set(paths) | {"evidence-manifest.json"}
+            or bounded_identity(os.fstat(directory)) != root_bound
+            or bounded_identity(os.lstat(root)) != root_bound
+        ):
+            raise RuntimeError("frozen r2 directory changed while reading")
+        return payloads
+    finally:
+        os.close(directory)
+
+
+def evidence_sha256(payloads: dict[str, bytes], r2_manifest: bytes) -> str:
+    if hashlib.sha256(payloads["invalid-journals.sha256"]).hexdigest() != (
+        "8292ac78073804687faab381181881ac7f522da1edea2dffe625626c1482c535"
+    ):
+        raise RuntimeError("frozen r1 journal manifest differs")
+    hashes = {
+        name: hashlib.sha256(payloads[name]).hexdigest()
+        for name in EVIDENCE
+    }
+    hashes[f"{R2_EVIDENCE}/evidence-manifest.json"] = hashlib.sha256(
+        r2_manifest
+    ).hexdigest()
+    expected = "".join(
+        f"{hashes[name]}  {name}\n" for name in sorted(hashes)
+    ).encode("ascii")
+    if payloads["evidence-sha256"] != expected:
+        raise RuntimeError("terminal evidence digest manifest differs")
+    return hashlib.sha256(expected).hexdigest()
+
+
+# TERMINAL_MANIFEST_VALIDATOR_BEGIN
+def terminal_manifest_value(
+    payloads: dict[str, bytes],
+    r2_payloads: dict[str, bytes],
+    review_info: os.stat_result,
+    r2_info: os.stat_result,
+    actor_inodes: dict[str, object],
+    manifest_info: os.stat_result,
+) -> dict[str, object]:
+    file_payloads = {
+        name: payload
+        for name, payload in payloads.items()
+        if name != "terminal-manifest.json"
+    }
+    file_payloads.update(
+        {f"r2-evidence/{name}": payload for name, payload in r2_payloads.items()}
+    )
+    files = [
+        {
+            "bytes": len(file_payloads[name]),
+            "mode": "0400",
+            "path": name,
+            "sha256": hashlib.sha256(file_payloads[name]).hexdigest(),
+        }
+        for name in sorted(file_payloads)
+    ]
+    return {
+        "actor_inodes": actor_inodes,
+        "files": files,
+        "r2_directory": {
+            "dev": r2_info.st_dev,
+            "ino": r2_info.st_ino,
+            "mode": "0500",
+        },
+        "review_directory": {
+            "dev": review_info.st_dev,
+            "ino": review_info.st_ino,
+            "mode": "0500",
+        },
+        "self": {"dev": manifest_info.st_dev, "ino": manifest_info.st_ino},
+        "version": 1,
+    }
+
+
+def validate_terminal_manifest(
+    raw: bytes,
+    payloads: dict[str, bytes],
+    r2_payloads: dict[str, bytes],
+    review_info: os.stat_result,
+    r2_info: os.stat_result,
+    actor_inodes: dict[str, object],
+    manifest_info: os.stat_result,
+) -> None:
+    value = json.loads(
+        raw,
+        object_pairs_hook=no_duplicates,
+        parse_constant=reject_constant,
+    )
+    expected = terminal_manifest_value(
+        payloads,
+        r2_payloads,
+        review_info,
+        r2_info,
+        actor_inodes,
+        manifest_info,
+    )
+    if value != expected or raw != canonical(value):
+        raise RuntimeError("terminal manifest binding/canonical bytes differ")
+# TERMINAL_MANIFEST_VALIDATOR_END
+
+
+def frozen_directory(raw_path: str) -> tuple[dict[str, bytes], dict[str, bytes]]:
     path = Path(os.path.abspath(raw_path))
     if os.path.realpath(path) != os.fspath(path):
         raise RuntimeError("review directory path contains a symlink")
@@ -1943,71 +9793,59 @@ def frozen_directory(raw_path: str) -> dict[str, bytes]:
     ):
         raise RuntimeError("owned frozen mode-0500 review directory required")
     directory_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    files: dict[str, int] = {}
     try:
         opened_dir = os.fstat(directory_fd)
-        if (opened_dir.st_dev, opened_dir.st_ino) != (
-            before_dir.st_dev,
-            before_dir.st_ino,
-        ):
+        opened_bound = bounded_identity(opened_dir)
+        if opened_bound != bounded_identity(before_dir):
             raise RuntimeError("review directory changed while opening")
         if set(os.listdir(directory_fd)) != EXPECTED:
             raise RuntimeError("frozen review directory allowlist differs")
-        for name in sorted(EXPECTED):
-            before_file = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            if (
-                stat.S_ISLNK(before_file.st_mode)
-                or not stat.S_ISREG(before_file.st_mode)
-                or before_file.st_uid != os.getuid()
-                or before_file.st_nlink != 1
-                or stat.S_IMODE(before_file.st_mode) != 0o400
-            ):
-                raise RuntimeError(f"owned frozen review file required: {name}")
-            descriptor = os.open(
-                name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd
-            )
-            opened_file = os.fstat(descriptor)
-            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            if (
-                not stat.S_ISREG(opened_file.st_mode)
-                or opened_file.st_uid != os.getuid()
-                or before_file.st_nlink != 1
-                or opened_file.st_nlink != 1
-                or current.st_nlink != 1
-                or stat.S_IMODE(opened_file.st_mode) != 0o400
-                or (opened_file.st_dev, opened_file.st_ino) !=
-                   (before_file.st_dev, before_file.st_ino)
-                or (current.st_dev, current.st_ino) !=
-                   (opened_file.st_dev, opened_file.st_ino)
-            ):
-                os.close(descriptor)
-                raise RuntimeError(f"frozen review file changed: {name}")
-            files[name] = descriptor
+        actor_inodes = validate_actor_inodes(
+            directory_fd, path, opened_dir, mode=0o400, reports_empty=False,
+            label="frozen actor identity",
+        )
+        r2_payloads = r2_snapshot(path / R2_EVIDENCE, 0o500, 0o400)
         result: dict[str, bytes] = {}
-        for name, descriptor in files.items():
-            chunks: list[bytes] = []
-            while chunk := os.read(descriptor, 1024 * 1024):
-                chunks.append(chunk)
-            result[name] = b"".join(chunks)
-            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            opened_file = os.fstat(descriptor)
-            if (
-                current.st_nlink != 1
-                or opened_file.st_nlink != 1
-                or (current.st_dev, current.st_ino) !=
-                   (opened_file.st_dev, opened_file.st_ino)
-            ):
-                raise RuntimeError(f"frozen review path changed while reading: {name}")
-        if set(os.listdir(directory_fd)) != EXPECTED:
+        infos: dict[str, os.stat_result] = {}
+        for name in sorted(EXPECTED - {R2_EVIDENCE}):
+            result[name], infos[name] = read_bounded_entry(
+                path,
+                name,
+                parent_mode=0o500,
+                file_mode=0o400,
+                limit=terminal_file_limit(name),
+                label=f"Phase M terminal {name}",
+            )
+        if (
+            set(os.listdir(directory_fd)) != EXPECTED
+            or bounded_identity(os.fstat(directory_fd)) != opened_bound
+            or bounded_identity(os.lstat(path)) != opened_bound
+        ):
             raise RuntimeError("frozen review directory changed while reading")
-        return result
+        if validate_actor_inodes(
+            directory_fd, path, opened_dir, mode=0o400, reports_empty=False,
+            label="frozen actor identity",
+        ) != actor_inodes:
+            raise RuntimeError("frozen actor identity changed while reading")
+        if r2_snapshot(path / R2_EVIDENCE, 0o500, 0o400) != r2_payloads:
+            raise RuntimeError("frozen r2 evidence changed while reading")
+        if controller_from_brief(result["task-7-brief.md"]) != r2_payloads["r2_controller.py"]:
+            raise RuntimeError("frozen Task 7 brief/evidence controller bytes differ")
+        validate_terminal_manifest(
+            result["terminal-manifest.json"],
+            result,
+            r2_payloads,
+            os.fstat(directory_fd),
+            os.lstat(path / R2_EVIDENCE),
+            actor_inodes,
+            infos["terminal-manifest.json"],
+        )
+        return result, r2_payloads
     finally:
-        for descriptor in files.values():
-            os.close(descriptor)
         os.close(directory_fd)
 
 
-current = frozen_directory(sys.argv[1])
+current, current_r2 = frozen_directory(sys.argv[1])
 base = current["review-base-head"].decode("ascii").removesuffix("\n")
 initial = current["initial-main-anchor"].decode("ascii").removesuffix("\n")
 candidate = current["candidate-head"].decode("ascii").removesuffix("\n")
@@ -2019,10 +9857,14 @@ if candidate != reviewed or HEX64.fullmatch(package_sha) is None:
     raise RuntimeError("reviewed/candidate/package binding differs")
 if hashlib.sha256(current["whole-branch.diff"]).hexdigest() != package_sha:
     raise RuntimeError("whole-branch package digest differs")
+evidence_sha = evidence_sha256(
+    current, current_r2["evidence-manifest.json"]
+)
 expected = [
     ("REVIEWED_HEAD", reviewed),
     ("REVIEW_BASE_HEAD", base),
     ("PACKAGE_SHA256", package_sha),
+    ("EVIDENCE_SHA256", evidence_sha),
     ("CRITICAL", "0"),
     ("IMPORTANT", "0"),
     ("MINOR", "0"),
@@ -2033,15 +9875,16 @@ for report in REPORTS:
 review_hashes = [hashlib.sha256(current[name]).hexdigest() for name in REPORTS]
 previous = "-"
 if sys.argv[2]:
-    old = frozen_directory(sys.argv[2])
+    old, old_r2 = frozen_directory(sys.argv[2])
+    evidence_sha256(old, old_r2["evidence-manifest.json"])
     previous = old["reviewed-head"].decode("ascii").removesuffix("\n")
     if HEX40.fullmatch(previous) is None:
         raise RuntimeError("invalid previous reviewed-head")
-print(base, initial, reviewed, package_sha, *review_hashes, previous)
+print(base, initial, reviewed, package_sha, evidence_sha, *review_hashes, previous)
 PY
 )"
 IFS=' ' read -r REVIEW_BASE_HEAD INITIAL_MAIN_ANCHOR REVIEWED_HEAD \
-  PACKAGE_SHA256 CODE_REVIEW_SHA256 ADVERSARIAL_REVIEW_SHA256 \
+  PACKAGE_SHA256 EVIDENCE_SHA256 CODE_REVIEW_SHA256 ADVERSARIAL_REVIEW_SHA256 \
   PONYTAIL_REVIEW_SHA256 PREVIOUS_REVIEWED_HEAD <<EOF
 $BINDINGS
 EOF
@@ -2072,12 +9915,15 @@ test "$EXPECTED_MAIN_ANCHOR" != "$REVIEWED_HEAD"
 # Accept an absent generated environment or an owned ordinary canonical one.
 MAIN_VENV="$MAIN_ROOT/.venv"
 git -C "$MAIN_ROOT" check-ignore -q -- .venv/
-"$UV" run --quiet --no-project --python 3.13 python - \
+"$UV" run --quiet --no-project --python 3.13 python -P - \
   "$MAIN_ROOT" "$MAIN_VENV" <<'PY'
 from pathlib import Path
 import os
 import stat
 import sys
+
+if not sys.flags.safe_path:
+    raise SystemExit("STOP: main .venv preflight requires safe-path mode")
 
 root = Path(sys.argv[1])
 venv = Path(sys.argv[2])
@@ -2163,17 +10009,139 @@ print(
 PY
 }
 
+# The review directory's name was first parsed and validated well after this merge, so
+# a REVIEW_DIR whose name does not end in `terminal-r<N>` fast-forwarded main and then
+# hit a bare `exit 1` with no postmerge report written at all: a guard placed after the
+# irreversible action it should gate, the same class the identity gate corrected.
+# `frozen_directory()` checks this directory's mode, allowlist and contents but never
+# its name, which is the one check the R1 builder does perform.
+REVIEW_ROUND="${REVIEW_DIR##*terminal-r}"
+case "$REVIEW_ROUND" in 0|*[!0-9]*|'') echo 'STOP: review directory does not end in terminal-r<N>' >&2; exit 1 ;; esac
+case "${REVIEW_DIR##*/}" in terminal-r"$REVIEW_ROUND") ;; *) echo 'STOP: review directory basename is not terminal-r<N>' >&2; exit 1 ;; esac
+# Re-pinned immediately before the fast-forward. The anchor is asserted a hundred lines
+# and two intervening commands earlier and was never re-checked here; `--ff-only` bounds
+# the damage, but a main advanced to a different ancestor of REVIEWED_HEAD still
+# fast-forwards while the journal goes on recording the stale anchor.
+test "$(git -C "$MAIN_ROOT" rev-parse HEAD)" = "$EXPECTED_MAIN_ANCHOR"
 # Merge the immutable reviewed object, never the moving branch name.
 git -C "$MAIN_ROOT" merge --ff-only "$REVIEWED_HEAD"
 test "$(git -C "$MAIN_ROOT" rev-parse HEAD)" = "$REVIEWED_HEAD"
+CHECKS_EXIT=125
+CHECKS_OUTPUT_BYTES=0
+CHECKS_OUTPUT_SHA256=-
+CHECKS_SUMMARY_COUNT=0
+CHECKS_TESTS=-
+CHECKS_OUTPUT_TRUNCATED=true
+CHECKS_LINE_OVERFLOW=true
+CHECKS_INVENTORY_CLEAN=false
 set +e
-(cd "$MAIN_ROOT" && ./scripts/checks.sh)
-CHECKS_EXIT=$?
+CHECKS_BINDINGS="$("$UV" run --quiet --no-project --python 3.13 python -P - \
+  "$MAIN_ROOT" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+if not sys.flags.safe_path:
+    raise SystemExit("STOP: main checks capture requires safe-path mode")
+
+LIVE_CAP = 8 * 1024 * 1024
+LINE_CAP = 1024 * 1024
+root = Path(sys.argv[1])
+process = subprocess.Popen(
+    ["./scripts/checks.sh"],
+    cwd=root,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+)
+assert process.stdout is not None
+digest = hashlib.sha256()
+total = 0
+forwarded = 0
+pending = bytearray()
+dropping_line = False
+line_overflow = False
+clean_summaries = 0
+observed_counts: list[int] = []
+inventory_clean = True
+forbidden = (b"skipped", b"xfailed", b"xpassed", b"deselected")
+
+
+def inspect_line(line: bytes) -> None:
+    global clean_summaries, inventory_clean
+    if re.fullmatch(rb"369 passed in [^\r\n]+", line) is not None:
+        clean_summaries += 1
+    summary = re.fullmatch(rb"([0-9]+) passed(?:, [^\r\n]+)? in [^\r\n]+", line)
+    if summary is not None:
+        observed_counts.append(int(summary.group(1)))
+    lowered = line.lower()
+    if any(token in lowered for token in forbidden):
+        inventory_clean = False
+
+
+while True:
+    chunk = process.stdout.read(64 * 1024)
+    if not chunk:
+        break
+    digest.update(chunk)
+    total += len(chunk)
+    if forwarded < LIVE_CAP:
+        live = chunk[: LIVE_CAP - forwarded]
+        sys.stderr.buffer.write(live)
+        sys.stderr.buffer.flush()
+        forwarded += len(live)
+    for byte in chunk:
+        if dropping_line:
+            if byte == 0x0A:
+                dropping_line = False
+            continue
+        if byte == 0x0A:
+            inspect_line(bytes(pending).removesuffix(b"\r"))
+            pending.clear()
+            continue
+        pending.append(byte)
+        if len(pending) > LINE_CAP:
+            line_overflow = True
+            pending.clear()
+            dropping_line = True
+if pending and not dropping_line:
+    inspect_line(bytes(pending).removesuffix(b"\r"))
+returncode = process.wait()
+truncated = total > LIVE_CAP
+if truncated:
+    print(
+        f"\nCHECKS_LIVE_OUTPUT_CAPPED retained={LIVE_CAP} observed={total}",
+        file=sys.stderr,
+    )
+observed = str(observed_counts[0]) if len(observed_counts) == 1 else "-"
+print(
+    returncode,
+    total,
+    digest.hexdigest(),
+    clean_summaries,
+    observed,
+    str(truncated).lower(),
+    str(line_overflow).lower(),
+    str(inventory_clean).lower(),
+)
+PY
+)"
+CHECKS_CAPTURE_EXIT=$?
 verify_main_venv
 MAIN_VENV_EXIT=$?
 git -C "$MAIN_ROOT" diff --check
 DIFF_EXIT=$?
 set -e
+if [ "$CHECKS_CAPTURE_EXIT" = 0 ]; then
+  IFS=' ' read -r CHECKS_EXIT CHECKS_OUTPUT_BYTES CHECKS_OUTPUT_SHA256 \
+    CHECKS_SUMMARY_COUNT CHECKS_TESTS CHECKS_OUTPUT_TRUNCATED \
+    CHECKS_LINE_OVERFLOW CHECKS_INVENTORY_CLEAN <<EOF
+$CHECKS_BINDINGS
+EOF
+fi
 POST_MAIN_HEAD="$(git -C "$MAIN_ROOT" rev-parse HEAD)"
 FEATURE_HEAD="$(git rev-parse HEAD)"
 FEATURE_REF_HEAD="$(git rev-parse refs/heads/$FEATURE_BRANCH)"
@@ -2182,35 +10150,150 @@ FEATURE_STATUS="$(git status --porcelain=v1 --untracked-files=all)"
 test "$POST_MAIN_HEAD" = "$REVIEWED_HEAD"
 test "$FEATURE_HEAD" = "$REVIEWED_HEAD"
 test "$FEATURE_REF_HEAD" = "$REVIEWED_HEAD"
-REVIEW_ROUND="${REVIEW_DIR##*terminal-r}"
-case "$REVIEW_ROUND" in 0|*[!0-9]*|'') exit 1 ;; esac
 POSTMERGE_REPORT=.superpowers/sdd/modeling-remediation/postmerge-r$REVIEW_ROUND.txt
-test ! -e "$POSTMERGE_REPORT"
-test ! -L "$POSTMERGE_REPORT"
-install -m 600 /dev/null "$POSTMERGE_REPORT"
+CHECKS_EVIDENCE_OK=true
+case "$CHECKS_OUTPUT_SHA256" in *[!0-9a-f]*|'') CHECKS_EVIDENCE_OK=false ;; esac
+if [ "${#CHECKS_OUTPUT_SHA256}" != 64 ] || [ "$CHECKS_CAPTURE_EXIT" != 0 ] || \
+   [ "$CHECKS_SUMMARY_COUNT" != 1 ] || [ "$CHECKS_TESTS" != 369 ] || \
+   [ "$CHECKS_OUTPUT_TRUNCATED" != false ] || \
+   [ "$CHECKS_LINE_OVERFLOW" != false ] || \
+   [ "$CHECKS_INVENTORY_CLEAN" != true ]; then
+  CHECKS_EVIDENCE_OK=false
+fi
 RESULT=pass
-if [ "$CHECKS_EXIT" != 0 ] || [ "$MAIN_VENV_EXIT" != 0 ] || \
+if [ "$CHECKS_EXIT" != 0 ] || [ "$CHECKS_EVIDENCE_OK" != true ] || \
+   [ "$MAIN_VENV_EXIT" != 0 ] || \
    [ "$DIFF_EXIT" != 0 ]; then RESULT=clean_failure; fi
 if [ -n "$MAIN_STATUS" ] || [ -n "$FEATURE_STATUS" ]; then RESULT=dirty_failure; fi
-{
-  printf 'result=%s\n' "$RESULT"
-  printf 'review_dir=%s\nfeature_root=%s\nmain_root=%s\n' \
-    "$REVIEW_DIR" "$FEATURE_ROOT" "$MAIN_ROOT"
-  printf 'review_base_head=%s\ninitial_main_anchor=%s\n' \
-    "$REVIEW_BASE_HEAD" "$INITIAL_MAIN_ANCHOR"
-  printf 'expected_main_anchor=%s\nreviewed_head=%s\n' \
-    "$EXPECTED_MAIN_ANCHOR" "$REVIEWED_HEAD"
-  printf 'postmerge_main_head=%s\nfeature_worktree_head=%s\nfeature_ref_head=%s\n' \
-    "$POST_MAIN_HEAD" "$FEATURE_HEAD" "$FEATURE_REF_HEAD"
-  printf 'package_sha256=%s\ncode_review_sha256=%s\n' \
-    "$PACKAGE_SHA256" "$CODE_REVIEW_SHA256"
-  printf 'adversarial_review_sha256=%s\nponytail_review_sha256=%s\n' \
-    "$ADVERSARIAL_REVIEW_SHA256" "$PONYTAIL_REVIEW_SHA256"
-  printf 'checks_exit=%s\nmain_venv_exit=%s\ndiff_check_exit=%s\n' \
-    "$CHECKS_EXIT" "$MAIN_VENV_EXIT" "$DIFF_EXIT"
-  printf 'main_clean=%s\n' "$([ -z "$MAIN_STATUS" ] && echo true || echo false)"
-  printf 'feature_clean=%s\n' "$([ -z "$FEATURE_STATUS" ] && echo true || echo false)"
-} >"$POSTMERGE_REPORT"
+MAIN_CLEAN="$([ -z "$MAIN_STATUS" ] && echo true || echo false)"
+FEATURE_CLEAN="$([ -z "$FEATURE_STATUS" ] && echo true || echo false)"
+set +e
+POSTMERGE_ID="$("$UV" run --quiet --no-project --python 3.13 python -P - \
+  ".superpowers/sdd/modeling-remediation" "$REVIEW_ROUND" "$RESULT" \
+  "$REVIEW_DIR" "$FEATURE_ROOT" "$MAIN_ROOT" "$REVIEW_BASE_HEAD" \
+  "$INITIAL_MAIN_ANCHOR" "$EXPECTED_MAIN_ANCHOR" "$REVIEWED_HEAD" \
+  "$POST_MAIN_HEAD" "$FEATURE_HEAD" "$FEATURE_REF_HEAD" "$PACKAGE_SHA256" \
+  "$CODE_REVIEW_SHA256" "$EVIDENCE_SHA256" "$ADVERSARIAL_REVIEW_SHA256" \
+  "$PONYTAIL_REVIEW_SHA256" "$CHECKS_CAPTURE_EXIT" "$CHECKS_EXIT" \
+  "$CHECKS_SUMMARY_COUNT" "$CHECKS_TESTS" "$CHECKS_OUTPUT_BYTES" \
+  "$CHECKS_OUTPUT_SHA256" "$CHECKS_OUTPUT_TRUNCATED" "$CHECKS_LINE_OVERFLOW" \
+  "$CHECKS_INVENTORY_CLEAN" "$MAIN_VENV_EXIT" "$DIFF_EXIT" \
+  "$MAIN_CLEAN" "$FEATURE_CLEAN" <<'PY'
+from __future__ import annotations
+
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+if not sys.flags.safe_path:
+    raise SystemExit("STOP: post-merge journal writer requires safe-path mode")
+
+run_dir = Path(os.path.abspath(sys.argv[1]))
+round_n = sys.argv[2]
+values = sys.argv[3:]
+keys = (
+    "result",
+    "review_dir",
+    "feature_root",
+    "main_root",
+    "review_base_head",
+    "initial_main_anchor",
+    "expected_main_anchor",
+    "reviewed_head",
+    "postmerge_main_head",
+    "feature_worktree_head",
+    "feature_ref_head",
+    "package_sha256",
+    "code_review_sha256",
+    "evidence_sha256",
+    "adversarial_review_sha256",
+    "ponytail_review_sha256",
+    "checks_capture_exit",
+    "checks_exit",
+    "checks_summary_count",
+    "checks_tests",
+    "checks_output_bytes",
+    "checks_output_sha256",
+    "checks_output_truncated",
+    "checks_line_overflow",
+    "checks_inventory_clean",
+    "main_venv_exit",
+    "diff_check_exit",
+    "main_clean",
+    "feature_clean",
+)
+if re.fullmatch(r"[1-9][0-9]*", round_n) is None or len(values) != len(keys):
+    raise RuntimeError("invalid postmerge report arguments")
+if os.path.realpath(run_dir) != os.fspath(run_dir):
+    raise RuntimeError("postmerge run directory path contains a symlink")
+run_info = os.lstat(run_dir)
+if (
+    stat.S_ISLNK(run_info.st_mode)
+    or not stat.S_ISDIR(run_info.st_mode)
+    or run_info.st_uid != os.getuid()
+    or stat.S_IMODE(run_info.st_mode) != 0o700
+):
+    raise RuntimeError("owned native mode-0700 postmerge run directory required")
+run_fd = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+name = f"postmerge-r{round_n}.txt"
+descriptor = -1
+try:
+    opened_run = os.fstat(run_fd)
+    if (opened_run.st_dev, opened_run.st_ino) != (run_info.st_dev, run_info.st_ino):
+        raise RuntimeError("postmerge run directory changed while opening")
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=run_fd,
+    )
+    os.fchmod(descriptor, 0o600)
+    report_info = os.fstat(descriptor)
+    rows = [
+        f"report_dev={report_info.st_dev}",
+        f"report_ino={report_info.st_ino}",
+    ]
+    rows.extend(f"{key}={value}" for key, value in zip(keys, values, strict=True))
+    payload = ("\n".join(rows) + "\n").encode("utf-8")
+    view = memoryview(payload)
+    while view:
+        view = view[os.write(descriptor, view):]
+    os.fsync(descriptor)
+    current = os.stat(name, dir_fd=run_fd, follow_symlinks=False)
+    after = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(after.st_mode)
+        or after.st_uid != os.getuid()
+        or after.st_nlink != 1
+        or current.st_nlink != 1
+        or stat.S_IMODE(after.st_mode) != 0o600
+        or (after.st_dev, after.st_ino) != (report_info.st_dev, report_info.st_ino)
+        or (current.st_dev, current.st_ino) != (after.st_dev, after.st_ino)
+    ):
+        raise RuntimeError("postmerge report identity changed")
+    os.fsync(run_fd)
+    print(report_info.st_dev, report_info.st_ino)
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+    os.close(run_fd)
+PY
+)"
+POSTMERGE_PUBLISH_EXIT=$?
+set -e
+if [ "$POSTMERGE_PUBLISH_EXIT" != 0 ]; then
+  if [ "$RESULT" = dirty_failure ]; then
+    echo "STOP_DIRTY_WORKTREE postmerge_report_publication_failed" >&2
+    exit 86
+  fi
+  echo "POSTMERGE_CLEAN_FAILURE postmerge_report_publication_failed" >&2
+  exit 85
+fi
+IFS=' ' read -r POSTMERGE_REPORT_DEV POSTMERGE_REPORT_INO <<EOF
+$POSTMERGE_ID
+EOF
 if [ "$RESULT" = dirty_failure ]; then
   echo "STOP_DIRTY_WORKTREE report=$POSTMERGE_REPORT" >&2
   exit 86
@@ -2227,22 +10310,29 @@ BASH
 Expected success: `postmerge_main_head == feature_worktree_head ==
 feature_ref_head == REVIEWED_HEAD`, both worktrees are clean, `checks_exit`,
 `main_venv_exit`, and `diff_check_exit` are zero, and the report says `result=pass`.
+It also records its own creation device/inode, `checks_tests=369`,
+`checks_summary_count=1`, the full streamed-output SHA-256/byte count, and literal
+`checks_output_truncated=false`, `checks_line_overflow=false`, and
+`checks_inventory_clean=true`. Any reduced, skipped, xfailed, duplicate-summary,
+overlong-line, or live-cap-overflow run is clean failure 85 unless dirty state
+dominates as exit 86.
 
 On exit 85, main is clean at the old reviewed object. Preserve the original
-`review_base_head`, old locked review directory, and report; do not reset/rebase/revert
-main. Dispatch one fix-forward implementer, rerun owning probes and Task 5's full gate
-with Appendix D `EXPECTED_MAIN_ANCHOR=<old REVIEWED_HEAD>`, pass one combined Task 5
-review, generate the next whole-branch package from the original `review_base_head`,
-pass all three terminal reviews, then rerun this block with the old review directory as
-`PREVIOUS_REVIEW_DIR`. If main is dirty (exit 86), fail closed and ask the user; never
-stash, clean, checkout, reset, revert, or continue automatically.
+`review_base_head`, old locked review directory, bound evidence and postmerge report;
+do not reset/rebase/revert main. Dispatch one fix-forward implementer with the complete
+failure, route every changed path to its owning Task/report/combined review exactly as
+Phase R specifies, then regenerate and fully execute Task 7 (including a fresh selected
+attempt, manifest/report, 369-test gate and combined review) on the new HEAD. Generate
+the next whole-branch package from the original `review_base_head`, pass all three
+terminal reviews on new package/evidence digests, then rerun this block with the old
+review directory as `PREVIOUS_REVIEW_DIR`. If main is dirty (exit 86), fail closed and
+ask the user; never stash, clean, checkout, reset, revert, or continue automatically.
 
 ---
 
-## Appendix A: Exact runbook bytes
+## Appendix A0: Exact initial/pre-live runbook bytes
 
-Task 1 writes the following bytes exactly, then runs the contract probe after the
-fence. The fence itself is not part of the runbook.
+Tasks 1, 4, and 5 receive this initial/pre-live Appendix, never amended Appendix A. Task 1 installs and commits these exact currently tracked runbook bytes; Tasks 4 and 5 use the same immutable context without rewriting it. The exact payload is 322 lines, 16,202 bytes, and SHA-256 `81f7216f1f1f454276c177804f26aa9260ab41a1bc5e71e2015a91781aa4c50b`. The initial probe below is part of Appendix A0 and must run against those bytes.
 
 ````markdown
 # Blender Lab 官方 MCP：安全建模运行手册
@@ -2573,8 +10663,13 @@ Task 1 then runs this exact contract probe:
 
 ```bash
 UV_BIN="${UV_BIN:-$HOME/.local/bin/uv}"
+case "$UV_BIN" in /*) ;; *) echo 'STOP: UV_BIN must be absolute' >&2; exit 1 ;; esac
+test -x "$UV_BIN"
 "$UV_BIN" run --quiet --no-project --python 3.13 python - <<'PY'
 from __future__ import annotations
+
+if not __debug__:
+    raise SystemExit("STOP: contract probe requires assertions; unset PYTHONOPTIMIZE")
 
 from collections import Counter
 from pathlib import Path
@@ -2700,7 +10795,606 @@ PY
 
 Expected: `{'headings': 12, 'issue_rows': 24, 'contract': 'ok'}`.
 
+
+---
+
+
+## Appendix A: Exact runbook bytes
+
+Task 1 wrote the initial version. Task 7 writes the following amended bytes exactly,
+then runs the contract probe after the fence. The fence itself is not part of the
+runbook. The exact payload is 425 lines, 21,493 bytes, and SHA-256
+`39b2665064ee8e1be72bb73318a60a46b467c01da636eed4dab5c05945c6d610`, so a reviewer
+reading this appendix in place has the same three numbers every other payload states
+at its own heading.
+
+````markdown
+# Blender Lab 官方 MCP：安全建模运行手册
+
+状态：operational、non-normative
+
+本仓库技术版本：`0.1.0`
+
+本手册只规定安装完成后的建模、验证和证据流程。安装、配置、更新与回滚请使用
+[`install-official-blender-mcp.md`](install-official-blender-mcp.md)，不要在此重复安装步骤。
+
+## 1. 边界与前置条件
+
+只使用名为 `blender` 的 Blender Lab 官方 MCP，不调用本仓库的自定义 MCP Server。
+
+运行边界为：
+
+- Blender `>=5.2`；`5.2.0` 是实测基线，更高版本必须重新通过本手册的运行时探测；
+- 官方源码固定在
+  `4309a39646e644261624bfcd2bca669b343b7621`，运行中不得更新或修改该 checkout；
+- Server 继续使用 Python 3.13 和 `mcp[cli]>=1.2.0,<2`；
+- `MCP_SOURCE_DIR`、`UV_BIN` 和有效 Server 参数从已验证的安装配置解析，不硬编码用户名；
+- 只操作新启动的 disposable factory scene，不打开、保存或覆盖用户 `.blend`；
+- 运行文件只写入当前 UID 所有、非 symlink、mode `0700` 的临时 run root。
+
+开始前验证 checkout 的完整 commit、clean 状态和有效配置。live catalog、固定源码
+catalog 与 configured catalog 必须动态、逐名相等。不得把工具数量硬编码为 `26`；
+经批准更新后出现的新增工具，只有在三份 catalog 与结果表全部一致时才可接受。
+
+## 2. Shell 与 SDD 纪律
+
+所有使用 Bash 语法的命令——包括 fence、临时 loop、数组、`set --`、here-document
+和复制/校验命令——都使用 `/bin/bash -euo pipefail` 执行，不直接交给默认 zsh。
+zsh 的 `path` 是与 `PATH` 联动的特殊参数；循环变量使用
+`fixture_path` 等普通名称。
+
+SDD 的 brief 必须使用 helper 的第三个 `OUTFILE` 参数：
+
+```text
+scripts/task-brief PLAN_FILE TASK_NUMBER OUTFILE
+```
+
+不得把 helper stdout 重定向到它管理的 brief 文件。每次执行生成唯一
+`RUN_STEM`，brief 与 report 使用同一个 stem：
+
+```bash
+RUN_STEM="modeling-run-YYYYMMDD-HHMMSS-task-N"
+BRIEF=".superpowers/sdd/${RUN_STEM}-brief.md"
+REPORT=".superpowers/sdd/${RUN_STEM}-report.md"
+
+test ! -e "$BRIEF"
+test ! -e "$REPORT"
+/bin/bash "$TASK_BRIEF_HELPER" "$PLAN_FILE" "$TASK_NUMBER" "$BRIEF"
+test -s "$BRIEF"
+```
+
+dispatch 时显式传递该 `BRIEF` 和 `REPORT`。agent 完成后必须执行
+`test -s "$REPORT"`；不得把旧的通用 `task-N-report.md` 当成本次报告。
+
+仓库自身 gate 与后文官方 MCP source/config harness 是两条不同的环境边界。
+`scripts/checks.sh` 必须在 `PYTHONDONTWRITEBYTECODE` 后导出 `UV_NO_EDITABLE=1`，并在
+vendor generate 与 `--check` 都成功后执行：
+
+```bash
+"$UV_BIN" sync --frozen --python 3.13 --reinstall-package blender-codex
+```
+
+这样 tmp-cwd console entrypoint 与测试读取的是当次 vendor 生成后的
+site-packages package snapshot，不依赖 editable `.pth`。不得用 `chflags`、
+`PYTHONPATH` 或减少/跳过 369 个测试来规避 worktree 的 `UF_HIDDEN` sweep。
+该实施环境事件记为 `POSTPLAN-ENV-01`，仅用 prose 记录，不加入第 11 节的 24 个
+`MODEL-*` issue，也不写入 audit CLI 的 literal issue-ID 字段。
+
+## 3. Preflight 与精确写入范围
+
+启动 recorder 后、任何 Blender 写入前，验证：
+
+1. `127.0.0.1:9876` 恰有一个 Blender listener，并记录 PID；
+2. `bpy.data.filepath == ""`，当前是 unsaved factory scene；
+3. mode、factory object exact set、active/selected 状态和 `VIEW_3D` 均符合计划；
+4. 本次所有目标 collection、object、mesh、curve、material、camera、light、
+   image、library 与 sentinel 均不存在；
+5. fixture 和 run root 通过 `lstat`、UID、mode、普通文件/目录及 hash 检查。
+
+计划必须逐名列出允许创建或修改的 datablock，不能只用 `Lamp_*` 一类模式表示范围。
+允许的 Scene、World、camera、render 和 color-management 设置也必须逐项列出。
+factory 数据和 allowlist 之外的既有对象不得修改。
+
+每个 mutating phase 在第一次写入前重新断言：
+
+- 所有前置 phase 的 exact object/material/data/parent set；
+- 本 phase 新目标全部不存在；
+- filepath、sentinel、mode、collection 和 run-root 身份仍匹配；
+- 不存在意外 `.001` 名称。
+
+最终结构验收使用 exact set、data 名称、parent chain、collection membership、
+active/selected、library、missing-file 路径和明确排除 ground 后的数值 bounds。
+每个角点先转为 `mathutils.Vector(corner)`，再计算
+`obj.matrix_world @ Vector(corner)`。对已放置到世界坐标的对象设置 parent 时，先
+`world = obj.matrix_world.copy()`，赋值 parent，再恢复 `obj.matrix_world = world`，
+并立即断言世界矩阵不变。summary 只能交叉验证，不能替代 exact assertion。
+
+## 4. Locale 与场景身份
+
+不要按本地化 display name 查找 Blender 内置节点。必须按稳定 RNA type 查找，并
+断言唯一：
+
+- Principled shader：`node.type == "BSDF_PRINCIPLED"`；
+- World background：`node.type == "BACKGROUND"`。
+
+节点 input 也不得按 display name 或猜测的版本名查找。枚举 `node.inputs`，按唯一
+`NodeSocket.identifier` 查找并读回。Blender 5.2 Principled metallic 的 identifier
+是 `Metallic`，不是 `Metallic IOR Level`：
+
+```python
+if not __debug__:
+    raise SystemExit("STOP: 结构断言 payload 需要 assertions；不得设置 PYTHONOPTIMIZE")
+
+
+def unique_socket(node, identifier):
+    matches = [item for item in node.inputs if item.identifier == identifier]
+    assert len(matches) == 1
+    return matches[0]
+
+
+metallic = unique_socket(principled, "Metallic")
+background_color = unique_socket(background, "Color")
+background_strength = unique_socket(background, "Strength")
+metallic.default_value = 0.8
+background_color.default_value = (0.004, 0.006, 0.012, 1.0)
+background_strength.default_value = 0.18
+assert abs(metallic.default_value - 0.8) <= 1e-6
+assert all(
+    abs(actual - expected) <= 1e-6
+    for actual, expected in zip(
+        background_color.default_value,
+        (0.004, 0.006, 0.012, 1.0),
+    )
+)
+assert abs(background_strength.default_value - 0.18) <= 1e-6
+```
+
+每个带 `assert` 的 payload 都必须以上面的 `if not __debug__:` 守卫开头。`-O` 会
+整段剥除 `assert`，把结构验收静默降级成无操作；守卫让这种解释器直接拒绝运行。
+
+所有 RNA float readback 都使用 `1e-6` tolerance；禁止 decimal exact equality。
+World Background 的 `Color`/`Strength` 同样是 identifier，不得使用 display-name
+subscript lookup。
+
+由本次运行创建的名称必须使用计划中的固定 ASCII 名称。
+
+`bpy.data.is_dirty` 只记录为 observation，不参与场景身份或 phase precondition。
+场景身份由空 filepath、run sentinel、exact object/material/data set、parent chain、
+collection membership 和 active/selected 状态共同证明。
+
+## 5. Transactional phase 与恢复
+
+每个 mutating phase 视为一次事务。发生异常时必须按以下顺序处理：
+
+1. 立即写入失败 end event，保留原始 symptom；
+2. 在任何恢复动作前写入当时的 verbatim first hypothesis，不得事后改写；
+3. 记录是否已经产生 partial state；
+4. 不在原 session 中删除、补写或继续；
+5. 确认它仍是 unsaved disposable scene 后退出该 Blender GUI，不保存；
+6. 等待旧 listener 消失，重新启动 factory scene，并验证恰有一个新 listener；
+7. 完整重跑 preflight，再从 Phase 1 全量 replay 一次；
+8. recovery 使用新的 event ID，设置正整数 `attempt` 并引用 `recovery_of`。
+
+同一 recorder 内 linked recovery 的 literal issue-ID set 必须与原失败相同。若
+recovery 暴露独立 symptom 或不同 issue-ID，保留整个 journal 为 invalid evidence，
+discard unsaved scene，并用新 recorder PID、新 `clock_id`、`attempt=0` 全量重跑。
+不得改写 issue ID、拼接 recorder 或跨 clock 设置 `recovery_of`。
+
+同一失败再次出现时停止盲目重试，保留两次证据并进入根因分析。不得用 `.001`
+对象、局部删除或强制修改 dirty flag 掩盖 partial state。
+
+## 6. Interpreter、fixture 与文档查询 contract
+
+所有 source/config harness 使用解析后的绝对 `UV_BIN`、Python 3.13 和 Server
+实际依赖边界：
+
+```bash
+"$UV_BIN" run --quiet --no-project --python 3.13 \
+  --with 'mcp[cli]>=1.2.0,<2' \
+  --with-editable "$MCP_SOURCE_DIR/mcp" \
+  python -
+```
+
+命令在 `/bin/bash -euo pipefail` 下运行。执行后重新验证固定 checkout clean，
+且没有生成 `uv.lock`。
+
+每个将发送给 GUI/CLI execution tool 的完整 Python payload 都先 exclusive-create 为
+run root 下 native mode `0600` 的普通非 symlink 文件，再用同一 uv-managed Python
+3.13 预编译：
+
+```bash
+test -f "$PAYLOAD_FILE"
+test ! -L "$PAYLOAD_FILE"
+test "$(stat -f '%u' "$PAYLOAD_FILE")" = "$(id -u)"
+test "$(stat -f '%Lp' "$PAYLOAD_FILE")" = 600
+"$UV_BIN" run --quiet --no-project --python 3.13 \
+  python - "$PAYLOAD_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+payload_path = Path(sys.argv[1])
+payload = payload_path.read_bytes()
+compile(payload, str(payload_path), "exec")
+print(f"PAYLOAD_COMPILE_GREEN bytes={len(payload)}")
+PY
+```
+
+发送给 tool 的 code 必须与该已编译文件 byte-for-byte 相同。CLI read-only probe
+先只返回 determinate `observations`（包括 raw 与 `bpy.path.abspath()` 后的 canonical
+path），controller 先持久化完整 response，再在 tool 外对 observation 做 exact
+assertion。不得在返回 observation 之前猜测 saved-path/list representation；否则一次
+blank assertion error 会同时丢失诊断值。语法失败也不得作为 MCP recovery 发送。
+
+断言返回字段前先读固定源码的响应 contract；官方 API 搜索结果字段是 `hits`，
+不得猜测为 `results`。Cylinder operator 的已验证查询为：
+
+```text
+bpy.ops.mesh primitive_cylinder_add
+```
+
+不要发送已知返回零结果的自然语言拆分形式。
+
+精确 member query 返回 `kind=partial, found=false` 是 determinate non-match，不是可把
+同一请求重试成 pass 的 transport failure；先原样保存该 response，再查询它的 owning
+type。`bpy.types.NodeSocket.identifier` 的固定 owning-type query 是
+`bpy.types.NodeSocket`，只接受 owning-type response 的 `found=true` 且
+`kind=exact`。不得把 member-level partial 改写成 found，也不得猜测另一个
+member path。
+
+Blender 保存时可能丢弃 zero-user image。需要在保存后仍存在的受控 missing-image
+fixture，保存前设置 `use_fake_user=True`，然后重新打开文件验证 image 和 missing
+路径。已有 fixture 保持不变；需要恢复时创建新的 derived fixture，并只对失败工具
+重试一次。
+
+library/image filepath 可能是 `//library_source.blend`。必须先调用
+`bpy.path.abspath(item.filepath)`，再交给 `Path(...).resolve()`；直接解析 `//`
+字符串会错误得到 `/library_source.blend`。
+
+## 7. Blender 5.2 与上游限制
+
+在 Phase 3 的其他写入前，从当前 Blender 运行时枚举 render engine，确认目标值
+存在，赋值后立即读回。Blender 5.2 的实测 EEVEE 值是 `BLENDER_EEVEE`。
+
+固定上游 thumbnail 实现仍包含旧的 `BLENDER_EEVEE_NEXT` 分支；该字符串不是
+Blender 5.2 的 render-engine 值。此分支在 5.2 上不会自动降低 EEVEE samples。
+调用 thumbnail 前后记录实际 engine、render samples、viewport samples 和耗时，
+但不修改固定上游源码。
+
+area 和 window screenshot 从第一次调用起都使用
+`size_limit_in_bytes=48_000`。更大的 base64 response 可能被当前非阻塞 bridge
+截断；48 KB 是运行规避措施，不代表上游传输问题已被仓库修复。返回值仍须验证为
+非空 PNG 和合理尺寸。
+
+## 8. Render scratch
+
+render 前从 Blender 读取 `bpy.app.tempdir` 并先做 `realpath`。安全检查区分两类路径：
+
+- canonical temp root 以上的系统祖先只要求正常解析为既有普通目录；不得要求它们
+  属于当前 UID，也不得创建、chmod 或替换它们；
+- canonical temp root 及本次使用的所有下级路径必须由当前 UID 所有，逐层
+  `lstat`，不得含 symlink。
+
+最终 scratch 固定为 canonical temp root 下的 `blender_mcp`。若它不存在，先记录
+absence，再只创建这一层 mode `0700` 目录；若已存在，则必须是当前 UID 所有的
+普通非 symlink 私有目录，否则停止。
+
+每次 render 使用包含所选 `attempt-000N`、call event ID 和 first/repeat identity 的
+唯一 basename。调用前分别对官方
+source target 和 run-root copy target 执行 `lstat`，两者都必须不存在；不能用
+`exists()` 代替，因为 broken symlink 也必须拒绝。
+
+调用后验证：
+
+1. 返回路径的 `realpath` 恰等于预期 source target；
+2. basename 和 canonical parent 恰好匹配；
+3. source 经 `lstat` 是当前 UID 所有、非 symlink、非空的普通文件；
+4. 文件头是 PNG magic；
+5. 记录 source 的 `sha256`；
+6. copy parent 已通过逐层 ownership/symlink 检查；
+7. 使用 exclusive-create 方式复制，不覆盖既有路径；
+8. copy 经同样的 `lstat`、PNG 和 ownership 检查；
+9. source 与 copy 的 `sha256` 完全相等；
+10. `bpy.data.filepath`、原 render filepath 和 unsaved 状态保持不变。
+
+render 失败但留下 partial file 时，不删除或复用它；记录路径、size、magic 和 hash，
+recovery 使用新的唯一 basename。
+
+## 9. 单一时钟与证据
+
+在读取 payload、catalog 或 Blender 状态前，启动
+`scripts/official_blender_mcp_audit.py record` 的一个长生命周期进程。一个 run
+只能有一个 recorder 和一个由它生成的 `clock_id`；不得为每个 event 启动新的
+Python 进程。
+
+使用私有 FIFO 保持 recorder stdin 打开：
+
+```bash
+umask 077
+JOURNAL="$RUN_ROOT/events.ndjson"
+EVENT_FIFO="$RUN_ROOT/events.fifo"
+
+test ! -e "$JOURNAL"
+test ! -e "$EVENT_FIFO"
+mkfifo -m 600 "$EVENT_FIFO"
+
+"$UV_BIN" run --quiet --no-project --python 3.13 \
+  python scripts/official_blender_mcp_audit.py \
+  record --output "$JOURNAL" <"$EVENT_FIFO" &
+RECORDER_PID=$!
+exec 9>"$EVENT_FIFO"
+```
+
+通过 FD 9 发送 JSON event。Task、stage 和每次 tool call 分别使用
+`scope=task|stage|call`、稳定 `event_id` 及恰好一对 `start`/`end`。唯一 Task start
+必须是首个 event，唯一 Task end 必须是末个 event，所有 stage/call 都位于其间。
+failure end event 必须在 recovery start event 之前包含非空 `symptom`、调用者原样
+提供的 `first_hypothesis` 和 literal issue IDs；deviation 与 linked recovery end 也必须
+有非空 literal issue IDs。记录 `attempt` 与 `recovery_of`；只有 tool response
+明确提供的内部计时才可记录为 Blender internal time；缺失时省略 `internal_ms` 键，
+不要写 `unavailable`（recorder 只接受 JSON number，且禁止任何额外键，字符串会使整轮
+journal 被判 invalid 且不得编辑后重验）。
+audit-recorder 的 start/end envelope 永远不是 MCP wall，也不得写入 `internal_ms`
+冒充 tool 内部耗时。
+
+实际 MCP dispatch wall 只能由同一个同步 controller 在直接
+`await ClientSession.call_tool(...)` 前后调用 `time.monotonic_ns()` 得出，并以
+`controller_dispatch_wall_ms` 与 tool name、ordinal、attempt、canonical arguments
+SHA-256、完整 `CallToolResult` SHA-256 一起写入独立 evidence record。若 direct
+controller timing 不可用，明确记录 `unavailable`，不得生成 server-compute duration。
+recorder envelope 与 direct controller wall 的差值不做相减归因；只有同一 controller
+显式测得的非-MCP orchestration phase 才可称为 `unattributed orchestration`。
+
+recorder 因 identity、issue-ID 或 recovery-chain 拒绝输入时，保留 journal、stderr、
+PID 和 `clock_id` 并将整轮标记 invalid；不得编辑后重验。下一轮使用新私有 root、
+recorder 和 factory scene。
+
+结束时先发送 Task end，关闭 FD，等待 recorder 正常退出，再运行 `validate`：
+
+```bash
+exec 9>&-
+wait "$RECORDER_PID"
+
+"$UV_BIN" run --quiet --no-project --python 3.13 \
+  python scripts/official_blender_mcp_audit.py validate \
+  --journal "$JOURNAL" \
+  --audit "$AUDIT_FILE" \
+  --live-catalog "$LIVE_CATALOG" \
+  --source-catalog "$SOURCE_CATALOG" \
+  --config-catalog "$CONFIG_CATALOG"
+```
+
+只有 recorder、direct-controller evidence validator 与 repository `validate` 都成功后
+才能报告 coverage、duration 或 recovery 结论。
+
+潜在异常阈值为：summary/docs/navigation `5,000 ms`、screenshot `10,000 ms`、
+thumbnail `30,000 ms`、viewport `60,000 ms`。首次成功调用超过对应阈值时，保留
+首次证据并执行一次同条件复测；render 复测必须换新 basename。未超过阈值不得仅为
+“看起来慢”而重试。
+
+## 10. Soft process diagnostic 与正常清理
+
+Task 前后各记录一次只读 `ps` snapshot，统计与当前 Codex/App Server 相关的
+uv launcher 和 `blender-mcp` child 数量及 RSS；同时记录
+`127.0.0.1:9876` 的唯一 listener。snapshot 只能用于比较 count/RSS delta，
+不能从进程数量反推每次 tool call 都启动了新 Server。
+
+运行中不得逐个终止 idle stdio Server；它们没有额外监听 `9876`，且单独终止可能
+破坏仍在使用的 session。等所有 agents、报告、journal 和 Git 工作都完成后，如需
+清理 retained pairs，正常退出并重新启动 Codex Desktop，然后重新记录 snapshot。
+
+`MODEL-RUN-10` 只得到 soft diagnostic 和正常 host-lifecycle 清理建议；现有证据
+不足以证明 root/subagent-session 因果映射。
+
+## 11. 问题处置清单
+
+下表恰好覆盖 approved audit 的 24 个唯一 issue ID。Disposition 说明未来运行中的
+责任边界，不改写历史证据。
+
+| Issue ID | Disposition | 规则 |
+|---|---|---|
+| `MODEL-SHELL-01` | `prevented_by_runbook` | 所有 Bash 语法显式 `/bin/bash` |
+| `MODEL-SDD-01` | `prevented_by_runbook` | helper 第三个 `OUTFILE`，禁止 stdout 覆盖 brief |
+| `MODEL-SDD-02` | `prevented_by_runbook` | run-scoped brief/report stem 与前后存在性检查 |
+| `MODEL-RUN-01` | `prevented_by_runbook` | 唯一 node type 与 `NodeSocket.identifier` |
+| `MODEL-RUN-02` | `prevented_by_runbook` | dirty 仅观察，exact structure 证明身份 |
+| `MODEL-RUN-03` | `prevented_by_audit` | 解析 exact table 和 literal issue IDs |
+| `MODEL-RUN-04` | `prevented_by_audit` | 单一 recorder、同一 clock ID 和成对事件 |
+| `MODEL-RUN-05` | `prevented_by_runbook` | 绝对 uv 与 Python 3.13 |
+| `MODEL-RUN-06` | `prevented_by_runbook` | fake-user fixture；先 `bpy.path.abspath` 再 canonicalize |
+| `MODEL-RUN-07` | `prevented_by_runbook` | 有效 editable dependencies 与源码确认响应字段 |
+| `MODEL-RUN-08` | `mitigated_only` | 48 KB screenshot cap；上游传输根因未改动 |
+| `MODEL-RUN-09` | `mitigated_only` | 安全创建最终 scratch parent；上游未自动创建 |
+| `MODEL-RUN-10` | `diagnostic_only` | 只记录 process delta 并正常退出 host |
+| `MODEL-RUN-11` | `future_prevention_only` | 未来 failure 必须先持久化 first hypothesis；历史缺口保留 |
+| `MODEL-PLAN-01` | `prevented_by_runbook` | 运行时发现并读回 `BLENDER_EEVEE` |
+| `MODEL-PLAN-02` | `prevented_by_runbook` | recorder identity、discard 和 full replay |
+| `MODEL-PLAN-03` | `prevented_by_runbook` | 精确声明 Scene/World/render/datablock 写入范围 |
+| `MODEL-PLAN-04` | `prevented_by_runbook` | world-preserving parent 与 Vector bounds |
+| `MODEL-PLAN-05` | `prevented_by_runbook_and_audit` | one-clock journal 与机器校验 |
+| `MODEL-PLAN-06` | `prevented_by_runbook` | 使用 source-proven operator query |
+| `MODEL-PLAN-07` | `prevented_by_audit` | 动态 catalog equality 和结果表 `Counter` |
+| `MODEL-PLAN-08` | `prevented_by_runbook` | canonical containment、lstat、unique absent target 和 hash |
+| `MODEL-PLAN-09` | `warning_only` | 记录 EEVEE/sample 兼容性，不修改固定上游 |
+| `MODEL-PLAN-10` | `prevented_by_runbook_and_audit` | immediate events、阈值复测、partial artifact 保留和验证 |
+
+`MODEL-RUN-08`、`MODEL-RUN-09` 只被规避；`MODEL-RUN-10` 只被观察；
+`MODEL-PLAN-09` 只记录兼容性警告。它们都不是仓库内修复。
+`MODEL-RUN-11` 只能预防未来证据缺口，不能补造已丢失的历史 hypothesis。
+
+## 12. 完成检查
+
+- [ ] 官方 source pin、SDK boundary、Blender version 和动态 catalog equality 通过；
+- [ ] recorder 在任何工作读取前启动，Task/stage/call events 全部成对；
+- [ ] 唯一 listener、factory scene、target absence 与 exact write allowlist 通过；
+- [ ] locale-safe node/socket、dirty observation 和 transactional recovery 已执行；
+- [ ] world-preserving parent、Vector bounds、recorder/recovery identity 已执行；
+- [ ] fixture、docs query、48 KB screenshot 与 Blender engine contract 通过；
+- [ ] render source/copy 的 absence、containment、lstat、PNG 和 hash 通过；
+- [ ] exact structural assertion 与所有官方工具结果通过；
+- [ ] `validate` 通过后才形成结论；
+- [ ] Task 前后 process snapshot 已记录，未进行 mid-run individual termination；
+- [ ] agents、reports、journal 和 Git 状态全部收口后再正常退出或重启 Codex Desktop。
+````
+
+Task 7 then runs this exact amended contract probe:
+
+```bash
+UV_BIN="${UV_BIN:-$HOME/.local/bin/uv}"
+case "$UV_BIN" in /*) ;; *) echo 'STOP: UV_BIN must be absolute' >&2; exit 1 ;; esac
+test -x "$UV_BIN"
+"$UV_BIN" run --quiet --no-project --python 3.13 python - <<'PY'
+from __future__ import annotations
+
+if not __debug__:
+    raise SystemExit("STOP: contract probe requires assertions; unset PYTHONOPTIMIZE")
+
+from collections import Counter
+from pathlib import Path
+import re
+import stat
+
+path = Path("docs/use-official-blender-mcp.md")
+info = path.lstat()
+assert stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+text = path.read_text(encoding="utf-8")
+assert text.endswith("\n")
+
+headings = [
+    "## 1. 边界与前置条件",
+    "## 2. Shell 与 SDD 纪律",
+    "## 3. Preflight 与精确写入范围",
+    "## 4. Locale 与场景身份",
+    "## 5. Transactional phase 与恢复",
+    "## 6. Interpreter、fixture 与文档查询 contract",
+    "## 7. Blender 5.2 与上游限制",
+    "## 8. Render scratch",
+    "## 9. 单一时钟与证据",
+    "## 10. Soft process diagnostic 与正常清理",
+    "## 11. 问题处置清单",
+    "## 12. 完成检查",
+]
+for heading in headings:
+    assert text.count(heading + "\n") == 1, heading
+
+required = [
+    "Blender `>=5.2`",
+    "4309a39646e644261624bfcd2bca669b343b7621",
+    "mcp[cli]>=1.2.0,<2",
+    "不得把工具数量硬编码为 `26`",
+    "/bin/bash -euo pipefail",
+    "scripts/task-brief PLAN_FILE TASK_NUMBER OUTFILE",
+    "RUN_STEM",
+    "UV_NO_EDITABLE=1",
+    '"$UV_BIN" sync --frozen --python 3.13 --reinstall-package blender-codex',
+    "site-packages package snapshot",
+    "369 个测试",
+    "POSTPLAN-ENV-01",
+    "`chflags`",
+    "`PYTHONPATH`",
+    'node.type == "BSDF_PRINCIPLED"',
+    'node.type == "BACKGROUND"',
+    'item.identifier == identifier',
+    'unique_socket(background, "Color")',
+    'unique_socket(background, "Strength")',
+    'abs(metallic.default_value - 0.8) <= 1e-6',
+    'mathutils.Vector(corner)',
+    'world = obj.matrix_world.copy()',
+    'obj.matrix_world = world',
+    'bpy.path.abspath(item.filepath)',
+    '新 recorder PID',
+    "bpy.data.is_dirty",
+    "use_fake_user=True",
+    "bpy.ops.mesh primitive_cylinder_add",
+    "`hits`",
+    "`BLENDER_EEVEE`",
+    "size_limit_in_bytes=48_000",
+    "bpy.app.tempdir",
+    "`lstat`",
+    "`sha256`",
+    "`clock_id`",
+    "`unattributed orchestration`",
+    'compile(payload, str(payload_path), "exec")',
+    'if not __debug__:',
+    '先只返回 determinate `observations`',
+    '`kind=partial, found=false`',
+    '`bpy.types.NodeSocket`',
+    '`controller_dispatch_wall_ms`',
+    'await ClientSession.call_tool(...)',
+    "Codex Desktop",
+]
+for literal in required:
+    assert literal in text, literal
+
+expected = {
+    "MODEL-SHELL-01": "prevented_by_runbook",
+    "MODEL-SDD-01": "prevented_by_runbook",
+    "MODEL-SDD-02": "prevented_by_runbook",
+    "MODEL-RUN-01": "prevented_by_runbook",
+    "MODEL-RUN-02": "prevented_by_runbook",
+    "MODEL-RUN-03": "prevented_by_audit",
+    "MODEL-RUN-04": "prevented_by_audit",
+    "MODEL-RUN-05": "prevented_by_runbook",
+    "MODEL-RUN-06": "prevented_by_runbook",
+    "MODEL-RUN-07": "prevented_by_runbook",
+    "MODEL-RUN-08": "mitigated_only",
+    "MODEL-RUN-09": "mitigated_only",
+    "MODEL-RUN-10": "diagnostic_only",
+    "MODEL-RUN-11": "future_prevention_only",
+    "MODEL-PLAN-01": "prevented_by_runbook",
+    "MODEL-PLAN-02": "prevented_by_runbook",
+    "MODEL-PLAN-03": "prevented_by_runbook",
+    "MODEL-PLAN-04": "prevented_by_runbook",
+    "MODEL-PLAN-05": "prevented_by_runbook_and_audit",
+    "MODEL-PLAN-06": "prevented_by_runbook",
+    "MODEL-PLAN-07": "prevented_by_audit",
+    "MODEL-PLAN-08": "prevented_by_runbook",
+    "MODEL-PLAN-09": "warning_only",
+    "MODEL-PLAN-10": "prevented_by_runbook_and_audit",
+}
+issue_section = text.split("## 11. 问题处置清单\n", 1)[1]
+issue_section = issue_section.split("\n## 12. 完成检查\n", 1)[0]
+pattern = re.compile(
+    r"^\|\s*`(?P<issue>MODEL-(?:SHELL|SDD|RUN|PLAN)-\d{2})`\s*"
+    r"\|\s*`(?P<disposition>[a-z_]+)`\s*\|"
+)
+rows = []
+for line in issue_section.splitlines():
+    match = pattern.match(line)
+    if match:
+        rows.append((match.group("issue"), match.group("disposition")))
+assert len(rows) == 24
+assert Counter(issue for issue, _ in rows) == Counter(expected.keys())
+assert dict(rows) == expected
+all_ids = set(re.findall(r"MODEL-(?:SHELL|SDD|RUN|PLAN)-\d{2}", text))
+assert all_ids == set(expected)
+assert text.count("BLENDER_EEVEE_NEXT") == 1
+for forbidden in [
+    "git clone", "codex mcp add", "3 MB", "3MB", "pkill", "killall",
+    "pytest -k", "--ignore=tests", "matches[0].default_value == 0.8",
+    'inputs["Color"]', 'inputs["Strength"]',
+]:
+    assert forbidden not in text, forbidden
+for forbidden_pattern in [
+    r"(?i)\bfix(?:es|ed|ing)?\s+`?MODEL-RUN-10",
+    r"(?i)\bprevent(?:s|ed|ing)?\s+`?MODEL-RUN-10",
+    r"(?:修复|解决|预防)\s*`?MODEL-RUN-10",
+    r"(?i)\bkill\s+-",
+    r"(?m)^\s*chflags\b",
+    r"(?m)^\s*(?:export\s+)?PYTHONPATH\s*=",
+]:
+    assert re.search(forbidden_pattern, text) is None, forbidden_pattern
+print({"headings": len(headings), "issue_rows": len(rows), "contract": "ok"})
+PY
+```
+
+Expected: `{'headings': 12, 'issue_rows': 24, 'contract': 'ok'}`.
+
 ## Appendix B1 — recorder-only complete bytes
+
+Task 2 writes these exact 353 lines / 13,149 bytes with SHA-256
+`f66cf823a0c399ec310c676e200a582834590cbb195978f9f37584da5e1080ff`. The retained
+`.superpowers/sdd/modeling-remediation/appendix-b1-recorder.py` is an older scratch
+copy and is not this payload; bind the extraction to the digest above, never to that file.
 
 ```python
 #!/usr/bin/env python3
@@ -3058,7 +11752,9 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-## Appendix B2 — final complete bytes
+## Appendix B2I — initial validator complete bytes
+
+Task 3 installs and commits these exact pre-hardening bytes. They are the currently tracked 626-line, 24,168-byte CLI with SHA-256 `4a45f69f8aae1f72711119e9ecd4e4f6a91a3fcfe88488b737c7c154696ec3fe`; Task 6, not Task 3, owns the later bounded-reader delta in Appendix B2.
 
 ```python
 #!/usr/bin/env python3
@@ -3689,7 +12385,802 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-## Appendix C — complete adversarial probe
+
+
+## Appendix B2 — final complete bytes
+
+Task 6 installs these exact 773 lines / 29,338 bytes with SHA-256
+`a67525432beca49a09c14b3ce266c46109900344cb4f2515f23fccd9a3de530d`.
+
+```python
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import stat
+import sys
+import time
+import uuid
+from collections import Counter
+from collections.abc import Sequence
+from datetime import datetime, timezone
+from typing import NoReturn, TextIO, cast
+
+ISSUE_RE = re.compile(r"MODEL-(?:SHELL|SDD|RUN|PLAN)-\d{2}")
+UTC_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z")
+WALL_RE = re.compile(r"(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?")
+TOOL_HEADING = "## Tool results"
+TABLE_HEADER = (
+    "| Ordinal | Tool | Outcome | Wall ms | Observed shape | Retry count | Issue ID |"
+)
+TABLE_SEPARATOR = "|---:|---|---|---:|---|---:|---|"
+GENERATED = {"clock_id", "recorded_at_utc", "monotonic_ns", "sequence"}
+
+
+class AuditError(Exception):
+    def __init__(self, category: str, message: str) -> None:
+        super().__init__(message)
+        self.category = category
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise AuditError("USAGE", message)
+
+
+def json_value(text: str, label: str) -> object:
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in items:
+            if key in result:
+                raise AuditError("JSON", f"{label}: duplicate key {key}")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> NoReturn:
+        raise AuditError("JSON", f"{label}: invalid constant {value}")
+
+    try:
+        value: object = json.loads(
+            text,
+            object_pairs_hook=pairs,
+            parse_constant=reject_constant,
+        )
+    except (ValueError, RecursionError) as exc:
+        raise AuditError("JSON", f"{label}: invalid JSON") from exc
+    return value
+
+
+def json_object(text: str, label: str) -> dict[str, object]:
+    value = json_value(text, label)
+    if not isinstance(value, dict):
+        raise AuditError("SCHEMA", f"{label}: expected object")
+    return cast(dict[str, object], value)
+
+
+def text_field(event: dict[str, object], key: str) -> str:
+    value = event[key]
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise AuditError("SCHEMA", f"{key}: expected nonblank trimmed string")
+    return value
+
+
+def int_field(event: dict[str, object], key: str) -> int:
+    value = event[key]
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise AuditError("SCHEMA", f"{key}: expected integer")
+    return value
+
+
+def issues(event: dict[str, object]) -> tuple[str, ...]:
+    value = event["issue_ids"]
+    if not isinstance(value, list):
+        raise AuditError("SCHEMA", "issue_ids: expected array")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or ISSUE_RE.fullmatch(item) is None:
+            raise AuditError("SCHEMA", "issue_ids: invalid issue ID")
+        result.append(item)
+    if len(result) != len(set(result)):
+        raise AuditError("SCHEMA", "issue_ids: duplicate issue ID")
+    return tuple(result)
+
+
+def internal_ms(event: dict[str, object]) -> None:
+    if "internal_ms" not in event:
+        return
+    value = event["internal_ms"]
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise AuditError("SCHEMA", "internal_ms: expected JSON number")
+    if value < 0 or (isinstance(value, float) and (value != value or value == float("inf"))):
+        raise AuditError("SCHEMA", "internal_ms: expected finite nonnegative number")
+
+
+def validate_event(event: dict[str, object]) -> None:
+    identity = {"event_id", "kind", "scope", "stage", "attempt", "recovery_of"}
+    kind = event.get("kind")
+    if kind == "start":
+        required = identity
+        allowed = required
+    elif kind == "end":
+        required = identity | {"outcome", "issue_ids"}
+        allowed = required | {"symptom", "first_hypothesis", "internal_ms"}
+    else:
+        raise AuditError("SCHEMA", "kind: expected start or end")
+
+    missing = required - set(event)
+    unknown = set(event) - allowed
+    if missing:
+        raise AuditError("SCHEMA", f"missing: {','.join(sorted(missing))}")
+    if unknown:
+        raise AuditError("SCHEMA", f"unknown: {','.join(sorted(unknown))}")
+
+    event_id = text_field(event, "event_id")
+    scope = text_field(event, "scope")
+    if scope not in {"task", "stage", "call"}:
+        raise AuditError("SCHEMA", "scope: expected task, stage, or call")
+    text_field(event, "stage")
+    attempt = int_field(event, "attempt")
+    if attempt < 0:
+        raise AuditError("SCHEMA", "attempt: expected nonnegative integer")
+
+    recovery = event["recovery_of"]
+    if recovery is not None:
+        if not isinstance(recovery, str) or not recovery or recovery != recovery.strip():
+            raise AuditError("SCHEMA", "recovery_of: expected null or nonblank string")
+        if recovery == event_id:
+            raise AuditError("SCHEMA", "recovery_of cannot reference itself")
+    if recovery is None and attempt != 0:
+        raise AuditError("SCHEMA", "original event must use attempt 0")
+    if recovery is not None and attempt == 0:
+        raise AuditError("SCHEMA", "recovery event must use positive attempt")
+
+    if kind == "start":
+        return
+
+    outcome = text_field(event, "outcome")
+    if outcome not in {"pass", "fail", "deviation"}:
+        raise AuditError("SCHEMA", "outcome: expected pass, fail, or deviation")
+    event_issues = issues(event)
+    if (outcome in {"fail", "deviation"} or recovery is not None) and not event_issues:
+        raise AuditError("SCHEMA", "fail, deviation, or recovery requires issue_ids")
+    internal_ms(event)
+
+    has_symptom = "symptom" in event
+    has_hypothesis = "first_hypothesis" in event
+    if outcome == "fail":
+        if not has_symptom or not has_hypothesis:
+            raise AuditError("SCHEMA", "failed end requires symptom and first_hypothesis")
+        text_field(event, "symptom")
+        text_field(event, "first_hypothesis")
+    elif has_symptom or has_hypothesis:
+        raise AuditError("SCHEMA", "non-failed end cannot have error fields")
+
+
+def check_next(
+    event: dict[str, object],
+    opened: dict[str, dict[str, object]],
+    completed: dict[str, dict[str, object]],
+) -> None:
+    event_id = text_field(event, "event_id")
+    scope = text_field(event, "scope")
+    task_open = any(item["scope"] == "task" for item in opened.values())
+    if event["kind"] == "start":
+        if event_id in opened or event_id in completed:
+            raise AuditError("JOURNAL", "duplicate event_id")
+        if scope == "task":
+            if opened or completed:
+                raise AuditError("JOURNAL", "task start must be the first event")
+        elif not task_open:
+            raise AuditError("JOURNAL", "non-task event must be inside task envelope")
+        recovery = event["recovery_of"]
+        if recovery is not None:
+            failed = completed.get(cast(str, recovery))
+            if failed is None:
+                raise AuditError("JOURNAL", "recovery must follow a completed failure")
+            if failed["outcome"] != "fail":
+                raise AuditError("JOURNAL", "recovery_of must reference failure")
+            if int_field(event, "attempt") != int_field(failed, "attempt") + 1:
+                raise AuditError("JOURNAL", "recovery attempt must increment")
+        return
+
+    start = opened.get(event_id)
+    if start is None:
+        raise AuditError("JOURNAL", "end has no preceding start")
+    if scope == "task" and len(opened) != 1:
+        raise AuditError("JOURNAL", "task end must follow all enclosed events")
+    if any(
+        event[key] != start[key]
+        for key in ("scope", "stage", "attempt", "recovery_of")
+    ):
+        raise AuditError("JOURNAL", "start/end identity fields differ")
+    recovery = start["recovery_of"]
+    if recovery is not None and issues(event) != issues(completed[cast(str, recovery)]):
+        raise AuditError("JOURNAL", "recovery end issue_ids differ from failure")
+
+
+def accept_next(
+    event: dict[str, object],
+    opened: dict[str, dict[str, object]],
+    completed: dict[str, dict[str, object]],
+) -> None:
+    event_id = text_field(event, "event_id")
+    if event["kind"] == "start":
+        opened[event_id] = event
+    else:
+        del opened[event_id]
+        completed[event_id] = event
+
+
+def new_output(raw_path: str) -> TextIO:
+    if not raw_path or "\x00" in raw_path or raw_path.endswith(os.sep):
+        raise AuditError("OUTPUT", "invalid output path")
+    path = os.path.abspath(raw_path)
+    parent, name = os.path.split(path)
+    if os.path.realpath(parent) != parent:
+        raise AuditError("OUTPUT", "output parent path contains a symlink")
+    if not name or name in {".", ".."}:
+        raise AuditError("OUTPUT", "invalid output basename")
+
+    try:
+        before = os.lstat(parent)
+    except OSError as exc:
+        raise AuditError("OUTPUT", "output parent unavailable") from exc
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISDIR(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o700
+    ):
+        raise AuditError("OUTPUT", "parent must be owned, non-symlink, mode 0700")
+
+    parent_fd = -1
+    output_fd = -1
+    try:
+        parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        after = os.fstat(parent_fd)
+        if (
+            (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+            or after.st_uid != os.getuid()
+            or not stat.S_ISDIR(after.st_mode)
+            or stat.S_IMODE(after.st_mode) != 0o700
+        ):
+            raise AuditError("OUTPUT", "output parent changed")
+        output_fd = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_fd,
+        )
+        os.fchmod(output_fd, 0o600)
+        info = os.fstat(output_fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1
+        ):
+            raise AuditError("OUTPUT", "new output failed safety checks")
+        handle = cast(
+            TextIO,
+            open(output_fd, "w", encoding="utf-8", newline="\n", closefd=True),
+        )
+        output_fd = -1
+        return handle
+    except AuditError:
+        raise
+    except OSError as exc:
+        raise AuditError("OUTPUT", "target must be new and non-symlink") from exc
+    finally:
+        if output_fd >= 0:
+            os.close(output_fd)
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
+def record(output: str) -> dict[str, object]:
+    clock_id = str(uuid.uuid4())
+    opened: dict[str, dict[str, object]] = {}
+    completed: dict[str, dict[str, object]] = {}
+    count = 0
+    previous_utc: datetime | None = None
+    previous_monotonic: int | None = None
+
+    with new_output(output) as handle:
+        for line_number, line in enumerate(sys.stdin, 1):
+            if not line.strip():
+                raise AuditError("SCHEMA", f"line {line_number}: blank")
+            event = json_object(line, f"line {line_number}")
+            validate_event(event)
+            check_next(event, opened, completed)
+            now = datetime.now(timezone.utc)
+            monotonic_ns = time.monotonic_ns()
+            if previous_utc is not None and now <= previous_utc:
+                raise AuditError("CLOCK", "UTC clock did not advance")
+            if previous_monotonic is not None and monotonic_ns <= previous_monotonic:
+                raise AuditError("CLOCK", "monotonic clock did not advance")
+
+            count += 1
+            payload = dict(event)
+            payload.update(
+                {
+                    "clock_id": clock_id,
+                    "recorded_at_utc": now.isoformat(timespec="microseconds").replace(
+                        "+00:00", "Z"
+                    ),
+                    "monotonic_ns": monotonic_ns,
+                    "sequence": count,
+                }
+            )
+            handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            accept_next(event, opened, completed)
+            previous_utc = now
+            previous_monotonic = monotonic_ns
+
+    if count == 0:
+        raise AuditError("JOURNAL", "no events recorded")
+    if opened:
+        raise AuditError("JOURNAL", "recording ended with unpaired starts")
+    if sum(item["scope"] == "task" for item in completed.values()) != 1:
+        raise AuditError("JOURNAL", "expected exactly one task envelope")
+    return {"status": "ok", "clock_id": clock_id, "events": count}
+
+
+JOURNAL_MAX_BYTES = 16 * 1024 * 1024
+AUDIT_MAX_BYTES = 4 * 1024 * 1024
+LIVE_CATALOG_MAX_BYTES = 1024 * 1024
+SOURCE_CATALOG_MAX_BYTES = 1024 * 1024
+CONFIG_CATALOG_MAX_BYTES = 1024 * 1024
+READ_CHUNK_BYTES = 64 * 1024
+INPUT_LIMITS = {
+    "journal": JOURNAL_MAX_BYTES,
+    "audit": AUDIT_MAX_BYTES,
+    "live catalog": LIVE_CATALOG_MAX_BYTES,
+    "source catalog": SOURCE_CATALOG_MAX_BYTES,
+    "config catalog": CONFIG_CATALOG_MAX_BYTES,
+}
+
+InputIdentity = tuple[int, int, int, int, int, int, int, int]
+ParentIdentity = InputIdentity
+
+
+def input_identity(info: os.stat_result) -> InputIdentity:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def parent_identity(info: os.stat_result) -> ParentIdentity:
+    return input_identity(info)
+
+
+def read_owned_regular(raw_path: str, label: str, limit: int) -> str:
+    allowed = INPUT_LIMITS.get(label)
+    if (
+        allowed is None
+        or limit <= 0
+        or limit > allowed
+        or not raw_path
+        or "\x00" in raw_path
+    ):
+        raise AuditError("INPUT", f"{label}: invalid path, role, or limit")
+    absolute = os.path.abspath(raw_path)
+    parent = os.path.dirname(absolute)
+    leaf = os.path.basename(absolute)
+    if (
+        not leaf
+        or leaf in {".", ".."}
+        or os.path.realpath(parent) != parent
+    ):
+        raise AuditError("INPUT", f"{label}: non-canonical parent or leaf")
+
+    try:
+        parent_before = os.lstat(parent)
+    except OSError as exc:
+        raise AuditError("INPUT", f"{label}: parent unavailable") from exc
+    # Only `audit` is relaxed, and only because it is a git-tracked file: mode 0644 under
+    # a 0755 directory on every normal checkout, so requiring the writer's 0600/0700
+    # would reject the tracked active audit on every clean run. The other four labels are
+    # this run's own evidence, written by `new_output` at 0600 under a 0700 root, and are
+    # held to exactly that. Applying the tracked-file relaxation to all five was one
+    # rationale covering one label of the five it governed.
+    tracked = label == "audit"
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or (
+            stat.S_IMODE(parent_before.st_mode) & 0o022
+            if tracked
+            else stat.S_IMODE(parent_before.st_mode) != 0o700
+        )
+    ):
+        raise AuditError("INPUT", f"{label}: unsafe parent directory")
+
+    parent_fd = -1
+    descriptor = -1
+    try:
+        parent_fd = os.open(
+            parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        parent_opened = os.fstat(parent_fd)
+        parent_current = os.lstat(parent)
+        bound_parent = parent_identity(parent_before)
+        if (
+            parent_identity(parent_opened) != bound_parent
+            or parent_identity(parent_current) != bound_parent
+        ):
+            raise AuditError("INPUT", f"{label}: parent changed while opening")
+
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = input_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            # The leaf half of the same per-label rule. Only the parent half was
+            # implemented, so a `journal` leaf at 0755 under a 0700 parent was accepted
+            # while the comment claimed the four evidence labels were held to 0600.
+            or (
+                stat.S_IMODE(before.st_mode) & 0o022
+                if tracked
+                else stat.S_IMODE(before.st_mode) != 0o600
+            )
+            or before.st_size <= 0
+            or before.st_size > limit
+        ):
+            raise AuditError("INPUT", f"{label}: unsafe file metadata or size")
+
+        descriptor = os.open(
+            leaf,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+        opened = os.fstat(descriptor)
+        if input_identity(opened) != bound:
+            raise AuditError("INPUT", f"{label}: changed while opening")
+
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(READ_CHUNK_BYTES, remaining))
+            if not chunk:
+                raise AuditError("INPUT", f"{label}: shrank while reading")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise AuditError("INPUT", f"{label}: grew while reading")
+
+        after = os.fstat(descriptor)
+        current = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        parent_after = os.fstat(parent_fd)
+        parent_path_after = os.lstat(parent)
+        if input_identity(after) != bound:
+            raise AuditError("INPUT", f"{label}: descriptor identity changed")
+        if input_identity(current) != bound:
+            raise AuditError("INPUT", f"{label}: leaf pathname identity changed")
+        if parent_identity(parent_after) != bound_parent:
+            raise AuditError("INPUT", f"{label}: parent descriptor identity changed")
+        if parent_identity(parent_path_after) != bound_parent:
+            raise AuditError("INPUT", f"{label}: parent pathname identity changed")
+        payload = b"".join(chunks)
+        if len(payload) != before.st_size:
+            raise AuditError("INPUT", f"{label}: byte count differs")
+    except AuditError:
+        raise
+    except OSError as exc:
+        raise AuditError("INPUT", f"{label}: unsafe descriptor read failed") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_fd >= 0:
+            os.close(parent_fd)
+    try:
+        return payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AuditError("INPUT", f"{label}: expected UTF-8") from exc
+
+
+def catalog(text: str, label: str) -> Counter[str]:
+    value = json_value(text, label)
+    if not isinstance(value, list) or not value:
+        raise AuditError("CATALOG", f"{label}: expected nonempty array")
+    names: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item or item != item.strip():
+            raise AuditError("CATALOG", f"{label}: invalid name")
+        names.append(item)
+    if len(names) != len(set(names)):
+        raise AuditError("CATALOG", f"{label}: duplicate name")
+    return Counter(names)
+
+
+def code_cell(cell: str, label: str) -> str:
+    if (
+        len(cell) < 3
+        or cell[0] != "`"
+        or cell[-1] != "`"
+        or "`" in cell[1:-1]
+        or not cell[1:-1]
+        or cell[1:-1] != cell[1:-1].strip()
+    ):
+        raise AuditError("TABLE", f"{label}: invalid code cell")
+    return cell[1:-1]
+
+
+def table_issues(cell: str) -> tuple[str, ...]:
+    if cell == "none":
+        return ()
+    result: list[str] = []
+    for part in cell.split(";"):
+        issue = code_cell(part.strip(), "issue")
+        if ISSUE_RE.fullmatch(issue) is None:
+            raise AuditError("TABLE", "issue: invalid ID")
+        result.append(issue)
+    if len(result) != len(set(result)):
+        raise AuditError("TABLE", "issue: duplicate ID")
+    return tuple(result)
+
+
+def tool_table(text: str) -> Counter[str]:
+    lines = text.splitlines()
+    headings = [index for index, line in enumerate(lines) if line == TOOL_HEADING]
+    if len(headings) != 1:
+        raise AuditError("TABLE", "expected one exact Tool results heading")
+    if lines.count(TABLE_HEADER) != 1:
+        raise AuditError("TABLE", "expected one exact seven-column header")
+    section_start = headings[0] + 1
+    section_end = next(
+        (
+            index
+            for index in range(section_start, len(lines))
+            if lines[index].startswith("## ")
+        ),
+        len(lines),
+    )
+    headers = [
+        index
+        for index in range(section_start, section_end)
+        if lines[index] == TABLE_HEADER
+    ]
+    if len(headers) != 1:
+        raise AuditError("TABLE", "header is outside Tool results section")
+    header = headers[0]
+    if header + 1 >= section_end or lines[header + 1] != TABLE_SEPARATOR:
+        raise AuditError("TABLE", "invalid separator")
+    if any(line.startswith("|") for line in lines[section_start:header]):
+        raise AuditError("TABLE", "unexpected table before tool table")
+
+    tools: list[str] = []
+    expected = 1
+    cursor = header + 2
+    while cursor < section_end and lines[cursor].startswith("|"):
+        line = lines[cursor]
+        if not line.endswith("|"):
+            raise AuditError("TABLE", "row lacks final separator")
+        cells = [part.strip() for part in line[1:-1].split("|")]
+        if len(cells) != 7 or any(not cell for cell in cells):
+            raise AuditError("TABLE", "row must contain seven nonblank cells")
+        ordinal, tool_cell, outcome, wall_cell, shape, retry_cell, issue_cell = cells
+        if not ordinal.isdecimal() or ordinal != str(expected):
+            raise AuditError("TABLE", "ordinals must be canonical 1..N")
+        tool = code_cell(tool_cell, "tool")
+        if outcome not in {"pass", "pass_with_recovery", "pass_with_deviation"}:
+            raise AuditError("TABLE", "invalid outcome")
+        if WALL_RE.fullmatch(wall_cell) is None or float(wall_cell) == float("inf"):
+            raise AuditError("TABLE", "wall time must be finite and nonnegative")
+        if not shape:
+            raise AuditError("TABLE", "blank observed shape")
+        if (
+            not retry_cell.isdecimal()
+            or len(retry_cell) > 9
+            or retry_cell != str(int(retry_cell))
+        ):
+            raise AuditError("TABLE", "invalid retry count")
+        retry = int(retry_cell)
+        row_issues = table_issues(issue_cell)
+        if outcome == "pass_with_recovery":
+            if retry < 1 or not row_issues:
+                raise AuditError("TABLE", "recovery requires retry and issue ID")
+        elif retry != 0:
+            raise AuditError("TABLE", "non-recovery retry must be zero")
+        if outcome == "pass_with_deviation" and not row_issues:
+            raise AuditError("TABLE", "deviation requires issue ID")
+        tools.append(tool)
+        expected += 1
+        cursor += 1
+
+    if not tools:
+        raise AuditError("TABLE", "tool table has no rows")
+    if any(line.startswith("|") for line in lines[cursor:section_end]):
+        raise AuditError("TABLE", "multiple tables in Tool results section")
+    if len(tools) != len(set(tools)):
+        raise AuditError("TABLE", "duplicate tool row")
+    return Counter(tools)
+
+
+def recorded_event(
+    obj: dict[str, object],
+) -> tuple[dict[str, object], str, datetime, int, int]:
+    missing = GENERATED - set(obj)
+    if missing:
+        raise AuditError("SCHEMA", f"missing generated: {','.join(sorted(missing))}")
+    client = {key: value for key, value in obj.items() if key not in GENERATED}
+    validate_event(client)
+    clock_id = text_field(obj, "clock_id")
+    try:
+        parsed = uuid.UUID(clock_id)
+    except ValueError as exc:
+        raise AuditError("CLOCK", "clock_id: invalid UUID") from exc
+    if str(parsed) != clock_id or parsed.version != 4:
+        raise AuditError("CLOCK", "clock_id: expected canonical UUID4")
+    utc_text = text_field(obj, "recorded_at_utc")
+    if UTC_RE.fullmatch(utc_text) is None:
+        raise AuditError("CLOCK", "recorded_at_utc: invalid format")
+    try:
+        utc = datetime.strptime(utc_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as exc:
+        raise AuditError("CLOCK", "recorded_at_utc: invalid value") from exc
+    monotonic_ns = int_field(obj, "monotonic_ns")
+    sequence = int_field(obj, "sequence")
+    if monotonic_ns < 0 or sequence < 1:
+        raise AuditError("CLOCK", "invalid monotonic_ns or sequence")
+    return client, clock_id, utc, monotonic_ns, sequence
+
+
+def journal(text: str) -> tuple[int, str]:
+    lines = text.splitlines()
+    if not lines:
+        raise AuditError("JOURNAL", "journal is empty")
+    opened: dict[str, dict[str, object]] = {}
+    completed: dict[str, dict[str, object]] = {}
+    starts: dict[str, tuple[datetime, int]] = {}
+    clock_id: str | None = None
+    previous_utc: datetime | None = None
+    previous_monotonic: int | None = None
+    for expected, line in enumerate(lines, 1):
+        if not line.strip():
+            raise AuditError("JOURNAL", "blank journal line")
+        event, current_clock, utc, monotonic_ns, sequence = recorded_event(
+            json_object(line, f"journal line {expected}")
+        )
+        if sequence != expected:
+            raise AuditError("JOURNAL", "sequence differs from line order")
+        if clock_id is None:
+            clock_id = current_clock
+        elif current_clock != clock_id:
+            raise AuditError("CLOCK", "mixed clock IDs")
+        if previous_utc is not None and utc <= previous_utc:
+            raise AuditError("CLOCK", "UTC timestamps are not increasing")
+        if previous_monotonic is not None and monotonic_ns <= previous_monotonic:
+            raise AuditError("CLOCK", "monotonic timestamps are not increasing")
+        check_next(event, opened, completed)
+        event_id = text_field(event, "event_id")
+        if event["kind"] == "start":
+            starts[event_id] = (utc, monotonic_ns)
+        else:
+            start_utc, start_monotonic = starts[event_id]
+            if utc <= start_utc or monotonic_ns <= start_monotonic:
+                raise AuditError("CLOCK", "nonpositive event duration")
+        accept_next(event, opened, completed)
+        previous_utc = utc
+        previous_monotonic = monotonic_ns
+    if opened:
+        raise AuditError("JOURNAL", "unpaired start")
+    assert clock_id is not None
+    return len(lines), clock_id
+
+
+def validate(args: argparse.Namespace) -> dict[str, object]:
+    journal_text = read_owned_regular(
+        cast(str, args.journal), "journal", JOURNAL_MAX_BYTES
+    )
+    audit_text = read_owned_regular(
+        cast(str, args.audit), "audit", AUDIT_MAX_BYTES
+    )
+    live = catalog(
+        read_owned_regular(
+            cast(str, args.live_catalog),
+            "live catalog",
+            LIVE_CATALOG_MAX_BYTES,
+        ),
+        "live catalog"
+    )
+    source = catalog(
+        read_owned_regular(
+            cast(str, args.source_catalog),
+            "source catalog",
+            SOURCE_CATALOG_MAX_BYTES,
+        ),
+        "source catalog",
+    )
+    config = catalog(
+        read_owned_regular(
+            cast(str, args.config_catalog),
+            "config catalog",
+            CONFIG_CATALOG_MAX_BYTES,
+        ),
+        "config catalog",
+    )
+    if live != source or live != config:
+        raise AuditError("CATALOG", "catalog counters differ")
+    table = tool_table(audit_text)
+    if table != live:
+        raise AuditError("TABLE", "tool table differs from catalogs")
+    events, clock_id = journal(journal_text)
+    return {
+        "status": "ok",
+        "catalog_count": sum(live.values()),
+        "tool_rows": sum(table.values()),
+        "clock_id": clock_id,
+        "events": events,
+    }
+
+
+def parser() -> Parser:
+    result = Parser()
+    subcommands = result.add_subparsers(dest="command", required=True)
+    command = subcommands.add_parser("record")
+    command.add_argument("--output", required=True)
+    command = subcommands.add_parser("validate")
+    command.add_argument("--journal", required=True)
+    command.add_argument("--audit", required=True)
+    command.add_argument("--live-catalog", required=True)
+    command.add_argument("--source-catalog", required=True)
+    command.add_argument("--config-catalog", required=True)
+    return result
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        args = parser().parse_args(argv)
+        if args.command == "record":
+            result = record(cast(str, args.output))
+        else:
+            result = validate(args)
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 0
+    except AuditError as exc:
+        print(f"ERROR[{exc.category}]: {str(exc).replace(chr(10), ' ')}", file=sys.stderr)
+        return 1
+    except OSError:
+        print("ERROR[IO]: operating-system I/O failure", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+## Appendix C0 — initial adversarial probe
+
+Tasks 2–5 use this pre-live probe with Appendix B1, B2I, A0, and D exactly as their dispatch map specifies. Task 6 owns the hardened Appendix C delta.
+
+The exact initial probe is 655 lines / 26,314 bytes with SHA-256
+`ea39caf013cdbfccfdd7987ef588fcce8ed509b7b5db62af86b445cd460f7383`. Extract these bytes
+into the ignored `.superpowers/sdd/modeling-remediation/appendix-c-probe.py` at mode
+`0600` before running any command below. That path is an ignored scratch artifact and
+currently holds a third, stale version (637 lines / 25,309 bytes / mode `0644` /
+SHA-256 `4e3ce3f97b448f2abdccb3ddd30157a3d070d9e9611d0e1cff5d61a568209d94`) that is
+neither this payload nor Appendix C's — overwrite it, never execute it. Every C0 command
+binds the digest above, so a stale, foreign-owned, world-readable or symlinked copy fails
+closed instead of deciding four Tasks' verdicts.
 
 ```python
 #!/usr/bin/env python3
@@ -3710,6 +13201,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+# The run this probe stands in for happens under `umask 077` -- Appendix D sets it -- and
+# the validator holds its four evidence labels to a 0600 leaf under a 0700 parent. Every
+# `write_text` here takes the process umask, so without this the probe wrote 0644
+# catalogs and journals under the default 022 and its own GREEN cases failed, while the
+# gate, the syntax check and every mutation stayed green. One umask, not a chmod at each
+# of twenty-odd write sites.
+os.umask(0o077)
 
 ERROR_RE = re.compile(r"ERROR\[([A-Z]+)\]: [^\n]+\n?\Z")
 HEADER = "| Ordinal | Tool | Outcome | Wall ms | Observed shape | Retry count | Issue ID |"
@@ -4300,13 +13799,23 @@ class Probe:
 
 
 def main() -> int:
+    if not __debug__:
+        raise SystemExit("STOP: probe requires assertions; unset PYTHONOPTIMIZE")
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("record-red", "record-green", "validate-red", "all-green"))
     parser.add_argument("--script", required=True, type=Path)
     args = parser.parse_args()
 
     if args.mode == "record-red":
-        assert not args.script.exists()
+        # `exists()` follows the link, so a dangling symlink at the audit-script path
+        # reported SCRIPT_ABSENT; the runbook rule is that a broken symlink is rejected
+        # too. `assert` also disappears under PYTHONOPTIMIZE, which this check must not.
+        try:
+            args.script.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise SystemExit("audit script path must be absent, symlinks included")
         print("SCRIPT_ABSENT")
         return 0
 
@@ -4342,11 +13851,20 @@ transition.
 ```bash
 /bin/bash -euo pipefail <<'BASH'
 UV="${UV:-$HOME/.local/bin/uv}"
-case "$UV" in /*) ;; *) echo "UV must be absolute" >&2; exit 1 ;; esac
+case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
 PROBE=.superpowers/sdd/modeling-remediation/appendix-c-probe.py
+PROBE_SHA256=ea39caf013cdbfccfdd7987ef588fcce8ed509b7b5db62af86b445cd460f7383
 SCRIPT=scripts/official_blender_mcp_audit.py
+test -f "$PROBE"
+test ! -L "$PROBE"
 test -s "$PROBE"
+test "$(stat -f '%u:%Lp' "$PROBE")" = "$(id -u):600"
+test "$(shasum -a 256 "$PROBE" | cut -d' ' -f1)" = "$PROBE_SHA256"
+# `test ! -e` is true for a dangling symlink, and the runbook rule is that a broken
+# symlink must be rejected too. Two lines, not `&&`: in an `A && B` list a failing A
+# aborts under neither errexit nor an exiting ERR trap.
 test ! -e "$SCRIPT"
+test ! -L "$SCRIPT"
 "$UV" run --quiet --no-project --python 3.13 python "$PROBE" \
   record-red --script "$SCRIPT"
 # exact stdout: SCRIPT_ABSENT
@@ -4358,10 +13876,15 @@ BASH
 ```bash
 /bin/bash -euo pipefail <<'BASH'
 UV="${UV:-$HOME/.local/bin/uv}"
-case "$UV" in /*) ;; *) echo "UV must be absolute" >&2; exit 1 ;; esac
+case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
 PROBE=.superpowers/sdd/modeling-remediation/appendix-c-probe.py
+PROBE_SHA256=ea39caf013cdbfccfdd7987ef588fcce8ed509b7b5db62af86b445cd460f7383
 SCRIPT=scripts/official_blender_mcp_audit.py
+test -f "$PROBE"
+test ! -L "$PROBE"
 test -s "$PROBE"
+test "$(stat -f '%u:%Lp' "$PROBE")" = "$(id -u):600"
+test "$(shasum -a 256 "$PROBE" | cut -d' ' -f1)" = "$PROBE_SHA256"
 test -f "$SCRIPT"
 test ! -L "$SCRIPT"
 "$UV" run --frozen --python 3.13 ruff check "$SCRIPT"
@@ -4376,15 +13899,20 @@ test ! -L "$SCRIPT"
 BASH
 ```
 
-### After Task 3 replaces the script with Appendix B2
+### After Task 3 replaces the script with Appendix B2I
 
 ```bash
 /bin/bash -euo pipefail <<'BASH'
 UV="${UV:-$HOME/.local/bin/uv}"
-case "$UV" in /*) ;; *) echo "UV must be absolute" >&2; exit 1 ;; esac
+case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
 PROBE=.superpowers/sdd/modeling-remediation/appendix-c-probe.py
+PROBE_SHA256=ea39caf013cdbfccfdd7987ef588fcce8ed509b7b5db62af86b445cd460f7383
 SCRIPT=scripts/official_blender_mcp_audit.py
+test -f "$PROBE"
+test ! -L "$PROBE"
 test -s "$PROBE"
+test "$(stat -f '%u:%Lp' "$PROBE")" = "$(id -u):600"
+test "$(shasum -a 256 "$PROBE" | cut -d' ' -f1)" = "$PROBE_SHA256"
 test -f "$SCRIPT"
 test ! -L "$SCRIPT"
 "$UV" run --frozen --python 3.13 ruff check "$SCRIPT"
@@ -4404,14 +13932,1067 @@ catalog/table adversaries, journal clock/order/pair/recovery failures, and
 Task-envelope, issue-ID, extreme-JSON, and `internal_ms` positive, boolean, negative,
 infinite, and NaN cases.
 
+
+
+## Appendix C — complete adversarial probe
+
+The exact hardened probe is 937 lines / 36,994 bytes with SHA-256
+`9e2f58d3bf98d9c7113d10362c4637f6a36e0a9fb389ff0b1d2c509f5806e0b3`.
+
+```python
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, cast
+
+# The run this probe stands in for happens under `umask 077` -- Appendix D sets it -- and
+# the validator holds its four evidence labels to a 0600 leaf under a 0700 parent. Every
+# `write_text` here takes the process umask, so without this the probe wrote 0644
+# catalogs and journals under the default 022 and its own GREEN cases failed, while the
+# gate, the syntax check and every mutation stayed green. One umask, not a chmod at each
+# of twenty-odd write sites.
+os.umask(0o077)
+
+ERROR_RE = re.compile(r"ERROR\[([A-Z]+)\]: [^\n]+\n?\Z")
+HEADER = "| Ordinal | Tool | Outcome | Wall ms | Observed shape | Retry count | Issue ID |"
+SEPARATOR = "|---:|---|---|---:|---|---:|---|"
+
+
+def base_events() -> list[dict[str, Any]]:
+    return [
+        {
+            "event_id": "task",
+            "kind": "start",
+            "scope": "task",
+            "stage": "remediation-integration",
+            "attempt": 0,
+            "recovery_of": None,
+        },
+        {
+            "event_id": "failed",
+            "kind": "start",
+            "scope": "call",
+            "stage": "catalog-call",
+            "attempt": 0,
+            "recovery_of": None,
+        },
+        {
+            "event_id": "failed",
+            "kind": "end",
+            "scope": "call",
+            "stage": "catalog-call",
+            "attempt": 0,
+            "recovery_of": None,
+            "outcome": "fail",
+            "issue_ids": ["MODEL-RUN-01"],
+            "symptom": "caller-observed protocol symptom",
+            "first_hypothesis": "caller-provided first hypothesis",
+            "internal_ms": 1.25,
+        },
+        {
+            "event_id": "recovery",
+            "kind": "start",
+            "scope": "call",
+            "stage": "catalog-call-recovery",
+            "attempt": 1,
+            "recovery_of": "failed",
+        },
+        {
+            "event_id": "recovery",
+            "kind": "end",
+            "scope": "call",
+            "stage": "catalog-call-recovery",
+            "attempt": 1,
+            "recovery_of": "failed",
+            "outcome": "pass",
+            "issue_ids": ["MODEL-RUN-01"],
+            "internal_ms": 0,
+        },
+        {
+            "event_id": "clean",
+            "kind": "start",
+            "scope": "stage",
+            "stage": "frozen-state",
+            "attempt": 0,
+            "recovery_of": None,
+        },
+        {
+            "event_id": "clean",
+            "kind": "end",
+            "scope": "stage",
+            "stage": "frozen-state",
+            "attempt": 0,
+            "recovery_of": None,
+            "outcome": "deviation",
+            "issue_ids": ["MODEL-PLAN-10"],
+        },
+        {
+            "event_id": "task",
+            "kind": "end",
+            "scope": "task",
+            "stage": "remediation-integration",
+            "attempt": 0,
+            "recovery_of": None,
+            "outcome": "pass",
+            "issue_ids": [],
+        },
+    ]
+
+
+def encode(events: list[dict[str, Any]]) -> bytes:
+    return "".join(json.dumps(item, separators=(",", ":")) + "\n" for item in events).encode()
+
+
+class Probe:
+    def __init__(self, script: Path) -> None:
+        self.script = script.resolve()
+        raw_root = tempfile.mkdtemp(prefix="official-mcp-audit-")
+        self.root = Path(os.path.realpath(raw_root))
+        self.root.chmod(0o700)
+        self.case_number = 0
+
+    def close(self) -> None:
+        shutil.rmtree(self.root)
+
+    def command(self, *args: str, stdin: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            [sys.executable, str(self.script), *args],
+            input=stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    def error(
+        self,
+        category: str,
+        *args: str,
+        stdin: bytes | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        result = self.command(*args, stdin=stdin)
+        assert result.returncode == 1, (category, result.returncode, result.stdout, result.stderr)
+        stderr = result.stderr.decode()
+        match = ERROR_RE.fullmatch(stderr)
+        assert match is not None, stderr
+        assert match.group(1) == category, stderr
+        assert result.stdout == b"", result.stdout
+        return result
+
+    def record_error(
+        self,
+        category: str,
+        events: list[dict[str, Any]] | None = None,
+        raw: bytes | None = None,
+    ) -> Path:
+        self.case_number += 1
+        target = self.root / f"bad-record-{self.case_number}.ndjson"
+        self.error(
+            category,
+            "record",
+            "--output",
+            str(target),
+            stdin=raw if raw is not None else encode(events or []),
+        )
+        return target
+
+    def valid_record(self) -> tuple[Path, dict[str, Any]]:
+        target = self.root / "journal.ndjson"
+        result = self.command("record", "--output", str(target), stdin=encode(base_events()))
+        assert result.returncode == 0, result.stderr
+        assert result.stderr == b""
+        output = json.loads(result.stdout)
+        assert set(output) == {"status", "clock_id", "events"}
+        assert output["status"] == "ok" and output["events"] == 8
+        uuid.UUID(output["clock_id"])
+        info = target.lstat()
+        assert stat.S_ISREG(info.st_mode)
+        assert info.st_uid == os.getuid()
+        assert stat.S_IMODE(info.st_mode) == 0o600
+        rows = [json.loads(line) for line in target.read_text().splitlines()]
+        assert [row["sequence"] for row in rows] == list(range(1, 9))
+        assert len({row["clock_id"] for row in rows}) == 1
+        assert [row["scope"] for row in rows].count("task") == 2
+        assert rows[0]["scope"] == rows[-1]["scope"] == "task"
+        return target, output
+
+    def record_green(self) -> Path:
+        journal, _ = self.valid_record()
+        before = (journal.lstat().st_ino, hashlib.sha256(journal.read_bytes()).hexdigest())
+
+        self.error("OUTPUT", "record", "--output", str(journal), stdin=encode(base_events()))
+        assert before == (journal.lstat().st_ino, hashlib.sha256(journal.read_bytes()).hexdigest())
+
+        link = self.root / "journal-link.ndjson"
+        link.symlink_to(journal)
+        link_before = link.lstat()
+        self.error("OUTPUT", "record", "--output", str(link), stdin=encode(base_events()))
+        assert stat.S_ISLNK(link.lstat().st_mode)
+        assert link.lstat().st_ino == link_before.st_ino
+        assert before == (journal.lstat().st_ino, hashlib.sha256(journal.read_bytes()).hexdigest())
+
+        mode_parent = self.root / "mode-parent"
+        mode_parent.mkdir(mode=0o755)
+        mode_parent.chmod(0o755)
+        self.error(
+            "OUTPUT",
+            "record",
+            "--output",
+            str(mode_parent / "journal.ndjson"),
+            stdin=encode(base_events()),
+        )
+
+        real_parent = self.root / "real-parent"
+        real_parent.mkdir(mode=0o700)
+        alias_parent = self.root / "alias-parent"
+        alias_parent.symlink_to(real_parent, target_is_directory=True)
+        self.error(
+            "OUTPUT",
+            "record",
+            "--output",
+            str(alias_parent / "journal.ndjson"),
+            stdin=encode(base_events()),
+        )
+
+        task_start = base_events()[0]
+        failed_start = base_events()[1]
+        failed_end = base_events()[2]
+        recovery_start = base_events()[3]
+        recovery_end = base_events()[4]
+        deviation_end = base_events()[6]
+        task_end = base_events()[7]
+        cases: list[tuple[str, list[dict[str, Any]] | None, bytes | None]] = []
+        item = copy.deepcopy(task_start)
+        item["unknown"] = 1
+        cases.append(("SCHEMA", [item], None))
+        item = copy.deepcopy(task_start)
+        item["clock_id"] = str(uuid.uuid4())
+        cases.append(("SCHEMA", [item], None))
+        item = copy.deepcopy(task_start)
+        item["attempt"] = True
+        cases.append(("SCHEMA", [item], None))
+        item = copy.deepcopy(task_start)
+        item["attempt"] = -1
+        cases.append(("SCHEMA", [item], None))
+        item = copy.deepcopy(task_start)
+        item["stage"] = " "
+        cases.append(("SCHEMA", [item], None))
+        item = copy.deepcopy(task_start)
+        item["scope"] = "operation"
+        cases.append(("SCHEMA", [item], None))
+        item = copy.deepcopy(task_start)
+        item.pop("scope")
+        cases.append(("SCHEMA", [item], None))
+        item = copy.deepcopy(task_start)
+        item["recovery_of"] = 7
+        cases.append(("SCHEMA", [item], None))
+        item = copy.deepcopy(task_start)
+        item["internal_ms"] = 1
+        cases.append(("SCHEMA", [item], None))
+        cases.append(("JOURNAL", [copy.deepcopy(failed_end)], None))
+        cases.append(("JOURNAL", [copy.deepcopy(task_start)], None))
+        duplicate_task = copy.deepcopy(task_start)
+        duplicate_task["event_id"] = "task-2"
+        cases.append(("JOURNAL", [task_start, duplicate_task], None))
+        cases.append(("JOURNAL", [copy.deepcopy(recovery_start)], None))
+
+        passing = copy.deepcopy(base_events())
+        passing[2]["outcome"] = "pass"
+        passing[2].pop("symptom")
+        passing[2].pop("first_hypothesis")
+        cases.append(("JOURNAL", passing[:4], None))
+        wrong_attempt = copy.deepcopy(base_events())
+        wrong_attempt[3]["attempt"] = 2
+        cases.append(("JOURNAL", wrong_attempt[:4], None))
+        mismatch = copy.deepcopy(base_events())
+        mismatch[2]["stage"] = "other"
+        cases.append(("JOURNAL", mismatch[:3], None))
+        mismatch = copy.deepcopy(base_events())
+        mismatch[2]["scope"] = "stage"
+        cases.append(("JOURNAL", mismatch[:3], None))
+        mismatch = copy.deepcopy(base_events())
+        mismatch[4]["issue_ids"] = ["MODEL-RUN-02"]
+        cases.append(("JOURNAL", mismatch[:5], None))
+        item = copy.deepcopy(failed_end)
+        item["issue_ids"] = ["BAD-01"]
+        cases.append(("SCHEMA", [task_start, failed_start, item], None))
+        item = copy.deepcopy(failed_end)
+        item["issue_ids"] = ["MODEL-RUN-01", "MODEL-RUN-01"]
+        cases.append(("SCHEMA", [task_start, failed_start, item], None))
+        item = copy.deepcopy(failed_end)
+        item["issue_ids"] = []
+        cases.append(("SCHEMA", [task_start, failed_start, item], None))
+        item = copy.deepcopy(failed_end)
+        item.pop("symptom")
+        cases.append(("SCHEMA", [task_start, failed_start, item], None))
+        item = copy.deepcopy(failed_end)
+        item.pop("first_hypothesis")
+        cases.append(("SCHEMA", [task_start, failed_start, item], None))
+        item = copy.deepcopy(failed_end)
+        item["first_hypothesis"] = ""
+        cases.append(("SCHEMA", [task_start, failed_start, item], None))
+        item = copy.deepcopy(failed_end)
+        item["outcome"] = "pass"
+        cases.append(("SCHEMA", [task_start, failed_start, item], None))
+        item = copy.deepcopy(recovery_end)
+        item["issue_ids"] = []
+        cases.append(("SCHEMA", base_events()[:4] + [item], None))
+        item = copy.deepcopy(deviation_end)
+        item["issue_ids"] = []
+        cases.append(("SCHEMA", base_events()[:6] + [item], None))
+        item = copy.deepcopy(recovery_end)
+        item["internal_ms"] = True
+        cases.append(("SCHEMA", base_events()[:4] + [item], None))
+        item = copy.deepcopy(recovery_end)
+        item["internal_ms"] = -0.1
+        cases.append(("SCHEMA", base_events()[:4] + [item], None))
+        item = copy.deepcopy(recovery_end)
+        item["internal_ms"] = 1e999
+        cases.append(("JSON", base_events()[:4] + [item], None))
+        cases.append(("JOURNAL", base_events()[1:3], None))
+        cases.append(("JOURNAL", [task_start, failed_start, task_end], None))
+        cases.append(("JOURNAL", [task_start, task_end, failed_start], None))
+        cases.append(
+            (
+                "JSON",
+                None,
+                b'{"event_id":"x","kind":"end","scope":"task","stage":"x",'
+                b'"attempt":0,"recovery_of":null,"outcome":"pass",'
+                b'"issue_ids":[],"internal_ms":NaN}\n',
+            )
+        )
+        huge_integer = (
+            b'{"event_id":"x","kind":"start","scope":"task","stage":"x",'
+            b'"attempt":' + b"9" * 5000 + b',"recovery_of":null}\n'
+        )
+        cases.append(("JSON", None, huge_integer))
+        cases.append(("JSON", None, b"[" * 10000 + b"0" + b"]" * 10000 + b"\n"))
+        cases.append(("SCHEMA", None, b"\n"))
+        for category, events, raw in cases:
+            self.record_error(category, events, raw)
+        return journal
+
+    def write_catalogs(self, names: list[str]) -> dict[str, Path]:
+        result: dict[str, Path] = {}
+        payload = json.dumps(names, separators=(",", ":")) + "\n"
+        for label in ("live", "source", "config"):
+            path = self.root / f"{label}.json"
+            path.write_text(payload)
+            result[label] = path
+        return result
+
+    def audit_text(self, names: list[str]) -> str:
+        rows = ["## Tool results", "", HEADER, SEPARATOR]
+        rows.extend(
+            f"| {index} | `{name}` | pass | {index}.0 | synthetic | 0 | none |"
+            for index, name in enumerate(names, 1)
+        )
+        return "\n".join(rows) + "\n"
+
+    def validate_command(
+        self,
+        journal: Path,
+        audit: Path,
+        catalogs: dict[str, Path],
+    ) -> tuple[str, ...]:
+        return (
+            "validate",
+            "--journal",
+            str(journal),
+            "--audit",
+            str(audit),
+            "--live-catalog",
+            str(catalogs["live"]),
+            "--source-catalog",
+            str(catalogs["source"]),
+            "--config-catalog",
+            str(catalogs["config"]),
+        )
+
+    def validator_error(
+        self,
+        category: str,
+        journal: Path,
+        audit: Path,
+        catalogs: dict[str, Path],
+    ) -> None:
+        self.error(category, *self.validate_command(journal, audit, catalogs))
+
+    def write_journal(self, base: Path, name: str, rows: list[dict[str, Any]]) -> Path:
+        path = self.root / name
+        path.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows))
+        return path
+
+    def retime(self, rows: list[dict[str, Any]]) -> None:
+        base = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        for index, row in enumerate(rows, 1):
+            row["sequence"] = index
+            row["monotonic_ns"] = index * 1000
+            row["recorded_at_utc"] = (
+                (base + timedelta(microseconds=index))
+                .isoformat(timespec="microseconds")
+                .replace("+00:00", "Z")
+            )
+
+
+    def expect_reader_input_error(
+        self,
+        module: Any,
+        path: Path,
+        limit: int,
+        label: str = "journal",
+        message: str | None = None,
+    ) -> None:
+        try:
+            module.read_owned_regular(str(path), label, limit)
+        except module.AuditError as exc:
+            assert exc.category == "INPUT", exc.category
+            if message is not None:
+                assert str(exc) == f"{label}: {message}", str(exc)
+        else:
+            raise AssertionError(f"reader accepted unsafe input: {path} as {label!r}")
+
+    def reader_bound_proof(self) -> None:
+        """Prove the shipped validator refuses an input larger than its byte cap.
+
+        This drives the `validate` entry point, so it measures behaviour and
+        never a function signature. The oversize catalog is the accepted catalog
+        plus trailing JSON whitespace: it parses to the identical value, so an
+        unbounded reader validates it green and only a bounded reader refuses
+        it, on size alone.
+        """
+        journal = self.root / "bound-journal.ndjson"
+        recorded = self.command(
+            "record",
+            "--output",
+            str(journal),
+            stdin=encode(base_events()),
+        )
+        assert recorded.returncode == 0, recorded.stderr
+        names = ["tool_a", "tool_b"]
+        catalogs = self.write_catalogs(names)
+        audit = self.root / "bound-audit.md"
+        audit.write_text(self.audit_text(names))
+        args = self.validate_command(journal, audit, catalogs)
+        accepted = self.command(*args)
+        assert accepted.returncode == 0, accepted.stderr
+
+        compact = catalogs["live"].read_text()
+        padded = compact.rstrip("\n") + " " * (1024 * 1024) + "\n"
+        catalogs["live"].write_text(padded)
+        catalogs["live"].chmod(0o600)
+        assert json.loads(padded) == names
+        assert catalogs["live"].stat().st_size > 1024 * 1024
+        refused = self.command(*args)
+        assert refused.returncode == 1, (
+            "READER_BOUND_MISSING: oversize live catalog accepted with returncode "
+            f"{refused.returncode}; the validator enforces no read byte cap"
+        )
+        stderr = refused.stderr.decode()
+        assert stderr == "ERROR[INPUT]: live catalog: unsafe file metadata or size\n", (
+            "READER_BOUND_MISSING: oversize live catalog was not refused on size: "
+            + stderr.strip()
+        )
+        assert refused.stdout == b"", refused.stdout
+        self.write_catalogs(names)
+
+    def reader_race(
+        self,
+        module: Any,
+        name: str,
+        action: Any,
+        message: str,
+    ) -> None:
+        """Race one mutation against the read and pin which control refused it.
+
+        Asserting only the category could not tell these cases apart, so deleting
+        the leaf-pathname, parent-descriptor or parent-pathname re-check left the
+        matrix green. Each case now binds the exact refusal text, and the
+        `parent-entry` case touches nothing but the parent directory, so it can
+        only be refused by the two parent re-checks.
+        """
+        payload = b"a" * (module.READ_CHUNK_BYTES * 2 + 17)
+        path = self.root / f"reader-race-{name}.txt"
+        path.write_bytes(payload)
+        path.chmod(0o600)
+        original_read = module.os.read
+        triggered = False
+
+        def racing_read(descriptor: int, count: int) -> bytes:
+            nonlocal triggered
+            chunk = cast(bytes, original_read(descriptor, count))
+            if chunk and not triggered:
+                triggered = True
+                action(path, payload)
+            return chunk
+
+        module.os.read = racing_read
+        try:
+            self.expect_reader_input_error(
+                module, path, len(payload) + 1, message=message
+            )
+        finally:
+            module.os.read = original_read
+        assert triggered, name
+
+    def reader_green(self) -> None:
+        self.reader_bound_proof()
+
+        spec = importlib.util.spec_from_file_location("audit_reader_probe", self.script)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        assert set(module.INPUT_LIMITS) == {
+            "journal",
+            "audit",
+            "live catalog",
+            "source catalog",
+            "config catalog",
+        }, module.INPUT_LIMITS
+
+        positive = self.root / "reader-positive.txt"
+        positive_payload = "positive\n"
+        positive.write_text(positive_payload)
+        positive.chmod(0o600)
+        assert (
+            module.read_owned_regular(
+                str(positive),
+                "journal",
+                len(positive_payload.encode()),
+            )
+            == positive_payload
+        )
+        # The `audit` label is deliberately laxer than the other four: it reads a
+        # git-tracked file, which is mode 0644 under a 0755 directory on every normal
+        # checkout, while the four evidence labels are this run's own output at 0600 under
+        # a 0700 root. Nothing in this matrix pinned that asymmetry, so tightening `audit`
+        # to match the others -- or relaxing the others to match `audit` -- was invisible
+        # here and surfaced only against a real tracked audit at validate time.
+        tracked_parent = self.root / "tracked-audit-parent"
+        tracked_parent.mkdir(mode=0o755)
+        tracked_parent.chmod(0o755)
+        tracked = tracked_parent / "active-audit.md"
+        tracked.write_text(positive_payload)
+        tracked.chmod(0o644)
+        assert (
+            module.read_owned_regular(
+                str(tracked),
+                "audit",
+                len(positive_payload.encode()),
+            )
+            == positive_payload
+        )
+        # The same bytes at the same modes under an evidence label must be refused, so the
+        # asymmetry is pinned in both directions rather than only in the permissive one.
+        self.expect_reader_input_error(
+            module,
+            tracked,
+            len(positive_payload.encode()),
+        )
+        self.expect_reader_input_error(
+            module,
+            positive,
+            len(positive_payload.encode()) - 1,
+        )
+        self.expect_reader_input_error(
+            module,
+            positive,
+            len(positive_payload.encode()),
+            label="reader probe",
+        )
+        self.expect_reader_input_error(
+            module,
+            positive,
+            module.INPUT_LIMITS["journal"] + 1,
+        )
+
+        journal = self.root / "reader-journal.ndjson"
+        recorded = self.command(
+            "record",
+            "--output",
+            str(journal),
+            stdin=encode(base_events()),
+        )
+        assert recorded.returncode == 0, recorded.stderr
+        names = ["tool_a", "tool_b"]
+        catalogs = self.write_catalogs(names)
+        audit = self.root / "reader-audit.md"
+        audit.write_text(self.audit_text(names))
+        valid = self.command(*self.validate_command(journal, audit, catalogs))
+        assert valid.returncode == 0, valid.stderr
+
+        leaf_link = self.root / "reader-leaf-link"
+        leaf_link.symlink_to(journal)
+        self.validator_error("INPUT", leaf_link, audit, catalogs)
+
+        real_parent = self.root / "reader-real-parent"
+        real_parent.mkdir(mode=0o700)
+        parent_journal = real_parent / "journal.ndjson"
+        shutil.copyfile(journal, parent_journal)
+        parent_journal.chmod(0o600)
+        alias_parent = self.root / "reader-alias-parent"
+        alias_parent.symlink_to(real_parent, target_is_directory=True)
+        self.validator_error(
+            "INPUT",
+            alias_parent / parent_journal.name,
+            audit,
+            catalogs,
+        )
+
+        hard_target = self.root / "reader-hard-target"
+        hard_link = self.root / "reader-hard-link"
+        shutil.copyfile(journal, hard_target)
+        hard_target.chmod(0o600)
+        os.link(hard_target, hard_link)
+        self.validator_error("INPUT", hard_link, audit, catalogs)
+        hard_link.unlink()
+        hard_target.unlink()
+
+        unsafe_mode = self.root / "reader-unsafe-mode"
+        shutil.copyfile(journal, unsafe_mode)
+        unsafe_mode.chmod(0o666)
+        self.validator_error("INPUT", unsafe_mode, audit, catalogs)
+
+        unsafe_parent = self.root / "reader-unsafe-parent"
+        unsafe_parent.mkdir(mode=0o700)
+        parent_input = unsafe_parent / "journal.ndjson"
+        shutil.copyfile(journal, parent_input)
+        parent_input.chmod(0o600)
+        unsafe_parent.chmod(0o770)
+        self.validator_error("INPUT", parent_input, audit, catalogs)
+
+        catalogs["live"].write_bytes(b"x" * (1024 * 1024 + 1))
+        self.validator_error("INPUT", journal, audit, catalogs)
+        catalogs = self.write_catalogs(names)
+
+        def grow(path: Path, _payload: bytes) -> None:
+            with path.open("ab", buffering=0) as handle:
+                handle.write(b"x")
+                os.fsync(handle.fileno())
+
+        def shrink(path: Path, _payload: bytes) -> None:
+            with path.open("r+b", buffering=0) as handle:
+                handle.truncate(1)
+                os.fsync(handle.fileno())
+
+        def mutate(path: Path, _payload: bytes) -> None:
+            with path.open("r+b", buffering=0) as handle:
+                handle.write(b"z")
+                os.fsync(handle.fileno())
+
+        def replace(path: Path, payload: bytes) -> None:
+            displaced = path.with_name(path.name + "-displaced")
+            os.replace(path, displaced)
+            path.write_bytes(payload)
+            path.chmod(0o600)
+
+        def parent_entry(path: Path, _payload: bytes) -> None:
+            sibling = path.with_name(path.name + "-sibling")
+            sibling.write_bytes(b"s")
+            sibling.chmod(0o600)
+
+        self.reader_race(module, "grow", grow, "grew while reading")
+        self.reader_race(module, "shrink", shrink, "shrank while reading")
+        self.reader_race(module, "in-place", mutate, "descriptor identity changed")
+        self.reader_race(
+            module, "pathname-replacement", replace, "descriptor identity changed"
+        )
+        self.reader_race(
+            module, "parent-entry", parent_entry, "parent descriptor identity changed"
+        )
+
+    def all_green(self) -> None:
+        journal = self.record_green()
+        names = ["tool_a", "tool_b", "tool_c"]
+        catalogs = self.write_catalogs(names)
+        audit = self.root / "audit.md"
+        audit.write_text(self.audit_text(names))
+        args = self.validate_command(journal, audit, catalogs)
+        result = self.command(*args)
+        assert result.returncode == 0, result.stderr
+        output = json.loads(result.stdout)
+        assert set(output) == {"status", "catalog_count", "tool_rows", "clock_id", "events"}
+        assert output["status"] == "ok"
+        assert output["catalog_count"] == output["tool_rows"] == 3
+        assert output["events"] == 8
+
+        names.append("tool_d")
+        catalogs = self.write_catalogs(names)
+        audit.write_text(self.audit_text(names))
+        result = self.command(*self.validate_command(journal, audit, catalogs))
+        assert result.returncode == 0, result.stderr
+        output = json.loads(result.stdout)
+        assert output["catalog_count"] == output["tool_rows"] == 4
+
+        link = self.root / "input-link"
+        link.symlink_to(journal)
+        self.validator_error("INPUT", link, audit, catalogs)
+        fifo = self.root / "input-fifo"
+        os.mkfifo(fifo, 0o600)
+        self.validator_error("INPUT", fifo, audit, catalogs)
+        self.validator_error("INPUT", self.root, audit, catalogs)
+        foreign = next(
+            Path(path)
+            for path in ("/etc/hosts", "/etc/passwd")
+            if Path(path).exists() and Path(path).lstat().st_uid != os.getuid()
+        )
+        self.validator_error("INPUT", foreign, audit, catalogs)
+
+        def catalog_case(value: object, category: str = "CATALOG") -> None:
+            catalogs["live"].write_text(json.dumps(value) + "\n")
+            self.validator_error(category, journal, audit, catalogs)
+            self.write_catalogs(names)
+
+        catalog_case({})
+        catalog_case([])
+        catalog_case(["tool_a", ""])
+        catalog_case(["tool_a", "tool_a"])
+        catalogs["source"].write_text(json.dumps(names[:-1]))
+        self.validator_error("CATALOG", journal, audit, catalogs)
+        self.write_catalogs(names)
+        catalogs["config"].write_text(json.dumps(names + ["tool_e"]))
+        self.validator_error("CATALOG", journal, audit, catalogs)
+        self.write_catalogs(names)
+        catalogs["live"].write_text("{bad")
+        self.validator_error("JSON", journal, audit, catalogs)
+        catalogs = self.write_catalogs(names)
+        catalogs["live"].write_text("[" + "9" * 5000 + "]\n")
+        self.validator_error("JSON", journal, audit, catalogs)
+        catalogs = self.write_catalogs(names)
+        catalogs["live"].write_text("[" * 10000 + "0" + "]" * 10000 + "\n")
+        self.validator_error("JSON", journal, audit, catalogs)
+        catalogs = self.write_catalogs(names)
+
+        good_audit = self.audit_text(names)
+        table_cases = [
+            good_audit.replace("## Tool results", "## Wrong"),
+            good_audit + "\n## Tool results\n",
+            good_audit.replace(HEADER, "| Wrong |"),
+            good_audit.replace(SEPARATOR, "|---|"),
+            good_audit.replace("| 1 | `tool_a`", "| 2 | `tool_a`", 1),
+            good_audit.replace("| 1 | `tool_a`", "| 1 | `tool_b`", 1),
+            good_audit.replace("| 1 | `tool_a`", "| 1 | `tool_e`", 1),
+            good_audit.replace("| pass | 1.0", "| fail | 1.0", 1),
+            good_audit.replace("| pass | 1.0", "| pass | NaN", 1),
+            good_audit.replace("| pass | 1.0", "| pass | Inf", 1),
+            good_audit.replace("| pass | 1.0", "| pass | -1", 1),
+            good_audit.replace("| 0 | none |", "| -1 | none |", 1),
+            good_audit.replace("| synthetic |", "|  |", 1),
+            good_audit.replace("| none |", "| MODEL-RUN-01 |", 1),
+            good_audit.replace("| none |", "| `BAD-01` |", 1),
+            good_audit.replace("| none |", "| `MODEL-RUN-01`; `MODEL-RUN-01` |", 1),
+            "## Tool results\n\n" + HEADER + "\n" + SEPARATOR + "\n",
+            good_audit + "| x | y | z | q | r | s | t |\n",
+        ]
+        for index, value in enumerate(table_cases):
+            bad_audit = self.root / f"bad-table-{index}.md"
+            bad_audit.write_text(value)
+            self.validator_error("TABLE", journal, bad_audit, catalogs)
+        missing_audit = self.root / "missing-tool.md"
+        missing_audit.write_text(self.audit_text(names[:-1]))
+        self.validator_error("TABLE", journal, missing_audit, catalogs)
+        extra_audit = self.root / "extra-tool.md"
+        extra_audit.write_text(self.audit_text(names + ["tool_e"]))
+        self.validator_error("TABLE", journal, extra_audit, catalogs)
+
+        original = [json.loads(line) for line in journal.read_text().splitlines()]
+
+        def journal_case(
+            name: str,
+            rows: list[dict[str, Any]] | None,
+            category: str,
+            raw: str | None = None,
+        ) -> None:
+            path = self.root / f"bad-journal-{name}.ndjson"
+            if raw is None:
+                assert rows is not None
+                self.write_journal(journal, path.name, rows)
+            else:
+                path.write_text(raw)
+            self.validator_error(category, path, audit, catalogs)
+
+        journal_case("empty", [], "INPUT", "")
+        journal_case("json", None, "JSON", "{bad\n")
+        rows = copy.deepcopy(original)
+        rows[0]["unknown"] = 1
+        journal_case("unknown", rows, "SCHEMA")
+        rows = copy.deepcopy(original)
+        rows[0].pop("clock_id")
+        journal_case("missing-generated", rows, "SCHEMA")
+        rows = copy.deepcopy(original)
+        rows[0]["sequence"] = True
+        journal_case("bool-sequence", rows, "SCHEMA")
+        rows = copy.deepcopy(original)
+        rows[0]["monotonic_ns"] = True
+        journal_case("bool-monotonic", rows, "SCHEMA")
+        rows = copy.deepcopy(original)
+        rows[1]["clock_id"] = str(uuid.uuid4())
+        journal_case("mixed-clock", rows, "CLOCK")
+        rows = copy.deepcopy(original)
+        rows[1]["sequence"] = 9
+        journal_case("sequence", rows, "JOURNAL")
+        rows = copy.deepcopy(original)
+        rows[1]["recorded_at_utc"] = rows[0]["recorded_at_utc"]
+        journal_case("utc-order", rows, "CLOCK")
+        rows = copy.deepcopy(original)
+        rows[1]["monotonic_ns"] = rows[0]["monotonic_ns"]
+        journal_case("mono-order", rows, "CLOCK")
+        rows = copy.deepcopy(original[:-1])
+        journal_case("unpaired", rows, "JOURNAL")
+        rows = copy.deepcopy(original)
+        rows[1]["stage"] = "other"
+        journal_case("identity", rows, "JOURNAL")
+        rows = copy.deepcopy(original)
+        rows[2]["scope"] = "stage"
+        journal_case("scope-identity", rows, "JOURNAL")
+        rows = copy.deepcopy(original)
+        rows[1]["scope"] = "operation"
+        journal_case("scope-value", rows, "SCHEMA")
+        rows = copy.deepcopy(original)
+        rows[1].pop("scope")
+        journal_case("scope-missing", rows, "SCHEMA")
+        rows = copy.deepcopy(original)
+        rows[2].pop("symptom")
+        journal_case("symptom", rows, "SCHEMA")
+        rows = copy.deepcopy(original)
+        rows[2].pop("first_hypothesis")
+        journal_case("hypothesis", rows, "SCHEMA")
+        rows = copy.deepcopy(original)
+        rows[2]["first_hypothesis"] = ""
+        journal_case("blank-hypothesis", rows, "SCHEMA")
+        rows = copy.deepcopy(original)
+        rows[2]["issue_ids"] = []
+        journal_case("failure-empty-issues", rows, "SCHEMA")
+        rows = copy.deepcopy(original)
+        rows[4]["issue_ids"] = []
+        journal_case("recovery-empty-issues", rows, "SCHEMA")
+        rows = copy.deepcopy(original)
+        rows[6]["issue_ids"] = []
+        journal_case("deviation-empty-issues", rows, "SCHEMA")
+        rows = copy.deepcopy(original)
+        rows[4]["issue_ids"] = ["MODEL-RUN-02"]
+        journal_case("recovery-issues", rows, "JOURNAL")
+        rows = copy.deepcopy(original)
+        rows[3]["attempt"] = rows[4]["attempt"] = 2
+        journal_case("recovery-attempt", rows, "JOURNAL")
+        rows = copy.deepcopy(original)
+        rows[3]["recovery_of"] = rows[4]["recovery_of"] = "clean"
+        rows = rows[:3] + rows[5:7] + rows[3:5] + rows[7:]
+        self.retime(rows)
+        journal_case("recovery-pass", rows, "JOURNAL")
+        rows = copy.deepcopy(original)
+        rows = [rows[0], rows[1], rows[3], rows[2], *rows[4:]]
+        self.retime(rows)
+        journal_case("recovery-before", rows, "JOURNAL")
+        rows = copy.deepcopy(original[1:-1])
+        self.retime(rows)
+        journal_case("task-missing", rows, "JOURNAL")
+        rows = copy.deepcopy([original[0], original[-1], original[0], original[-1]])
+        rows[2]["event_id"] = rows[3]["event_id"] = "task-2"
+        self.retime(rows)
+        journal_case("task-duplicate", rows, "JOURNAL")
+        rows = copy.deepcopy([original[0], original[1], original[-1]])
+        self.retime(rows)
+        journal_case("task-premature-end", rows, "JOURNAL")
+        rows = copy.deepcopy([original[0], original[-1], original[5], original[6]])
+        self.retime(rows)
+        journal_case("task-non-enclosing", rows, "JOURNAL")
+        rows = copy.deepcopy(original)
+        rows[0]["clock_id"] = "bad"
+        journal_case("bad-clock", rows, "CLOCK")
+        rows = copy.deepcopy(original)
+        rows[4]["internal_ms"] = -1
+        journal_case("internal-negative", rows, "SCHEMA")
+        raw = journal.read_text().replace('"internal_ms":0', '"internal_ms":NaN', 1)
+        journal_case("internal-nan", None, "JSON", raw)
+        journal_case("huge-integer", None, "JSON", "[" + "9" * 5000 + "]\n")
+        journal_case("deep-json", None, "JSON", "[" * 10000 + "0" + "]" * 10000 + "\n")
+        self.reader_green()
+
+
+def main() -> int:
+    if not __debug__:
+        raise SystemExit("STOP: probe requires assertions; unset PYTHONOPTIMIZE")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "mode",
+        choices=(
+            "record-red",
+            "record-green",
+            "validate-red",
+            "reader-green",
+            "all-green",
+        ),
+    )
+    parser.add_argument("--script", required=True, type=Path)
+    args = parser.parse_args()
+
+    if args.mode == "record-red":
+        # `exists()` follows the link, so a dangling symlink at the audit-script path
+        # reported SCRIPT_ABSENT; the runbook rule is that a broken symlink is rejected
+        # too. `assert` also disappears under PYTHONOPTIMIZE, which this check must not.
+        try:
+            args.script.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise SystemExit("audit script path must be absent, symlinks included")
+        print("SCRIPT_ABSENT")
+        return 0
+
+    probe = Probe(args.script)
+    try:
+        if args.mode == "record-green":
+            probe.record_green()
+            print("RECORD_GREEN")
+        elif args.mode == "validate-red":
+            result = probe.error("USAGE", "validate")
+            assert b"invalid choice" in result.stderr
+            print("VALIDATOR_ABSENT")
+        elif args.mode == "reader-green":
+            probe.reader_green()
+            print("READER_GREEN")
+        else:
+            probe.all_green()
+            print("ALL_GREEN")
+    finally:
+        probe.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+## Exact commands and expected output
+
+The hardened probe is extracted once into the ignored `appendix-c-probe.py`. These
+actor-neutral commands are the only Appendix C transition commands, so the Appendix
+does not expose a later Task or any controller phase.
+
+### RED against the pre-hardening validator
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+UV="${UV:-$HOME/.local/bin/uv}"
+case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
+PROBE=.superpowers/sdd/modeling-remediation/appendix-c-probe.py
+PROBE_SHA256=9e2f58d3bf98d9c7113d10362c4637f6a36e0a9fb389ff0b1d2c509f5806e0b3
+SCRIPT=scripts/official_blender_mcp_audit.py
+test -f "$PROBE"
+test ! -L "$PROBE"
+test -s "$PROBE"
+test "$(stat -f '%u:%Lp' "$PROBE")" = "$(id -u):600"
+test "$(shasum -a 256 "$PROBE" | cut -d' ' -f1)" = "$PROBE_SHA256"
+test -f "$SCRIPT"
+test ! -L "$SCRIPT"
+set +e
+READER_RED_OUTPUT="$(
+  "$UV" run --quiet --no-project --python 3.13 python "$PROBE" \
+    reader-green --script "$SCRIPT" 2>&1
+)"
+READER_RED_STATUS=$?
+set -e
+test "$READER_RED_STATUS" = 1
+case "$READER_RED_OUTPUT" in
+  *"READER_BOUND_MISSING: oversize live catalog accepted with returncode 0"*) ;;
+  *) printf '%s\n' "$READER_RED_OUTPUT" >&2; exit 1 ;;
+esac
+printf 'READER_HARDENING_RED\n'
+# exact stdout: READER_HARDENING_RED
+BASH
+```
+
+### GREEN after installing Appendix B2
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+UV="${UV:-$HOME/.local/bin/uv}"
+case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
+PROBE=.superpowers/sdd/modeling-remediation/appendix-c-probe.py
+PROBE_SHA256=9e2f58d3bf98d9c7113d10362c4637f6a36e0a9fb389ff0b1d2c509f5806e0b3
+SCRIPT=scripts/official_blender_mcp_audit.py
+test -f "$PROBE"
+test ! -L "$PROBE"
+test -s "$PROBE"
+test "$(stat -f '%u:%Lp' "$PROBE")" = "$(id -u):600"
+test "$(shasum -a 256 "$PROBE" | cut -d' ' -f1)" = "$PROBE_SHA256"
+test -f "$SCRIPT"
+test ! -L "$SCRIPT"
+MYPY_CACHE="$(mktemp -d /private/tmp/official-mcp-mypy.XXXXXX)"
+test -d "$MYPY_CACHE"
+test ! -L "$MYPY_CACHE"
+test "$(stat -f '%u:%Lp' "$MYPY_CACHE")" = "$(id -u):700"
+trap 'rm -rf "$MYPY_CACHE"' EXIT
+"$UV" run --frozen --python 3.13 ruff check --no-cache "$SCRIPT" "$PROBE"
+"$UV" run --frozen --python 3.13 mypy --strict \
+  --cache-dir "$MYPY_CACHE" "$SCRIPT" "$PROBE"
+"$UV" run --quiet --no-project --python 3.13 python -m py_compile \
+  "$SCRIPT" "$PROBE"
+"$UV" run --quiet --no-project --python 3.13 python "$PROBE" \
+  reader-green --script "$SCRIPT"
+# exact stdout: READER_GREEN
+"$UV" run --quiet --no-project --python 3.13 python "$PROBE" \
+  all-green --script "$SCRIPT"
+# exact stdout: ALL_GREEN
+BASH
+```
+
+`reader-green` opens with `reader_bound_proof`, a signature-independent behavioural
+gate: it drives the shipped `validate` entry point twice with catalogs that parse to
+the identical value and differ only by a megabyte of trailing JSON whitespace. A
+reader with no byte cap ingests the padded file and validates it green; a bounded
+reader refuses it with `ERROR[INPUT]: live catalog: unsafe file metadata or size`.
+This is what the RED and GREEN lanes above discriminate. The RED lane is therefore
+bound to the missing byte cap — the exact capability Task 6 adds — and not to any
+signature, arity or message-text property: a pure refactor of `read_owned_regular`
+cannot flip it, and a 3-argument reader that still reads unbounded fails GREEN.
+
+`reader-green` then loads the validator as a module and asserts `INPUT_LIMITS` is
+exactly the five known validator roles, that an unknown role is refused outright,
+and that a caller-supplied limit above the role's ceiling is refused. The rest of the
+reader matrix is otherwise unchanged: a normal positive, the exact-limit positive,
+over-limit
+rejection, parent and leaf symlinks, a hardlink, group/world-writable file and parent
+modes, oversize input, and deterministic descriptor-coordinated grow, shrink,
+same-size in-place mutation, pathname replacement, and parent-directory-entry races.
+Each race case binds the exact refusal text rather than only the `INPUT` category,
+because the four post-read re-checks previously shared one message and deleting three
+of them left the matrix green. The `parent-entry` case creates a sibling under the bound
+parent and touches the read file not at all, so only the parent re-checks can refuse it.
+The race cases call the reader in-process and assert on the raised `AuditError`; the
+validator negatives driven through the CLI are the ones that
+exit exactly `1`, write no stdout, and emit one `ERROR[INPUT]: ...` line. The full
+mode retains the pre-existing record, catalog, table, journal, clock, pairing,
+recovery, Task-envelope, issue-ID, extreme-JSON, and `internal_ms` coverage.
+
 ## Appendix D: Exact no-write catalog and journal integration
 
-Task 4 and Task 5 use a new private run root for every invocation. Set
+Tasks 4, 5, and 7 use a new private run root for every invocation. Set
 `EXPECTED_ACTIVE_AUDIT_DIRTY=1` in Task 4 after changing only the active audit heading;
-set it to `0` for the clean Task 5 replay. `TASK_N` and `TASK_REPORT` bind those lanes.
-Before initial Phase M, leave `EXPECTED_MAIN_ANCHOR` empty so Appendix E's initial
-anchor is used. After a clean Phase M gate failure, set it to the exact prior reviewed
-HEAD for the next fix-forward round; the review package base does not move.
+set it to `0` for the clean Task 5 replay. Task 7 uses clean `0` as well: it commits both
+its runbook and its audit before rerunning this appendix, so there is one Task 7
+invocation and no dirty Task 7 lane -- the `case` below rejects one.
+`TASK_N` and `TASK_REPORT` bind lanes.
+Before initial controller merge verification, leave `EXPECTED_MAIN_ANCHOR` empty so
+Appendix E's initial anchor is used. After a clean controller merge-gate failure, set
+it to the exact prior reviewed HEAD for the next fix-forward round; the review package
+base does not move.
 
 The recorder starts before the first App Server, effective-config, on-disk config,
 source, external-baseline, audit, or Git-scope integration read. Bootstrap
@@ -4425,43 +15006,111 @@ list-of-tool-dicts live tool shapes. Source collection recognizes only function
 definitions carrying an exact `@mcp.tool` decorator. The effective `config/read`
 `mcp_servers.blender.enabled_tools` and the on-disk TOML
 `mcp_servers.blender.enabled_tools` are independently extracted and must equal the
-live and source catalogs. The config catalog file contains the effective set.
+live and source catalogs. The config catalog file contains the effective set. Its App
+stdout reader is nonblocking, uses one absolute deadline per request, retains ordered
+raw bytes across pages, and enforces one-MiB line and four-MiB session caps. The embedded
+pipe/subprocess matrix must pass before the real App Server is launched. App stderr is
+drained concurrently from a nonblocking pipe; it retains at most one MiB, records at
+most the truthful cap-plus-one observation, and terminates the child on overflow. The
+outer supervisor likewise streams collector stderr without an unbounded temporary
+write, retaining at most 9,000,000 bytes before it terminates the collector and returns
+the dedicated overflow status. The external-frozen-state stage is the one exception: it
+redirects its stderr to a file directly, so that capture is not bounded as it is
+written. Because the failure-closure reader caps at the same 9,000,000 bytes, the stage
+tests the captured size before it calls `finish_failed_stage` and stops with an explicit
+message rather than letting the failure path itself raise.
+
+Appendices D and E define five identity-binding bounded readers. Four of them are
+deliberately outside the marked reader families and therefore outside the byte-identity
+check at Task 0's integration gate; `bounded_owned_bytes` is the exception -- it sits
+inside `FAILURE_ACK_APPEND_READER` since that program was delimited, so it is held by
+that family's digest and is absent from the free-definition census. The five are
+`bounded_owned_bytes` and `owned_regular` (failure records
+and Task reports, mode `0600`, own UID), `read_bounded` (captured child stderr, mode
+`0600`, own UID), and `safe_file_bytes` / `file_bytes` (frozen external inputs, own UID,
+non-world-writable leaf, non-group/world-writable parent). They differ in ownership/mode
+role, in the size floor, and in the leaf mode test: the artifact readers reject
+`st_size <= 0` because an empty failure record or
+Task report is always invalid, while `read_bounded` and `safe_file_bytes` / `file_bytes`
+accept zero bytes because an empty stderr capture and an empty `__init__.py` in the
+pinned source tree are both legitimate; the first three require native mode `0600`
+exactly, while the last two must accept the tracked mode-`0644` repository files they
+exist to read and therefore reject only a world-writable leaf. Task 0's payload-identity
+gate enforces that split, the required safety tokens in each body, and the
+identity-tuple equality across every free copy, so drift in any of them
+fails closed rather than going unnoticed. Four further Appendix D functions call
+`os.read` without being members of that family: `read_limited`, a probe-local reader of a
+file the same probe just created inside its own `TemporaryDirectory`, which reads to EOF
+and binds no owner, mode or link count; `capture`, a subprocess stderr collector;
+`drain_app_stderr`, the nonblocking drain of the App Server child's stderr pipe; and
+`read_app_response`, the deadline-bounded reader of that child's stdout pipe. The last two
+read pipes rather than files, so leaf ownership, mode and link count do not apply to them;
+what applies is the byte cap, which each carries. The gate enumerates every function in
+the Plan whose body calls `os.read` and requires each name to be either a held member or
+one of those four named exemptions *with its exact definition count*, so a sixth reader
+cannot appear unnoticed, and it holds the four exempt bodies by SHA-256, because a
+count-exact exemption with no content check let `O_NOFOLLOW` and the link-count guard be
+deleted from `read_limited` and `capture` with the gate still green.
 
 Each catalog contains only a sorted JSON string array. The run root is current-UID,
 ordinary, non-symlink mode `0700`; catalogs, stderr captures, completed journal, and
 validation timing are current-UID, ordinary, non-symlink mode `0600` files. Required
 existing mutable paths reject missing targets, symlinks, foreign UID, and
-world-writable mode.
+world-writable mode. Every one of the five identity-binding readers listed above binds
+the pre-open size and
+the opened/after/current identity, owner, mode, link count, and size, reads exactly the
+pre-open byte count, and rejects pre-open growth plus post-read growth, shrink, or
+replacement; the embedded deterministic race probe must pass before a record is used.
+`read_limited` is not one of them and is used only inside that probe.
 
 Success closes every call, stage, and Task event, closes FD 9, waits for recorder EOF,
 then validates. On a stage failure, the command writes the bounded exact stderr bytes
-to the private `failure.json`, prints its resume FIFO, and blocks in the implementer's
-still-live command session. The same implementer/caller keeps that session pending,
+and validated capture status/size/digest metadata to the private `failure.json`; the
+same canonical metadata is retained in all three failure-closure symptoms. It prints
+its resume FIFO and blocks in the implementer's still-live command session. The same
+implementer/caller keeps that session pending,
 inspects the record, forms its immediate verbatim first hypothesis, appends this exact
 compact line to its ignored Task report, writes the JSON object to the resume FIFO,
 and then resumes/polls the original session:
 
 ```text
-failure_ack={"first_hypothesis":"CALLER'S VERBATIM FIRST HYPOTHESIS","raw_stderr_sha256":"64 lowercase hex digits from failure.json"}
+failure_ack={"failure_record_sha256":"64 lowercase hex digits over exact failure.json bytes","first_hypothesis":"CALLER'S VERBATIM FIRST HYPOTHESIS","raw_stderr_sha256":"64 lowercase hex digits from failure.json"}
 ```
 
 While the original command session remains pending, the same implementer/caller runs
 this exact block in a second shell, setting only its own immediate hypothesis and the
-three paths printed by the pending session:
+paths printed by the pending session:
 
 ```bash
 /bin/bash -euo pipefail <<'BASH'
+umask 077
 : "${UV_BIN:?reuse the absolute uv path from the pending command}"
+: "${RUN_ROOT:?set to the printed run_root path}"
 : "${FAILURE_RECORD:?set to the printed failure.json path}"
 : "${RESUME_FIFO:?set to the printed resume FIFO path}"
 : "${TASK_REPORT:?set to this Task's ignored report path}"
 : "${FIRST_HYPOTHESIS:?set the caller's immediate verbatim first hypothesis}"
+case "$UV_BIN" in /*) ;; *) echo 'STOP: UV_BIN must be absolute' >&2; exit 1 ;; esac
+case "$RUN_ROOT" in /*) ;; *) echo 'STOP: RUN_ROOT must be absolute' >&2; exit 1 ;; esac
+# The pending session printed all four values. Bind the two run-root paths to that
+# printed root so a typo or a symlink cannot redirect the acknowledgement, and hold the
+# report to the same three-way lane the pending command enforced.
+test "$FAILURE_RECORD" = "$RUN_ROOT/failure.json"
+test "$RESUME_FIFO" = "$RUN_ROOT/resume.fifo"
+case "$TASK_REPORT" in
+  /*/.superpowers/sdd/modeling-remediation/task-4-report.md) ;;
+  /*/.superpowers/sdd/modeling-remediation/task-5-report.md) ;;
+  /*/.superpowers/sdd/modeling-remediation/task-7-report.md) ;;
+  *) echo "STOP: unexpected absolute Task report path" >&2; exit 1 ;;
+esac
 CALLER_ACK="$(
+# FAILURE_ACK_APPEND_READER_BEGIN
   "$UV_BIN" run --quiet --no-project --python 3.13 python - \
     "$FAILURE_RECORD" "$TASK_REPORT" "$FIRST_HYPOTHESIS" <<'PY'
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -4469,38 +15118,197 @@ import stat
 import sys
 from pathlib import Path
 
+MAX_FAILURE_RECORD_BYTES = 12_100_000
+
+
+def snapshot_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def bounded_owned_bytes(
+    path: Path, limit: int
+) -> tuple[bytes, os.stat_result, os.stat_result]:
+    path = Path(os.path.abspath(path))
+    parent, leaf = path.parent, path.name
+    if limit <= 0 or leaf in {"", ".", ".."} or Path(os.path.realpath(parent)) != parent:
+        raise RuntimeError(f"unsafe snapshot path: {path}")
+    parent_before = os.lstat(parent)
+    parent_bound = snapshot_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) & 0o022
+    ):
+        raise RuntimeError(f"unsafe snapshot parent: {parent}")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = -1
+    try:
+        if (
+            snapshot_identity(os.fstat(parent_fd)) != parent_bound
+            or snapshot_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError("snapshot parent changed while opening")
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = snapshot_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_size <= 0
+            or before.st_size > limit
+        ):
+            raise RuntimeError(f"owned mode-0600 bounded file required: {path}")
+        descriptor = os.open(
+            leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
+        if snapshot_identity(os.fstat(descriptor)) != bound:
+            raise RuntimeError("snapshot changed while opening")
+        chunks: list[bytes] = []
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                raise RuntimeError("snapshot shrank while reading")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError("snapshot grew while reading")
+        payload = b"".join(chunks)
+        if (
+            len(payload) != before.st_size
+            or snapshot_identity(os.fstat(descriptor)) != bound
+            or snapshot_identity(
+                os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            ) != bound
+            or snapshot_identity(os.fstat(parent_fd)) != parent_bound
+            or snapshot_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError("snapshot changed while reading")
+        return payload, before, parent_before
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
 failure_path, report_path, hypothesis = sys.argv[1:]
 if not hypothesis or hypothesis != hypothesis.strip():
     raise RuntimeError("first hypothesis must be nonblank verbatim text")
-failure = json.loads(Path(failure_path).read_bytes())
+failure_payload, _, _ = bounded_owned_bytes(
+    Path(failure_path), MAX_FAILURE_RECORD_BYTES
+)
+failure = json.loads(failure_payload)
 stderr = base64.b64decode(failure["raw_stderr_b64"], validate=True)
 digest = hashlib.sha256(stderr).hexdigest()
 if digest != failure["raw_stderr_sha256"] or len(stderr) != failure["raw_stderr_bytes"]:
     raise RuntimeError("failure record does not match its raw stderr")
-ack = {"first_hypothesis": hypothesis, "raw_stderr_sha256": digest}
+ack = {
+    "failure_record_sha256": hashlib.sha256(failure_payload).hexdigest(),
+    "first_hypothesis": hypothesis,
+    "raw_stderr_sha256": digest,
+}
 ack_json = json.dumps(ack, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 payload = ("failure_ack=" + ack_json + "\n").encode("utf-8")
 report = Path(report_path)
-parent = os.path.abspath(report.parent)
-if os.path.realpath(parent) != parent:
-    raise RuntimeError("Task report parent contains a symlink")
-flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
-fd = os.open(report, flags, 0o600)
+initial, report_before, report_parent_before = bounded_owned_bytes(
+    report, 64_000_000
+)
+report = Path(os.path.abspath(report))
+parent = report.parent
+parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+fd = os.open(
+    report.name,
+    os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW,
+    dir_fd=parent_fd,
+)
 try:
-    os.fchmod(fd, 0o600)
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
-        raise RuntimeError("unsafe Task report")
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    if (
+        snapshot_identity(os.fstat(parent_fd))
+        != snapshot_identity(report_parent_before)
+        or snapshot_identity(os.lstat(parent))
+        != snapshot_identity(report_parent_before)
+        or snapshot_identity(os.fstat(fd)) != snapshot_identity(report_before)
+        or snapshot_identity(
+            os.stat(report.name, dir_fd=parent_fd, follow_symlinks=False)
+        ) != snapshot_identity(report_before)
+    ):
+        raise RuntimeError("Task report changed before append")
     view = memoryview(payload)
     while view:
         view = view[os.write(fd, view):]
     os.fsync(fd)
+    final_info = os.fstat(fd)
+    if final_info.st_size > 64_000_000:
+        raise RuntimeError("Task report exceeded its cap")
+    os.lseek(fd, 0, os.SEEK_SET)
+    remaining = final_info.st_size
+    chunks: list[bytes] = []
+    while remaining:
+        chunk = os.read(fd, min(65_536, remaining))
+        if not chunk:
+            raise RuntimeError("Task report shrank after append")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    if os.read(fd, 1):
+        raise RuntimeError("Task report grew after append")
+    final = b"".join(chunks)
+    current = os.stat(report.name, dir_fd=parent_fd, follow_symlinks=False)
+    if (
+        final != initial + payload
+        or snapshot_identity(os.fstat(fd)) != snapshot_identity(final_info)
+        or snapshot_identity(current) != snapshot_identity(final_info)
+        or snapshot_identity(os.fstat(parent_fd))
+        != snapshot_identity(report_parent_before)
+        or snapshot_identity(os.lstat(parent))
+        != snapshot_identity(report_parent_before)
+    ):
+        raise RuntimeError("Task report append publication differs")
 finally:
     os.close(fd)
+    os.close(parent_fd)
 print(ack_json)
+# FAILURE_ACK_APPEND_READER_END
 PY
 )"
-printf '%s\n' "$CALLER_ACK" >"$RESUME_FIFO"
+"$UV_BIN" run --quiet --no-project --python 3.13 python - "$RESUME_FIFO" "$CALLER_ACK" <<'PY'
+import os
+import stat
+import sys
+
+# A bare `>"$RESUME_FIFO"` redirect creates or truncates an ordinary file when the path
+# is wrong or symlinked, writes the acknowledgement into it, and leaves the pending
+# session blocked forever. Prove the target is the FIFO before writing one line to it.
+target = sys.argv[1]
+if not os.path.isabs(target):
+    raise SystemExit("STOP: resume FIFO path must be absolute")
+info = os.lstat(target)
+if (
+    not stat.S_ISFIFO(info.st_mode)
+    or info.st_uid != os.getuid()
+    or stat.S_IMODE(info.st_mode) != 0o600
+):
+    raise SystemExit("STOP: resume target is not the owned mode-0600 FIFO")
+fd = os.open(target, os.O_WRONLY | os.O_NOFOLLOW)
+try:
+    opened = os.fstat(fd)
+    if (
+        not stat.S_ISFIFO(opened.st_mode)
+        or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+    ):
+        raise SystemExit("STOP: resume FIFO changed while opening")
+    view = memoryview((sys.argv[2] + "\n").encode("utf-8"))
+    while view:
+        view = view[os.write(fd, view):]
+finally:
+    os.close(fd)
+PY
 BASH
 ```
 
@@ -4514,34 +15322,72 @@ no cross-clock `recovery_of` is invented. Normal orchestration does not resume u
 the implementer has completed, reported, and returned.
 
 ```bash
+# Tasks 4, 5 and 7 extract this fence body and pipe it into /bin/bash -euo pipefail, so
+# it is a fence payload rather than a standalone runbook command; the runbook rule is
+# that every Bash fence is *executed with* /bin/bash -euo pipefail (Appendix A0/A section
+# 2), not that every fence opens with that literal, and it binds those callers rather
+# than this body -- which sets the same options on its own first line regardless.
+set -euo pipefail
 UV_BIN="${UV_BIN:-$HOME/.local/bin/uv}"
+case "$UV_BIN" in /*) ;; *) echo 'STOP: UV_BIN must be absolute' >&2; exit 1 ;; esac
+test -x "$UV_BIN"
 CODEX_BIN="${CODEX_BIN:-/Applications/ChatGPT.app/Contents/Resources/codex}"
 CODEX_CONFIG="${CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
-AUDIT_FILE="docs/audits/2026-08-10-official-blender-mcp-modeling-validation.md"
-AUDIT_SCRIPT="scripts/official_blender_mcp_audit.py"
-EXTERNAL_BASELINE=".superpowers/sdd/modeling-remediation/external-baseline/baseline.json"
+REPO_ROOT="$(pwd -P)"
+AUDIT_FILE="$REPO_ROOT/docs/audits/2026-08-10-official-blender-mcp-modeling-validation.md"
+AUDIT_SCRIPT="$REPO_ROOT/scripts/official_blender_mcp_audit.py"
+EXTERNAL_BASELINE="$REPO_ROOT/.superpowers/sdd/modeling-remediation/external-baseline/baseline.json"
 BASE_COMMIT="09bf5c2089fe27b8dcdaa9af8115ec4d151359c3"
 EXPECTED_ACTIVE_AUDIT_DIRTY="${EXPECTED_ACTIVE_AUDIT_DIRTY:-1}"
-TASK_N="${TASK_N:?set to 4 or 5}"
+TASK_N="${TASK_N:?set to 4, 5, or 7}"
 TASK_REPORT="${TASK_REPORT:?set the ignored Task report path}"
 EXPECTED_MAIN_ANCHOR="${EXPECTED_MAIN_ANCHOR:-}"
 REPO_CWD="$(pwd -P)"
 export GIT_NO_REPLACE_OBJECTS=1
+test -z "${PYTHONOPTIMIZE-}"
+test -z "${PYTHONPATH-}"
+test -z "${PYTHONSTARTUP-}"
+test -z "${PYTHONHOME-}"
 
-case "$TASK_N:$EXPECTED_ACTIVE_AUDIT_DIRTY" in
-  4:1|5:0) ;;
-  *) echo "STOP: Task 4 requires dirty=1 and Task 5 requires dirty=0" >&2; exit 1 ;;
+# One case, not two: separate lane checks accepted TASK_N=4 with Task 5's report path,
+# which would have written Task 4's failure acknowledgement into Task 5's report.
+case "$TASK_N:$EXPECTED_ACTIVE_AUDIT_DIRTY:$TASK_REPORT" in
+  4:1:.superpowers/sdd/modeling-remediation/task-4-report.md) ;;
+  5:0:.superpowers/sdd/modeling-remediation/task-5-report.md) ;;
+  # No 7:1 lane. Task 7 commits the active audit before it reruns Appendix D, so the
+  # tree is clean at that point and a dirty Task 7 lane is unreachable from the runbook
+  # that declares it. Accepting one would accept a state this Plan never produces.
+  7:0:.superpowers/sdd/modeling-remediation/task-7-report.md) ;;
+  *) echo "STOP: invalid Task/active-audit-dirty/report lane" >&2; exit 1 ;;
 esac
-case "$TASK_REPORT" in
-  .superpowers/sdd/modeling-remediation/task-4-report.md|.superpowers/sdd/modeling-remediation/task-5-report.md) ;;
-  *) echo "STOP: unexpected Task report path" >&2; exit 1 ;;
-esac
-for resolved_path in "$UV_BIN" "$CODEX_BIN" "$CODEX_CONFIG" "$REPO_CWD"; do
+# The report reader below requires native mode 0600. Assert it here, before the
+# recorder exists, so a 0644 report stops the command instead of killing it inside a
+# live envelope with no task/stage start written and no failure closure possible.
+test -f "$TASK_REPORT"
+test ! -L "$TASK_REPORT"
+test "$(stat -f '%u' "$TASK_REPORT")" = "$(id -u)"
+test "$(stat -f '%Lp' "$TASK_REPORT")" = 600
+for resolved_path in "$UV_BIN" "$CODEX_BIN" "$CODEX_CONFIG" "$REPO_CWD" \
+  "$AUDIT_FILE" "$AUDIT_SCRIPT" "$EXTERNAL_BASELINE"; do
   case "$resolved_path" in
     /*) ;;
     *) echo "STOP: required path is not absolute: $resolved_path" >&2; exit 1 ;;
   esac
 done
+test "$REPO_CWD" = "$REPO_ROOT"
+for owned_input in "$AUDIT_FILE" "$AUDIT_SCRIPT" "$EXTERNAL_BASELINE"; do
+  test -f "$owned_input"
+  test ! -L "$owned_input"
+  test "$(stat -f '%u' "$owned_input")" = "$(id -u)"
+  # `case ... in *[2367])` only inspects the final mode digit, so 620, 640 and 664 all
+  # passed a gate whose message claims to reject them. Test both write bits directly.
+  "$UV_BIN" run --quiet --no-project --python 3.13 python -c \
+    'import os,stat,sys; raise SystemExit(0 if not stat.S_IMODE(os.lstat(sys.argv[1]).st_mode) & 0o022 else 1)' \
+    "$owned_input" \
+    || { echo "STOP: group/world-writable input: $owned_input" >&2; exit 1; }
+done
+AUDIT_SCRIPT_SHA256="$(shasum -a 256 "$AUDIT_SCRIPT" | awk '{print $1}')"
+export AUDIT_SCRIPT_SHA256
 
 export UV_BIN CODEX_BIN CODEX_CONFIG AUDIT_FILE AUDIT_SCRIPT EXTERNAL_BASELINE
 export BASE_COMMIT EXPECTED_ACTIVE_AUDIT_DIRTY TASK_N TASK_REPORT
@@ -4553,6 +15399,9 @@ RUN_ROOT="$(
 import os
 import stat
 import tempfile
+
+if not __debug__:
+    raise SystemExit("STOP: run-root allocation requires assertions; unset PYTHONOPTIMIZE")
 
 temp_base = os.path.realpath(tempfile.gettempdir())
 base_info = os.lstat(temp_base)
@@ -4578,14 +15427,18 @@ LIVE_CATALOG="$RUN_ROOT/live-catalog.json"
 SOURCE_CATALOG="$RUN_ROOT/source-catalog.json"
 CONFIG_CATALOG="$RUN_ROOT/config-catalog.json"
 COLLECT_STDERR="$RUN_ROOT/catalog-collector.stderr"
+COLLECT_STDERR_META="$RUN_ROOT/catalog-collector.stderr.meta.json"
 FROZEN_STDERR="$RUN_ROOT/external-frozen-state.stderr"
 VALIDATE_TIMING="$RUN_ROOT/validate-timing.json"
 export JOURNAL EVENT_FIFO RESUME_FIFO FAILURE_RECORD LIVE_CATALOG SOURCE_CATALOG
-export CONFIG_CATALOG COLLECT_STDERR FROZEN_STDERR VALIDATE_TIMING
+export CONFIG_CATALOG COLLECT_STDERR COLLECT_STDERR_META FROZEN_STDERR VALIDATE_TIMING
 
 "$UV_BIN" run --quiet --no-project --python 3.13 python - <<'PY'
 import os
 import stat
+
+if not __debug__:
+    raise SystemExit("STOP: FIFO creation requires assertions; unset PYTHONOPTIMIZE")
 
 root = os.environ["RUN_ROOT"]
 info = os.lstat(root)
@@ -4619,20 +15472,94 @@ cleanup_recorder() {
 }
 trap cleanup_recorder EXIT
 
+test "$(shasum -a 256 "$AUDIT_SCRIPT" | awk '{print $1}')" = "$AUDIT_SCRIPT_SHA256"
 "$UV_BIN" run --quiet --no-project --python 3.13 \
   python "$AUDIT_SCRIPT" record --output "$JOURNAL" <"$EVENT_FIFO" &
 RECORDER_PID=$!
 exec 9>"$EVENT_FIFO"
 RECORDER_FD_OPEN=1
 
-if [ -e "$TASK_REPORT" ]; then
-  REPORT_BEFORE_SHA="$(shasum -a 256 "$TASK_REPORT" | awk '{print $1}')"
-else
-  REPORT_BEFORE_SHA="-"
-fi
-export REPORT_BEFORE_SHA
+REPORT_BEFORE_STATE="$({
+# TASK_REPORT_SNAPSHOT_READER_BEGIN
+  "$UV_BIN" run --quiet --no-project --python 3.13 python - \
+    "$TASK_REPORT" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+from pathlib import Path
+
+path = Path(os.path.abspath(sys.argv[1]))
+parent, leaf = path.parent, path.name
+if leaf in {"", ".", ".."} or os.path.realpath(parent) != os.fspath(parent):
+    raise RuntimeError("unsafe Task report path")
+def identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+parent_before = os.lstat(parent)
+parent_bound = identity(parent_before)
+if (
+    stat.S_ISLNK(parent_before.st_mode)
+    or not stat.S_ISDIR(parent_before.st_mode)
+    or parent_before.st_uid != os.getuid()
+    or stat.S_IMODE(parent_before.st_mode) & 0o022
+):
+    raise RuntimeError("unsafe Task report parent")
+parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+descriptor = -1
+try:
+    if identity(os.fstat(parent_fd)) != parent_bound or identity(os.lstat(parent)) != parent_bound:
+        raise RuntimeError("Task report parent changed while opening")
+    before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+    bound = identity(before)
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_nlink != 1
+        or before.st_size <= 0
+        or before.st_size > 64_000_000
+    ):
+        raise RuntimeError("unsafe Task report metadata")
+    descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    if identity(os.fstat(descriptor)) != bound:
+        raise RuntimeError("Task report changed while opening")
+    remaining = before.st_size
+    chunks = []
+    while remaining:
+        chunk = os.read(descriptor, min(65_536, remaining))
+        if not chunk:
+            raise RuntimeError("Task report shrank while reading")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    if os.read(descriptor, 1):
+        raise RuntimeError("Task report grew while reading")
+    payload = b"".join(chunks)
+    if (
+        len(payload) != before.st_size
+        or identity(os.fstat(descriptor)) != bound
+        or identity(os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)) != bound
+        or identity(os.fstat(parent_fd)) != parent_bound
+        or identity(os.lstat(parent)) != parent_bound
+    ):
+        raise RuntimeError("Task report snapshot changed")
+    print(hashlib.sha256(payload).hexdigest(), before.st_dev, before.st_ino)
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+    os.close(parent_fd)
+# TASK_REPORT_SNAPSHOT_READER_END
+PY
+})"
+IFS=' ' read -r REPORT_BEFORE_SHA REPORT_BEFORE_DEV REPORT_BEFORE_INO <<EOF
+$REPORT_BEFORE_STATE
+EOF
+export REPORT_BEFORE_SHA REPORT_BEFORE_DEV REPORT_BEFORE_INO
 printf 'run_root=%s\nfailure_record=%s\nresume_fifo=%s\ntask_report=%s\n' \
-  "$RUN_ROOT" "$FAILURE_RECORD" "$RESUME_FIFO" "$TASK_REPORT"
+  "$RUN_ROOT" "$FAILURE_RECORD" "$RESUME_FIFO" "$REPO_CWD/$TASK_REPORT"
 
 finish_failed_stage() {
   failed_call=$1
@@ -4642,7 +15569,7 @@ finish_failed_stage() {
   failed_stderr=$5
   failed_issues=$6
 
-  FAILURE_SHA="$({
+  FAILURE_RECORD_SHA256="$({
     "$UV_BIN" run --quiet --no-project --python 3.13 python - \
       "$FAILURE_RECORD" "$failed_call" "$failed_stage_event" "$failed_stage" \
       "$failed_exit" "$failed_stderr" "$failed_issues" <<'PY'
@@ -4651,15 +15578,338 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
 import stat
 import sys
+import tempfile
 from pathlib import Path
 
+MAX_FAILURE_STDERR_BYTES = 9_000_000
+
+
+def snapshot_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def read_bounded(path: Path, limit: int, hook=None) -> bytes:
+    path = Path(os.path.abspath(path))
+    parent, leaf = path.parent, path.name
+    if limit <= 0 or leaf in {"", ".", ".."} or os.path.realpath(parent) != os.fspath(parent):
+        raise RuntimeError(f"unsafe capture path: {path}")
+    parent_before = os.lstat(parent)
+    parent_bound = snapshot_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) & 0o022
+    ):
+        raise RuntimeError(f"unsafe capture parent: {parent}")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = -1
+    try:
+        if (
+            snapshot_identity(os.fstat(parent_fd)) != parent_bound
+            or snapshot_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"capture parent changed while opening: {path}")
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = snapshot_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_size > limit
+        ):
+            raise RuntimeError(f"owned mode-0600 capture required: {path}")
+        if hook is not None:
+            hook("after_lstat", path)
+        descriptor = os.open(
+            leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
+        if snapshot_identity(os.fstat(descriptor)) != bound:
+            raise RuntimeError(f"capture changed while opening: {path}")
+        if hook is not None:
+            hook("after_open", path)
+        chunks: list[bytes] = []
+        remaining = before.st_size
+        first_read = True
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                raise RuntimeError(f"capture shrank while reading: {path}")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+            if first_read and hook is not None:
+                first_read = False
+                hook("after_first_read", path)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"capture grew while reading: {path}")
+        payload = b"".join(chunks)
+        if (
+            len(payload) != before.st_size
+            or snapshot_identity(os.fstat(descriptor)) != bound
+            or snapshot_identity(
+                os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            ) != bound
+            or snapshot_identity(os.fstat(parent_fd)) != parent_bound
+            or snapshot_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"capture changed while reading: {path}")
+        return payload
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
+def probe_read_bounded_races() -> None:
+    def create(path: Path, payload: bytes = b"abcd") -> None:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            os.write(descriptor, payload)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def append(path: Path) -> None:
+        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+        try:
+            os.write(descriptor, b"x")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    with tempfile.TemporaryDirectory(
+        prefix="appendix-d-reader-race-",
+        dir=os.path.realpath(tempfile.gettempdir()),
+    ) as raw_root:
+        root = Path(raw_root)
+        os.chmod(root, 0o700)
+        positive = root / "positive"
+        create(positive)
+        if read_bounded(positive, 4) != b"abcd":
+            raise AssertionError("bounded reader positive differs")
+        try:
+            read_bounded(positive, 3)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("bounded reader accepted over-cap input")
+
+        def rejected(name: str, hook) -> None:
+            path = root / name
+            create(path)
+            try:
+                read_bounded(path, 16, hook)
+            except RuntimeError:
+                return
+            raise AssertionError(f"bounded reader race accepted: {name}")
+
+        rejected(
+            "grow-before-open",
+            lambda phase, path: append(path) if phase == "after_lstat" else None,
+        )
+        rejected(
+            "grow-after-first-read",
+            lambda phase, path: append(path) if phase == "after_first_read" else None,
+        )
+        rejected(
+            "shrink-after-first-read",
+            lambda phase, path: os.truncate(path, 1)
+            if phase == "after_first_read" else None,
+        )
+        rejected(
+            "same-size-after-first-read",
+            lambda phase, path: path.write_bytes(b"wxyz")
+            if phase == "after_first_read" else None,
+        )
+        rejected(
+            "mode-after-first-read",
+            lambda phase, path: os.chmod(path, 0o640)
+            if phase == "after_first_read" else None,
+        )
+
+        def replace_after_open(phase: str, path: Path) -> None:
+            if phase != "after_open":
+                return
+            replacement = root / "replacement"
+            create(replacement)
+            os.replace(replacement, path)
+
+        rejected("rename-after-open", replace_after_open)
+
+        hardlink = root / "hardlink"
+        create(hardlink)
+        os.link(hardlink, root / "hardlink-alias")
+        try:
+            read_bounded(hardlink, 16)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("bounded reader accepted a hardlink")
+
+        parent_case = root / "parent-case"
+        parent_case.mkdir(mode=0o700)
+        parent_path = parent_case / "capture"
+        create(parent_path)
+
+        def replace_parent(phase: str, _: Path) -> None:
+            if phase != "after_first_read":
+                return
+            parent_case.rename(root / "parent-case-old")
+            parent_case.mkdir(mode=0o700)
+            create(parent_case / "capture", b"wxyz")
+
+        try:
+            read_bounded(parent_path, 16, replace_parent)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("bounded reader accepted parent replacement")
+
+
+probe_read_bounded_races()
+
+
+def validate_capture(
+    capture: object,
+    retained_bytes: int,
+    retained_sha256: str,
+    raw_exit: int,
+) -> None:
+    if not isinstance(capture, dict) or set(capture) != {
+        "capture_error", "elapsed_ms", "observed_bytes", "process_exit",
+        "retained_bytes", "retained_sha256", "truncated",
+    }:
+        raise RuntimeError("collector stderr capture metadata differs")
+    error = capture["capture_error"]
+    observed = capture["observed_bytes"]
+    retained = capture["retained_bytes"]
+    process_exit = capture["process_exit"]
+    elapsed = capture["elapsed_ms"]
+    truncated = capture["truncated"]
+    if (
+        error not in {None, "oversize", "timeout"}
+        or isinstance(elapsed, bool)
+        or not isinstance(elapsed, (int, float))
+        or not math.isfinite(elapsed)
+        or elapsed < 0
+        or isinstance(observed, bool)
+        or not isinstance(observed, int)
+        or observed < 0
+        or observed > MAX_FAILURE_STDERR_BYTES + 1
+        or isinstance(retained, bool)
+        or not isinstance(retained, int)
+        or retained != retained_bytes
+        or retained > MAX_FAILURE_STDERR_BYTES
+        or observed < retained
+        or capture["retained_sha256"] != retained_sha256
+        or type(truncated) is not bool
+        or truncated is not (observed > retained)
+        or type(process_exit) is not int
+    ):
+        raise RuntimeError("collector stderr capture values differ")
+    if error is None:
+        expected_exit = process_exit if process_exit >= 0 else 128 - process_exit
+        valid_state = raw_exit == expected_exit and observed == retained and not truncated
+    elif error == "oversize":
+        valid_state = (
+            raw_exit == 74
+            and retained == MAX_FAILURE_STDERR_BYTES
+            and observed == MAX_FAILURE_STDERR_BYTES + 1
+            and truncated
+        )
+    else:
+        valid_state = raw_exit == 75 and observed == retained and not truncated
+    if not valid_state:
+        raise RuntimeError("collector stderr capture state/exit mismatch")
+
+
+def probe_capture_validator() -> None:
+    digest = "0" * 64
+    good = (
+        ({"capture_error": None, "elapsed_ms": 1.0, "observed_bytes": 22,
+          "process_exit": 17, "retained_bytes": 22,
+          "retained_sha256": digest, "truncated": False}, 22, 17),
+        ({"capture_error": "oversize", "elapsed_ms": 2.0,
+          "observed_bytes": MAX_FAILURE_STDERR_BYTES + 1,
+          "process_exit": -15, "retained_bytes": MAX_FAILURE_STDERR_BYTES,
+          "retained_sha256": digest, "truncated": True},
+         MAX_FAILURE_STDERR_BYTES, 74),
+        ({"capture_error": "timeout", "elapsed_ms": 3.0,
+          "observed_bytes": 10, "process_exit": -15, "retained_bytes": 10,
+          "retained_sha256": digest, "truncated": False}, 10, 75),
+        ({"capture_error": None, "elapsed_ms": 4.0, "observed_bytes": 0,
+          "process_exit": -9, "retained_bytes": 0,
+          "retained_sha256": digest, "truncated": False}, 0, 137),
+    )
+    for capture, retained, raw_exit in good:
+        validate_capture(capture, retained, digest, raw_exit)
+    bad = []
+    for index, (capture, retained, raw_exit) in enumerate(good):
+        wrong_exit = dict(capture)
+        bad.append((wrong_exit, retained, 1))
+        wrong_state = dict(capture)
+        if index == 0:
+            wrong_state["observed_bytes"] = retained + 1
+            wrong_state["truncated"] = True
+        elif index == 1:
+            wrong_state["observed_bytes"] = MAX_FAILURE_STDERR_BYTES
+            wrong_state["truncated"] = False
+        elif index == 2:
+            wrong_state["observed_bytes"] = retained + 1
+            wrong_state["truncated"] = True
+        else:
+            wrong_state["capture_error"] = "oversize"
+        bad.append((wrong_state, retained, raw_exit))
+    for capture, retained, raw_exit in bad:
+        try:
+            validate_capture(capture, retained, digest, raw_exit)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("forged collector stderr capture was accepted")
+
+
+probe_capture_validator()
+
+
 output, call_id, stage_id, stage, raw_exit, stderr_path, raw_issues = sys.argv[1:]
-stderr = Path(stderr_path).read_bytes()
-if len(stderr) > 2_000_000:
-    raise RuntimeError("stderr capture exceeds 2000000-byte bound")
+capture_required = {
+    "catalog-collection": True,
+    "external-frozen-state": False,
+}.get(stage)
+if capture_required is None:
+    raise RuntimeError("unknown failure stage")
+stderr_file = Path(stderr_path)
+try:
+    os.lstat(stderr_file)
+except FileNotFoundError:
+    # The collector died before it could create its own stderr file. That is
+    # exactly when this closure path matters most, so record the absence rather
+    # than raising out of the failure handler.
+    stderr = b"CAPTURE_ABSENT: collector stderr was never created\n"
+else:
+    stderr = read_bounded(stderr_file, MAX_FAILURE_STDERR_BYTES)
+capture_path = Path(str(stderr_file) + ".meta.json")
+try:
+    os.lstat(capture_path)
+except FileNotFoundError:
+    capture = None
+else:
+    capture = json.loads(read_bounded(capture_path, 16_384))
+    validate_capture(capture, len(stderr), hashlib.sha256(stderr).hexdigest(), int(raw_exit))
 issues = json.loads(raw_issues)
 if not isinstance(issues, list) or not issues:
     raise RuntimeError("failure issue IDs must be nonempty")
@@ -4673,8 +15923,10 @@ record = {
     "stage": stage,
     "stage_event_id": stage_id,
 }
+if capture is not None:
+    record["stderr_capture"] = capture
 payload = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
-flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 fd = os.open(output, flags, 0o600)
 try:
     os.fchmod(fd, 0o600)
@@ -4690,14 +15942,25 @@ if (
     stat.S_ISLNK(final.st_mode)
     or not stat.S_ISREG(final.st_mode)
     or final.st_uid != os.getuid()
+    or final.st_nlink != 1
     or stat.S_IMODE(final.st_mode) != 0o600
     or (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino)
+    or final.st_size != len(payload)
+    or opened.st_size != len(payload)
 ):
     raise RuntimeError("unsafe failure record")
-print(digest)
+# Checked here, after the record is on disk, and not before it. `capture_required` is
+# true for the catalog stage while the metadata file is written only at the end of
+# `capture()`, so a supervisor-level death -- the case this closure exists for -- leaves
+# the metadata absent. Raising ahead of the write aborted `finish_failed_stage` under
+# `set -e` with no `failure.json` and no closure at all. The record is preserved first;
+# the mismatch still stops the run, and the evidence it stops on now exists.
+if capture_required is not (capture is not None):
+    raise RuntimeError("stderr capture presence differs from stage policy")
+print(hashlib.sha256(payload).hexdigest())
 PY
   })"
-  export FAILURE_SHA
+  export FAILURE_RECORD_SHA256
 
   printf '%s\n' \
     "CALLER_ACTION_REQUIRED: keep this session pending and read $FAILURE_RECORD" \
@@ -4707,68 +15970,214 @@ PY
   export CALLER_ACK
 
   "$UV_BIN" run --quiet --no-project --python 3.13 python - \
-    "$FAILURE_RECORD" "$TASK_REPORT" "$REPORT_BEFORE_SHA" "$failed_issues" <<'PY' >&9
+    "$FAILURE_RECORD" "$TASK_REPORT" "$REPORT_BEFORE_SHA" \
+    "$REPORT_BEFORE_DEV" "$REPORT_BEFORE_INO" "$failed_issues" <<'PY' >&9
 from __future__ import annotations
 
 import base64
 import hashlib
 import json
+import math
 import os
 import stat
 import sys
 from pathlib import Path
 
-failure_path, report_path, before_sha, raw_issues = sys.argv[1:]
+failure_path, report_path, before_sha, before_dev, before_ino, raw_issues = sys.argv[1:]
+MAX_FAILURE_STDERR_BYTES = 9_000_000
+MAX_FAILURE_RECORD_BYTES = 12_100_000
+MAX_TASK_REPORT_BYTES = 64_000_000
 
 
-def owned_regular(path: Path) -> bytes:
-    absolute = os.path.abspath(path)
-    if os.path.realpath(absolute) != absolute:
-        raise RuntimeError(f"symlinked path component rejected: {path}")
-    before = os.lstat(path)
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-        raise RuntimeError(f"owned regular file required: {path}")
-    if before.st_uid != os.getuid() or before.st_mode & stat.S_IWOTH:
-        raise RuntimeError(f"unsafe file ownership/mode: {path}")
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+def snapshot_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def owned_regular(
+    path: Path, limit: int
+) -> tuple[bytes, os.stat_result, os.stat_result]:
+    path = Path(os.path.abspath(path))
+    parent, leaf = path.parent, path.name
+    if limit <= 0 or leaf in {"", ".", ".."} or os.path.realpath(parent) != os.fspath(parent):
+        raise RuntimeError(f"unsafe bounded path: {path}")
+    parent_before = os.lstat(parent)
+    parent_bound = snapshot_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) & 0o022
+    ):
+        raise RuntimeError(f"unsafe bounded parent: {parent}")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    fd = -1
     try:
-        opened = os.fstat(fd)
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+        if (
+            snapshot_identity(os.fstat(parent_fd)) != parent_bound
+            or snapshot_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"parent changed while opening: {path}")
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = snapshot_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_size <= 0
+            or before.st_size > limit
+        ):
+            raise RuntimeError(f"owned mode-0600 bounded file required: {path}")
+        fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        if snapshot_identity(os.fstat(fd)) != bound:
             raise RuntimeError(f"file changed while opening: {path}")
         chunks: list[bytes] = []
-        while chunk := os.read(fd, 1024 * 1024):
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                raise RuntimeError(f"file shrank while reading: {path}")
             chunks.append(chunk)
-        after = os.fstat(fd)
-        current = os.lstat(path)
-        if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+            remaining -= len(chunk)
+        if os.read(fd, 1):
+            raise RuntimeError(f"file grew while reading: {path}")
+        payload = b"".join(chunks)
+        if (
+            len(payload) != before.st_size
+            or snapshot_identity(os.fstat(fd)) != bound
+            or snapshot_identity(
+                os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            ) != bound
+            or snapshot_identity(os.fstat(parent_fd)) != parent_bound
+            or snapshot_identity(os.lstat(parent)) != parent_bound
+        ):
             raise RuntimeError(f"file changed while reading: {path}")
-        if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
-            raise RuntimeError(f"file path changed while reading: {path}")
-        return b"".join(chunks)
+        return payload, before, parent_before
     finally:
-        os.close(fd)
+        if fd >= 0:
+            os.close(fd)
+        os.close(parent_fd)
 
 
-failure = json.loads(owned_regular(Path(failure_path)))
+failure_payload, _, _ = owned_regular(
+    Path(failure_path), MAX_FAILURE_RECORD_BYTES
+)
+failure_record_sha256 = hashlib.sha256(failure_payload).hexdigest()
+if failure_record_sha256 != os.environ["FAILURE_RECORD_SHA256"]:
+    raise RuntimeError("failure record digest mismatch")
+failure = json.loads(failure_payload)
+expected_failure_keys = {
+    "call_event_id", "exit_code", "raw_stderr_b64", "raw_stderr_bytes",
+    "raw_stderr_sha256", "stage", "stage_event_id",
+}
+allowed_failure_keys = {
+    frozenset(expected_failure_keys),
+    frozenset(expected_failure_keys | {"stderr_capture"}),
+}
+if not isinstance(failure, dict) or frozenset(failure) not in allowed_failure_keys:
+    raise RuntimeError("failure record has wrong fields")
 stderr = base64.b64decode(failure["raw_stderr_b64"], validate=True)
 digest = hashlib.sha256(stderr).hexdigest()
-if digest != failure["raw_stderr_sha256"] or digest != os.environ["FAILURE_SHA"]:
+if digest != failure["raw_stderr_sha256"]:
     raise RuntimeError("raw stderr digest mismatch")
 if len(stderr) != failure["raw_stderr_bytes"]:
     raise RuntimeError("raw stderr length mismatch")
 
+capture = failure.get("stderr_capture")
+capture_required = {
+    "catalog-collection": True,
+    "external-frozen-state": False,
+}.get(failure["stage"])
+if capture_required is None:
+    raise RuntimeError("unknown failure stage")
+if capture_required is not (capture is not None):
+    raise RuntimeError("stderr capture presence differs from stage policy")
+capture_suffix = ""
+if capture is not None:
+    if not isinstance(capture, dict) or set(capture) != {
+        "capture_error", "elapsed_ms", "observed_bytes", "process_exit",
+        "retained_bytes", "retained_sha256", "truncated",
+    }:
+        raise RuntimeError("stderr capture metadata has wrong fields")
+    if (
+        capture["capture_error"] not in {None, "oversize", "timeout"}
+        or isinstance(capture["elapsed_ms"], bool)
+        or not isinstance(capture["elapsed_ms"], (int, float))
+        or not math.isfinite(capture["elapsed_ms"])
+        or capture["elapsed_ms"] < 0
+        or isinstance(capture["observed_bytes"], bool)
+        or not isinstance(capture["observed_bytes"], int)
+        or capture["observed_bytes"] < len(stderr)
+        or capture["observed_bytes"] > MAX_FAILURE_STDERR_BYTES + 1
+        or isinstance(capture["retained_bytes"], bool)
+        or not isinstance(capture["retained_bytes"], int)
+        or capture["retained_bytes"] != len(stderr)
+        or capture["retained_bytes"] > MAX_FAILURE_STDERR_BYTES
+        or capture["retained_sha256"] != digest
+        or type(capture["truncated"]) is not bool
+        or capture["truncated"] is not (capture["observed_bytes"] > len(stderr))
+        or type(capture["process_exit"]) is not int
+    ):
+        raise RuntimeError("stderr capture metadata values differ")
+    capture_error = capture["capture_error"]
+    process_exit = capture["process_exit"]
+    observed = capture["observed_bytes"]
+    retained = capture["retained_bytes"]
+    truncated = capture["truncated"]
+    if capture_error is None:
+        expected_exit = process_exit if process_exit >= 0 else 128 - process_exit
+        valid_capture_state = (
+            failure["exit_code"] == expected_exit
+            and observed == retained
+            and not truncated
+        )
+    elif capture_error == "oversize":
+        valid_capture_state = (
+            failure["exit_code"] == 74
+            and retained == MAX_FAILURE_STDERR_BYTES
+            and observed == MAX_FAILURE_STDERR_BYTES + 1
+            and truncated
+        )
+    else:
+        valid_capture_state = (
+            failure["exit_code"] == 75
+            and observed == retained
+            and not truncated
+        )
+    if not valid_capture_state:
+        raise RuntimeError("stderr capture state/exit mismatch")
+    capture_suffix = ";stderr_capture=" + json.dumps(
+        capture, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    )
+
 ack = json.loads(os.environ["CALLER_ACK"])
-if set(ack) != {"first_hypothesis", "raw_stderr_sha256"}:
+if set(ack) != {
+    "failure_record_sha256", "first_hypothesis", "raw_stderr_sha256",
+}:
     raise RuntimeError("caller ack has wrong fields")
 hypothesis = ack["first_hypothesis"]
 if not isinstance(hypothesis, str) or not hypothesis or hypothesis != hypothesis.strip():
     raise RuntimeError("caller must provide a verbatim nonblank first_hypothesis")
-if ack["raw_stderr_sha256"] != digest:
+if (
+    ack["raw_stderr_sha256"] != digest
+    or ack["failure_record_sha256"] != failure_record_sha256
+):
     raise RuntimeError("caller ack names the wrong failure")
 
-report = owned_regular(Path(report_path))
+report, report_info, _ = owned_regular(
+    Path(report_path), MAX_TASK_REPORT_BYTES
+)
 report_sha = hashlib.sha256(report).hexdigest()
-if report_sha == before_sha:
+if (
+    report_sha == before_sha
+    or (report_info.st_dev, report_info.st_ino)
+    != (int(before_dev), int(before_ino))
+):
     raise RuntimeError("Task report was not written after the failure")
 ack_line = "failure_ack=" + json.dumps(
     ack, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -4780,6 +16189,7 @@ issues = json.loads(raw_issues)
 symptom = (
     f"exit={failure['exit_code']};raw_stderr_bytes={failure['raw_stderr_bytes']};"
     f"raw_stderr_sha256={digest};raw_stderr_b64={failure['raw_stderr_b64']}"
+    f"{capture_suffix}"
 )
 common = {
     "attempt": 0,
@@ -4823,7 +16233,306 @@ printf '%s\n' \
 
 set +e
 "$UV_BIN" run --quiet --no-project --python 3.13 python - \
-  2>"$COLLECT_STDERR" <<'PY'
+  "$COLLECT_STDERR" "$COLLECT_STDERR_META" <<'PY' 8<<'COLLECTOR'
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import selectors
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+if not __debug__:
+    raise SystemExit("STOP: catalog collector requires assertions; unset PYTHONOPTIMIZE")
+
+CAPTURE_LIMIT = 9_000_000
+COLLECTOR_TIMEOUT_SECONDS = 180.0
+COLLECTOR_SOURCE_LIMIT = 1_000_000
+
+
+def safe_parent(path: Path) -> Path:
+    absolute = Path(os.path.abspath(path))
+    if Path(os.path.realpath(absolute)) != absolute:
+        raise RuntimeError(f"capture path contains a symlink: {absolute}")
+    parent = absolute.parent
+    info = os.lstat(parent)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise RuntimeError(f"owned mode-0700 capture parent required: {parent}")
+    return absolute
+
+
+def write_all(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        view = view[os.write(descriptor, view):]
+
+
+def create_file(path: Path, payload: bytes) -> None:
+    path = safe_parent(path)
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        write_all(descriptor, payload)
+        os.fsync(descriptor)
+        opened = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    final = os.lstat(path)
+    if (
+        stat.S_ISLNK(final.st_mode)
+        or not stat.S_ISREG(final.st_mode)
+        or final.st_uid != os.getuid()
+        or final.st_nlink != 1
+        or stat.S_IMODE(final.st_mode) != 0o600
+        or (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino)
+        or final.st_size != len(payload)
+    ):
+        raise RuntimeError(f"unsafe capture file: {path}")
+
+
+def read_limited(path: Path, limit: int) -> bytes:
+    descriptor = os.open(safe_parent(path), os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        chunks: list[bytes] = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > limit:
+            raise RuntimeError(f"bounded read exceeded: {path}")
+        return payload
+    finally:
+        os.close(descriptor)
+
+
+def terminate(proc: subprocess.Popen[bytes]) -> None:
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def shell_status(returncode: int) -> int:
+    return returncode if returncode >= 0 else 128 - returncode
+
+
+def capture(
+    command: list[str],
+    stderr_path: Path,
+    meta_path: Path,
+    *,
+    timeout_seconds: float,
+) -> tuple[int, dict[str, object]]:
+    stderr_path = safe_parent(stderr_path)
+    meta_path = safe_parent(meta_path)
+    if stderr_path.parent != meta_path.parent or stderr_path == meta_path:
+        raise RuntimeError("capture paths must be distinct siblings")
+    descriptor = os.open(
+        stderr_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    digest = hashlib.sha256()
+    observed = 0
+    retained = 0
+    capture_error: str | None = None
+    eof = False
+    proc: subprocess.Popen[bytes] | None = None
+    stderr_selector = selectors.DefaultSelector()
+    started = time.monotonic()
+    try:
+        os.fchmod(descriptor, 0o600)
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=None,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        if proc.stderr is None:
+            raise RuntimeError("collector stderr pipe unavailable")
+        os.set_blocking(proc.stderr.fileno(), False)
+        stderr_selector.register(proc.stderr, selectors.EVENT_READ)
+        deadline = started + timeout_seconds
+        while not eof and capture_error is None:
+            remaining_time = deadline - time.monotonic()
+            if remaining_time <= 0:
+                capture_error = "timeout"
+                break
+            ready = stderr_selector.select(timeout=min(0.25, remaining_time))
+            if not ready:
+                continue
+            try:
+                chunk = os.read(
+                    proc.stderr.fileno(),
+                    min(65_536, CAPTURE_LIMIT - observed + 1),
+                )
+            except BlockingIOError:
+                continue
+            if not chunk:
+                eof = True
+                continue
+            observed += len(chunk)
+            available = max(0, CAPTURE_LIMIT - retained)
+            prefix = chunk[:available]
+            if prefix:
+                write_all(descriptor, prefix)
+                digest.update(prefix)
+                retained += len(prefix)
+            if len(chunk) > available:
+                capture_error = "oversize"
+                break
+        if capture_error is not None:
+            terminate(proc)
+        else:
+            remaining_time = max(0.001, deadline - time.monotonic())
+            try:
+                proc.wait(timeout=remaining_time)
+            except subprocess.TimeoutExpired:
+                capture_error = "timeout"
+                terminate(proc)
+        exit_code = proc.returncode
+        os.fsync(descriptor)
+        opened = os.fstat(descriptor)
+    finally:
+        stderr_selector.close()
+        if proc is not None:
+            terminate(proc)
+            if proc.stderr is not None:
+                proc.stderr.close()
+        os.close(descriptor)
+    final = os.lstat(stderr_path)
+    if (
+        stat.S_ISLNK(final.st_mode)
+        or not stat.S_ISREG(final.st_mode)
+        or final.st_uid != os.getuid()
+        or final.st_nlink != 1
+        or stat.S_IMODE(final.st_mode) != 0o600
+        or (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino)
+        or final.st_size != retained
+    ):
+        raise RuntimeError("captured stderr metadata differs")
+    meta: dict[str, object] = {
+        "capture_error": capture_error,
+        "elapsed_ms": (time.monotonic() - started) * 1_000,
+        "observed_bytes": observed,
+        "process_exit": exit_code,
+        "retained_bytes": retained,
+        "retained_sha256": digest.hexdigest(),
+        "truncated": observed > retained,
+    }
+    create_file(
+        meta_path,
+        (json.dumps(meta, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+    )
+    if capture_error == "oversize":
+        return 74, meta
+    if capture_error == "timeout":
+        return 75, meta
+    if exit_code is None:
+        raise RuntimeError("collector exit status absent")
+    return shell_status(exit_code), meta
+
+
+def fake_command(byte_count: int, exit_code: int) -> list[str]:
+    code = (
+        "import os,sys\n"
+        "remaining=int(sys.argv[1]);chunk=b'x'*65536\n"
+        "while remaining:\n"
+        " part=chunk[:min(len(chunk),remaining)]\n"
+        " try: written=os.write(2,part)\n"
+        " except BrokenPipeError: break\n"
+        " remaining-=written\n"
+        "raise SystemExit(int(sys.argv[2]))\n"
+    )
+    return [sys.executable, "-c", code, str(byte_count), str(exit_code)]
+
+
+def probe_capture() -> None:
+    with tempfile.TemporaryDirectory(
+        prefix="outer-stderr-probe-", dir=os.path.realpath(tempfile.gettempdir()),
+    ) as raw_root:
+        root = Path(raw_root)
+        os.chmod(root, 0o700)
+        cases = (
+            ("silent", 0, 17, 17, False),
+            ("stderr-exit", 22, 17, 17, False),
+            ("boundary", 8_039_492, 17, 17, False),
+            ("overflow", 10_000_000, 0, 74, True),
+        )
+        for name, byte_count, child_exit, expected_exit, truncated in cases:
+            stderr_path = root / f"{name}.stderr"
+            meta_path = root / f"{name}.json"
+            result, meta = capture(
+                fake_command(byte_count, child_exit),
+                stderr_path,
+                meta_path,
+                timeout_seconds=10,
+            )
+            assert result == expected_exit
+            assert meta["truncated"] is truncated
+            expected_retained = min(byte_count, CAPTURE_LIMIT)
+            expected_observed = (
+                CAPTURE_LIMIT + 1 if truncated else byte_count
+            )
+            assert meta["retained_bytes"] == expected_retained
+            assert meta["observed_bytes"] == expected_observed
+            retained = read_limited(stderr_path, CAPTURE_LIMIT)
+            assert len(retained) == expected_retained
+            assert hashlib.sha256(retained).hexdigest() == meta["retained_sha256"]
+            parsed = json.loads(read_limited(meta_path, 16_384))
+            assert parsed == meta
+        signal_stderr = root / "signal.stderr"
+        signal_meta = root / "signal.json"
+        signal_result, signal_record = capture(
+            [sys.executable, "-c", "import os,signal;os.kill(os.getpid(),signal.SIGKILL)"],
+            signal_stderr,
+            signal_meta,
+            timeout_seconds=10,
+        )
+        assert signal_result == 137
+        assert signal_record["capture_error"] is None
+        assert signal_record["process_exit"] == -9
+        assert signal_record["observed_bytes"] == 0
+    print(
+        "OUTER_STDERR_CAPTURE_PROBE_GREEN silent=1 stderr_exit=1 "
+        "boundary_8039492=1 overflow_10m=1 signal_137=1"
+    )
+
+
+probe_capture()
+collector = os.fdopen(8, "rb", closefd=True).read(COLLECTOR_SOURCE_LIMIT + 1)
+if len(collector) > COLLECTOR_SOURCE_LIMIT:
+    raise RuntimeError("collector source exceeds bound")
+compile(collector, "appendix-d-collector", "exec")
+raise SystemExit(capture(
+    [sys.executable, "-c", collector.decode("utf-8")],
+    Path(sys.argv[1]),
+    Path(sys.argv[2]),
+    timeout_seconds=COLLECTOR_TIMEOUT_SECONDS,
+)[0])
+PY
 from __future__ import annotations
 
 import ast
@@ -4835,13 +16544,20 @@ import selectors
 import stat
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from pathlib import Path
 from typing import Any
 
+if not __debug__:
+    raise SystemExit("STOP: catalog collector child requires assertions; unset PYTHONOPTIMIZE")
+
 UID = os.getuid()
 MAX_RESPONSE_BYTES = 1_048_576
+MAX_TOTAL_RESPONSE_BYTES = 4_194_304
+MAX_APP_STDERR_BYTES = 1_048_576
+MAX_FAILURE_STDERR_BYTES = 9_000_000
 
 
 class AppServerProtocolError(Exception):
@@ -4852,7 +16568,79 @@ class AppServerProtocolError(Exception):
         self.raw_response = raw_response
 
 
-def canonical(path: Path) -> Path:
+def app_protocol_failure_record(
+    failure: AppServerProtocolError,
+    app_stderr: bytes,
+    app_stderr_observed_bytes: int,
+    app_exit_code: int | None,
+) -> dict[str, Any]:
+    raw_response = failure.raw_response
+    return {
+        "category": "APP_SERVER_PROTOCOL_ERROR",
+        "error": failure.error,
+        "method": failure.method,
+        "raw_response_b64": base64.b64encode(raw_response).decode("ascii"),
+        "raw_response_bytes": len(raw_response),
+        "raw_response_sha256": hashlib.sha256(raw_response).hexdigest(),
+        "app_stderr_b64": base64.b64encode(app_stderr).decode("ascii"),
+        "app_stderr_observed_bytes": app_stderr_observed_bytes,
+        "app_stderr_retained_bytes": len(app_stderr),
+        "app_stderr_sha256": hashlib.sha256(app_stderr).hexdigest(),
+        "app_stderr_truncated": app_stderr_observed_bytes > len(app_stderr),
+        "app_server_exit_code": app_exit_code,
+    }
+
+
+def drain_app_stderr(
+    proc: subprocess.Popen[bytes],
+    stderr_fd: int,
+    retained: bytearray,
+    observed: list[int],
+    failure: threading.Event,
+    failure_detail: dict[str, Any],
+) -> None:
+    drain_selector = selectors.DefaultSelector()
+    try:
+        drain_selector.register(stderr_fd, selectors.EVENT_READ)
+        while True:
+            ready = drain_selector.select(timeout=0.25)
+            if not ready:
+                if proc.poll() is None:
+                    continue
+                ready = [(None, None)]
+            try:
+                chunk = os.read(
+                    stderr_fd,
+                    min(65_536, MAX_APP_STDERR_BYTES - observed[0] + 1),
+                )
+            except BlockingIOError:
+                continue
+            except OSError as exc:
+                failure_detail.update({"kind": "stderr_drain_error", "message": str(exc)})
+                failure.set()
+                return
+            if not chunk:
+                return
+            observed[0] += len(chunk)
+            available = max(0, MAX_APP_STDERR_BYTES - len(retained))
+            retained.extend(chunk[:available])
+            if observed[0] > MAX_APP_STDERR_BYTES:
+                failure_detail.update({
+                    "kind": "stderr_oversize",
+                    "limit": MAX_APP_STDERR_BYTES,
+                    "observed_at_least": observed[0],
+                })
+                failure.set()
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+                return
+    finally:
+        drain_selector.close()
+
+
+def canonical_path(path: Path) -> Path:
     absolute = Path(os.path.abspath(os.fspath(path)))
     resolved = Path(os.path.realpath(absolute))
     if absolute != resolved:
@@ -4861,7 +16649,7 @@ def canonical(path: Path) -> Path:
 
 
 def safe_directory(path: Path, *, private: bool = False) -> Path:
-    path = canonical(path)
+    path = canonical_path(path)
     try:
         info = os.lstat(path)
     except FileNotFoundError as exc:
@@ -4877,43 +16665,81 @@ def safe_directory(path: Path, *, private: bool = False) -> Path:
     return path
 
 
-def safe_file_bytes(path: Path) -> bytes:
-    path = canonical(path)
+def snapshot_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def safe_file_bytes(path: Path, *, limit: int) -> bytes:
+    path = Path(os.path.abspath(path))
+    parent, leaf = path.parent, path.name
+    if limit <= 0 or leaf in {"", ".", ".."} or Path(os.path.realpath(parent)) != parent:
+        raise RuntimeError(f"unsafe bounded file path: {path}")
+    parent_before = os.lstat(parent)
+    parent_bound = snapshot_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != UID
+        or stat.S_IMODE(parent_before.st_mode) & 0o022
+    ):
+        raise RuntimeError(f"unsafe bounded file parent: {parent}")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = -1
     try:
-        before = os.lstat(path)
-    except FileNotFoundError as exc:
-        raise RuntimeError(f"required file missing: {path}") from exc
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-        raise RuntimeError(f"ordinary file required: {path}")
-    if before.st_uid != UID:
-        raise RuntimeError(f"foreign UID rejected: {path}")
-    if before.st_mode & stat.S_IWOTH:
-        raise RuntimeError(f"world-writable file rejected: {path}")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        opened = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-            raise RuntimeError(f"lstat/fstat identity changed: {path}")
+        if (
+            snapshot_identity(os.fstat(parent_fd)) != parent_bound
+            or snapshot_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"bounded file parent changed while opening: {path}")
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = snapshot_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != UID
+            or before.st_nlink != 1
+            or before.st_mode & stat.S_IWOTH
+            or before.st_size > limit
+        ):
+            raise RuntimeError(f"unsafe bounded file metadata: {path}")
+        descriptor = os.open(
+            leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
+        if snapshot_identity(os.fstat(descriptor)) != bound:
+            raise RuntimeError(f"bounded file changed while opening: {path}")
+        remaining = before.st_size
         chunks: list[bytes] = []
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
             if not chunk:
-                break
+                raise RuntimeError(f"bounded file shrank while reading: {path}")
             chunks.append(chunk)
-        after = os.fstat(descriptor)
-        if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
-            raise RuntimeError(f"file identity changed while reading: {path}")
-        current = os.lstat(path)
-        if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
-            raise RuntimeError(f"file path changed while reading: {path}")
-        return b"".join(chunks)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"bounded file grew while reading: {path}")
+        payload = b"".join(chunks)
+        if (
+            len(payload) != before.st_size
+            or snapshot_identity(os.fstat(descriptor)) != bound
+            or snapshot_identity(
+                os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            ) != bound
+            or snapshot_identity(os.fstat(parent_fd)) != parent_bound
+            or snapshot_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"bounded file changed while reading: {path}")
+        return payload
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
 
 
 def safe_executable(path: Path) -> Path:
-    path = canonical(path)
+    path = canonical_path(path)
     info = os.lstat(path)
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise RuntimeError(f"ordinary executable required: {path}")
@@ -4945,7 +16771,7 @@ def write_catalog(path: Path, names: list[str]) -> None:
     else:
         raise RuntimeError(f"catalog target already exists: {path}")
     payload = (json.dumps(names, separators=(",", ":")) + "\n").encode()
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
     descriptor = os.open(path, flags, 0o600)
     try:
         os.fchmod(descriptor, 0o600)
@@ -4965,6 +16791,433 @@ def write_catalog(path: Path, names: list[str]) -> None:
         raise RuntimeError(f"catalog identity changed: {path}")
 
 
+def read_app_response(
+    stdout_fd: int,
+    selector: selectors.BaseSelector,
+    buffer: bytearray,
+    raw_response: bytearray,
+    request_id: int,
+    method: str,
+    deadline: float,
+    line_limit: int,
+    total_limit: int,
+    stderr_failure: threading.Event | None = None,
+    stderr_failure_detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    consumed = 0
+
+    def fail(error: Any) -> None:
+        raise AppServerProtocolError(method, error, bytes(raw_response))
+
+    def check_deadline(phase: str) -> None:
+        if stderr_failure is not None and stderr_failure.is_set():
+            fail(dict(stderr_failure_detail or {"kind": "stderr_capture_failure"}))
+        if time.monotonic() >= deadline:
+            pending = bytes(buffer[consumed:])
+            fail({
+                "kind": "timeout",
+                "phase": phase,
+                "partial_line": bool(pending and not pending.endswith(b"\n")),
+            })
+
+    while True:
+        check_deadline("before_frame_scan")
+        end_index = buffer.find(b"\n", consumed)
+        while end_index >= 0:
+            check_deadline("before_frame_extract")
+            end_index += 1
+            line = bytes(buffer[consumed:end_index])
+            consumed = end_index
+            check_deadline("after_frame_extract")
+            if len(line) > line_limit:
+                fail({"kind": "line_oversize", "limit": line_limit, "newline": True})
+            check_deadline("before_json_parse")
+            try:
+                message = json.loads(line)
+            except (ValueError, RecursionError) as exc:
+                fail({"kind": "invalid_json", "message": str(exc)})
+            check_deadline("after_json_parse")
+            if not isinstance(message, dict):
+                fail({"kind": "invalid_shape", "shape": type(message).__name__})
+            if type(message.get("id")) is not int or message.get("id") != request_id:
+                end_index = buffer.find(b"\n", consumed)
+                continue
+            if "error" in message:
+                fail(message["error"])
+            result = message.get("result")
+            if not isinstance(result, dict):
+                fail({"kind": "invalid_result", "shape": type(result).__name__})
+            del buffer[:consumed]
+            check_deadline("before_result_return")
+            return result
+        if consumed:
+            del buffer[:consumed]
+            consumed = 0
+        if len(buffer) > line_limit:
+            fail({"kind": "line_oversize", "limit": line_limit, "newline": False})
+        check_deadline("before_select")
+        remaining = deadline - time.monotonic()
+        ready = selector.select(timeout=min(0.25, remaining))
+        check_deadline("after_select")
+        if not ready:
+            continue
+        try:
+            chunk = os.read(stdout_fd, min(65_536, total_limit - len(raw_response) + 1))
+        except BlockingIOError:
+            continue
+        if chunk:
+            available = max(0, total_limit - len(raw_response))
+            raw_response.extend(chunk[:available])
+            buffer.extend(chunk[:available])
+            check_deadline("after_read")
+            if len(chunk) > available:
+                fail({"kind": "total_oversize", "limit": total_limit})
+            continue
+        check_deadline("after_read")
+        pending = bytes(buffer[consumed:])
+        fail({
+            "kind": "eof",
+            "partial_line": bool(pending and not pending.endswith(b"\n")),
+        })
+
+
+def write_app_request(
+    proc: subprocess.Popen[bytes],
+    payload: bytes,
+    method: str,
+    raw_response: bytearray,
+    stderr_failure: threading.Event,
+    stderr_failure_detail: dict[str, Any],
+) -> None:
+    def fail(error: Any, cause: OSError | None = None) -> None:
+        failure = AppServerProtocolError(method, error, bytes(raw_response))
+        if cause is None:
+            raise failure
+        raise failure from cause
+
+    if stderr_failure.is_set():
+        fail(dict(stderr_failure_detail))
+    if proc.stdin is None:
+        fail({"kind": "stdin_unavailable"})
+    try:
+        view = memoryview(payload)
+        while view:
+            written = proc.stdin.write(view)
+            if not written:
+                raise BrokenPipeError("App Server stdin write returned zero")
+            view = view[written:]
+        proc.stdin.flush()
+    except OSError as exc:
+        error = (
+            dict(stderr_failure_detail)
+            if stderr_failure.is_set()
+            else {"kind": "stdin_write_error", "message": str(exc)}
+        )
+        fail(error, exc)
+    if stderr_failure.is_set():
+        fail(dict(stderr_failure_detail))
+
+
+def probe_app_response_reader() -> None:
+    def run_case(
+        payload: bytes,
+        request_ids: tuple[int, ...],
+        *,
+        keep_open: bool = False,
+        timeout: float = 0.25,
+        line_limit: int = 256,
+        total_limit: int = 2_048,
+    ) -> tuple[list[dict[str, Any]], AppServerProtocolError | None, bytes, float]:
+        read_fd, write_fd = os.pipe()
+        os.set_blocking(read_fd, False)
+        case_selector = selectors.DefaultSelector()
+        case_selector.register(read_fd, selectors.EVENT_READ)
+        view = memoryview(payload)
+        while view:
+            view = view[os.write(write_fd, view):]
+        if not keep_open:
+            os.close(write_fd)
+            write_fd = -1
+        buffer = bytearray()
+        raw_response = bytearray()
+        results: list[dict[str, Any]] = []
+        failure: AppServerProtocolError | None = None
+        started = time.monotonic()
+        try:
+            for request_id in request_ids:
+                results.append(read_app_response(
+                    read_fd,
+                    case_selector,
+                    buffer,
+                    raw_response,
+                    request_id,
+                    "probe",
+                    time.monotonic() + timeout,
+                    line_limit,
+                    total_limit,
+                ))
+        except AppServerProtocolError as exc:
+            failure = exc
+        finally:
+            elapsed = time.monotonic() - started
+            case_selector.close()
+            os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
+        return results, failure, bytes(raw_response), elapsed
+
+    pages = (
+        b'{"id":1,"result":{"page":1}}\n'
+        b'{"id":2,"result":{"page":2}}\n'
+    )
+    results, failure, raw, _ = run_case(pages, (1, 2))
+    assert failure is None and results == [{"page": 1}, {"page": 2}] and raw == pages
+
+    results, failure, raw, elapsed = run_case(b"{", (1,), keep_open=True, timeout=0.02)
+    assert not results and failure is not None and failure.error["kind"] == "timeout"
+    assert failure.error["partial_line"] is True and raw == b"{" and elapsed < 0.25
+
+    results, failure, raw, _ = run_case(b"{", (1,))
+    assert not results and failure is not None and failure.error == {
+        "kind": "eof", "partial_line": True,
+    }
+    assert raw == b"{"
+
+    for newline in (False, True):
+        payload = b"x" * 65 + (b"\n" if newline else b"")
+        results, failure, raw, _ = run_case(
+            payload, (1,), keep_open=not newline, line_limit=64,
+        )
+        assert not results and failure is not None
+        assert failure.error == {"kind": "line_oversize", "limit": 64, "newline": newline}
+        assert raw == payload
+
+    wrong = b"".join(
+        json.dumps({"id": 1_000 + index, "result": {}}).encode() + b"\n"
+        for index in range(200)
+    )
+    results, failure, raw, elapsed = run_case(
+        wrong, (1,), keep_open=True, timeout=0.01,
+        line_limit=128, total_limit=len(wrong) + 1,
+    )
+    assert not results and failure is not None and failure.error["kind"] == "timeout"
+    assert raw == wrong and elapsed < 0.25
+
+    results, failure, raw, _ = run_case(
+        wrong, (1,), line_limit=128, total_limit=512,
+    )
+    assert not results and failure is not None
+    assert failure.error == {"kind": "total_oversize", "limit": 512}
+    assert raw == wrong[:512]
+
+    error_payload = (
+        b'{"id":99,"result":{}}\n'
+        b'{"id":1,"error":{"code":-1,"message":"probe-error"}}\n'
+    )
+    results, failure, raw, _ = run_case(error_payload, (1,))
+    assert not results and failure is not None
+    assert failure.error == {"code": -1, "message": "probe-error"}
+    assert failure.raw_response == error_payload and raw == error_payload
+
+    malformed = b'{"id":1,"result":\n'
+    results, failure, raw, _ = run_case(malformed, (1,))
+    assert not results and failure is not None
+    assert failure.error["kind"] == "invalid_json"
+    assert failure.raw_response == malformed and raw == malformed
+
+    big_integer = b'{"id":1,"result":{"value":' + b"9" * 5_000 + b'}}\n'
+    results, failure, raw, _ = run_case(
+        big_integer, (1,), line_limit=len(big_integer), total_limit=len(big_integer),
+    )
+    assert not results and failure is not None
+    assert failure.error["kind"] == "invalid_json"
+    assert failure.raw_response == big_integer and raw == big_integer
+
+    deep_nesting = (
+        b'{"id":1,"result":' + b"[" * 10_000 + b"]" * 10_000 + b'}\n'
+    )
+    results, failure, raw, _ = run_case(
+        deep_nesting, (1,), line_limit=len(deep_nesting), total_limit=len(deep_nesting),
+    )
+    assert not results and failure is not None
+    assert failure.error["kind"] == "invalid_json"
+    assert failure.raw_response == deep_nesting and raw == deep_nesting
+
+    def run_stderr_child(
+        attempted_bytes: int, exit_code: int,
+    ) -> tuple[bytes, int, dict[str, Any], int | None, float]:
+        code = (
+            "import os,sys\n"
+            "remaining=int(sys.argv[1]);chunk=b'x'*65536\n"
+            "while remaining:\n"
+            " part=chunk[:min(len(chunk),remaining)]\n"
+            " try: written=os.write(2,part)\n"
+            " except BrokenPipeError: break\n"
+            " remaining-=written\n"
+            "raise SystemExit(int(sys.argv[2]))\n"
+        )
+        child = subprocess.Popen(
+            [sys.executable, "-c", code, str(attempted_bytes), str(exit_code)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        assert child.stderr is not None
+        os.set_blocking(child.stderr.fileno(), False)
+        retained = bytearray()
+        observed = [0]
+        failed = threading.Event()
+        detail: dict[str, Any] = {}
+        thread = threading.Thread(
+            target=drain_app_stderr,
+            args=(child, child.stderr.fileno(), retained, observed, failed, detail),
+        )
+        started = time.monotonic()
+        thread.start()
+        try:
+            child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=2)
+            raise AssertionError("stderr probe child exceeded total deadline")
+        thread.join(timeout=2)
+        elapsed = time.monotonic() - started
+        if thread.is_alive():
+            child.stderr.close()
+            thread.join(timeout=1)
+            raise AssertionError("stderr probe drain did not finish")
+        child.stderr.close()
+        return bytes(retained), observed[0], detail, child.returncode, elapsed
+
+    silent_stderr, silent_observed, silent_detail, silent_exit, _ = run_stderr_child(0, 17)
+    assert silent_stderr == b"" and silent_observed == 0 and silent_detail == {}
+    assert silent_exit == 17
+
+    retained_stderr, observed_stderr, stderr_detail, stderr_exit, _ = run_stderr_child(22, 17)
+    assert retained_stderr == b"x" * 22 and observed_stderr == 22
+    assert stderr_detail == {} and stderr_exit == 17
+
+    large_stderr, large_observed, large_detail, large_exit, elapsed = run_stderr_child(
+        20_000_000, 0,
+    )
+    assert large_stderr == b"x" * MAX_APP_STDERR_BYTES
+    assert large_observed == MAX_APP_STDERR_BYTES + 1
+    assert large_detail == {
+        "kind": "stderr_oversize",
+        "limit": MAX_APP_STDERR_BYTES,
+        "observed_at_least": MAX_APP_STDERR_BYTES + 1,
+    }
+    assert large_exit is not None and large_exit != 0 and elapsed < 2
+
+    race_code = (
+        "import os,sys,time\n"
+        "sys.stdin.buffer.readline()\n"
+        "os.write(1,b'{\"id\":1,\"result\":{\"ok\":true}}\\n')\n"
+        "time.sleep(.2)\n"
+        "chunk=b'x'*65536\n"
+        "while True:\n"
+        " try: os.write(2,chunk)\n"
+        " except BrokenPipeError: break\n"
+    )
+    race = subprocess.Popen(
+        [sys.executable, "-c", race_code],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+    )
+    assert race.stdout is not None and race.stderr is not None
+    os.set_blocking(race.stdout.fileno(), False)
+    os.set_blocking(race.stderr.fileno(), False)
+    race_selector = selectors.DefaultSelector()
+    race_selector.register(race.stdout, selectors.EVENT_READ)
+    race_retained = bytearray()
+    race_observed = [0]
+    race_event = threading.Event()
+    race_detail: dict[str, Any] = {}
+    race_thread = threading.Thread(
+        target=drain_app_stderr,
+        args=(
+            race,
+            race.stderr.fileno(),
+            race_retained,
+            race_observed,
+            race_event,
+            race_detail,
+        ),
+    )
+    race_raw = bytearray()
+    race_thread.start()
+    try:
+        write_app_request(
+            race, b'{"id":1}\n', "race-1", race_raw, race_event, race_detail,
+        )
+        race_result = read_app_response(
+            race.stdout.fileno(),
+            race_selector,
+            bytearray(),
+            race_raw,
+            1,
+            "race-1",
+            time.monotonic() + 1,
+            1_024,
+            4_096,
+            race_event,
+            race_detail,
+        )
+        assert race_result == {"ok": True}
+        assert race_event.wait(timeout=2)
+        try:
+            write_app_request(
+                race, b'{"id":2}\n', "race-2", race_raw, race_event, race_detail,
+            )
+        except AppServerProtocolError as exc:
+            assert exc.error == race_detail
+            assert exc.raw_response == b'{"id":1,"result":{"ok":true}}\n'
+        else:
+            raise AssertionError("stderr request race escaped structured failure")
+    finally:
+        if race.poll() is None:
+            race.kill()
+        race.wait(timeout=2)
+        race_thread.join(timeout=2)
+        race_selector.close()
+        race.stdout.close()
+        race.stderr.close()
+    assert not race_thread.is_alive()
+    assert race_observed[0] == MAX_APP_STDERR_BYTES + 1
+    assert len(race_retained) == MAX_APP_STDERR_BYTES
+
+    record = app_protocol_failure_record(
+        AppServerProtocolError("probe", {"code": -1}, b"raw\n"),
+        retained_stderr,
+        observed_stderr,
+        stderr_exit,
+    )
+    assert base64.b64decode(record["app_stderr_b64"], validate=True) == b"x" * 22
+    assert record["app_stderr_observed_bytes"] == 22
+    assert record["app_stderr_retained_bytes"] == 22
+    assert record["app_stderr_truncated"] is False
+    assert record["app_server_exit_code"] == 17
+    worst_case_bound = (
+        4 * ((MAX_TOTAL_RESPONSE_BYTES + 2) // 3)
+        + 4 * ((MAX_APP_STDERR_BYTES + 2) // 3)
+        + MAX_RESPONSE_BYTES
+        + 4_096
+    )
+    assert worst_case_bound <= MAX_FAILURE_STDERR_BYTES
+    print(
+        "APP_RESPONSE_READER_PROBE_GREEN normal_pages=2 partial_timeout=1 "
+        "eof_partial=1 line_partial=1 line_newline=1 wrong_id_deadline=1 "
+        "wrong_id_total=1 error_raw=1 malformed=1 bigint=1 deep=1 "
+        "stderr_silent=1 stderr_exit=1 app_stderr_20m=1 "
+        "stderr_request_race=1 failure_cap=1"
+    )
+
+
+probe_app_response_reader()
+
+
 run_root = safe_directory(Path(os.environ["RUN_ROOT"]), private=True)
 repo_cwd = safe_directory(Path(os.environ["REPO_CWD"]))
 codex_bin = safe_executable(Path(os.environ["CODEX_BIN"]))
@@ -4974,42 +17227,64 @@ proc = subprocess.Popen(
     cwd=repo_cwd,
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
-    stderr=subprocess.DEVNULL,
+    stderr=subprocess.PIPE,
     bufsize=0,
 )
-if proc.stdin is None or proc.stdout is None:
+if proc.stdin is None or proc.stdout is None or proc.stderr is None:
     raise RuntimeError("App Server stdio unavailable")
+os.set_blocking(proc.stdout.fileno(), False)
+os.set_blocking(proc.stderr.fileno(), False)
 selector = selectors.DefaultSelector()
 selector.register(proc.stdout, selectors.EVENT_READ)
+response_buffer = bytearray()
+raw_response = bytearray()
+app_stderr_retained = bytearray()
+app_stderr_observed = [0]
+app_stderr_failure = threading.Event()
+app_stderr_failure_detail: dict[str, Any] = {}
+app_stderr_thread = threading.Thread(
+    target=drain_app_stderr,
+    args=(
+        proc,
+        proc.stderr.fileno(),
+        app_stderr_retained,
+        app_stderr_observed,
+        app_stderr_failure,
+        app_stderr_failure_detail,
+    ),
+)
+app_stderr_thread.start()
 
 
 def request(request_id: int, method: str, params: dict[str, Any]) -> dict[str, Any]:
     payload = (
         json.dumps({"id": request_id, "method": method, "params": params}) + "\n"
     ).encode("utf-8")
-    proc.stdin.write(payload)
-    proc.stdin.flush()
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        for key, _ in selector.select(timeout=0.5):
-            line = key.fileobj.readline(MAX_RESPONSE_BYTES + 1)
-            if not line:
-                raise RuntimeError(f"App Server closed during {method}")
-            if len(line) > MAX_RESPONSE_BYTES or not line.endswith(b"\n"):
-                raise RuntimeError(f"App Server response exceeded bound during {method}")
-            message = json.loads(line)
-            if message.get("id") != request_id:
-                continue
-            if "error" in message:
-                raise AppServerProtocolError(method, message["error"], line)
-            result = message.get("result")
-            if not isinstance(result, dict):
-                raise RuntimeError(f"App Server result must be an object: {method}")
-            return result
-    raise TimeoutError(method)
+    write_app_request(
+        proc,
+        payload,
+        method,
+        raw_response,
+        app_stderr_failure,
+        app_stderr_failure_detail,
+    )
+    return read_app_response(
+        proc.stdout.fileno(),
+        selector,
+        response_buffer,
+        raw_response,
+        request_id,
+        method,
+        time.monotonic() + 30.0,
+        MAX_RESPONSE_BYTES,
+        MAX_TOTAL_RESPONSE_BYTES,
+        app_stderr_failure,
+        app_stderr_failure_detail,
+    )
 
 
 protocol_failure: AppServerProtocolError | None = None
+unexpected_failure: Exception | None = None
 try:
     request(1, "initialize", {
         "clientInfo": {"name": "blender-mcp-remediation-verifier", "version": "1"}
@@ -5081,6 +17356,8 @@ try:
     live = normalize(live_raw, "live")
 except AppServerProtocolError as exc:
     protocol_failure = exc
+except Exception as exc:
+    unexpected_failure = exc
 finally:
     selector.close()
     proc.terminate()
@@ -5089,21 +17366,47 @@ finally:
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait(timeout=5)
+    app_stderr_thread.join(timeout=5)
+    if app_stderr_thread.is_alive():
+        app_stderr_failure_detail.update({"kind": "stderr_drain_timeout"})
+        app_stderr_failure.set()
+        proc.stderr.close()
+        app_stderr_thread.join(timeout=1)
+    if app_stderr_thread.is_alive():
+        raise RuntimeError("App Server stderr drain did not stop")
+    app_exit_code = proc.returncode
+    app_stderr = bytes(app_stderr_retained)
+    app_stderr_observed_bytes = app_stderr_observed[0]
+    proc.stderr.close()
+
+if app_stderr_failure.is_set() and protocol_failure is None:
+    protocol_failure = AppServerProtocolError(
+        "app-server-stderr",
+        dict(app_stderr_failure_detail),
+        bytes(raw_response),
+    )
 
 if protocol_failure is not None:
-    raw_response = protocol_failure.raw_response
-    print(json.dumps({
-        "category": "APP_SERVER_PROTOCOL_ERROR",
-        "error": protocol_failure.error,
-        "method": protocol_failure.method,
-        "raw_response_b64": base64.b64encode(raw_response).decode("ascii"),
-        "raw_response_bytes": len(raw_response),
-        "raw_response_sha256": hashlib.sha256(raw_response).hexdigest(),
-    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")), file=sys.stderr)
+    print(json.dumps(
+        app_protocol_failure_record(
+            protocol_failure,
+            app_stderr,
+            app_stderr_observed_bytes,
+            app_exit_code,
+        ),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ), file=sys.stderr)
     raise SystemExit(70)
 
+if unexpected_failure is not None:
+    raise unexpected_failure
+
 disk_config = tomllib.loads(
-    safe_file_bytes(Path(os.environ["CODEX_CONFIG"])).decode("utf-8")
+    safe_file_bytes(
+        Path(os.environ["CODEX_CONFIG"]), limit=2 * 1024 * 1024
+    ).decode("utf-8")
 )
 disk_servers = disk_config.get("mcp_servers")
 if not isinstance(disk_servers, dict):
@@ -5122,6 +17425,30 @@ if len(indices) != 1 or indices[0] + 1 >= len(arguments):
 editable_root = safe_directory(Path(arguments[indices[0] + 1]))
 if editable_root.name != "mcp":
     raise RuntimeError("configured editable target must be mcp")
+# The tree that is AST-scanned here must be the same checkout the frozen-state
+# stage pins. Without this, repointing --with-editable at a decoy checkout with a
+# correspondingly shrunk enabled_tools makes all four catalogs agree while the
+# frozen stage keeps re-verifying the original pinned source root.
+baseline_value = json.loads(
+    safe_file_bytes(
+        Path(os.environ["EXTERNAL_BASELINE"]), limit=4 * 1024 * 1024
+    ).decode("utf-8")
+)
+if not isinstance(baseline_value, dict):
+    raise RuntimeError("external baseline must be an object")
+baseline_paths = baseline_value.get("paths")
+if not isinstance(baseline_paths, dict):
+    raise RuntimeError("external baseline records no paths")
+baseline_entry = baseline_paths.get("source_root")
+if not isinstance(baseline_entry, dict):
+    raise RuntimeError("external baseline records no source_root")
+baseline_source_root = baseline_entry.get("resolved_path")
+if not isinstance(baseline_source_root, str) or not baseline_source_root:
+    raise RuntimeError("external baseline records no source_root")
+if os.fspath(editable_root.parent) != baseline_source_root:
+    raise RuntimeError(
+        "configured --with-editable checkout differs from the pinned source root"
+    )
 source_package = safe_directory(editable_root / "blmcp")
 
 source_names: list[str] = []
@@ -5134,7 +17461,7 @@ for directory, directory_names, file_names in os.walk(source_package, followlink
             continue
         source_path = directory_path / file_name
         tree = ast.parse(
-            safe_file_bytes(source_path).decode("utf-8"),
+            safe_file_bytes(source_path, limit=4 * 1024 * 1024).decode("utf-8"),
             filename=os.fspath(source_path),
         )
         for node in ast.walk(tree):
@@ -5178,7 +17505,7 @@ print(json.dumps({
     "on_disk_config_count": len(on_disk),
     "equal": True,
 }, sort_keys=True))
-PY
+COLLECTOR
 COLLECT_EXIT=$?
 set -e
 
@@ -5195,6 +17522,13 @@ printf '%s\n' \
   '{"event_id":"frozen-call","kind":"start","scope":"call","stage":"external-frozen-state","attempt":0,"recovery_of":null}' \
   >&9
 
+# A bare `2>` creates or truncates through a symlink: no O_EXCL, no O_NOFOLLOW, no
+# pre-existence check, and `noclobber` is never set -- the shape this Plan argues at
+# length against for the resume FIFO. The run root is a private 0700 mkdtemp, so what
+# is left after these two guards is a window inside a directory only this process can
+# write. One guard per line, for the `A && B` reason above.
+test ! -e "$FROZEN_STDERR"
+test ! -L "$FROZEN_STDERR"
 set +e
 "$UV_BIN" run --quiet --no-project --python 3.13 python - \
   2>"$FROZEN_STDERR" <<'PY'
@@ -5227,7 +17561,7 @@ REQUIRED_TRACKED = {
 }
 
 
-def canonical(path: Path) -> Path:
+def canonical_path(path: Path) -> Path:
     absolute = Path(os.path.abspath(os.fspath(path)))
     resolved = Path(os.path.realpath(absolute))
     if absolute != resolved:
@@ -5235,44 +17569,88 @@ def canonical(path: Path) -> Path:
     return resolved
 
 
-def safe_bytes(path: Path) -> tuple[os.stat_result, bytes]:
-    path = canonical(path)
+def snapshot_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def file_bytes(path: Path, *, limit: int) -> tuple[Path, os.stat_result, bytes]:
+    path = Path(os.path.abspath(path))
+    parent, leaf = path.parent, path.name
+    if limit <= 0 or leaf in {"", ".", ".."} or Path(os.path.realpath(parent)) != parent:
+        raise RuntimeError(f"unsafe bounded file path: {path}")
+    parent_before = os.lstat(parent)
+    parent_bound = snapshot_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != UID
+        or stat.S_IMODE(parent_before.st_mode) & 0o022
+    ):
+        raise RuntimeError(f"unsafe bounded file parent: {parent}")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = -1
     try:
-        before = os.lstat(path)
-    except FileNotFoundError as exc:
-        raise RuntimeError(f"required file missing: {path}") from exc
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-        raise RuntimeError(f"ordinary file required: {path}")
-    if before.st_uid != UID:
-        raise RuntimeError(f"foreign UID rejected: {path}")
-    if before.st_mode & stat.S_IWOTH:
-        raise RuntimeError(f"world-writable file rejected: {path}")
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        opened = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-            raise RuntimeError(f"lstat/fstat identity changed: {path}")
+        if (
+            snapshot_identity(os.fstat(parent_fd)) != parent_bound
+            or snapshot_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"bounded file parent changed while opening: {path}")
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = snapshot_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != UID
+            or before.st_nlink != 1
+            or before.st_mode & stat.S_IWOTH
+            or before.st_size > limit
+        ):
+            raise RuntimeError(f"unsafe bounded file metadata: {path}")
+        descriptor = os.open(
+            leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
+        if snapshot_identity(os.fstat(descriptor)) != bound:
+            raise RuntimeError(f"bounded file changed while opening: {path}")
+        remaining = before.st_size
         chunks: list[bytes] = []
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
             if not chunk:
-                break
+                raise RuntimeError(f"bounded file shrank while reading: {path}")
             chunks.append(chunk)
-        after = os.fstat(descriptor)
-        current = os.lstat(path)
-        if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
-            raise RuntimeError(f"file identity changed while reading: {path}")
-        if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
-            raise RuntimeError(f"file path changed while reading: {path}")
-        return before, b"".join(chunks)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"bounded file grew while reading: {path}")
+        payload = b"".join(chunks)
+        if (
+            len(payload) != before.st_size
+            or snapshot_identity(os.fstat(descriptor)) != bound
+            or snapshot_identity(
+                os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            ) != bound
+            or snapshot_identity(os.fstat(parent_fd)) != parent_bound
+            or snapshot_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"bounded file changed while reading: {path}")
+        return path, before, payload
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
 
 
 def measure(path: Path, expected_type: str) -> dict[str, Any]:
-    path = canonical(path)
+    path = canonical_path(path)
     if expected_type == "file":
-        info, content = safe_bytes(path)
+        # Must not be smaller than the capture cap Appendix E used for this input;
+        # Appendix E uses two, so this is a floor rather than one exact value. A smaller
+        # verification cap
+        # turns a file captured cleanly at Task 0 into a permanent frozen-state
+        # failure.
+        _, info, content = file_bytes(path, limit=512 * 1024 * 1024)
         digest: str | None = hashlib.sha256(content).hexdigest()
     elif expected_type == "directory":
         try:
@@ -5325,7 +17703,9 @@ def git_blob(root: Path, object_id: str) -> bytes:
     return completed.stdout
 
 
-_, baseline_bytes = safe_bytes(Path(os.environ["EXTERNAL_BASELINE"]))
+_, _, baseline_bytes = file_bytes(
+    Path(os.environ["EXTERNAL_BASELINE"]), limit=4 * 1024 * 1024
+)
 baseline = json.loads(baseline_bytes)
 if not isinstance(baseline, dict) or not isinstance(baseline.get("paths"), dict):
     raise RuntimeError("invalid external baseline")
@@ -5354,14 +17734,18 @@ if hashlib.sha256(git_blob(feature_root, old_checks_blob)).hexdigest() != proven
     "old_checks_sha256"
 ]:
     raise RuntimeError("baseline checks SHA-256 differs")
-_, final_checks_bytes = safe_bytes(feature_root / "scripts" / "checks.sh")
+_, _, final_checks_bytes = file_bytes(
+    feature_root / "scripts" / "checks.sh", limit=4 * 1024 * 1024
+)
 final_checks_sha256 = hashlib.sha256(final_checks_bytes).hexdigest()
 if final_checks_sha256 == provenance["old_checks_sha256"]:
     raise RuntimeError("final checks bytes were not changed")
 task1_report_path = (
     feature_root / ".superpowers/sdd/modeling-remediation/task-1-report.md"
 )
-_, task1_report_bytes = safe_bytes(task1_report_path)
+_, _, task1_report_bytes = file_bytes(
+    task1_report_path, limit=64 * 1024 * 1024
+)
 task1_report_sha256 = hashlib.sha256(task1_report_bytes).hexdigest()
 task1_report_text = task1_report_bytes.decode("utf-8")
 marker_patterns = {
@@ -5441,8 +17825,9 @@ task1_checks_blob = git(
 )
 if git_blob(feature_root, task1_checks_blob) != final_checks_bytes:
     raise RuntimeError("Task 1 checks Git blob differs from final checks bytes")
-_, retained_evidence = safe_bytes(
-    feature_root / ".superpowers/sdd/modeling-remediation/uv-hidden-flag-research.md"
+_, _, retained_evidence = file_bytes(
+    feature_root / ".superpowers/sdd/modeling-remediation/uv-hidden-flag-research.md",
+    limit=4 * 1024 * 1024,
 )
 retained_evidence_sha256 = hashlib.sha256(retained_evidence).hexdigest()
 if retained_evidence_sha256 != provenance["retained_evidence_sha256"]:
@@ -5493,6 +17878,8 @@ if current_source != baseline["source_head"] or not source_clean:
     raise RuntimeError("official source state changed")
 
 base_commit = os.environ["BASE_COMMIT"]
+if re.fullmatch(r"[0-9a-f]{40}", base_commit) is None:
+    raise RuntimeError("BASE_COMMIT must be a full 40-hex commit id")
 subprocess.run(
     ["git", "-C", os.fspath(feature_root), "merge-base", "--is-ancestor",
      base_commit, current_feature],
@@ -5531,7 +17918,9 @@ expected_status = [f" M {ACTIVE_AUDIT}"] if expected_dirty else []
 if status_lines != expected_status:
     raise RuntimeError("working tree differs from the expected active-audit-only state")
 if not expected_dirty:
-    _, active_audit_bytes = safe_bytes(feature_root / ACTIVE_AUDIT)
+    _, _, active_audit_bytes = file_bytes(
+        feature_root / ACTIVE_AUDIT, limit=8 * 1024 * 1024
+    )
     task1_digest_prefix = b"task1_report_sha256="
     task1_digest_literal = (
         f"task1_report_sha256={task1_report_sha256}".encode("ascii")
@@ -5571,6 +17960,14 @@ FROZEN_EXIT=$?
 set -e
 
 if [ "$FROZEN_EXIT" != 0 ]; then
+  # This stage writes stderr through a plain redirect rather than the collector's
+  # bounded supervisor, so the capture can exceed `MAX_FAILURE_STDERR_BYTES`. When it
+  # does, `finish_failed_stage`'s bounded reader raises inside the failure path and no
+  # closure is written at all. Detect it here and stop with the actual reason.
+  if [ "$(stat -f '%z' "$FROZEN_STDERR")" -gt 9000000 ]; then
+    echo "STOP: frozen-stage stderr exceeds 9,000,000 bytes; the failure record cannot be written" >&2
+    exit 1
+  fi
   finish_failed_stage \
     frozen-call frozen-stage external-frozen-state "$FROZEN_EXIT" "$FROZEN_STDERR" \
     '["MODEL-PLAN-10"]'
@@ -5648,10 +18045,14 @@ completed = subprocess.run(
 )
 monotonic_end = time.monotonic_ns()
 utc_end = utc_now()
-if completed.returncode != 0:
-    sys.stderr.write(completed.stderr)
-    raise SystemExit(completed.returncode)
-validation = json.loads(completed.stdout)
+# The task-scope end event carrying "outcome":"pass" is on disk, and the journal is
+# closed, reaped and untrapped, before this validation runs -- necessarily, because the
+# closed journal is what is being validated. So the journal cannot carry its own verdict.
+# What it must not do is be the *only* artifact: on failure the run used to leave one
+# journal permanently asserting it passed, with the refutation on a stderr stream nobody
+# retains and no closure writable. The verdict is recorded here instead, outside the
+# envelope, on both paths and before the exit status is raised.
+failed = completed.returncode != 0
 duration_ms = (monotonic_end - monotonic_start) / 1_000_000
 if not math.isfinite(duration_ms) or duration_ms < 0:
     raise RuntimeError("invalid validation duration")
@@ -5661,7 +18062,9 @@ record = {
     "monotonic_start_ns": monotonic_start,
     "monotonic_end_ns": monotonic_end,
     "duration_ms": duration_ms,
-    "validation": validation,
+    "verdict": "fail" if failed else "pass",
+    "returncode": completed.returncode,
+    "validation": None if failed else json.loads(completed.stdout),
 }
 
 output = Path(os.environ["VALIDATE_TIMING"])
@@ -5671,7 +18074,7 @@ except FileNotFoundError:
     pass
 else:
     raise RuntimeError("validation timing target already exists")
-flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 descriptor = os.open(output, flags, 0o600)
 payload = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
 try:
@@ -5684,21 +18087,36 @@ finally:
     os.close(descriptor)
 private_file(output)
 print(json.dumps({"run_root": os.fspath(root), **record}, sort_keys=True))
+if failed:
+    sys.stderr.write(completed.stderr)
+    raise SystemExit(completed.returncode)
 PY
 ```
 
 Expected:
 
+- the collector first prints `APP_RESPONSE_READER_PROBE_GREEN normal_pages=2
+  partial_timeout=1 eof_partial=1 line_partial=1 line_newline=1
+  wrong_id_deadline=1 wrong_id_total=1 error_raw=1 malformed=1 bigint=1 deep=1
+  stderr_silent=1 stderr_exit=1 app_stderr_20m=1 stderr_request_race=1
+  failure_cap=1`;
+- the outer supervisor prints `OUTER_STDERR_CAPTURE_PROBE_GREEN silent=1
+  stderr_exit=1 boundary_8039492=1 overflow_10m=1 signal_137=1`;
 - live/source/effective-config/on-disk-config catalogs are dynamically equal;
 - the three catalog files are sorted JSON string arrays and the config file contains
   the effective set;
 - success produces one first/last Task envelope with nested catalog/frozen stage and
   call pairs;
 - either stage failure preserves the exact bounded stderr bytes; the same
-  implementer/caller keeps the command session pending, writes the matching raw-error
-  digest and immediate verbatim first hypothesis to the ignored Task report, signals
-  the resume FIFO, then observes call/stage/Task closure and a nonzero exit; no default,
-  reconstruction, sanitization, or cross-run recovery link is created;
+  implementer/caller keeps the command session pending, writes the matching exact
+  `failure.json` digest, raw-error digest, and immediate verbatim first hypothesis to
+  the ignored Task report, signals the resume FIFO, then observes call/stage/Task
+  closure and a nonzero exit; catalog failure requires validated bounded-capture metadata
+  while frozen-state failure forbids it -- and where the collector died before writing
+  that metadata, `failure.json` is still written with the exact bounded stderr bytes and
+  their digest before the policy mismatch stops the run, so the evidence exists even
+  though the closure does not; and no default, reconstruction, sanitization, or
+  cross-run recovery link is created;
 - the external paths, source pin/clean state, fixed round main anchor,
   immutable original review base, main cleanliness, and feature ancestry remain valid;
 - the ignored Task 1 report has exactly one of each raw freshness/sweep marker, common
@@ -5707,9 +18125,12 @@ Expected:
   to contain that exact `task1_report_sha256=<digest>` literal once;
 - both the net delta and every individual commit since `09bf5c2` belong to the exact
   five-path remediation allowlist, so modify-then-revert cannot hide a frozen write;
-- Task 4 has exactly the active audit as an unstaged modification; Task 5 is clean;
+- Task 4 has exactly the active audit modified; Task 5 and Task 7 are clean;
 - validation starts only after recorder EOF/exit and has an external same-process
-  UTC/monotonic bracket;
+  UTC/monotonic bracket. Its verdict cannot be inside the journal it validates, so the
+  journal's task-scope `"outcome":"pass"` asserts that the steps ran, not that the run
+  was validated; `validate-timing.json` carries the verdict and is written on the
+  failing path as well as the passing one;
 - no Blender mutation, render, navigation, save, config write, preference write,
   source write, or tracked repository write occurs.
 
@@ -5729,8 +18150,16 @@ and the retained hashes are historical-only.
 ```bash
 /bin/bash -euo pipefail <<'BASH'
 UV_BIN="${UV_BIN:-$HOME/.local/bin/uv}"
+case "$UV_BIN" in /*) ;; *) echo 'STOP: UV_BIN must be absolute' >&2; exit 1 ;; esac
+test -x "$UV_BIN"
 CODEX_CONFIG="${CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
 BLENDER_USERPREF="${BLENDER_USERPREF:-$HOME/Library/Application Support/Blender/5.2/config/userpref.blend}"
+umask 077
+export GIT_NO_REPLACE_OBJECTS=1
+test -z "${PYTHONOPTIMIZE-}"
+test -z "${PYTHONPATH-}"
+test -z "${PYTHONSTARTUP-}"
+test -z "${PYTHONHOME-}"
 
 for resolved_path in "$UV_BIN" "$CODEX_CONFIG" "$BLENDER_USERPREF"; do
   case "$resolved_path" in
@@ -5756,7 +18185,7 @@ UID = os.getuid()
 PINNED_SOURCE = "4309a39646e644261624bfcd2bca669b343b7621"
 OLD_CHECKS_SHA256 = "c0798f66b9b1ac6ed7e85b772adc0cca24b6c5f69ebb5df2e1b742a7c745307e"
 RETAINED_EVIDENCE_SHA256 = "ebd57eee1c24b90c4a68d71b112c2682cf879f5ca345231960071661131edbd5"
-def canonical(path: Path) -> Path:
+def canonical_path(path: Path) -> Path:
     absolute = Path(os.path.abspath(os.fspath(path)))
     resolved = Path(os.path.realpath(absolute))
     if absolute != resolved:
@@ -5765,7 +18194,7 @@ def canonical(path: Path) -> Path:
 
 
 def checked(path: Path, expected: str) -> tuple[Path, os.stat_result]:
-    path = canonical(path)
+    path = canonical_path(path)
     try:
         info = os.lstat(path)
     except FileNotFoundError as exc:
@@ -5787,32 +18216,92 @@ def directory(path: Path) -> Path:
     return checked(path, "directory")[0]
 
 
-def file_bytes(path: Path) -> tuple[Path, os.stat_result, bytes]:
-    path, before = checked(path, "file")
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+def snapshot_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def file_bytes(path: Path, *, limit: int) -> tuple[Path, os.stat_result, bytes]:
+    path = Path(os.path.abspath(path))
+    parent, leaf = path.parent, path.name
+    if limit <= 0 or leaf in {"", ".", ".."} or Path(os.path.realpath(parent)) != parent:
+        raise RuntimeError(f"unsafe bounded file path: {path}")
+    parent_before = os.lstat(parent)
+    parent_bound = snapshot_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != UID
+        or stat.S_IMODE(parent_before.st_mode) & 0o022
+    ):
+        raise RuntimeError(f"unsafe bounded file parent: {parent}")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = -1
     try:
-        opened = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-            raise RuntimeError(f"lstat/fstat identity changed: {path}")
+        if (
+            snapshot_identity(os.fstat(parent_fd)) != parent_bound
+            or snapshot_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"bounded file parent changed while opening: {path}")
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = snapshot_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != UID
+            or before.st_nlink != 1
+            or before.st_mode & stat.S_IWOTH
+            or before.st_size > limit
+        ):
+            raise RuntimeError(f"unsafe bounded file metadata: {path}")
+        descriptor = os.open(
+            leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
+        if snapshot_identity(os.fstat(descriptor)) != bound:
+            raise RuntimeError(f"bounded file changed while opening: {path}")
+        remaining = before.st_size
         chunks: list[bytes] = []
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
             if not chunk:
-                break
+                raise RuntimeError(f"bounded file shrank while reading: {path}")
             chunks.append(chunk)
-        after = os.fstat(descriptor)
-        current = os.lstat(path)
-        if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
-            raise RuntimeError(f"file identity changed while reading: {path}")
-        if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
-            raise RuntimeError(f"file path changed while reading: {path}")
-        return path, before, b"".join(chunks)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"bounded file grew while reading: {path}")
+        payload = b"".join(chunks)
+        if (
+            len(payload) != before.st_size
+            or snapshot_identity(os.fstat(descriptor)) != bound
+            or snapshot_identity(
+                os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            ) != bound
+            or snapshot_identity(os.fstat(parent_fd)) != parent_bound
+            or snapshot_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"bounded file changed while reading: {path}")
+        return path, before, payload
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
 
 
-def metadata(path: Path, expected: str, content: bytes | None = None) -> dict[str, Any]:
-    path, info = checked(path, expected)
+def metadata(
+    path: Path,
+    expected: str,
+    content: bytes | None = None,
+    captured: os.stat_result | None = None,
+) -> dict[str, Any]:
+    if expected == "file":
+        path = canonical_path(path)
+        if captured is None:
+            raise RuntimeError("file metadata requires its captured snapshot stat")
+        info = captured
+    else:
+        path, info = checked(path, expected)
     return {
         "resolved_path": os.fspath(path),
         "type": expected,
@@ -5829,7 +18318,7 @@ def git(root: Path, *arguments: str) -> str:
         capture_output=True,
         text=True,
     )
-    return completed.stdout.strip()
+    return completed.stdout.rstrip("\r\n")
 
 
 def parse_worktrees(raw: str) -> list[dict[str, str]]:
@@ -5855,7 +18344,7 @@ def write_json(path: Path, value: object) -> None:
         pass
     else:
         raise RuntimeError(f"output target already exists: {target}")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
     descriptor = os.open(target, flags, 0o600)
     payload = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
     try:
@@ -5882,7 +18371,9 @@ if git(feature_root, "branch", "--show-current") != "codex/official-blender-mcp-
     raise RuntimeError("unexpected feature branch")
 if git(feature_root, "status", "--porcelain=v1", "--untracked-files=all"):
     raise RuntimeError("feature worktree must be clean before baseline capture")
-checks_path, _, checks_content = file_bytes(feature_root / "scripts" / "checks.sh")
+checks_path, _, checks_content = file_bytes(
+    feature_root / "scripts" / "checks.sh", limit=4 * 1024 * 1024
+)
 old_checks_sha256 = hashlib.sha256(checks_content).hexdigest()
 if old_checks_sha256 != OLD_CHECKS_SHA256:
     raise RuntimeError("old checks SHA-256 differs")
@@ -5892,7 +18383,7 @@ if git(feature_root, "hash-object", os.fspath(checks_path)) != old_checks_blob:
 evidence_path = (
     feature_root / ".superpowers/sdd/modeling-remediation/uv-hidden-flag-research.md"
 )
-_, _, evidence_content = file_bytes(evidence_path)
+_, _, evidence_content = file_bytes(evidence_path, limit=4 * 1024 * 1024)
 retained_evidence_sha256 = hashlib.sha256(evidence_content).hexdigest()
 if retained_evidence_sha256 != RETAINED_EVIDENCE_SHA256:
     raise RuntimeError("retained failure evidence SHA-256 differs")
@@ -5908,7 +18399,9 @@ if initial_main_anchor != main_entries[0].get("HEAD"):
 if git(main_root, "status", "--porcelain=v1", "--untracked-files=all"):
     raise RuntimeError("main worktree must be clean before baseline capture")
 
-config_path, _, config_content = file_bytes(Path(os.environ["CODEX_CONFIG"]))
+config_path, config_info, config_content = file_bytes(
+    Path(os.environ["CODEX_CONFIG"]), limit=2 * 1024 * 1024
+)
 directory(config_path.parent)
 config = tomllib.loads(config_content.decode("utf-8"))
 server = config["mcp_servers"]["blender"]
@@ -5923,7 +18416,9 @@ if editable_root.name != "mcp":
     raise RuntimeError("configured editable target must be mcp")
 source_root = directory(editable_root.parent)
 
-preference_path, _, preference_content = file_bytes(Path(os.environ["BLENDER_USERPREF"]))
+preference_path, preference_info, preference_content = file_bytes(
+    Path(os.environ["BLENDER_USERPREF"]), limit=512 * 1024 * 1024
+)
 directory(preference_path.parent)
 
 source_head = git(source_root, "rev-parse", "HEAD")
@@ -5954,8 +18449,12 @@ record = {
     "paths": {
         "feature_root": metadata(feature_root, "directory"),
         "main_root": metadata(main_root, "directory"),
-        "codex_config": metadata(config_path, "file", config_content),
-        "blender_userpref": metadata(preference_path, "file", preference_content),
+        "codex_config": metadata(
+            config_path, "file", config_content, captured=config_info
+        ),
+        "blender_userpref": metadata(
+            preference_path, "file", preference_content, captured=preference_info
+        ),
         "source_root": metadata(source_root, "directory"),
     },
     "feature_head": feature_head,
@@ -5986,3 +18485,7631 @@ the committed old-checks blob/SHA-256, retained-evidence SHA-256, and the baseli
 The mutable checks path is not added to generic unchanged `paths`. Config and
 preference contents are absent. Historical fixture/PNG files are not read, and their
 previously recorded hashes are not described as current comparisons.
+
+## Appendix F: Exact clean final-retest protocol
+
+Use exact absolute
+`FEATURE_ROOT=/Users/yeminjie/Developer/BlenderDesign/.worktrees/official-blender-mcp-install`
+and the owned native-mode-`0700` container
+`R2_CONTAINER=$FEATURE_ROOT/.superpowers/sdd/modeling-remediation/final-retest-r2`.
+Each run exclusively allocates the next `attempt-000N` child; every fixture, payload,
+catalog, journal, response, report, validation and retained PNG path derives from that
+selected absolute child. Existing attempts are immutable invalid/pass candidates and
+are never edited, deleted, concatenated or reused.
+
+Allocate one attempt with this exact block:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+FEATURE_ROOT=/Users/yeminjie/Developer/BlenderDesign/.worktrees/official-blender-mcp-install
+R2_CONTAINER="$FEATURE_ROOT/.superpowers/sdd/modeling-remediation/final-retest-r2"
+UV_BIN="${UV_BIN:-$HOME/.local/bin/uv}"
+case "$UV_BIN" in /*) ;; *) echo 'STOP: UV_BIN must be absolute' >&2; exit 1 ;; esac
+ATTEMPT_ROOT="$(
+  "$UV_BIN" run --quiet --no-project --python 3.13 python - \
+    "$R2_CONTAINER" <<'PY'
+from __future__ import annotations
+
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+container = Path(os.path.abspath(sys.argv[1]))
+if os.path.realpath(container.parent) != os.fspath(container.parent):
+    raise RuntimeError("r2 parent contains a symlink")
+parent = os.lstat(container.parent)
+if (
+    stat.S_ISLNK(parent.st_mode)
+    or not stat.S_ISDIR(parent.st_mode)
+    or parent.st_uid != os.getuid()
+    or stat.S_IMODE(parent.st_mode) != 0o700
+):
+    raise RuntimeError("owned native mode-0700 r2 parent required")
+try:
+    os.mkdir(container, 0o700)
+except FileExistsError:
+    pass
+if os.path.realpath(container) != os.fspath(container):
+    raise RuntimeError("r2 container contains a symlink")
+container_info = os.lstat(container)
+if (
+    stat.S_ISLNK(container_info.st_mode)
+    or not stat.S_ISDIR(container_info.st_mode)
+    or container_info.st_uid != os.getuid()
+    or stat.S_IMODE(container_info.st_mode) != 0o700
+):
+    raise RuntimeError("owned native mode-0700 r2 container required")
+
+container_binding = (container_info.st_dev, container_info.st_ino)
+container_fd = os.open(container, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+
+
+def bound_container() -> None:
+    opened = os.fstat(container_fd)
+    current = os.lstat(container)
+    if (
+        (opened.st_dev, opened.st_ino) != container_binding
+        or (current.st_dev, current.st_ino) != container_binding
+        or not stat.S_ISDIR(opened.st_mode)
+        or opened.st_uid != os.getuid()
+        or stat.S_IMODE(opened.st_mode) != 0o700
+    ):
+        raise RuntimeError("r2 container changed during allocation")
+
+
+try:
+    bound_container()
+    numbers: list[int] = []
+    for name in os.listdir(container_fd):
+        match = re.fullmatch(r"attempt-([0-9]{4})", name)
+        if match is None or name == "attempt-0000":
+            raise RuntimeError(f"unexpected r2 container entry: {name}")
+        info = os.stat(name, dir_fd=container_fd, follow_symlinks=False)
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise RuntimeError(f"unsafe retained attempt: {name}")
+        numbers.append(int(match.group(1)))
+    number = max(numbers, default=0) + 1
+    if number > 9999:
+        raise RuntimeError("r2 attempt namespace exhausted")
+    leaf = f"attempt-{number:04d}"
+    bound_container()
+    os.mkdir(leaf, 0o700, dir_fd=container_fd)
+    info = os.stat(leaf, dir_fd=container_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise RuntimeError("new r2 attempt metadata differs")
+    bound_container()
+    attempt = container / leaf
+    final = os.lstat(attempt)
+    if (final.st_dev, final.st_ino) != (info.st_dev, info.st_ino):
+        raise RuntimeError("new r2 attempt pathname resolves elsewhere")
+finally:
+    os.close(container_fd)
+print(attempt)
+PY
+)"
+case "$ATTEMPT_ROOT" in "$R2_CONTAINER"/attempt-[0-9][0-9][0-9][0-9]) ;; *) exit 1 ;; esac
+export FEATURE_ROOT R2_CONTAINER ATTEMPT_ROOT UV_BIN
+printf 'R2_ATTEMPT_READY id=%s root=%s\n' "${ATTEMPT_ROOT##*/}" "$ATTEMPT_ROOT"
+BASH
+```
+
+Expected: one new canonical native-mode-`0700` attempt and
+`R2_ATTEMPT_READY id=attempt-000N root=<absolute-path>`. Any container entry that is
+not an `attempt-NNNN` directory is a hard failure by design: the container's
+exclusivity is what makes retained attempts immutable, so the guard is never relaxed.
+If macOS or Spotlight leaves a `.DS_Store` there, delete that stray file — it is not an
+attempt — and re-run; never delete or rename an `attempt-NNNN` directory. Bootstrap is limited to this
+allocation and exclusive creation of the exact controller/input bytes below. Start one
+Appendix-A audit recorder immediately afterward, before executing or reading fixture,
+catalog, payload, source/config or Blender state, and keep its FD open through the exact
+Task end event.
+
+The allocation block is the only block allowed to choose `N`. Copy its exact printed
+absolute root into `ATTEMPT_ROOT` in the fresh Task 7 implementer's persistent
+PTY/controller shell and export it once; all later blocks require that value,
+revalidate its canonical `attempt-[0-9]{4}` identity and mode, and never rediscover “latest” from mutable
+directory order. A missing/mismatched value fails before any read or dispatch.
+
+Create mode-0600 `fixture_setup.py` with these exact Blender-5.2-tested bytes. They are
+deliberately not the bytes of the retained r1 evidence file
+`.superpowers/sdd/modeling-remediation/final-retest-r1/fixture_setup.py`, and the two must
+not be reconciled: r1 is immutable executed history and is preserved exactly as it ran,
+while this r2 payload carries the later `os.path.lexists` / `os.lstat` + `S_ISLNK` /
+`S_ISREG` hardening whose reasons are stated in the payload's own comments. A terminal
+reviewer comparing the two evidence sets should expect them to differ; regenerating r1 to
+match would destroy the evidence the P6 manifest pins.
+
+<!-- R2_FIXTURE_SETUP_BEGIN -->
+```python
+from pathlib import Path
+import os
+import stat
+
+import bpy
+
+
+root = Path(__file__).resolve().parent
+library_path = root / "library_source.blend"
+fixture_path = root / "fixture.blend"
+missing_path = root / "known-missing.png"
+
+# `Path.exists()` follows symlinks and is False for a dangling one, so a planted
+# `library_source.blend -> victim` satisfied this guard and the `check_existing=False`
+# save below then wrote through the link. `os.path.lexists` sees the link itself, which
+# is also the spelling the shell half of this appendix already uses for the same files.
+for path in (library_path, fixture_path, missing_path):
+    if os.path.lexists(path):
+        raise RuntimeError(f"target already exists: {path}")
+
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.mesh.primitive_cube_add(size=1.5, location=(0.0, 0.0, 0.75))
+source = bpy.context.object
+source.name = "RetestLinkedSource"
+source.data.name = "RetestLinkedSourceMesh"
+bpy.ops.wm.save_as_mainfile(filepath=str(library_path), check_existing=False)
+
+bpy.ops.wm.read_factory_settings(use_empty=True)
+with bpy.data.libraries.load(str(library_path), link=True) as (data_from, data_to):
+    if "RetestLinkedSource" not in data_from.objects:
+        raise RuntimeError("linked source object absent")
+    data_to.objects = ["RetestLinkedSource"]
+linked = data_to.objects[0]
+if linked is None:
+    raise RuntimeError("linked source object failed to load")
+bpy.context.collection.objects.link(linked)
+
+bpy.ops.mesh.primitive_cylinder_add(vertices=24, radius=0.6, depth=1.2, location=(2.0, 0.0, 0.6))
+local = bpy.context.object
+local.name = "RetestFixtureLocal"
+local.data.name = "RetestFixtureLocalMesh"
+
+image = bpy.data.images.new("RetestKnownMissing", width=1, height=1)
+image.source = "FILE"
+image.filepath = str(missing_path)
+image.use_fake_user = True
+
+bpy.ops.object.camera_add(location=(5.0, -5.0, 4.0))
+bpy.context.object.name = "RetestFixtureCamera"
+bpy.ops.wm.save_as_mainfile(filepath=str(fixture_path), check_existing=False)
+
+for path in (library_path, fixture_path):
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise RuntimeError("fixture postcondition failed")
+if os.path.lexists(missing_path):
+    raise RuntimeError("fixture postcondition failed")
+```
+<!-- R2_FIXTURE_SETUP_END -->
+
+Do not execute this fixture fence yet. The exact sequence after the production
+controller fence first extracts and in-memory compiles all four Python inputs, opens
+the sole audit Task/stage, then runs this fixture in that already-open stage. It next
+terminates the old disposable Blender without saving, waits for no listener, launches
+Blender 5.2 with `--factory-startup`, and proves a different sole PID/listener plus the
+factory scene preconditions before the first direct MCP dispatch.
+
+The production controller below owns the sole authoritative dispatch timer. It sets
+`dispatch_start_ns` immediately before, and `dispatch_end_ns` immediately after, the
+same awaited `mcp.ClientSession.call_tool(...)`; response serialization and semantic
+or artifact checks occur after that bracket. `controller_dispatch_wall_ms` therefore
+includes transport/client/server wall time and is not server-internal compute. Never
+copy the audit recorder's envelope into `internal_ms`, and do not create a second wall
+recorder or sidecar.
+
+Exclusive-create native-mode-`0600` `model_body.py` with the following exact bytes. The
+controller prepends exactly `RUN_ROOT = <selected absolute attempt root repr>\n`,
+compiles the combined bytes in memory, and sends those same bytes to
+`execute_blender_code`. The body line count and SHA-256 stated after this fence are a
+dispatch invariant, not a literal tool-count assumption:
+
+<!-- R2_MODEL_BODY_BEGIN -->
+```python
+from pathlib import Path
+from math import pi
+
+import bpy
+from mathutils import Vector
+
+
+run_root = Path(RUN_ROOT).resolve()
+library_path = run_root / "library_source.blend"
+missing_path = run_root / "known-missing.png"
+# `is_file()`/`exists()` both follow symlinks, so a planted dangling
+# `known-missing.png` link read as absent and a `library_source.blend` link read as a
+# regular file. `is_symlink()` is the pathlib spelling of the `lexists`/`lstat` guard
+# the rest of this protocol uses.
+if (
+    library_path.is_symlink()
+    or not library_path.is_file()
+    or missing_path.is_symlink()
+    or missing_path.exists()
+):
+    raise RuntimeError("fixture precondition failed")
+
+bpy.ops.wm.read_homefile(use_factory_startup=True)
+factory_scene = bpy.context.scene
+if (
+    bpy.app.version < (5, 2, 0)
+    or bpy.data.filepath != ""
+    or bpy.data.is_saved
+    or bpy.context.mode != "OBJECT"
+    or "FinalRetestSentinel" in factory_scene
+    or {obj.name for obj in factory_scene.objects} != {"Camera", "Cube", "Light"}
+):
+    raise RuntimeError("factory precondition differs")
+bpy.ops.object.select_all(action="SELECT")
+bpy.ops.object.delete(use_global=False)
+for obj in list(bpy.data.objects):
+    bpy.data.objects.remove(obj, do_unlink=True)
+for value in list(bpy.data.materials):
+    bpy.data.materials.remove(value)
+for values in (bpy.data.cameras, bpy.data.lights, bpy.data.meshes, bpy.data.images):
+    for value in list(values):
+        values.remove(value)
+for collection in list(bpy.data.collections):
+    bpy.data.collections.remove(collection)
+
+scene = bpy.context.scene
+scene["FinalRetestSentinel"] = "official-blender-mcp-r2"
+lamp_collection = bpy.data.collections.new("FinalRetestLamp")
+scene.collection.children.link(lamp_collection)
+
+
+def move_to_lamp(obj):
+    for collection in list(obj.users_collection):
+        collection.objects.unlink(obj)
+    lamp_collection.objects.link(obj)
+    return obj
+
+
+def rename_active(name):
+    obj = move_to_lamp(bpy.context.view_layer.objects.active)
+    obj.name = name
+    if obj.data is not None:
+        obj.data.name = f"{name}_Mesh"
+    return obj
+
+
+def unique_node(material, node_type):
+    matches = [node for node in material.node_tree.nodes if node.type == node_type]
+    if len(matches) != 1:
+        raise RuntimeError(f"expected one {node_type} node")
+    return matches[0]
+
+
+def socket(node, identifier):
+    matches = [item for item in node.inputs if item.identifier == identifier]
+    if len(matches) != 1:
+        raise RuntimeError(f"expected one socket identifier {identifier}")
+    return matches[0]
+
+
+def material(name, base_color, metallic, roughness, emission=None):
+    value = bpy.data.materials.new(name)
+    value.use_nodes = True
+    principled = unique_node(value, "BSDF_PRINCIPLED")
+    socket(principled, "Base Color").default_value = base_color
+    socket(principled, "Metallic").default_value = metallic
+    socket(principled, "Roughness").default_value = roughness
+    if emission is not None:
+        socket(principled, "Emission Color").default_value = emission
+        socket(principled, "Emission Strength").default_value = 7.0
+    if abs(socket(principled, "Metallic").default_value - metallic) > 1e-6:
+        raise RuntimeError("metallic socket readback failed")
+    return value
+
+
+def assign(obj, value):
+    obj.data.materials.append(value)
+
+
+def parent_keep_world(child, parent):
+    world = child.matrix_world.copy()
+    child.parent = parent
+    child.matrix_world = world
+    bpy.context.view_layer.update()
+    if any(abs(a - b) > 1e-6 for row_a, row_b in zip(world, child.matrix_world) for a, b in zip(row_a, row_b)):
+        raise RuntimeError(f"world transform changed while parenting {child.name}")
+
+
+def point_camera(camera, target):
+    camera.rotation_euler = (Vector(target) - camera.location).to_track_quat("-Z", "Y").to_euler()
+
+
+mat_base = material("Mat_Base", (0.025, 0.035, 0.055, 1.0), 0.72, 0.2)
+mat_metal = material("Mat_Metal", (0.16, 0.19, 0.24, 1.0), 0.86, 0.16)
+mat_shade = material("Mat_Shade", (0.015, 0.025, 0.045, 1.0), 0.7, 0.12)
+mat_bulb = material(
+    "Mat_Bulb",
+    (1.0, 0.18, 0.035, 1.0),
+    0.0,
+    0.2,
+    emission=(1.0, 0.07, 0.01, 1.0),
+)
+mat_ground = material("Mat_Ground", (0.055, 0.065, 0.11, 1.0), 0.08, 0.55)
+
+bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=1.55, depth=0.4, location=(0.0, 0.0, 0.2))
+base = rename_active("Lamp_Base")
+assign(base, mat_base)
+
+bpy.ops.mesh.primitive_torus_add(major_radius=1.15, minor_radius=0.07, major_segments=64, minor_segments=12, location=(0.0, 0.0, 0.43))
+ring = rename_active("Lamp_Ring")
+assign(ring, mat_bulb)
+parent_keep_world(ring, base)
+
+bpy.ops.mesh.primitive_cylinder_add(vertices=48, radius=0.13, depth=2.45, location=(0.0, 0.0, 1.625))
+stem = rename_active("Lamp_Stem")
+assign(stem, mat_metal)
+parent_keep_world(stem, base)
+
+bpy.ops.mesh.primitive_uv_sphere_add(segments=40, ring_count=20, radius=0.22, location=(0.0, 0.0, 1.05))
+lower_joint = rename_active("Lamp_Joint_Lower")
+assign(lower_joint, mat_bulb)
+parent_keep_world(lower_joint, stem)
+
+bpy.ops.mesh.primitive_cylinder_add(vertices=48, radius=0.11, depth=1.7, location=(0.0, 0.0, 1.9))
+lower_arm = rename_active("Lamp_Arm_Lower")
+assign(lower_arm, mat_metal)
+parent_keep_world(lower_arm, lower_joint)
+
+bpy.ops.mesh.primitive_uv_sphere_add(segments=40, ring_count=20, radius=0.22, location=(0.0, 0.0, 2.75))
+upper_joint = rename_active("Lamp_Joint_Upper")
+assign(upper_joint, mat_bulb)
+parent_keep_world(upper_joint, lower_arm)
+
+bpy.ops.mesh.primitive_cylinder_add(vertices=48, radius=0.11, depth=1.7, location=(0.85, 0.0, 2.75), rotation=(0.0, pi / 2.0, 0.0))
+upper_arm = rename_active("Lamp_Arm_Upper")
+assign(upper_arm, mat_metal)
+parent_keep_world(upper_arm, upper_joint)
+
+bpy.ops.mesh.primitive_cone_add(vertices=64, radius1=0.7, radius2=0.3, depth=0.9, location=(1.7, 0.0, 2.6))
+shade = rename_active("Lamp_Shade")
+assign(shade, mat_shade)
+parent_keep_world(shade, upper_arm)
+
+bpy.ops.mesh.primitive_uv_sphere_add(segments=48, ring_count=24, radius=0.3, location=(1.7, 0.0, 2.12))
+bulb = rename_active("Lamp_Bulb")
+assign(bulb, mat_bulb)
+parent_keep_world(bulb, shade)
+
+bpy.ops.mesh.primitive_plane_add(size=20.0, location=(0.0, 0.0, 0.0))
+ground = rename_active("Ground")
+assign(ground, mat_ground)
+
+with bpy.data.libraries.load(str(library_path), link=True) as (data_from, data_to):
+    if "RetestLinkedSource" not in data_from.objects:
+        raise RuntimeError("linked source absent")
+    data_to.objects = ["RetestLinkedSource"]
+linked_source = data_to.objects[0]
+if linked_source is None or linked_source.data is None:
+    raise RuntimeError("linked source load failed")
+prop = bpy.data.objects.new("Library_Prop", linked_source.data)
+lamp_collection.objects.link(prop)
+prop.location = (-2.2, 1.7, 0.0)
+linked_library_path = str(Path(bpy.path.abspath(linked_source.library.filepath)).resolve())
+bpy.data.objects.remove(linked_source)
+
+bpy.ops.object.camera_add(location=(7.0, -9.0, 6.2))
+camera = move_to_lamp(bpy.context.view_layer.objects.active)
+camera.name = "Camera"
+camera.data.name = "Camera_Data"
+camera.data.lens = 52.0
+point_camera(camera, (0.4, 0.0, 1.45))
+scene.camera = camera
+
+bpy.ops.object.light_add(type="AREA", location=(4.0, -4.0, 6.0))
+key = move_to_lamp(bpy.context.view_layer.objects.active)
+key.name = "Key_Light"
+key.data.name = "Key_Light_Data"
+key.data.energy = 950.0
+key.data.color = (1.0, 0.12, 0.035)
+key.data.shape = "DISK"
+key.data.size = 5.0
+point_camera(key, (0.5, 0.0, 1.3))
+
+bpy.ops.object.light_add(type="AREA", location=(-4.0, -1.0, 4.0))
+fill = move_to_lamp(bpy.context.view_layer.objects.active)
+fill.name = "Fill_Light"
+fill.data.name = "Fill_Light_Data"
+fill.data.energy = 700.0
+fill.data.color = (0.08, 0.25, 1.0)
+fill.data.shape = "DISK"
+fill.data.size = 4.0
+point_camera(fill, (0.0, 0.0, 1.4))
+
+missing = bpy.data.images.new("RetestKnownMissingGui", width=1, height=1)
+missing.source = "FILE"
+missing.filepath = str(missing_path)
+missing.use_fake_user = True
+
+background = unique_node(scene.world, "BACKGROUND")
+background_color = socket(background, "Color")
+background_strength = socket(background, "Strength")
+background_color_expected = (0.004, 0.006, 0.012, 1.0)
+background_strength_expected = 0.18
+background_color.default_value = background_color_expected
+background_strength.default_value = background_strength_expected
+background_color_readback = tuple(background_color.default_value)
+background_strength_readback = float(background_strength.default_value)
+if any(
+    abs(actual - expected) > 1e-6
+    for actual, expected in zip(
+        background_color_readback,
+        background_color_expected,
+    )
+):
+    raise RuntimeError("background color readback failed")
+if abs(background_strength_readback - background_strength_expected) > 1e-6:
+    raise RuntimeError("background strength readback failed")
+
+scene.render.engine = "BLENDER_EEVEE"
+if scene.render.engine != "BLENDER_EEVEE":
+    raise RuntimeError("engine readback failed")
+scene.render.resolution_x = 640
+scene.render.resolution_y = 640
+scene.render.resolution_percentage = 75
+scene.render.image_settings.file_format = "PNG"
+
+for obj in scene.objects:
+    obj.select_set(False)
+shade.select_set(True)
+bpy.context.view_layer.objects.active = shade
+
+expected_objects = {
+    "Camera", "Fill_Light", "Ground", "Key_Light", "Lamp_Arm_Lower",
+    "Lamp_Arm_Upper", "Lamp_Base", "Lamp_Bulb", "Lamp_Joint_Lower",
+    "Lamp_Joint_Upper", "Lamp_Ring", "Lamp_Shade", "Lamp_Stem", "Library_Prop",
+}
+expected_materials = {"Mat_Base", "Mat_Bulb", "Mat_Ground", "Mat_Metal", "Mat_Shade"}
+expected_data = {
+    "Camera": ("CAMERA", "Camera_Data"),
+    "Fill_Light": ("LIGHT", "Fill_Light_Data"),
+    "Ground": ("MESH", "Ground_Mesh"),
+    "Key_Light": ("LIGHT", "Key_Light_Data"),
+    "Lamp_Arm_Lower": ("MESH", "Lamp_Arm_Lower_Mesh"),
+    "Lamp_Arm_Upper": ("MESH", "Lamp_Arm_Upper_Mesh"),
+    "Lamp_Base": ("MESH", "Lamp_Base_Mesh"),
+    "Lamp_Bulb": ("MESH", "Lamp_Bulb_Mesh"),
+    "Lamp_Joint_Lower": ("MESH", "Lamp_Joint_Lower_Mesh"),
+    "Lamp_Joint_Upper": ("MESH", "Lamp_Joint_Upper_Mesh"),
+    "Lamp_Ring": ("MESH", "Lamp_Ring_Mesh"),
+    "Lamp_Shade": ("MESH", "Lamp_Shade_Mesh"),
+    "Lamp_Stem": ("MESH", "Lamp_Stem_Mesh"),
+    "Library_Prop": ("MESH", "RetestLinkedSourceMesh"),
+}
+actual_data = {
+    obj.name: (obj.type, obj.data.name if obj.data is not None else None)
+    for obj in scene.objects
+}
+expected_meshes = {name for kind, name in expected_data.values() if kind == "MESH"}
+if (
+    {obj.name for obj in scene.objects} != expected_objects
+    or {obj.name for obj in bpy.data.objects} != expected_objects
+    or {item.name for item in bpy.data.materials} != expected_materials
+    or actual_data != expected_data
+    or {item.name for item in bpy.data.meshes} != expected_meshes
+    or {item.name for item in bpy.data.cameras} != {"Camera_Data"}
+    or {item.name for item in bpy.data.lights}
+    != {"Fill_Light_Data", "Key_Light_Data"}
+    or {item.name for item in bpy.data.images} != {"RetestKnownMissingGui"}
+):
+    raise RuntimeError("exact object/material/data set differs")
+expected_memberships = {name: ["FinalRetestLamp"] for name in expected_objects}
+actual_memberships = {
+    obj.name: sorted(collection.name for collection in obj.users_collection)
+    for obj in scene.objects
+}
+if (
+    {collection.name for collection in bpy.data.collections} != {"FinalRetestLamp"}
+    or [collection.name for collection in scene.collection.children]
+    != ["FinalRetestLamp"]
+    or {obj.name for obj in lamp_collection.objects} != expected_objects
+    or actual_memberships != expected_memberships
+    or scene.camera is not camera
+    or scene.get("FinalRetestSentinel") != "official-blender-mcp-r2"
+    or bpy.data.filepath != ""
+    or bpy.data.is_saved
+):
+    raise RuntimeError("exact collection/scene identity differs")
+expected_parents = {
+    "Lamp_Ring": "Lamp_Base",
+    "Lamp_Stem": "Lamp_Base",
+    "Lamp_Joint_Lower": "Lamp_Stem",
+    "Lamp_Arm_Lower": "Lamp_Joint_Lower",
+    "Lamp_Joint_Upper": "Lamp_Arm_Lower",
+    "Lamp_Arm_Upper": "Lamp_Joint_Upper",
+    "Lamp_Shade": "Lamp_Arm_Upper",
+    "Lamp_Bulb": "Lamp_Shade",
+}
+actual_parents = {obj.name: obj.parent.name for obj in scene.objects if obj.parent is not None}
+if actual_parents != expected_parents:
+    raise RuntimeError(f"parent map differs: {actual_parents!r}")
+selected_names = [obj.name for obj in scene.objects if obj.select_get()]
+if selected_names != ["Lamp_Shade"] or bpy.context.view_layer.objects.active != shade:
+    raise RuntimeError("selection differs")
+if any(obj.name.endswith(".001") for obj in bpy.data.objects):
+    raise RuntimeError("unexpected .001 object")
+
+geometry = [scene.objects[name] for name in expected_objects if name.startswith("Lamp_")]
+points = [obj.matrix_world @ Vector(corner) for obj in geometry for corner in obj.bound_box]
+bounds_min = [round(min(point[index] for point in points), 4) for index in range(3)]
+bounds_max = [round(max(point[index] for point in points), 4) for index in range(3)]
+if bounds_min != [-1.55, -1.55, 0.0] or bounds_max != [2.4, 1.55, 3.05]:
+    raise RuntimeError(f"bounds differ: {bounds_min!r} {bounds_max!r}")
+
+metallic_readbacks = {
+    value.name: float(
+        socket(unique_node(value, "BSDF_PRINCIPLED"), "Metallic").default_value
+    )
+    for value in bpy.data.materials
+}
+result = {
+    "objects": sorted(expected_objects),
+    "materials": sorted(expected_materials),
+    "data": {name: list(actual_data[name]) for name in sorted(actual_data)},
+    "collections": actual_memberships,
+    "scene_children": [collection.name for collection in scene.collection.children],
+    "parents": actual_parents,
+    "bounds_min": bounds_min,
+    "bounds_max": bounds_max,
+    "engine": scene.render.engine,
+    "resolution": [scene.render.resolution_x, scene.render.resolution_y, scene.render.resolution_percentage],
+    "selected": selected_names,
+    "active": bpy.context.view_layer.objects.active.name,
+    "camera": scene.camera.name,
+    "sentinel": scene["FinalRetestSentinel"],
+    "socket_identifiers": {
+        "principled_metallic": "Metallic",
+        "background_color": background_color.identifier,
+        "background_strength": background_strength.identifier,
+    },
+    "metallic_readbacks": metallic_readbacks,
+    "background_color_readback": list(background_color_readback),
+    "background_strength_readback": background_strength_readback,
+    "missing_path": missing.filepath,
+    "linked_library": linked_library_path,
+    "filepath": bpy.data.filepath,
+    "is_saved": bpy.data.is_saved,
+    "is_dirty": bpy.data.is_dirty,
+}
+```
+<!-- R2_MODEL_BODY_END -->
+
+The exact model-body fence is 368 lines and its UTF-8 SHA-256 is
+`534f38477d968d8ae4262340b1f172d51cba25e206c86a6a41976071aa638034`.
+The controller refuses any other bytes, prepends only the dynamic `RUN_ROOT` binding,
+and compiles the combined bytes in memory before dispatch. The obsolete 270-line body
+and SHA-256 `19d4fc39ada3725d762aef5bd68a6adf7a678299bef92885e466cbda8f0fde71`
+must never be accepted.
+
+The result must exactly report 14 objects, five materials, the exact object-type/data
+map, one `FinalRetestLamp` collection containing every object, eight parents, bounds
+`[-1.55,-1.55,0.0]` to `[2.4,1.55,3.05]`, `BLENDER_EEVEE`, `640x640@75`, stable
+Principled/Background socket identifiers and readbacks, active camera, sentinel,
+linked library, controlled missing image, Shade-only selection, and unsaved filepath.
+The payload internally asserts `Vector(corner)` bounds and world-preserving parenting;
+the result does not pretend those implementation methods came from a summary tool.
+
+Exclusive-create native-mode-`0600` `cli_body.py` with these exact observation-only
+bytes. The controller prepends the same selected `RUN_ROOT` binding, compiles the
+combined bytes in memory, and sends them once with absolute
+`blend_file=<attempt-root>/fixture.blend`:
+
+<!-- R2_CLI_BODY_BEGIN -->
+```python
+from pathlib import Path
+import bpy
+
+
+run_root = Path(RUN_ROOT).resolve()
+observations = {
+    "version": list(bpy.app.version),
+    "filepath_raw": bpy.data.filepath,
+    "filepath_resolved": str(Path(bpy.data.filepath).resolve()),
+    "objects": sorted(obj.name for obj in bpy.context.scene.objects),
+    "images": [
+        {
+            "name": image.name,
+            "filepath_raw": image.filepath,
+            "filepath_resolved": str(
+                Path(bpy.path.abspath(image.filepath)).resolve()
+            ),
+            "fake_user": bool(image.use_fake_user),
+        }
+        for image in bpy.data.images
+        if image.name == "RetestKnownMissing"
+    ],
+    "libraries": [
+        {
+            "filepath_raw": item.filepath,
+            "filepath_resolved": str(
+                Path(bpy.path.abspath(item.filepath)).resolve()
+            ),
+        }
+        for item in bpy.data.libraries
+    ],
+}
+result = observations
+```
+<!-- R2_CLI_BODY_END -->
+
+The exact CLI-body fence is 33 lines and its UTF-8 SHA-256 is
+`c358ad5ec7f30c8bdf7d7fae28ef1f71682d118b2b6dd462ac5ee522a7e241d2`.
+It is deliberately observation-only; every assertion over those observations belongs
+to the controller-side acceptance predicate after the raw result has been retained.
+
+The following production controller is the sole dispatch/validation/finalization
+implementation. Its fence is excluded from the file. The exact file is 6,193 lines,
+254,319 UTF-8 bytes, and SHA-256
+`cc325e471aa0d1a0349deade58d0f7517575c35d901fb99f00ee1cc4de7f640a`.
+It binds the 368-line model body and 33-line CLI body above, derives the live catalog
+count, and accepts safe future read-only tools without changing the pinned 26-tool
+minimum. No summarized or LLM-timestamped substitute is permitted.
+
+<!-- R2_CONTROLLER_BEGIN -->
+````python
+from __future__ import annotations
+
+import argparse
+import ast
+import asyncio
+import base64
+import hashlib
+import io
+import json
+import math
+import os
+import re
+import selectors
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import tomllib
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, NoReturn
+
+
+_RUNNING_PATH = os.path.realpath(os.path.abspath(__file__))
+_RUNNING_FD = os.open(_RUNNING_PATH, os.O_RDONLY | os.O_NOFOLLOW)
+
+SOURCE_PIN = "4309a39646e644261624bfcd2bca669b343b7621"
+PNG = b"\x89PNG\r\n\x1a\n"
+ACK_MAX_BYTES = 65_536
+APP_RAW_TOTAL_MAX = 4 * 1024 * 1024
+APP_STDERR_MAX = 4 * 1024 * 1024
+MCP_STDERR_MAX = 4 * 1024 * 1024
+TASK_ID = {
+    "event_id": "final-retest-r2",
+    "scope": "task",
+    "stage": "final-retest-r2",
+    "attempt": 0,
+    "recovery_of": None,
+}
+STAGE_ID = {
+    "event_id": "final-retest-r2-tools",
+    "scope": "stage",
+    "stage": "final-retest-r2",
+    "attempt": 0,
+    "recovery_of": None,
+}
+
+
+class R2Error(RuntimeError):
+    def __init__(self, category: str, message: str) -> None:
+        super().__init__(message)
+        self.category = category
+
+
+def cbytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def digest(value: object) -> str:
+    return hashlib.sha256(cbytes(value)).hexdigest()
+
+
+def exact_json(left: object, right: object) -> bool:
+    return cbytes(left) == cbytes(right)
+
+
+def start(identity: dict[str, object]) -> dict[str, object]:
+    return {**identity, "kind": "start"}
+
+
+def end(
+    identity: dict[str, object],
+    outcome: str = "pass",
+    issue_ids: list[str] | None = None,
+    symptom: str | None = None,
+    first_hypothesis: str | None = None,
+) -> dict[str, object]:
+    value: dict[str, object] = {
+        **identity,
+        "kind": "end",
+        "outcome": outcome,
+        "issue_ids": issue_ids or [],
+    }
+    if outcome == "fail":
+        value["symptom"] = symptom
+        value["first_hypothesis"] = first_hypothesis
+    return value
+
+
+def write_fd(fd: int, value: object) -> None:
+    view = memoryview(cbytes(value) + b"\n")
+    while view:
+        view = view[os.write(fd, view):]
+
+
+def strict_json(data: bytes, label: str) -> object:
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, item in items:
+            if key in value:
+                raise R2Error("JSON", f"{label}: duplicate key")
+            value[key] = item
+        return value
+
+    try:
+        return json.loads(
+            data,
+            object_pairs_hook=pairs,
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+        )
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+        raise R2Error("JSON", f"{label}: invalid JSON") from exc
+
+
+def check_owned_parent(
+    parent_fd: int,
+    binding: tuple[int, int],
+    root: Path,
+    stage: str,
+) -> None:
+    """Re-verify a bound output parent, the way production_atomic_publish does.
+
+    The directory's own size/nlink/mtime change as entries are created in it, so
+    the durable binding is (dev, ino) plus agreement between the descriptor view
+    and the pathname view at each checkpoint -- that is what catches a directory
+    substituted underneath the pathname.
+    """
+    opened = os.fstat(parent_fd)
+    current = os.lstat(root)
+    if (
+        (opened.st_dev, opened.st_ino) != binding
+        or production_stat_identity(opened) != production_stat_identity(current)
+        or not stat.S_ISDIR(opened.st_mode)
+        or opened.st_uid != os.getuid()
+        or stat.S_IMODE(opened.st_mode) != 0o700
+    ):
+        raise R2Error("OUTPUT", f"output parent changed {stage}")
+
+
+def open_owned_parent(root: Path) -> tuple[int, tuple[int, int]]:
+    """Open an output parent by descriptor and bind its identity."""
+    before = os.lstat(root)
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISDIR(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o700
+    ):
+        raise R2Error("OUTPUT", "owned native mode-0700 output parent required")
+    binding = (before.st_dev, before.st_ino)
+    parent_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        check_owned_parent(parent_fd, binding, root, "while opening")
+    except BaseException:
+        os.close(parent_fd)
+        raise
+    return parent_fd, binding
+
+
+def create_owned_fd(
+    parent_fd: int,
+    binding: tuple[int, int],
+    root: Path,
+    name: str,
+) -> int:
+    """Exclusively create `name` under an already-bound parent descriptor."""
+    if Path(name).name != name or name in {"", ".", ".."}:
+        raise R2Error("OUTPUT", "output must be one direct basename")
+    check_owned_parent(parent_fd, binding, root, "before create")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(name, flags, 0o600, dir_fd=parent_fd)
+    try:
+        opened = os.fstat(fd)
+        entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+            or (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise R2Error("OUTPUT", f"unsafe output: {name}")
+        check_owned_parent(parent_fd, binding, root, "after create")
+    except BaseException:
+        os.close(fd)
+        try:
+            os.unlink(name, dir_fd=parent_fd)
+        except OSError:
+            pass
+        raise
+    return fd
+
+
+def create_owned(root: Path, name: str, data: bytes) -> None:
+    parent_fd, binding = open_owned_parent(root)
+    try:
+        fd = create_owned_fd(parent_fd, binding, root, name)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+            opened = os.fstat(fd)
+            final = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(final.st_mode)
+                or stat.S_ISLNK(final.st_mode)
+                or final.st_uid != os.getuid()
+                or stat.S_IMODE(final.st_mode) != 0o600
+                or final.st_nlink != 1
+                or (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino)
+                or opened.st_size != len(data)
+            ):
+                raise R2Error("OUTPUT", f"unsafe output: {name}")
+            check_owned_parent(parent_fd, binding, root, "after write")
+        finally:
+            os.close(fd)
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+class Manifest:
+    """Append-only dispatch manifest that keeps its parent descriptor bound.
+
+    Every other writer in this file re-verifies the parent and the leaf inode on
+    each use. The manifest is written across the whole run and then re-read by
+    pathname during validation, so a directory-entry replacement mid-run would
+    otherwise send the record into an orphaned inode while validation reads the
+    replacement. `recheck` closes that window on every append and on close.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.name = "dispatch-manifest.ndjson"
+        self.path = root / self.name
+        self.parent_fd, self.binding = open_owned_parent(root)
+        try:
+            self.fd = create_owned_fd(
+                self.parent_fd, self.binding, root, self.name
+            )
+            os.fsync(self.parent_fd)
+            opened = os.fstat(self.fd)
+            self.leaf = (opened.st_dev, opened.st_ino)
+        except BaseException:
+            os.close(self.parent_fd)
+            raise
+
+    def recheck(self) -> None:
+        check_owned_parent(self.parent_fd, self.binding, self.root, "while appending")
+        opened = os.fstat(self.fd)
+        entry = os.stat(self.name, dir_fd=self.parent_fd, follow_symlinks=False)
+        if (
+            (opened.st_dev, opened.st_ino) != self.leaf
+            or (entry.st_dev, entry.st_ino) != self.leaf
+            or opened.st_nlink != 1
+            or entry.st_nlink != 1
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+        ):
+            raise R2Error("OUTPUT", "dispatch manifest identity changed")
+
+    def append(self, value: object) -> None:
+        self.recheck()
+        view = memoryview(cbytes(value) + b"\n")
+        while view:
+            view = view[os.write(self.fd, view):]
+        os.fsync(self.fd)
+
+    def close(self) -> None:
+        try:
+            self.recheck()
+        finally:
+            os.close(self.fd)
+            os.close(self.parent_fd)
+
+
+def response_dump(value: Any) -> dict[str, Any]:
+    result = value.model_dump(mode="json", by_alias=True, exclude_none=False)
+    if not isinstance(result, dict):
+        raise R2Error("RESPONSE", "CallToolResult did not serialize to an object")
+    cbytes(result)
+    return result
+
+
+# Acceptance source: 957b7a6178af7b6217fb336fbddbe861512ee13bee5fa7de915849e1b51cee69
+class AcceptanceError(RuntimeError):
+    pass
+
+
+MODEL_BODY_LINES = 368
+MODEL_BODY_SHA256 = "534f38477d968d8ae4262340b1f172d51cba25e206c86a6a41976071aa638034"
+CLI_BODY_LINES = 33
+CLI_BODY_SHA256 = "c358ad5ec7f30c8bdf7d7fae28ef1f71682d118b2b6dd462ac5ee522a7e241d2"
+
+KNOWN = tuple(sorted({
+    "execute_blender_code",
+    "execute_blender_code_for_cli",
+    "get_blendfile_summary_datablocks",
+    "get_blendfile_summary_datablocks_for_cli",
+    "get_blendfile_summary_missing_files",
+    "get_blendfile_summary_missing_files_for_cli",
+    "get_blendfile_summary_of_linked_libraries",
+    "get_blendfile_summary_of_linked_libraries_for_cli",
+    "get_blendfile_summary_path_info",
+    "get_blendfile_summary_path_info_for_cli",
+    "get_blendfile_summary_usage_guess",
+    "get_blendfile_summary_usage_guess_for_cli",
+    "get_object_detail_summary",
+    "get_objects_summary",
+    "get_python_api_docs",
+    "get_screenshot_of_area_as_image",
+    "get_screenshot_of_window_as_image",
+    "get_screenshot_of_window_as_json",
+    "jump_to_tab_by_name",
+    "jump_to_tab_by_space_type",
+    "jump_to_view3d_object_by_name",
+    "jump_to_view3d_object_data_by_name",
+    "render_thumbnail_to_path",
+    "render_viewport_to_path",
+    "search_api_docs",
+    "search_manual_docs",
+}))
+
+SUMMARY_5S = frozenset({
+    "get_blendfile_summary_datablocks",
+    "get_blendfile_summary_datablocks_for_cli",
+    "get_blendfile_summary_missing_files",
+    "get_blendfile_summary_missing_files_for_cli",
+    "get_blendfile_summary_of_linked_libraries",
+    "get_blendfile_summary_of_linked_libraries_for_cli",
+    "get_blendfile_summary_path_info",
+    "get_blendfile_summary_path_info_for_cli",
+    "get_blendfile_summary_usage_guess",
+    "get_blendfile_summary_usage_guess_for_cli",
+    "get_object_detail_summary",
+    "get_objects_summary",
+    "get_python_api_docs",
+    "get_screenshot_of_window_as_json",
+    "jump_to_tab_by_name",
+    "jump_to_tab_by_space_type",
+    "jump_to_view3d_object_by_name",
+    "jump_to_view3d_object_data_by_name",
+    "search_api_docs",
+    "search_manual_docs",
+})
+SCREENSHOT_10S = frozenset({
+    "get_screenshot_of_area_as_image",
+    "get_screenshot_of_window_as_image",
+})
+THRESHOLD_MS = {
+    **{name: 5_000.0 for name in SUMMARY_5S},
+    **{name: 10_000.0 for name in SCREENSHOT_10S},
+    "render_thumbnail_to_path": 30_000.0,
+    "render_viewport_to_path": 60_000.0,
+}
+
+KNOWN_ISSUES: dict[str, tuple[str, ...]] = {
+    **{name: ("MODEL-PLAN-05",) for name in KNOWN},
+    "execute_blender_code": ("MODEL-RUN-01", "MODEL-PLAN-04"),
+    "execute_blender_code_for_cli": ("MODEL-RUN-06",),
+    "get_blendfile_summary_missing_files_for_cli": ("MODEL-RUN-06",),
+    "get_blendfile_summary_of_linked_libraries_for_cli": ("MODEL-RUN-06",),
+    "get_blendfile_summary_path_info": ("MODEL-RUN-02",),
+    "get_objects_summary": ("MODEL-PLAN-04",),
+    "get_python_api_docs": ("MODEL-RUN-07",),
+    "get_screenshot_of_area_as_image": ("MODEL-RUN-08",),
+    "get_screenshot_of_window_as_image": ("MODEL-RUN-08",),
+    "render_thumbnail_to_path": (
+        "MODEL-RUN-09", "MODEL-PLAN-08", "MODEL-PLAN-09",
+    ),
+    "render_viewport_to_path": (
+        "MODEL-RUN-09", "MODEL-PLAN-08", "MODEL-PLAN-09",
+    ),
+    "search_api_docs": ("MODEL-PLAN-06", "MODEL-RUN-07"),
+    "search_manual_docs": ("MODEL-PLAN-06", "MODEL-RUN-07"),
+}
+
+GUI_BRIDGE = frozenset({
+    "execute_blender_code",
+    "get_blendfile_summary_datablocks",
+    "get_blendfile_summary_missing_files",
+    "get_blendfile_summary_of_linked_libraries",
+    "get_blendfile_summary_path_info",
+    "get_blendfile_summary_usage_guess",
+    "get_object_detail_summary",
+    "get_objects_summary",
+    "get_screenshot_of_window_as_json",
+    "jump_to_tab_by_name",
+    "jump_to_tab_by_space_type",
+    "jump_to_view3d_object_by_name",
+    "jump_to_view3d_object_data_by_name",
+    "render_thumbnail_to_path",
+    "render_viewport_to_path",
+})
+IMAGE_TOOLS = frozenset({
+    "get_screenshot_of_area_as_image",
+    "get_screenshot_of_window_as_image",
+})
+
+OBJECTS = frozenset({
+    "Camera", "Fill_Light", "Ground", "Key_Light", "Lamp_Arm_Lower",
+    "Lamp_Arm_Upper", "Lamp_Base", "Lamp_Bulb", "Lamp_Joint_Lower",
+    "Lamp_Joint_Upper", "Lamp_Ring", "Lamp_Shade", "Lamp_Stem", "Library_Prop",
+})
+MATERIALS = frozenset({"Mat_Base", "Mat_Bulb", "Mat_Ground", "Mat_Metal", "Mat_Shade"})
+PARENTS = {
+    "Lamp_Ring": "Lamp_Base",
+    "Lamp_Stem": "Lamp_Base",
+    "Lamp_Joint_Lower": "Lamp_Stem",
+    "Lamp_Arm_Lower": "Lamp_Joint_Lower",
+    "Lamp_Joint_Upper": "Lamp_Arm_Lower",
+    "Lamp_Arm_Upper": "Lamp_Joint_Upper",
+    "Lamp_Shade": "Lamp_Arm_Upper",
+    "Lamp_Bulb": "Lamp_Shade",
+}
+TYPES = {
+    **{name: "MESH" for name in OBJECTS - {"Camera", "Fill_Light", "Key_Light"}},
+    "Camera": "CAMERA",
+    "Fill_Light": "LIGHT",
+    "Key_Light": "LIGHT",
+}
+DATA_NAMES = {
+    **{name: f"{name}_Mesh" for name in OBJECTS if name.startswith("Lamp_")},
+    "Ground": "Ground_Mesh",
+    "Camera": "Camera_Data",
+    "Fill_Light": "Fill_Light_Data",
+    "Key_Light": "Key_Light_Data",
+    "Library_Prop": "RetestLinkedSourceMesh",
+}
+EXPECTED_DATA = {name: [TYPES[name], DATA_NAMES[name]] for name in OBJECTS}
+MEMBERSHIPS = {name: ["FinalRetestLamp"] for name in OBJECTS}
+METALLIC_READBACKS = {
+    "Mat_Base": 0.72,
+    "Mat_Bulb": 0.0,
+    "Mat_Ground": 0.08,
+    "Mat_Metal": 0.86,
+    "Mat_Shade": 0.70,
+}
+USAGES = frozenset({
+    "Animation", "Rendering", "Scripting", "Video Editing", "Modeling",
+    "Grease Pencil", "Geometry Nodes", "Compositing", "UV Unwrapping",
+    "Motion Tracking", "Audio",
+})
+
+
+@dataclass(frozen=True)
+class Context:
+    r2_root: Path
+    fixture: Path
+    library: Path
+    missing: Path
+    scratch: Path
+    thumb_arg: Path
+    view_arg: Path
+    thumb_copy: Path
+    view_copy: Path
+    model_code: str
+    cli_code: str
+
+
+def require(value: bool, message: str) -> None:
+    if not value:
+        raise AcceptanceError(message)
+
+
+def exact_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def exact_arguments(ctx: Context) -> dict[str, dict[str, Any]]:
+    require(ctx.r2_root.parent.name == "final-retest-r2", "attempt parent differs")
+    require(ctx.r2_root.name.startswith("attempt-") and len(ctx.r2_root.name) == 12
+            and ctx.r2_root.name[8:].isdigit() and ctx.r2_root.name != "attempt-0000",
+            "selected attempt name differs")
+    require(ctx.fixture == ctx.r2_root / "fixture.blend"
+            and ctx.library == ctx.r2_root / "library_source.blend"
+            and ctx.missing == ctx.r2_root / "known-missing.png", "attempt bindings differ")
+    values = {
+        "execute_blender_code": {"code": ctx.model_code},
+        "execute_blender_code_for_cli": {
+            "blend_file": str(ctx.fixture), "code": ctx.cli_code,
+        },
+        "get_blendfile_summary_datablocks": {},
+        "get_blendfile_summary_datablocks_for_cli": {"blend_file": str(ctx.fixture)},
+        "get_blendfile_summary_missing_files": {},
+        "get_blendfile_summary_missing_files_for_cli": {"blend_file": str(ctx.fixture)},
+        "get_blendfile_summary_of_linked_libraries": {},
+        "get_blendfile_summary_of_linked_libraries_for_cli": {"blend_file": str(ctx.fixture)},
+        "get_blendfile_summary_path_info": {},
+        "get_blendfile_summary_path_info_for_cli": {"blend_file": str(ctx.fixture)},
+        "get_blendfile_summary_usage_guess": {},
+        "get_blendfile_summary_usage_guess_for_cli": {"blend_file": str(ctx.fixture)},
+        "get_object_detail_summary": {"name": "Lamp_Shade"},
+        "get_objects_summary": {},
+        "get_python_api_docs": {"identifier": "bpy.types.NodeSocket"},
+        "get_screenshot_of_area_as_image": {
+            "area_ui_type": "VIEW_3D", "size_limit_in_bytes": 48_000,
+        },
+        "get_screenshot_of_window_as_image": {"size_limit_in_bytes": 48_000},
+        "get_screenshot_of_window_as_json": {},
+        "jump_to_tab_by_name": {"name": "Layout"},
+        "jump_to_tab_by_space_type": {"space_type": "VIEW_3D", "allow_edits": False},
+        "jump_to_view3d_object_by_name": {"name": "Lamp_Shade", "allow_edits": False},
+        "jump_to_view3d_object_data_by_name": {
+            "name": "Lamp_Shade_Mesh", "allow_edits": False,
+        },
+        "render_thumbnail_to_path": {"output_path": str(ctx.thumb_arg)},
+        "render_viewport_to_path": {"output_path": str(ctx.view_arg)},
+        "search_api_docs": {
+            "query": "bpy.ops.mesh primitive_cylinder_add", "max_results": 5, "context": 1,
+        },
+        "search_manual_docs": {
+            "query": "parent inverse keep transform", "max_results": 5, "context": 1,
+        },
+    }
+    require(tuple(sorted(values)) == KNOWN, "argument mapping differs from pinned names")
+    for name, args in values.items():
+        json.dumps(args, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        if name.endswith("_for_cli"):
+            require(Path(args["blend_file"]).is_absolute(), f"relative CLI path: {name}")
+    binding = f"RUN_ROOT = {str(ctx.r2_root)!r}\n"
+    require(ctx.model_code.startswith(binding) and ctx.cli_code.startswith(binding),
+            "payload RUN_ROOT binding differs")
+    model_body = ctx.model_code[len(binding):]
+    cli_body = ctx.cli_code[len(binding):]
+    require(len(model_body.splitlines()) == MODEL_BODY_LINES
+            and hashlib.sha256(model_body.encode()).hexdigest() == MODEL_BODY_SHA256,
+            "extended model body differs")
+    require(len(cli_body.splitlines()) == CLI_BODY_LINES
+            and hashlib.sha256(cli_body.encode()).hexdigest() == CLI_BODY_SHA256,
+            "observation-only CLI body differs")
+    compile(ctx.model_code, "<execute_blender_code>", "exec")
+    compile(ctx.cli_code, "<execute_blender_code_for_cli>", "exec")
+    return values
+
+
+def catalog_lane(tool: dict[str, Any]) -> str:
+    name = tool.get("name")
+    require(isinstance(name, str), "catalog name is not text")
+    if name in KNOWN:
+        return "known_semantic"
+    annotations = tool.get("annotations")
+    schema = tool.get("inputSchema")
+    if not (
+        isinstance(annotations, dict)
+        and annotations.get("readOnlyHint") is True
+        and annotations.get("destructiveHint") is not True
+        and isinstance(schema, dict)
+        and schema.get("type") == "object"
+        and schema.get("required", []) == []
+        and isinstance(schema.get("properties", {}), dict)
+    ):
+        raise AcceptanceError(f"PLAN_UPDATE_REQUIRED unknown tool contract: {name}")
+    return "future_readonly_empty_smoke"
+
+
+def structured_result(result: dict[str, Any]) -> dict[str, Any]:
+    require(result.get("isError") is False, "MCP isError is not false")
+    structured = result.get("structuredContent")
+    require(isinstance(structured, dict), "structuredContent is not an object")
+    content = result.get("content")
+    require(isinstance(content, list) and len(content) == 1, "expected one text content")
+    item = content[0]
+    require(isinstance(item, dict) and item.get("type") == "text", "expected text content")
+    text = item.get("text")
+    require(isinstance(text, str), "text content is not a string")
+    try:
+        text_value = strict_json(text.encode("utf-8"), "MCP text content")
+    except R2Error as exc:
+        raise AcceptanceError("text content is not strict JSON") from exc
+    require(exact_json(text_value, structured), "text/structured mismatch")
+    return structured
+
+
+def bridge_payload(structured: dict[str, Any]) -> dict[str, Any]:
+    require(structured.get("status") == "ok", "GUI bridge status is not ok")
+    payload = structured.get("result")
+    require(isinstance(payload, dict), "GUI bridge result is not an object")
+    return payload
+
+
+def canonical_blender_path(raw: str, blend_file: Path) -> Path:
+    require(isinstance(raw, str) and raw != "", "empty Blender path")
+    if raw.startswith("//"):
+        candidate = blend_file.parent / raw[2:]
+    else:
+        path = Path(raw)
+        candidate = path if path.is_absolute() else blend_file.parent / path
+    return Path(os.path.realpath(candidate))
+
+
+def assert_cli_path(raw: Any, resolved: Any, expected: Path, blend_file: Path) -> None:
+    require(isinstance(raw, str) and isinstance(resolved, str), "CLI path is not text")
+    resolved_path = Path(os.path.realpath(resolved))
+    require(
+        canonical_blender_path(raw, blend_file) == resolved_path == expected,
+        "CLI raw/resolved/canonical path differs",
+    )
+
+
+def assert_blender_version(version: Any) -> None:
+    require(
+        isinstance(version, list)
+        and len(version) == 3
+        and all(exact_int(item) for item in version)
+        and tuple(version) >= (5, 2, 0),
+        "Blender version differs",
+    )
+
+
+def assert_cli_datablock_context(payload: dict[str, Any]) -> None:
+    require(
+        isinstance(payload.get("render_engine"), str) and payload["render_engine"]
+        and isinstance(payload.get("scene_name"), str) and payload["scene_name"]
+        and isinstance(payload.get("workspaces"), list) and payload["workspaces"]
+        and all(isinstance(item, str) and item for item in payload["workspaces"]),
+        "fixture engine/scene/workspaces missing",
+    )
+
+
+def finite_vector(value: Any, size: int = 3, *, positive: bool = False) -> None:
+    require(isinstance(value, list) and len(value) == size, "vector shape differs")
+    require(all(finite_number(item) for item in value),
+            "vector is not finite")
+    if positive:
+        require(all(item > 0 for item in value), "vector is not positive")
+
+
+def assert_usage(payload: dict[str, Any]) -> None:
+    require(payload.get("status") == "ok", "usage status differs")
+    guesses = payload.get("usage_guesses")
+    require(isinstance(guesses, dict) and set(guesses) == USAGES, "usage names differ")
+    for value in guesses.values():
+        require(isinstance(value, dict) and set(value) == {"score", "certainty"},
+                "usage shape differs")
+        require(all(exact_int(value[key]) and 0 <= value[key] <= 100
+                    for key in ("score", "certainty")), "usage range differs")
+
+
+def assert_missing(payload: dict[str, Any], expected_name: str, ctx: Context) -> None:
+    require(payload.get("status") == "ok", "missing summary status differs")
+    rows = payload.get("missing_files")
+    require(isinstance(rows, list) and len(rows) == 1, "missing rows differ")
+    row = rows[0]
+    require(isinstance(row, dict), "missing row is not an object")
+    require(row.get("id_type") == "Image" and row.get("id_name") == expected_name,
+            "missing image identity differs")
+    require(canonical_blender_path(row.get("path"), ctx.fixture) == ctx.missing,
+            "missing path differs")
+    require(exact_int(payload.get("total_checked")) and payload["total_checked"] >= 1,
+            "missing checked count differs")
+
+
+def assert_libraries(payload: dict[str, Any], ctx: Context) -> None:
+    require(payload.get("status") == "ok", "library status differs")
+    direct = payload.get("direct_libraries")
+    require(
+        exact_int(payload.get("total_library_count"))
+        and payload["total_library_count"] == 1,
+        "library total differs",
+    )
+    require(isinstance(direct, list) and len(direct) == 1, "direct library count differs")
+    require(payload.get("indirect_libraries") == [], "indirect libraries differ")
+    row = direct[0]
+    require(isinstance(row, dict) and Path(str(row.get("name"))).name == "library_source.blend",
+            "library name differs")
+    require(canonical_blender_path(row.get("filepath"), ctx.fixture) == ctx.library,
+            "library path differs")
+    require(exact_int(row.get("linked_datablocks_count"))
+            and row["linked_datablocks_count"] > 0, "linked datablock count differs")
+
+
+def flatten_collections(collections: Any) -> tuple[list[dict[str, Any]], set[str]]:
+    require(isinstance(collections, list), "collections is not an array")
+    objects: list[dict[str, Any]] = []
+    names: set[str] = set()
+    def visit(node: Any) -> None:
+        require(isinstance(node, dict), "collection node is not an object")
+        require(isinstance(node.get("name"), str), "collection name missing")
+        names.add(node["name"])
+        rows = node.get("objects")
+        children = node.get("children")
+        require(isinstance(rows, list) and isinstance(children, list), "collection arrays differ")
+        objects.extend(rows)
+        for child in children:
+            visit(child)
+    for node in collections:
+        visit(node)
+    return objects, names
+
+
+def assert_objects_summary(payload: dict[str, Any]) -> None:
+    require(payload.get("status") == "ok", "objects summary status differs")
+    require(payload.get("scene_name") == "Scene", "scene name differs")
+    require(payload.get("active_workspace") == "Layout", "workspace differs")
+    require(payload.get("active_object") == "Lamp_Shade", "active object differs")
+    require(payload.get("object_mode") == "OBJECT", "object mode differs")
+    require(payload.get("camera_object") == "Camera", "camera differs")
+    rows, collections = flatten_collections(payload.get("collections"))
+    require("FinalRetestLamp" in collections, "lamp collection absent")
+    require(len(rows) == len(OBJECTS), "object rows contain duplicates or omissions")
+    by_name = {row.get("name"): row for row in rows if isinstance(row, dict)}
+    require(set(by_name) == OBJECTS and len(by_name) == len(rows), "object set differs")
+    for name, row in by_name.items():
+        require(row.get("type") == TYPES[name], f"type differs: {name}")
+        require(row.get("data_name") == DATA_NAMES[name], f"data differs: {name}")
+        require(row.get("parent") == PARENTS.get(name), f"parent differs: {name}")
+        require(row.get("selected") is (name == "Lamp_Shade"), f"selection differs: {name}")
+        require(row.get("visible") is True and row.get("hide_viewport") is False,
+                f"visibility differs: {name}")
+
+
+def assert_hits(payload: dict[str, Any], prefix: str) -> None:
+    hits = payload.get("hits")
+    require(payload.get("truncated") is False, "docs result is truncated")
+    require(isinstance(hits, list) and 1 <= len(hits) <= 5, "docs hits differ")
+    for index, hit in enumerate(hits):
+        require(isinstance(hit, dict), "docs hit is not an object")
+        require(exact_int(hit.get("index")) and hit["index"] == index,
+                "docs hit index differs")
+        path = hit.get("path")
+        require(isinstance(path, str) and path.startswith(prefix) and path.endswith(".rst"),
+                "docs hit path differs")
+        require(isinstance(hit.get("text"), str) and hit["text"].strip() != "",
+                "docs hit text empty")
+        require(isinstance(hit.get("breadcrumb"), str), "docs breadcrumb differs")
+        require(exact_int(hit.get("score")) and hit["score"] >= 0,
+                "docs score differs")
+
+
+def png_bytes(result: dict[str, Any], cap: int) -> bytes:
+    require(result.get("isError") is False, "PNG call isError differs")
+    require(result.get("structuredContent") is None, "PNG unexpectedly has structured content")
+    content = result.get("content")
+    require(isinstance(content, list) and len(content) == 1, "PNG content count differs")
+    item = content[0]
+    require(isinstance(item, dict) and item.get("type") == "image"
+            and item.get("mimeType") == "image/png", "PNG content type differs")
+    data = item.get("data")
+    require(isinstance(data, str), "PNG base64 missing")
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except ValueError as exc:
+        raise AcceptanceError("invalid PNG base64") from exc
+    require(8 < len(raw) <= cap and raw.startswith(b"\x89PNG\r\n\x1a\n"), "PNG bytes differ")
+    return raw
+
+
+def assert_render(name: str, payload: dict[str, Any], args: dict[str, Any], ctx: Context) -> None:
+    require(payload.get("status") == "ok", "render status differs")
+    argument = Path(args["output_path"])
+    require(argument.is_absolute() and argument.parent == ctx.scratch,
+            "render argument escaped scratch")
+    expected_source = ctx.scratch / argument.name
+    returned = payload.get("filepath")
+    require(isinstance(returned, str) and Path(os.path.realpath(returned)) == expected_source,
+            "render returned path differs")
+    require(Path(returned).name == argument.name, "render basename differs")
+    if name == "render_thumbnail_to_path":
+        dimensions, copy = (320, 320), ctx.thumb_copy
+    else:
+        dimensions, copy = (480, 480), ctx.view_copy
+    source_bytes = ordinary_owned_png(expected_source, dimensions)
+    copy_bytes = ordinary_owned_png(copy, dimensions, mode=0o600)
+    require(source_bytes == copy_bytes, "render source/copy bytes differ")
+
+
+def accept_known(name: str, result: dict[str, Any], args: dict[str, Any], ctx: Context) -> str:
+    require(name in KNOWN, f"not a pinned known tool: {name}")
+    if name in IMAGE_TOOLS:
+        png_bytes(result, 48_000)
+        return "pass"
+
+    structured = structured_result(result)
+    payload = bridge_payload(structured) if name in GUI_BRIDGE else structured
+
+    if name == "execute_blender_code":
+        require(set(payload) == {
+            "objects", "materials", "data", "collections", "scene_children", "parents",
+            "bounds_min", "bounds_max", "engine", "resolution", "selected", "active",
+            "camera", "sentinel", "socket_identifiers", "metallic_readbacks",
+            "background_color_readback", "background_strength_readback", "missing_path",
+            "linked_library", "filepath", "is_saved", "is_dirty",
+        }, "extended model result keys differ")
+        require(set(payload["objects"]) == OBJECTS and len(payload["objects"]) == 14,
+                "model objects differ")
+        require(set(payload["materials"]) == MATERIALS and len(payload["materials"]) == 5,
+                "model materials differ")
+        require(payload["parents"] == PARENTS, "model parent map differs")
+        require(payload["data"] == EXPECTED_DATA, "model type/data map differs")
+        require(payload["collections"] == MEMBERSHIPS
+                and payload["scene_children"] == ["FinalRetestLamp"],
+                "model collection identity differs")
+        finite_vector(payload["bounds_min"])
+        finite_vector(payload["bounds_max"])
+        require(
+            all(abs(actual - expected) <= 1e-9 for actual, expected in zip(
+                payload["bounds_min"], [-1.55, -1.55, 0.0]
+            ))
+            and all(abs(actual - expected) <= 1e-9 for actual, expected in zip(
+                payload["bounds_max"], [2.4, 1.55, 3.05]
+            )),
+            "model bounds differ",
+        )
+        require(payload["engine"] == "BLENDER_EEVEE"
+                and payload["resolution"] == [640, 640, 75], "render setup differs")
+        require(payload["selected"] == ["Lamp_Shade"] and payload["active"] == "Lamp_Shade",
+                "model selection differs")
+        require(payload["camera"] == "Camera"
+                and payload["sentinel"] == "official-blender-mcp-r2", "scene identity differs")
+        require(payload["socket_identifiers"] == {
+            "principled_metallic": "Metallic",
+            "background_color": "Color",
+            "background_strength": "Strength",
+        }, "socket identifiers differ")
+        readbacks = payload["metallic_readbacks"]
+        require(isinstance(readbacks, dict) and set(readbacks) == set(METALLIC_READBACKS)
+                and all(finite_number(readbacks[name])
+                        and abs(readbacks[name] - expected) <= 1e-6
+                        for name, expected in METALLIC_READBACKS.items()),
+                "metallic readbacks differ")
+        color = payload["background_color_readback"]
+        require(isinstance(color, list) and len(color) == 4
+                and all(finite_number(actual) and abs(actual - expected) <= 1e-6
+                        for actual, expected in zip(color, [0.004, 0.006, 0.012, 1.0])),
+                "background color readback differs")
+        strength = payload["background_strength_readback"]
+        require(finite_number(strength) and abs(strength - 0.18) <= 1e-6,
+                "background strength readback differs")
+        require(Path(payload["missing_path"]) == ctx.missing
+                and Path(payload["linked_library"]) == ctx.library, "model paths differ")
+        require(payload["filepath"] == "" and payload["is_saved"] is False
+                and isinstance(payload["is_dirty"], bool), "model save state differs")
+    elif name == "execute_blender_code_for_cli":
+        require(set(payload) == {
+            "version", "filepath_raw", "filepath_resolved", "objects", "images", "libraries",
+        }, "CLI observation keys differ")
+        version = payload["version"]
+        assert_blender_version(version)
+        assert_cli_path(
+            payload["filepath_raw"], payload["filepath_resolved"], ctx.fixture, ctx.fixture
+        )
+        require(payload["objects"] == ["RetestFixtureCamera", "RetestFixtureLocal", "RetestLinkedSource"],
+                "CLI objects differ")
+        images = payload["images"]
+        require(isinstance(images, list) and len(images) == 1 and isinstance(images[0], dict),
+                "CLI image observations differ")
+        image = images[0]
+        require(set(image) == {"name", "filepath_raw", "filepath_resolved", "fake_user"}
+                and image["name"] == "RetestKnownMissing" and image["fake_user"] is True,
+                "CLI image identity differs")
+        assert_cli_path(
+            image["filepath_raw"], image["filepath_resolved"], ctx.missing, ctx.fixture
+        )
+        libraries = payload["libraries"]
+        require(isinstance(libraries, list) and len(libraries) == 1
+                and isinstance(libraries[0], dict)
+                and set(libraries[0]) == {"filepath_raw", "filepath_resolved"}
+                and isinstance(libraries[0]["filepath_raw"], str),
+                "CLI library observations differ")
+        assert_cli_path(
+            libraries[0]["filepath_raw"],
+            libraries[0]["filepath_resolved"],
+            ctx.library,
+            ctx.fixture,
+        )
+    elif name in {"get_blendfile_summary_datablocks", "get_blendfile_summary_datablocks_for_cli"}:
+        require(payload.get("status") == "ok", "datablock status differs")
+        counts = payload.get("datablock_counts")
+        require(
+            isinstance(counts, dict)
+            and all(isinstance(key, str) and exact_int(value) for key, value in counts.items()),
+            "datablock counts missing or non-integer",
+        )
+        expected = ({"objects": 14, "materials": 5, "cameras": 1, "lights": 2,
+                     "meshes": 11, "images": 1, "libraries": 1}
+                    if not name.endswith("_for_cli") else
+                    {"objects": 3, "meshes": 2, "cameras": 1, "images": 1, "libraries": 1})
+        require(all(counts.get(key, 0) == value for key, value in expected.items()),
+                "relevant datablock counts differ")
+        if name.endswith("_for_cli"):
+            require(counts.get("materials", 0) == 0, "fixture materials differ")
+            assert_cli_datablock_context(payload)
+        else:
+            require(payload.get("render_engine") == "BLENDER_EEVEE", "GUI engine differs")
+            require(payload.get("scene_name") == "Scene"
+                    and payload.get("active_workspace") == "Layout", "GUI context differs")
+    elif name in {"get_blendfile_summary_missing_files", "get_blendfile_summary_missing_files_for_cli"}:
+        assert_missing(payload, "RetestKnownMissing" if name.endswith("_for_cli")
+                       else "RetestKnownMissingGui", ctx)
+    elif name in {"get_blendfile_summary_of_linked_libraries",
+                  "get_blendfile_summary_of_linked_libraries_for_cli"}:
+        assert_libraries(payload, ctx)
+    elif name == "get_blendfile_summary_path_info":
+        require(payload.get("status") == "ok" and payload.get("filepath") == ""
+                and payload.get("is_saved") is False, "GUI path state differs")
+        require(payload.get("age_seconds") is None and payload.get("file_size_bytes") is None
+                and payload.get("backups") is None, "unsaved metadata differs")
+        require(isinstance(payload.get("is_dirty"), bool), "dirty observation is not boolean")
+    elif name == "get_blendfile_summary_path_info_for_cli":
+        require(payload.get("status") == "ok" and payload.get("is_saved") is True,
+                "CLI path status differs")
+        require(Path(payload.get("filepath")).resolve() == ctx.fixture, "CLI summary path differs")
+        age = payload.get("age_seconds")
+        require(finite_number(age) and age >= 0,
+                "CLI age differs")
+        require(exact_int(payload.get("file_size_bytes"))
+                and payload["file_size_bytes"] == production_fixture_size(ctx)
+                and payload.get("backups") == [], "CLI file metadata differs")
+        require(isinstance(payload.get("is_dirty"), bool), "CLI dirty field differs")
+    elif name in {"get_blendfile_summary_usage_guess", "get_blendfile_summary_usage_guess_for_cli"}:
+        assert_usage(payload)
+    elif name == "get_object_detail_summary":
+        require(payload.get("status") == "ok" and payload.get("name") == "Lamp_Shade"
+                and payload.get("type") == "MESH", "Shade identity differs")
+        require(payload.get("data_name") == "Lamp_Shade_Mesh"
+                and payload.get("materials") == ["Mat_Shade"], "Shade data/material differs")
+        require(payload.get("parent") == "Lamp_Arm_Upper"
+                and payload.get("children") == ["Lamp_Bulb"], "Shade hierarchy differs")
+        require(payload.get("collections") == ["FinalRetestLamp"]
+                and payload.get("constraints") == [], "Shade collection/constraints differ")
+        for key in ("location", "rotation", "scale"):
+            finite_vector(payload.get(key))
+        finite_vector(payload.get("dimensions"), positive=True)
+    elif name == "get_objects_summary":
+        assert_objects_summary(payload)
+    elif name == "get_python_api_docs":
+        require(payload.get("kind") == "exact" and payload.get("found") is True
+                and payload.get("identifier") == "bpy.types.NodeSocket", "API doc identity differs")
+        require(isinstance(payload.get("content"), str) and payload["content"].strip()
+                and isinstance(payload.get("examples"), list), "API doc payload differs")
+    elif name == "get_screenshot_of_window_as_json":
+        require(payload.get("status") == "ok" and payload.get("workspace") == "Layout"
+                and payload.get("scene") == "Scene", "window JSON context differs")
+        require(exact_int(payload.get("window_width")) and payload["window_width"] > 0
+                and exact_int(payload.get("window_height")) and payload["window_height"] > 0,
+                "window dimensions differ")
+        areas = payload.get("areas")
+        require(isinstance(areas, list) and any(
+            isinstance(area, dict) and area.get("type") == "VIEW_3D"
+            and isinstance(area.get("space"), dict) and area["space"].get("type") == "VIEW_3D"
+            for area in areas), "VIEW_3D area absent")
+        require(payload.get("active_object") == {
+            "name": "Lamp_Shade", "type": "MESH", "mode": "OBJECT",
+            "location": payload.get("active_object", {}).get("location"),
+        }, "active-object JSON differs")
+        finite_vector(payload["active_object"]["location"])
+        require(payload.get("selected_objects") == [{"name": "Lamp_Shade", "type": "MESH"}],
+                "selected-object JSON differs")
+    elif name == "jump_to_tab_by_name":
+        require(payload.get("status") == "ok" and payload.get("workspace") == "Layout",
+                "workspace navigation differs")
+    elif name == "jump_to_tab_by_space_type":
+        require(payload.get("status") == "ok" and payload.get("workspace") == "Layout"
+                and payload.get("space_type") == "VIEW_3D"
+                and payload.get("created") is not True, "space navigation differs")
+    elif name in {"jump_to_view3d_object_by_name", "jump_to_view3d_object_data_by_name"}:
+        require(payload.get("status") == "ok" and payload.get("object") == "Lamp_Shade"
+                and payload.get("type") == "MESH" and payload.get("message") is None,
+                "object navigation differs")
+        finite_vector(payload.get("location"))
+        if name.endswith("data_by_name"):
+            require(payload.get("data_name") == "Lamp_Shade_Mesh", "navigation data differs")
+    elif name in {"render_thumbnail_to_path", "render_viewport_to_path"}:
+        assert_render(name, payload, args, ctx)
+    elif name == "search_api_docs":
+        assert_hits(payload, "api/")
+    elif name == "search_manual_docs":
+        assert_hits(payload, "manual/")
+    else:
+        raise AcceptanceError(f"known tool lacks predicate: {name}")
+    return "pass"
+
+
+def accept_future_readonly_smoke(result: dict[str, Any]) -> str:
+    require(result.get("isError") is False, "future read-only smoke returned isError")
+    content = result.get("content")
+    require(isinstance(content, list) and len(content) > 0, "future smoke content empty")
+    structured = result.get("structuredContent")
+    if structured is not None:
+        structured_result(result)
+    else:
+        require(all(isinstance(item, dict) and isinstance(item.get("type"), str)
+                    for item in content), "future smoke content shape differs")
+    image_items = [
+        item for item in content
+        if isinstance(item, dict) and item.get("type") == "image"
+    ]
+    if image_items:
+        require(
+            len(content) == 1
+            and len(image_items) == 1
+            and structured is None
+            and image_items[0].get("mimeType") == "image/png",
+            "future image smoke must be one standalone PNG",
+        )
+        png_bytes(result, 48_000)
+    return "future_readonly_empty_smoke"
+
+CATALOG_FILES = (
+    "direct-catalog.json",
+    "app-live-catalog.json",
+    "source-catalog.json",
+    "effective-config-catalog.json",
+    "on-disk-config-catalog.json",
+)
+TABLE_HEADER = "| Ordinal | Tool | Outcome | Wall ms | Observed shape | Retry count | Issue ID |"
+TABLE_SEPARATOR = "|---:|---|---|---:|---|---:|---|"
+VISUAL_HEADING = "## R2 visual acknowledgement"
+VISUAL_HEADER = "| Artifact | SHA-256 | Result |"
+VISUAL_SEPARATOR = "|---|---|---|"
+PINNED_REQUIRED = {
+    "execute_blender_code": ["code"],
+    "execute_blender_code_for_cli": ["blend_file", "code"],
+    "get_blendfile_summary_datablocks": [],
+    "get_blendfile_summary_datablocks_for_cli": ["blend_file"],
+    "get_blendfile_summary_missing_files": [],
+    "get_blendfile_summary_missing_files_for_cli": ["blend_file"],
+    "get_blendfile_summary_of_linked_libraries": [],
+    "get_blendfile_summary_of_linked_libraries_for_cli": ["blend_file"],
+    "get_blendfile_summary_path_info": [],
+    "get_blendfile_summary_path_info_for_cli": ["blend_file"],
+    "get_blendfile_summary_usage_guess": [],
+    "get_blendfile_summary_usage_guess_for_cli": ["blend_file"],
+    "get_object_detail_summary": ["name"],
+    "get_objects_summary": [],
+    "get_python_api_docs": ["identifier"],
+    "get_screenshot_of_area_as_image": ["area_ui_type"],
+    "get_screenshot_of_window_as_image": [],
+    "get_screenshot_of_window_as_json": [],
+    "jump_to_tab_by_name": ["name"],
+    "jump_to_tab_by_space_type": ["space_type"],
+    "jump_to_view3d_object_by_name": ["name"],
+    "jump_to_view3d_object_data_by_name": ["name"],
+    "render_thumbnail_to_path": ["output_path"],
+    "render_viewport_to_path": ["output_path"],
+    "search_api_docs": ["query"],
+    "search_manual_docs": ["query"],
+}
+PINNED_DESTRUCTIVE = frozenset({
+    "execute_blender_code",
+    "execute_blender_code_for_cli",
+    "jump_to_tab_by_name",
+    "jump_to_tab_by_space_type",
+    "jump_to_view3d_object_by_name",
+    "jump_to_view3d_object_data_by_name",
+    "render_thumbnail_to_path",
+})
+BASE_EVIDENCE = frozenset({
+    "r2_controller.py", "fixture_setup.py", "model_body.py", "cli_body.py",
+    "library_source.blend", "fixture.blend",
+    *CATALOG_FILES, "tool-schema.json", "catalog-bindings.json",
+    "events.ndjson", "dispatch-manifest.ndjson", "r2-report.md",
+    "dispatch-validation.json", "area-screenshot.png", "window-screenshot.png",
+    "thumbnail.png", "viewport.png",
+})
+CALL_KEYS = frozenset({
+    "record_type", "attempt_id", "event_id", "ordinal", "tool",
+    "classification", "repeat_of", "request", "request_sha256", "response",
+    "response_sha256", "dispatch_start_ns", "dispatch_end_ns", "duration_ns",
+    "controller_dispatch_wall_ms", "threshold_ms", "acceptance",
+    "observed_shape", "artifact", "dispatch_error", "acceptance_error", "outcome",
+})
+
+
+@dataclass(frozen=True)
+class ProductionSpec:
+    arguments: dict[str, Any]
+    lane: str
+    threshold_ms: float | None
+    issue_ids: tuple[str, ...]
+
+
+class ProductionCallFailure(R2Error):
+    def __init__(
+        self,
+        row: dict[str, Any],
+        identity: dict[str, object],
+        issue_ids: tuple[str, ...],
+    ) -> None:
+        super().__init__("CALL", f"{row['tool']}: {row['dispatch_error'] or row['acceptance_error']}")
+        self.row = row
+        self.identity = identity
+        self.issue_ids = issue_ids
+
+
+class VisualAckDeviation(R2Error):
+    pass
+
+
+class AppProtocolFailure(RuntimeError):
+    def __init__(
+        self,
+        method: str,
+        error: object,
+        raw: bytes,
+        *,
+        raw_lines: list[bytes] | None = None,
+        observed_bytes: int | None = None,
+        truncated: bool = False,
+    ) -> None:
+        super().__init__(method)
+        self.method = method
+        self.error = error
+        self.raw = raw
+        self.raw_lines = tuple(raw_lines if raw_lines is not None else ([raw] if raw else []))
+        self.observed_bytes = (
+            sum(len(item) for item in self.raw_lines)
+            if observed_bytes is None
+            else observed_bytes
+        )
+        self.truncated = truncated
+
+
+class AppDerivedFailure(RuntimeError):
+    def __init__(
+        self,
+        method: str,
+        error: object,
+        raw_lines: list[bytes],
+        observed_bytes: int,
+    ) -> None:
+        super().__init__(method)
+        self.method = method
+        self.error = error
+        self.raw_lines = tuple(raw_lines)
+        self.raw = raw_lines[-1] if raw_lines else b""
+        self.observed_bytes = observed_bytes
+        self.truncated = False
+
+
+class AppEvidenceError(R2Error):
+    def __init__(
+        self,
+        message: str,
+        response_sha256: str,
+        identity_kind: str,
+        oversize: bool,
+    ) -> None:
+        super().__init__("APP", message)
+        self.response_sha256 = response_sha256
+        self.identity_kind = identity_kind
+        self.oversize = oversize
+
+
+def production_issue_ids(exc: Exception) -> list[str]:
+    if isinstance(exc, ProductionCallFailure):
+        return list(exc.issue_ids)
+    if isinstance(exc, AppEvidenceError):
+        return ["MODEL-PLAN-07", *(["MODEL-RUN-08"] if exc.oversize else [])]
+    if isinstance(exc, R2Error) and exc.category in {
+        "APP", "CATALOG", "CONFIG", "SCHEMA", "SOURCE"
+    }:
+        return ["MODEL-PLAN-07"]
+    if isinstance(exc, R2Error) and exc.category in {"PAYLOAD", "ARGS"}:
+        return ["MODEL-PLAN-04"]
+    if isinstance(exc, R2Error) and exc.category == "ARTIFACT":
+        return ["MODEL-RUN-09"]
+    return ["MODEL-PLAN-05"]
+
+
+
+def production_root(raw: str) -> Path:
+    root = Path(os.path.abspath(raw))
+    if Path(os.path.realpath(root)) != root:
+        raise R2Error("INPUT", "attempt root contains a symlink")
+    info = os.lstat(root)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise R2Error("INPUT", "attempt root must be owned native mode 0700")
+    if (
+        re.fullmatch(r"attempt-\d{4}", root.name) is None
+        or root.name == "attempt-0000"
+        or root.parent.name != "final-retest-r2"
+    ):
+        raise R2Error("INPUT", "attempt root must be final-retest-r2/attempt-000N")
+    return root
+
+
+def production_stat_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mode,
+        info.st_uid,
+        info.st_nlink,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+@dataclass(frozen=True)
+class ProductionSnapshot:
+    path: Path
+    data: bytes
+    info: os.stat_result
+    parent: Path
+    parent_info: os.stat_result
+
+
+def production_snapshot_path(
+    path: Path,
+    *,
+    limit: int,
+    exact_mode: int | None = None,
+    expected_parent: os.stat_result | None = None,
+) -> ProductionSnapshot:
+    path = Path(os.path.abspath(path))
+    parent, leaf = path.parent, path.name
+    if (
+        limit <= 0
+        or leaf in {"", ".", ".."}
+        or Path(os.path.realpath(parent)) != parent
+    ):
+        raise R2Error("INPUT", f"unsafe bounded path: {path}")
+    parent_before = os.lstat(parent)
+    parent_bound = production_stat_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) & 0o022
+        or expected_parent is not None
+        and parent_bound != production_stat_identity(expected_parent)
+    ):
+        raise R2Error("INPUT", f"unsafe bounded parent: {parent}")
+    parent_fd = os.open(
+        parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    )
+    fd = -1
+    try:
+        if (
+            production_stat_identity(os.fstat(parent_fd)) != parent_bound
+            or production_stat_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise R2Error("INPUT", f"parent changed while opening: {path}")
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = production_stat_identity(before)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) & 0o022
+            or exact_mode is not None
+            and stat.S_IMODE(before.st_mode) != exact_mode
+            or before.st_size <= 0
+            or before.st_size > limit
+        ):
+            raise R2Error("INPUT", f"unsafe file: {path}")
+        fd = os.open(
+            leaf,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        if production_stat_identity(os.fstat(fd)) != bound:
+            raise R2Error("INPUT", f"file changed while opening: {path}")
+        chunks: list[bytes] = []
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(fd, min(1_048_576, remaining))
+            if not chunk:
+                raise R2Error("INPUT", f"short file read: {path}")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1):
+            raise R2Error("INPUT", f"file grew while reading: {path}")
+        data = b"".join(chunks)
+        if (
+            len(data) != before.st_size
+            or production_stat_identity(os.fstat(fd)) != bound
+            or production_stat_identity(
+                os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            ) != bound
+            or production_stat_identity(os.fstat(parent_fd)) != parent_bound
+            or production_stat_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise R2Error("INPUT", f"file or parent identity changed: {path}")
+        return ProductionSnapshot(path, data, before, parent, parent_before)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        os.close(parent_fd)
+
+
+class ProductionSnapshotSet:
+    def __init__(self, root: Path) -> None:
+        self.root = production_root(str(root))
+        self.root_info = os.lstat(self.root)
+        self.values: dict[str, ProductionSnapshot] = {}
+
+    def read(self, name: str, *, limit: int) -> bytes:
+        if Path(name).name != name or name in {"", ".", ".."}:
+            raise R2Error("INPUT", "evidence name must be one direct basename")
+        retained = self.values.get(name)
+        if retained is None:
+            retained = production_snapshot_path(
+                self.root / name,
+                limit=limit,
+                exact_mode=0o600,
+                expected_parent=self.root_info,
+            )
+            self.values[name] = retained
+        elif len(retained.data) > limit:
+            raise R2Error("INPUT", f"cached evidence exceeds role cap: {name}")
+        return retained.data
+
+    def info(self, name: str) -> os.stat_result:
+        try:
+            return self.values[name].info
+        except KeyError as exc:
+            raise R2Error("INPUT", f"evidence was not snapshotted: {name}") from exc
+
+    def names(self) -> set[str]:
+        directory_fd = os.open(
+            self.root,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            bound = production_stat_identity(self.root_info)
+            if (
+                production_stat_identity(os.fstat(directory_fd)) != bound
+                or production_stat_identity(os.lstat(self.root)) != bound
+            ):
+                raise R2Error("INPUT", "attempt directory identity changed")
+            result = set(os.listdir(directory_fd))
+            if (
+                production_stat_identity(os.fstat(directory_fd)) != bound
+                or production_stat_identity(os.lstat(self.root)) != bound
+            ):
+                raise R2Error("INPUT", "attempt listing generation changed")
+            return result
+        finally:
+            os.close(directory_fd)
+
+    def recheck_all(self) -> None:
+        bound = production_stat_identity(self.root_info)
+        if production_stat_identity(os.lstat(self.root)) != bound:
+            raise R2Error("INPUT", "attempt directory generation changed")
+        directory_fd = os.open(
+            self.root,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            if production_stat_identity(os.fstat(directory_fd)) != bound:
+                raise R2Error("INPUT", "attempt directory binding changed")
+            for name, snapshot in self.values.items():
+                current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if production_stat_identity(current) != production_stat_identity(
+                    snapshot.info
+                ):
+                    raise R2Error("INPUT", f"cached evidence changed: {name}")
+        finally:
+            os.close(directory_fd)
+
+
+_PRODUCTION_SNAPSHOTS: ProductionSnapshotSet | None = None
+
+
+def production_read_path(path: Path, *, limit: int = 64 * 1024 * 1024) -> bytes:
+    return production_snapshot_path(path, limit=limit).data
+
+
+def production_read_owned(root: Path, name: str, *, limit: int = 512 * 1024 * 1024) -> bytes:
+    if Path(name).name != name or name in {"", ".", ".."}:
+        raise R2Error("INPUT", "evidence name must be one direct basename")
+    if _PRODUCTION_SNAPSHOTS is not None and root == _PRODUCTION_SNAPSHOTS.root:
+        return _PRODUCTION_SNAPSHOTS.read(name, limit=limit)
+    return production_snapshot_path(
+        root / name, limit=limit, exact_mode=0o600
+    ).data
+
+
+def production_running_bytes(limit: int = 8 * 1024 * 1024) -> tuple[os.stat_result, bytes]:
+    """Read the executing script through the descriptor held open since import."""
+    opened = os.fstat(_RUNNING_FD)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_uid != os.getuid()
+        or opened.st_nlink != 1
+        or stat.S_IMODE(opened.st_mode) & 0o022
+        or opened.st_size <= 0
+        or opened.st_size > limit
+    ):
+        raise R2Error("CONTROLLER", "unsafe executing controller metadata")
+    chunks: list[bytes] = []
+    remaining = opened.st_size
+    offset = 0
+    while remaining:
+        chunk = os.pread(_RUNNING_FD, min(1024 * 1024, remaining), offset)
+        if not chunk:
+            raise R2Error("CONTROLLER", "executing controller shrank while reading")
+        chunks.append(chunk)
+        offset += len(chunk)
+        remaining -= len(chunk)
+    if os.pread(_RUNNING_FD, 1, offset):
+        raise R2Error("CONTROLLER", "executing controller grew while reading")
+    payload = b"".join(chunks)
+    if len(payload) != opened.st_size or production_stat_identity(
+        os.fstat(_RUNNING_FD)
+    ) != production_stat_identity(opened):
+        raise R2Error("CONTROLLER", "executing controller changed while reading")
+    return opened, payload
+
+
+def production_controller_sha(root: Path, expected: str | None = None) -> str:
+    retained_path = root / "r2_controller.py"
+    if Path(_RUNNING_PATH) != retained_path:
+        raise R2Error("CONTROLLER", "executing controller is not attempt/r2_controller.py")
+    retained = production_read_owned(root, "r2_controller.py", limit=8 * 1024 * 1024)
+    opened, running = production_running_bytes()
+    value = hashlib.sha256(running).hexdigest()
+    root_fd = -1
+    try:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        entry = os.stat("r2_controller.py", dir_fd=root_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise R2Error("CONTROLLER", "retained controller entry unavailable") from exc
+    finally:
+        if root_fd >= 0:
+            os.close(root_fd)
+    if production_stat_identity(entry) != production_stat_identity(opened):
+        raise R2Error("CONTROLLER", "executing and retained controller identity differ")
+    if retained != running:
+        raise R2Error("CONTROLLER", "executing and retained controller bytes differ")
+    if expected is not None and (
+        re.fullmatch(r"[0-9a-f]{64}", expected) is None or value != expected
+    ):
+        raise R2Error("CONTROLLER", "audited controller SHA-256 differs")
+    return value
+
+
+def production_names(value: Any, label: str) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(
+            isinstance(item, str)
+            and re.fullmatch(r"[A-Za-z0-9_.:-]+", item) is not None
+            for item in value
+        )
+        or len(value) != len(set(value))
+    ):
+        raise R2Error("CATALOG", f"{label}: unique nonblank string array required")
+    return sorted(value)
+
+
+def production_catalog(root: Path, name: str) -> list[str]:
+    value = strict_json(production_read_owned(root, name), name)
+    result = production_names(value, name)
+    if value != result:
+        raise R2Error("CATALOG", f"{name}: catalog is not canonical sorted order")
+    return result
+
+
+def production_source_names(
+    source_mcp: Path,
+    tracked: frozenset[str] | None = None,
+) -> list[str]:
+    package = source_mcp / "blmcp"
+    if not package.is_dir() or package.is_symlink() or Path(os.path.realpath(package)) != package:
+        raise R2Error("SOURCE", "configured blmcp package is unsafe or absent")
+    scanned = sorted(package.rglob("*.py"))
+    if tracked is not None:
+        source_root = source_mcp.parent
+        relative = {
+            os.path.relpath(os.fspath(path), os.fspath(source_root))
+            for path in scanned
+        }
+        if relative != set(tracked):
+            raise R2Error("SOURCE", "scanned blmcp sources differ from the pinned commit")
+    values: list[str] = []
+    for path in scanned:
+        raw = production_read_path(path, limit=4 * 1024 * 1024)
+        tree = ast.parse(raw, filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                target = decorator.func if isinstance(decorator, ast.Call) else decorator
+                if not (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "mcp"
+                    and target.attr == "tool"
+                ):
+                    continue
+                name = node.name
+                if isinstance(decorator, ast.Call):
+                    for keyword in decorator.keywords:
+                        if keyword.arg == "name":
+                            if not (
+                                isinstance(keyword.value, ast.Constant)
+                                and isinstance(keyword.value.value, str)
+                                and keyword.value.value
+                            ):
+                                raise R2Error("SOURCE", f"nonliteral tool name: {path}")
+                            name = keyword.value.value
+                values.append(name)
+                break
+    return production_names(values, "pinned source")
+
+
+def production_config(config_path: Path) -> tuple[dict[str, Any], list[str], Path]:
+    value = tomllib.loads(production_read_path(config_path, limit=2 * 1024 * 1024).decode("utf-8"))
+    servers = value.get("mcp_servers")
+    section = servers.get("blender") if isinstance(servers, dict) else None
+    if not isinstance(section, dict):
+        raise R2Error("CONFIG", "on-disk blender MCP section absent")
+    names = production_names(section.get("enabled_tools"), "on-disk config")
+    args = section.get("args")
+    if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+        raise R2Error("CONFIG", "configured args must be strings")
+    indices = [index for index, item in enumerate(args) if item == "--with-editable"]
+    if len(indices) != 1 or indices[0] + 1 >= len(args):
+        raise R2Error("CONFIG", "exactly one --with-editable path required")
+    source_mcp = Path(os.path.abspath(args[indices[0] + 1]))
+    if Path(os.path.realpath(source_mcp)) != source_mcp or source_mcp.name != "mcp":
+        raise R2Error("CONFIG", "configured editable mcp path differs")
+    command = section.get("command")
+    if not isinstance(command, str) or not Path(command).is_absolute():
+        raise R2Error("CONFIG", "configured command is not an absolute executable")
+    # `os.access` uses the real uid, follows symlinks and binds nothing, so it is a
+    # TOCTOU check on the one child that produces every piece of evidence. Bind the
+    # same way Codex and git are bound.
+    production_safe_executable(Path(os.path.abspath(command)), "configured server")
+    return section, names, source_mcp
+
+
+GIT_CANDIDATES = ("/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git")
+GIT_OUTPUT_MAX = 4 * 1024 * 1024
+GIT_STDERR_MAX = 64 * 1024
+
+
+def production_git_bin() -> str:
+    for candidate in GIT_CANDIDATES:
+        try:
+            info = os.lstat(candidate)
+        except OSError:
+            continue
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != 0
+            or info.st_mode & stat.S_IWOTH
+            or info.st_mode & stat.S_IWGRP
+            or not info.st_mode & stat.S_IXUSR
+        ):
+            continue
+        return candidate
+    raise R2Error("SOURCE", "no root-owned non-writable git binary found")
+
+
+def production_git(source_root: Path, *arguments: str) -> str:
+    """Run git with a fixed environment and configuration, bounding its output.
+
+    The environment is an explicit allowlist, not os.environ, and every config
+    knob git can be told to execute is pinned on the command line, so a
+    repository-local .git/config cannot turn a read-only query into an exec.
+    Both streams are sized against their cap while they are being read and the
+    child is killed as soon as either exceeds it. `capture_output=True` drained
+    both to EOF first and compared an already materialised buffer against
+    `GIT_OUTPUT_MAX` afterwards, which reports an overrun instead of preventing
+    one and never sized git's stderr at all -- and the
+    `status --porcelain=v1 --untracked-files=all` call is the one that decides
+    whether the checkout is clean, so it necessarily runs against a tree not yet
+    known to be small. Every other reader here caps the read from the size it
+    observed before opening; this is the same discipline for a pipe.
+    """
+    proc = subprocess.Popen(
+        [
+            production_git_bin(),
+            "-c", "core.fsmonitor=false",
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "core.pager=cat",
+            "-c", "core.alternateRefsCommand=",
+            "-c", "protocol.ext.allow=never",
+            "-C", str(source_root),
+            *arguments,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/nonexistent",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ALLOW_PROTOCOL": "",
+            "LC_ALL": "C",
+        },
+    )
+    stdout_pipe, stderr_pipe = proc.stdout, proc.stderr
+    if stdout_pipe is None or stderr_pipe is None:
+        proc.kill()
+        proc.wait()
+        raise R2Error("SOURCE", "git pipes were not created")
+    out_fd, err_fd = stdout_pipe.fileno(), stderr_pipe.fileno()
+    limits = {out_fd: GIT_OUTPUT_MAX, err_fd: GIT_STDERR_MAX}
+    buffers: dict[int, bytearray] = {out_fd: bytearray(), err_fd: bytearray()}
+    overflow = ""
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(out_fd, selectors.EVENT_READ)
+        selector.register(err_fd, selectors.EVENT_READ)
+        while selector.get_map() and not overflow:
+            for key, _ in selector.select(timeout=0.25):
+                descriptor = int(key.fd)
+                chunk = os.read(
+                    descriptor,
+                    min(65_536, limits[descriptor] - len(buffers[descriptor]) + 1),
+                )
+                if not chunk:
+                    selector.unregister(descriptor)
+                    continue
+                buffers[descriptor].extend(chunk)
+                if len(buffers[descriptor]) > limits[descriptor]:
+                    overflow = "stdout" if descriptor == out_fd else "stderr"
+                    break
+    finally:
+        selector.close()
+        if overflow:
+            proc.kill()
+        stdout_pipe.close()
+        stderr_pipe.close()
+        code = proc.wait()
+    if overflow:
+        raise R2Error("SOURCE", f"git {overflow} exceeds the bounded limit")
+    if code != 0:
+        raise R2Error("SOURCE", f"git exited {code}")
+    return bytes(buffers[out_fd]).decode("utf-8")
+
+
+def production_git_pin(source_mcp: Path) -> frozenset[str]:
+    source_root = source_mcp.parent
+    head = production_git(source_root, "rev-parse", "--verify", "HEAD").strip()
+    if head != SOURCE_PIN:
+        raise R2Error("SOURCE", "official source HEAD differs from canonical pin")
+    production_git(source_root, "cat-file", "-e", f"{SOURCE_PIN}^{{commit}}")
+    if production_git(
+        source_root, "status", "--porcelain=v1", "--untracked-files=all"
+    ):
+        raise R2Error("SOURCE", "official source checkout is dirty")
+    listing = production_git(
+        source_root, "ls-tree", "-r", "--name-only", "-z", SOURCE_PIN, "--", "mcp/blmcp"
+    )
+    tracked = frozenset(
+        entry for entry in listing.split("\0") if entry.endswith(".py")
+    )
+    if not tracked:
+        raise R2Error("SOURCE", "pinned commit tracks no blmcp source file")
+    return tracked
+
+
+def production_drain_app_stderr(
+    proc: subprocess.Popen[bytes],
+    stderr_fd: int,
+    retained: bytearray,
+    observed: list[int],
+    failure: threading.Event,
+    failure_detail: dict[str, Any],
+) -> None:
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(stderr_fd, selectors.EVENT_READ)
+        while True:
+            ready = selector.select(timeout=0.25)
+            if not ready:
+                if proc.poll() is None:
+                    continue
+            try:
+                chunk = os.read(
+                    stderr_fd,
+                    min(65_536, APP_STDERR_MAX - observed[0] + 1),
+                )
+            except BlockingIOError:
+                continue
+            except OSError as exc:
+                failure_detail.update({
+                    "kind": "stderr_drain_error",
+                    "message": str(exc),
+                })
+                failure.set()
+                return
+            if not chunk:
+                return
+            observed[0] += len(chunk)
+            retained.extend(chunk[:max(0, APP_STDERR_MAX - len(retained))])
+            if observed[0] > APP_STDERR_MAX:
+                failure_detail.update({
+                    "kind": "stderr_oversize",
+                    "limit": APP_STDERR_MAX,
+                    "observed_at_least": observed[0],
+                })
+                failure.set()
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+                return
+    finally:
+        selector.close()
+
+
+class ProductionBoundedStderr:
+    """A bounded, captured stderr sink for the MCP server child.
+
+    `stdio_client(params)` defaults `errlog` to the controller's own `sys.stderr`,
+    so the one evidence-producing child that was never drained wrote without any
+    cap straight into the operator's PTY -- the transcript hand-copied into the
+    committed audit, where terminal escape sequences pass through -- while its
+    sibling App-server child is drained under `APP_STDERR_MAX`. This gives it the
+    same discipline: the pipe is drained continuously so the child can never block
+    on a full pipe, at most `MCP_STDERR_MAX` bytes are retained, and every byte is
+    counted. The drain neither raises nor terminates the child; `require_bounded()`
+    turns the exact count into a closed failure of the attempt.
+    """
+
+    def __init__(self) -> None:
+        self.retained = bytearray()
+        self.observed = 0
+        self.error = ""
+        read_fd, write_fd = os.pipe()
+        self._read_fd = read_fd
+        self.errlog = os.fdopen(write_fd, "w", encoding="utf-8", errors="replace")
+        self._thread = threading.Thread(target=self._drain, daemon=True)
+        self._thread.start()
+
+    def _drain(self) -> None:
+        while True:
+            try:
+                chunk = os.read(self._read_fd, 65_536)
+            except OSError as exc:
+                self.error = str(exc)
+                return
+            if not chunk:
+                return
+            self.observed += len(chunk)
+            room = MCP_STDERR_MAX - len(self.retained)
+            if room > 0:
+                self.retained.extend(chunk[:room])
+
+    def close(self) -> None:
+        if not self.errlog.closed:
+            self.errlog.close()
+        self._thread.join(timeout=60)
+        if self._read_fd >= 0:
+            os.close(self._read_fd)
+            self._read_fd = -1
+
+    def require_bounded(self) -> None:
+        if self.error:
+            raise R2Error("APP", f"MCP server stderr drain failed: {self.error}")
+        if self.observed > MCP_STDERR_MAX:
+            raise R2Error(
+                "APP",
+                "MCP server stderr exceeds the bounded limit: "
+                f"{self.observed} bytes observed, limit {MCP_STDERR_MAX}",
+            )
+
+
+def production_app_request(
+    proc: subprocess.Popen[bytes],
+    selector: selectors.BaseSelector,
+    read_buffer: bytearray,
+    observed_lines: list[bytes],
+    observed_total: list[int],
+    request_id: int,
+    method: str,
+    params: dict[str, object],
+    *,
+    timeout_seconds: float = 30.0,
+    stderr_failure: threading.Event | None = None,
+    stderr_failure_detail: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], bytes]:
+    if proc.stdin is None or proc.stdout is None:
+        raise R2Error("APP", "App Server stdio absent")
+    if len(observed_total) != 1 or not exact_int(observed_total[0]):
+        raise R2Error("APP", "App raw byte counter differs")
+    deadline = time.monotonic() + timeout_seconds
+    last_observed = observed_lines[-1] if observed_lines else b""
+    consumed = 0
+
+    def wait_failure(kind: str) -> NoReturn:
+        pending = bytes(read_buffer[consumed:])
+        previous = observed_total[0]
+        available = max(0, APP_RAW_TOTAL_MAX - previous)
+        retained = pending[:available]
+        if retained:
+            observed_lines.append(retained)
+            observed_total[0] += len(retained)
+        raw = retained or last_observed
+        if raw or observed_lines:
+            raise AppProtocolFailure(
+                method,
+                {
+                    kind: True,
+                    "buffered_unprocessed": bool(pending),
+                    "partial_line": bool(pending and not pending.endswith(b"\n")),
+                },
+                raw,
+                raw_lines=observed_lines,
+                observed_bytes=previous + len(pending),
+                truncated=len(pending) > len(retained),
+            )
+        raise R2Error("APP", f"App Server {kind}: {method}")
+
+    def check_stderr(phase: str) -> None:
+        if stderr_failure is not None and stderr_failure.is_set():
+            detail = dict(stderr_failure_detail or {"kind": "stderr_capture_failure"})
+            detail["phase"] = phase
+            pending = bytes(read_buffer[consumed:])
+            previous = observed_total[0]
+            available = max(0, APP_RAW_TOTAL_MAX - previous)
+            retained = pending[:available]
+            if retained:
+                observed_lines.append(retained)
+                observed_total[0] += len(retained)
+            raise AppProtocolFailure(
+                method,
+                detail,
+                retained or last_observed,
+                raw_lines=observed_lines,
+                observed_bytes=previous + len(pending),
+                truncated=len(pending) > len(retained),
+            )
+
+    check_stderr("before_request_write")
+    payload = cbytes({"id": request_id, "method": method, "params": params}) + b"\n"
+    try:
+        view = memoryview(payload)
+        while view:
+            written = proc.stdin.write(view)
+            if not written:
+                raise BrokenPipeError("App Server stdin write returned zero")
+            view = view[written:]
+        proc.stdin.flush()
+    except OSError as exc:
+        if stderr_failure is not None and stderr_failure.is_set():
+            check_stderr("request_write_error")
+        raise AppProtocolFailure(
+            method,
+            {"kind": "stdin_write_error", "message": str(exc)},
+            last_observed,
+            raw_lines=observed_lines,
+            observed_bytes=observed_total[0],
+        ) from exc
+    check_stderr("after_request_write")
+
+    while True:
+        check_stderr("before_frame_scan")
+        end_index = read_buffer.find(b"\n", consumed)
+        while end_index >= 0:
+            check_stderr("before_frame_extract")
+            if time.monotonic() >= deadline:
+                wait_failure("timeout")
+            end_index += 1
+            line = bytes(read_buffer[consumed:end_index])
+            consumed = end_index
+            last_observed = line
+            previous = observed_total[0]
+            if previous + len(line) > APP_RAW_TOTAL_MAX:
+                retained = line[:max(0, APP_RAW_TOTAL_MAX - previous)]
+                if retained:
+                    observed_lines.append(retained)
+                    observed_total[0] += len(retained)
+                raise AppProtocolFailure(
+                    method,
+                    {"oversize": True, "raw_evidence_limit": APP_RAW_TOTAL_MAX},
+                    retained,
+                    raw_lines=observed_lines,
+                    observed_bytes=previous + len(line),
+                    truncated=True,
+                )
+            observed_lines.append(line)
+            observed_total[0] += len(line)
+            if len(line) > 1_048_576:
+                raise AppProtocolFailure(
+                    method,
+                    {"oversize": True, "newline": True},
+                    line,
+                    raw_lines=observed_lines,
+                    observed_bytes=observed_total[0],
+                )
+            check_stderr("before_json_parse")
+            if time.monotonic() >= deadline:
+                wait_failure("timeout")
+            try:
+                message = strict_json(line, method)
+            except R2Error as exc:
+                raise AppProtocolFailure(
+                    method,
+                    {"exception_type": type(exc).__name__, "message": str(exc)},
+                    line,
+                    raw_lines=observed_lines,
+                    observed_bytes=observed_total[0],
+                ) from exc
+            check_stderr("after_json_parse")
+            if time.monotonic() >= deadline:
+                wait_failure("timeout")
+            if not isinstance(message, dict):
+                raise AppProtocolFailure(
+                    method, {"shape": type(message).__name__}, line,
+                    raw_lines=observed_lines,
+                    observed_bytes=observed_total[0],
+                )
+            if not exact_int(message.get("id")) or message.get("id") != request_id:
+                end_index = read_buffer.find(b"\n", consumed)
+                continue
+            if "error" in message:
+                raise AppProtocolFailure(
+                    method,
+                    message["error"],
+                    line,
+                    raw_lines=observed_lines,
+                    observed_bytes=observed_total[0],
+                )
+            result = message.get("result")
+            if not isinstance(result, dict):
+                raise AppProtocolFailure(
+                    method,
+                    {"result_shape": type(result).__name__},
+                    line,
+                    raw_lines=observed_lines,
+                    observed_bytes=observed_total[0],
+                )
+            check_stderr("before_result_return")
+            del read_buffer[:consumed]
+            return result, line
+        if consumed:
+            del read_buffer[:consumed]
+            consumed = 0
+        if len(read_buffer) > 1_048_576:
+            observed = len(read_buffer)
+            retained = bytes(read_buffer)
+            previous = observed_total[0]
+            available = max(0, APP_RAW_TOTAL_MAX - previous)
+            retained = retained[:available]
+            if retained:
+                observed_lines.append(retained)
+                observed_total[0] += len(retained)
+            raise AppProtocolFailure(
+                method,
+                {"oversize": True, "newline": False},
+                retained,
+                raw_lines=observed_lines,
+                observed_bytes=previous + observed,
+                truncated=observed > len(retained),
+            )
+        check_stderr("before_select")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            wait_failure("timeout")
+        ready = selector.select(min(0.25, remaining))
+        check_stderr("after_select")
+        if not ready:
+            continue
+        try:
+            chunk = os.read(proc.stdout.fileno(), 65_536)
+        except BlockingIOError:
+            continue
+        if chunk:
+            read_buffer.extend(chunk)
+            continue
+        wait_failure("eof")
+
+
+def production_retain_app_failure(
+    failure_root: Path,
+    failure: Exception,
+    stderr_bytes: bytes,
+    stderr_observed: int,
+    process_exit: int | None,
+) -> NoReturn:
+    app_failure = isinstance(failure, (AppProtocolFailure, AppDerivedFailure))
+    raw_lines = list(failure.raw_lines) if app_failure else []
+    raw = b"".join(raw_lines)
+    retained = {
+        "exception_type": type(failure).__name__,
+        "exception_message": str(failure),
+        "method": failure.method if app_failure else None,
+        "protocol_error": failure.error if app_failure else None,
+        "raw_responses": [{
+            "ordinal": ordinal,
+            "bytes": len(item),
+            "sha256": hashlib.sha256(item).hexdigest(),
+            "b64": base64.b64encode(item).decode("ascii"),
+        } for ordinal, item in enumerate(raw_lines, 1)],
+        "raw_response_observed_bytes": failure.observed_bytes if app_failure else 0,
+        "raw_response_retained_bytes": len(raw),
+        "raw_response_sha256": hashlib.sha256(raw).hexdigest(),
+        "raw_response_truncated": failure.truncated if app_failure else False,
+        "stderr_observed_bytes": stderr_observed,
+        "stderr_retained_bytes": len(stderr_bytes),
+        "stderr_retained_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+        "stderr_truncated": stderr_observed > len(stderr_bytes),
+        "process_exit": process_exit,
+    }
+    evidence_bytes = cbytes(retained) + b"\n"
+    create_owned(failure_root, "app-server.stderr", stderr_bytes)
+    if raw:
+        create_owned(failure_root, "app-server-raw-transcript.bin", raw)
+    create_owned(failure_root, "app-server-failure.json", evidence_bytes)
+    ack_kind = (
+        "app-server-raw-transcript.bin" if raw else "app-server-failure.json"
+    )
+    ack_sha = (
+        str(retained["raw_response_sha256"])
+        if raw
+        else hashlib.sha256(evidence_bytes).hexdigest()
+    )
+    retained_names = "app-server-failure.json,app-server.stderr"
+    if raw:
+        retained_names += ",app-server-raw-transcript.bin"
+    raise AppEvidenceError(
+        f"retained={retained_names};"
+        f"ack_identity={ack_kind};"
+        f"ack_sha256={ack_sha};"
+        f"raw_sha256={retained['raw_response_sha256']};"
+        f"stderr_sha256={retained['stderr_retained_sha256']};"
+        f"process_exit={process_exit}",
+        ack_sha,
+        ack_kind,
+        bool(
+            isinstance(failure, AppProtocolFailure)
+            and isinstance(failure.error, dict)
+            and failure.error.get("oversize") is True
+        ),
+    ) from failure
+
+
+def production_app_catalogs(
+    codex_bin: Path,
+    cwd: Path,
+    failure_root: Path,
+) -> tuple[list[str], list[str]]:
+    try:
+        proc = subprocess.Popen(
+            [str(codex_bin), "app-server", "--stdio"],
+            cwd=cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+            env=production_child_env(),
+        )
+    except Exception as failure:
+        production_retain_app_failure(failure_root, failure, b"", 0, None)
+    selector: selectors.BaseSelector | None = None
+    stderr_retained = bytearray()
+    stderr_observed_total = [0]
+    stderr_failure = threading.Event()
+    stderr_failure_detail: dict[str, Any] = {}
+    stderr_thread: threading.Thread | None = None
+    if proc.stderr is not None:
+        os.set_blocking(proc.stderr.fileno(), False)
+        stderr_thread = threading.Thread(
+            target=production_drain_app_stderr,
+            args=(
+                proc,
+                proc.stderr.fileno(),
+                stderr_retained,
+                stderr_observed_total,
+                stderr_failure,
+                stderr_failure_detail,
+            ),
+        )
+        stderr_thread.start()
+    read_buffer = bytearray()
+    observed_lines: list[bytes] = []
+    observed_total = [0]
+    failure: Exception | None = None
+    answer: tuple[list[str], list[str]] | None = None
+    last_method = "initialize"
+    try:
+        if proc.stdin is None or proc.stdout is None or proc.stderr is None:
+            raise R2Error("APP", "App Server stdio absent")
+        os.set_blocking(proc.stdout.fileno(), False)
+        selector = selectors.DefaultSelector()
+        selector.register(proc.stdout, selectors.EVENT_READ)
+        production_app_request(
+            proc,
+            selector,
+            read_buffer,
+            observed_lines,
+            observed_total,
+            1,
+            "initialize",
+            {"clientInfo": {"name": "r2-production-controller", "version": "1"}},
+            stderr_failure=stderr_failure,
+            stderr_failure_detail=stderr_failure_detail,
+        )
+        last_method = "config/read"
+        effective_response, _ = production_app_request(
+            proc,
+            selector,
+            read_buffer,
+            observed_lines,
+            observed_total,
+            2,
+            "config/read",
+            {"cwd": str(cwd), "includeLayers": False},
+            stderr_failure=stderr_failure,
+            stderr_failure_detail=stderr_failure_detail,
+        )
+        config = effective_response.get("config")
+        servers = config.get("mcp_servers") if isinstance(config, dict) else None
+        blender = servers.get("blender") if isinstance(servers, dict) else None
+        if not isinstance(blender, dict):
+            raise R2Error("APP", "effective blender config absent")
+        effective = production_names(blender.get("enabled_tools"), "effective config")
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        blender_server: dict[str, Any] | None = None
+        request_id = 3
+        while True:
+            last_method = "mcpServerStatus/list"
+            status_value, _ = production_app_request(
+                proc,
+                selector,
+                read_buffer,
+                observed_lines,
+                observed_total,
+                request_id,
+                last_method,
+                {
+                    "cursor": cursor,
+                    "limit": 100,
+                    "threadId": None,
+                    "detail": "toolsAndAuthOnly",
+                },
+                stderr_failure=stderr_failure,
+                stderr_failure_detail=stderr_failure_detail,
+            )
+            request_id += 1
+            data = status_value.get("data")
+            if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+                raise R2Error("APP", "server status data must be objects")
+            for item in data:
+                name = item.get("name")
+                if not isinstance(name, str) or not name:
+                    raise R2Error("APP", "server status name missing")
+                if name == "blender":
+                    if blender_server is not None:
+                        raise R2Error("APP", "duplicate blender server across pages")
+                    blender_server = item
+            next_cursor = status_value.get("nextCursor")
+            if next_cursor is None:
+                break
+            if (
+                not isinstance(next_cursor, str)
+                or not next_cursor
+                or next_cursor != next_cursor.strip()
+                or next_cursor in seen_cursors
+            ):
+                raise R2Error("APP", "invalid or repeated server-status cursor")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        if blender_server is None:
+            raise R2Error("APP", "blender server status absent")
+        raw_tools = blender_server.get("tools")
+        if isinstance(raw_tools, dict):
+            live_raw: list[Any] = list(raw_tools)
+        elif isinstance(raw_tools, list):
+            live_raw = []
+            for tool in raw_tools:
+                if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+                    raise R2Error("APP", "invalid list-form App live tool")
+                live_raw.append(tool["name"])
+        else:
+            raise R2Error("APP", "App live tools must be dict or list")
+        answer = production_names(live_raw, "App live"), effective
+    except Exception as exc:
+        failure = (
+            exc
+            if isinstance(exc, (AppProtocolFailure, AppDerivedFailure)) or not observed_lines
+            else AppDerivedFailure(
+                last_method,
+                {"exception_type": type(exc).__name__, "message": str(exc)},
+                observed_lines,
+                observed_total[0],
+            )
+        )
+    finally:
+        if selector is not None:
+            selector.close()
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+        if stderr_thread is not None:
+            stderr_thread.join(timeout=5)
+            if stderr_thread.is_alive():
+                stderr_failure_detail.update({"kind": "stderr_drain_timeout"})
+                stderr_failure.set()
+                assert proc.stderr is not None
+                proc.stderr.close()
+                stderr_thread.join(timeout=1)
+            if stderr_thread.is_alive() and failure is None:
+                failure = R2Error("APP", "App Server stderr drain did not stop")
+        stderr_bytes = bytes(stderr_retained)
+        stderr_observed = stderr_observed_total[0]
+        process_exit = proc.returncode
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
+    if stderr_failure.is_set() and failure is None:
+        failure = AppDerivedFailure(
+            "app-server-stderr",
+            dict(stderr_failure_detail),
+            observed_lines,
+            observed_total[0],
+        )
+    if failure is not None:
+        production_retain_app_failure(
+            failure_root, failure, stderr_bytes, stderr_observed, process_exit
+        )
+    assert answer is not None
+    return answer
+
+
+async def production_listed(session: Any) -> list[Any]:
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    tools: list[Any] = []
+    names: set[str] = set()
+    while True:
+        page = await session.list_tools(cursor=cursor)
+        for tool in page.tools:
+            if tool.name in names:
+                raise R2Error("CATALOG", f"duplicate direct tool: {tool.name}")
+            names.add(tool.name)
+            tools.append(tool)
+        next_cursor = page.nextCursor
+        if next_cursor is None:
+            break
+        if (
+            not isinstance(next_cursor, str)
+            or not next_cursor
+            or next_cursor != next_cursor.strip()
+            or next_cursor in seen_cursors
+        ):
+            raise R2Error("CATALOG", "invalid or repeated direct list_tools cursor")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    if not tools:
+        raise R2Error("CATALOG", "direct list_tools was empty")
+    return tools
+
+
+def production_schema_rows(tools: list[Any]) -> list[dict[str, Any]]:
+    rows = [tool.model_dump(mode="json", by_alias=True, exclude_none=False) for tool in tools]
+    if not all(isinstance(row, dict) for row in rows):
+        raise R2Error("SCHEMA", "direct tool did not serialize to object")
+    rows.sort(key=lambda row: row.get("name"))
+    names: set[str] = set()
+    for row in rows:
+        name = row.get("name")
+        schema = row.get("inputSchema")
+        annotations = row.get("annotations")
+        if (
+            not isinstance(name, str)
+            or re.fullmatch(r"[A-Za-z0-9_.:-]+", name) is None
+            or name in names
+            or not isinstance(schema, dict)
+            or schema.get("type") != "object"
+            or not isinstance(schema.get("properties"), dict)
+            or annotations is not None and not isinstance(annotations, dict)
+        ):
+            raise R2Error("SCHEMA", "tool name/schema/annotations contract differs")
+        names.add(name)
+    cbytes(rows)
+    return rows
+
+
+def production_private_scratch(raw: str) -> Path:
+    path = Path(os.path.abspath(raw))
+    if Path(os.path.realpath(path)) != path:
+        raise R2Error("SCRATCH", "scratch path contains a symlink")
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        os.mkdir(path, 0o700)
+        info = os.lstat(path)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise R2Error("SCRATCH", "scratch directory must be owned native mode 0700")
+    return path
+
+
+def production_context(root: Path, names: list[str], scratch: Path) -> Context:
+    model_body = production_read_owned(root, "model_body.py", limit=2_000_000)
+    cli_body = production_read_owned(root, "cli_body.py", limit=2_000_000)
+    try:
+        model_text = model_body.decode("utf-8")
+        cli_text = cli_body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise R2Error("PAYLOAD", "payload body is not UTF-8") from exc
+    if (
+        len(model_text.splitlines()) != MODEL_BODY_LINES
+        or hashlib.sha256(model_body).hexdigest() != MODEL_BODY_SHA256
+        or len(cli_text.splitlines()) != CLI_BODY_LINES
+        or hashlib.sha256(cli_body).hexdigest() != CLI_BODY_SHA256
+    ):
+        raise R2Error("PAYLOAD", "model or CLI body line/digest binding differs")
+    binding = f"RUN_ROOT = {str(root)!r}\n"
+    thumb_ordinal = names.index("render_thumbnail_to_path") + 1
+    view_ordinal = names.index("render_viewport_to_path") + 1
+    return Context(
+        r2_root=root,
+        fixture=root / "fixture.blend",
+        library=root / "library_source.blend",
+        missing=root / "known-missing.png",
+        scratch=scratch,
+        thumb_arg=scratch / f"{root.name}-r2-call-{thumb_ordinal:04d}-thumbnail.png",
+        view_arg=scratch / f"{root.name}-r2-call-{view_ordinal:04d}-viewport.png",
+        thumb_copy=root / "thumbnail.png",
+        view_copy=root / "viewport.png",
+        model_code=binding + model_text,
+        cli_code=binding + cli_text,
+    )
+
+
+def production_repeat_context(ctx: Context, name: str, ordinal: int) -> Context:
+    thumb_arg, view_arg = ctx.thumb_arg, ctx.view_arg
+    thumb_copy, view_copy = ctx.thumb_copy, ctx.view_copy
+    if name == "render_thumbnail_to_path":
+        thumb_arg = ctx.scratch / f"{ctx.r2_root.name}-r2-repeat-{ordinal:04d}-thumbnail.png"
+        thumb_copy = ctx.r2_root / f"r2-repeat-{ordinal:04d}.png"
+    elif name == "render_viewport_to_path":
+        view_arg = ctx.scratch / f"{ctx.r2_root.name}-r2-repeat-{ordinal:04d}-viewport.png"
+        view_copy = ctx.r2_root / f"r2-repeat-{ordinal:04d}.png"
+    return Context(
+        r2_root=ctx.r2_root,
+        fixture=ctx.fixture,
+        library=ctx.library,
+        missing=ctx.missing,
+        scratch=ctx.scratch,
+        thumb_arg=thumb_arg,
+        view_arg=view_arg,
+        thumb_copy=thumb_copy,
+        view_copy=view_copy,
+        model_code=ctx.model_code,
+        cli_code=ctx.cli_code,
+    )
+
+
+def production_property_contract(
+    name: str,
+    args: dict[str, Any],
+    properties: dict[str, Any],
+) -> None:
+    for argument_name, argument_value in args.items():
+        property_schema = properties[argument_name]
+        expected_type = (
+            "boolean" if isinstance(argument_value, bool)
+            else "integer" if isinstance(argument_value, int)
+            else "string" if isinstance(argument_value, str)
+            else None
+        )
+        if (
+            expected_type is None
+            or not isinstance(property_schema, dict)
+            or property_schema.get("type") != expected_type
+        ):
+            raise R2Error("SCHEMA", f"pinned argument type differs: {name}.{argument_name}")
+    if name == "get_screenshot_of_area_as_image":
+        area_schema = properties.get("area_ui_type")
+        if (
+            not isinstance(area_schema, dict)
+            or not isinstance(area_schema.get("enum"), list)
+            or "VIEW_3D" not in area_schema["enum"]
+        ):
+            raise R2Error("SCHEMA", "VIEW_3D is absent from area screenshot enum")
+    for optional_name, expected_type, expected_default in (
+        ("size_limit_in_bytes", "integer", 0),
+        ("allow_edits", "boolean", False),
+        ("context", "integer", 0),
+        ("max_results", "integer", 20),
+    ):
+        if optional_name not in properties:
+            continue
+        property_schema = properties[optional_name]
+        default = property_schema.get("default") if isinstance(property_schema, dict) else None
+        if (
+            not isinstance(property_schema, dict)
+            or property_schema.get("type") != expected_type
+            or not exact_json(default, expected_default)
+        ):
+            raise R2Error(
+                "SCHEMA", f"pinned optional contract differs: {name}.{optional_name}"
+            )
+
+
+def production_fixture_size(ctx: Context) -> int:
+    """Fixture size from the bound snapshot; never a symlink-following stat()."""
+    if _PRODUCTION_SNAPSHOTS is not None and ctx.r2_root == _PRODUCTION_SNAPSHOTS.root:
+        try:
+            return _PRODUCTION_SNAPSHOTS.info("fixture.blend").st_size
+        except R2Error:
+            pass
+    info = os.lstat(ctx.fixture)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_nlink != 1
+    ):
+        raise R2Error("FIXTURE", "unsafe fixture metadata")
+    return info.st_size
+
+
+def production_safe_executable(path: Path, label: str) -> None:
+    """Bind an executable's identity before it is launched by pathname."""
+    if Path(os.path.realpath(path)) != path or not path.is_absolute():
+        raise R2Error("INPUT", f"{label} executable path is not canonical")
+    info = os.lstat(path)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid not in {0, os.getuid()}
+        or stat.S_IMODE(info.st_mode) & 0o022
+        or not stat.S_IMODE(info.st_mode) & 0o100
+    ):
+        raise R2Error("INPUT", f"unsafe {label} executable")
+
+
+CHILD_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "UV_CACHE_DIR",
+    "UV_PYTHON",
+    "UV_PYTHON_INSTALL_DIR",
+    "VIRTUAL_ENV",
+)
+
+
+def production_child_env() -> dict[str, str]:
+    """Child environment built from an explicit allowlist, not the inherited one.
+
+    A subtractive list cannot enumerate the dynamic-loader families that hijack a
+    child on this platform (`DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`,
+    `DYLD_FRAMEWORK_PATH`, `LD_PRELOAD`), so the two evidence-producing children get
+    an additive list instead, the way `production_git` already builds git's. It is
+    deliberately wider than git's because these children are uv-launched: the cache,
+    interpreter and certificate locations must survive or the launch itself changes.
+    """
+    value = {
+        key: os.environ[key]
+        for key in CHILD_ENV_ALLOWLIST
+        if key in os.environ
+    }
+    value["GIT_NO_REPLACE_OBJECTS"] = "1"
+    value["PYTHONDONTWRITEBYTECODE"] = "1"
+    return value
+
+
+def production_require_known_names(names: list[str]) -> None:
+    if not set(KNOWN) <= set(names):
+        raise R2Error("SCHEMA", "catalog omits a known tool")
+
+
+def production_specs(
+    names: list[str],
+    schema_rows: list[dict[str, Any]],
+    ctx: Context,
+) -> dict[str, ProductionSpec]:
+    known_arguments = exact_arguments(ctx)
+    by_name = {row["name"]: row for row in schema_rows}
+    if sorted(by_name) != names:
+        raise R2Error("SCHEMA", "schema rows differ from canonical direct catalog")
+    production_require_known_names(names)
+    specs: dict[str, ProductionSpec] = {}
+    for name in names:
+        row = by_name[name]
+        schema = row["inputSchema"]
+        properties = schema.get("properties")
+        required = schema.get("required", [])
+        if (
+            not isinstance(properties, dict)
+            or not isinstance(required, list)
+            or not all(isinstance(item, str) for item in required)
+            or len(required) != len(set(required))
+        ):
+            raise R2Error("SCHEMA", f"invalid required/properties schema: {name}")
+        lane = catalog_lane(row)
+        if name in KNOWN:
+            args = known_arguments[name]
+            if required != PINNED_REQUIRED[name] or not set(args) <= set(properties):
+                raise R2Error("SCHEMA", f"pinned required/property mapping differs: {name}")
+            production_property_contract(name, args, properties)
+            annotations = row.get("annotations")
+            if not isinstance(annotations, dict):
+                raise R2Error("SCHEMA", f"pinned annotations absent: {name}")
+            if name in PINNED_DESTRUCTIVE:
+                if annotations.get("destructiveHint") is not True:
+                    raise R2Error("SCHEMA", f"destructive annotation differs: {name}")
+            elif (
+                annotations.get("readOnlyHint") is not True
+                or annotations.get("destructiveHint") is True
+            ):
+                raise R2Error("SCHEMA", f"read-only annotation differs: {name}")
+            threshold = THRESHOLD_MS.get(name)
+            issues = KNOWN_ISSUES[name]
+        else:
+            args = {}
+            threshold = 5_000.0
+            issues = ("MODEL-PLAN-07",)
+        specs[name] = ProductionSpec(args, lane, threshold, issues)
+    return specs
+
+def safe_png_source(path: Path, expected: Path) -> bytes:
+    path = Path(os.path.abspath(path))
+    expected = Path(os.path.abspath(expected))
+    if path != expected or Path(os.path.realpath(path)) != path:
+        raise R2Error("ARTIFACT", "render source identity differs")
+    if _PRODUCTION_SNAPSHOTS is not None and path.parent == _PRODUCTION_SNAPSHOTS.root:
+        data = _PRODUCTION_SNAPSHOTS.read(path.name, limit=64 * 1024 * 1024)
+    else:
+        data = production_snapshot_path(path, limit=64 * 1024 * 1024).data
+    if not data.startswith(PNG):
+        raise R2Error("ARTIFACT", "render source PNG magic differs")
+    return data
+
+
+def ordinary_owned_png(
+    path: Path,
+    dimensions: tuple[int, int],
+    *,
+    mode: int | None = None,
+) -> bytes:
+    path = Path(os.path.abspath(path))
+    if Path(os.path.realpath(path)) != path:
+        raise R2Error("ARTIFACT", "render source identity differs")
+    if _PRODUCTION_SNAPSHOTS is not None and path.parent == _PRODUCTION_SNAPSHOTS.root:
+        data = _PRODUCTION_SNAPSHOTS.read(path.name, limit=64 * 1024 * 1024)
+        info = _PRODUCTION_SNAPSHOTS.info(path.name)
+    else:
+        snapshot = production_snapshot_path(path, limit=64 * 1024 * 1024)
+        data, info = snapshot.data, snapshot.info
+    if not data.startswith(PNG):
+        raise R2Error("ARTIFACT", "render source PNG magic differs")
+    if mode is not None and stat.S_IMODE(info.st_mode) != mode:
+        raise AcceptanceError(f"PNG mode differs: {path}")
+    require(struct.unpack(">II", data[16:24]) == dimensions, f"PNG dimensions differ: {path}")
+    return data
+
+
+def production_png_dimensions(data: bytes) -> tuple[int, int]:
+    if len(data) < 24 or not data.startswith(PNG):
+        raise R2Error("ARTIFACT", "PNG header differs")
+    return struct.unpack(">II", data[16:24])
+
+
+def production_artifact_name(name: str, ordinal: int, classification: str) -> str | None:
+    if classification == "first":
+        return {
+            "get_screenshot_of_area_as_image": "area-screenshot.png",
+            "get_screenshot_of_window_as_image": "window-screenshot.png",
+            "render_thumbnail_to_path": "thumbnail.png",
+            "render_viewport_to_path": "viewport.png",
+        }.get(name)
+    if name in IMAGE_TOOLS or name in {
+        "render_thumbnail_to_path", "render_viewport_to_path"
+    }:
+        return f"r2-repeat-{ordinal:04d}.png"
+    return None
+
+
+def production_future_png(response: dict[str, Any]) -> bytes | None:
+    content = response.get("content")
+    if not isinstance(content, list) or not any(
+        isinstance(item, dict) and item.get("type") == "image" for item in content
+    ):
+        return None
+    accept_future_readonly_smoke(response)
+    return png_bytes(response, 48_000)
+
+
+def production_save_artifact(
+    name: str,
+    response: dict[str, Any],
+    args: dict[str, Any],
+    ctx: Context,
+    ordinal: int,
+    classification: str,
+) -> dict[str, Any] | None:
+    future_data = production_future_png(response) if name not in KNOWN else None
+    target_name = production_artifact_name(name, ordinal, classification)
+    if future_data is not None:
+        target_name = (
+            f"r2-future-{ordinal:04d}.png"
+            if classification == "first"
+            else f"r2-repeat-{ordinal:04d}.png"
+        )
+    if target_name is None:
+        return None
+    if future_data is not None:
+        data = future_data
+    elif name in IMAGE_TOOLS:
+        data = png_bytes(response, 48_000)
+    else:
+        structured = structured_result(response)
+        payload_value = bridge_payload(structured)
+        returned = payload_value.get("filepath")
+        expected = Path(args["output_path"])
+        if (
+            not isinstance(returned, str)
+            or Path(os.path.realpath(returned)) != expected
+            or Path(returned).name != expected.name
+        ):
+            raise R2Error("ARTIFACT", "render returned path differs")
+        data = safe_png_source(expected, expected)
+        dimensions = (320, 320) if name == "render_thumbnail_to_path" else (480, 480)
+        if production_png_dimensions(data) != dimensions:
+            raise R2Error("ARTIFACT", "render PNG dimensions differ")
+    create_owned(ctx.r2_root, target_name, data)
+    width, height = production_png_dimensions(data)
+    return {
+        "path": target_name,
+        "bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "width": width,
+        "height": height,
+    }
+
+
+def production_accept(
+    name: str,
+    response: dict[str, Any],
+    args: dict[str, Any],
+    ctx: Context,
+    *,
+    replay: bool,
+) -> str:
+    if name not in KNOWN:
+        return accept_future_readonly_smoke(response)
+    if replay and name in {"render_thumbnail_to_path", "render_viewport_to_path"}:
+        structured = structured_result(response)
+        payload_value = bridge_payload(structured)
+        expected = Path(args["output_path"])
+        returned = payload_value.get("filepath")
+        require(
+            payload_value.get("status") == "ok"
+            and isinstance(returned, str)
+            and Path(os.path.realpath(returned)) == expected
+            and Path(returned).name == expected.name,
+            "render replay path/status differs",
+        )
+        if name == "render_thumbnail_to_path":
+            dimensions, retained = (320, 320), ctx.thumb_copy
+        else:
+            dimensions, retained = (480, 480), ctx.view_copy
+        source_bytes = ordinary_owned_png(expected, dimensions)
+        retained_bytes = ordinary_owned_png(retained, dimensions, mode=0o600)
+        require(source_bytes == retained_bytes, "render scratch/retained bytes differ")
+        return "pass"
+    return accept_known(name, response, args, ctx)
+
+
+def production_shape(response: dict[str, Any]) -> str:
+    content = response.get("content")
+    if not isinstance(content, list):
+        return "dispatch exception"
+    counts: dict[str, int] = {}
+    for item in content:
+        kind = item.get("type") if isinstance(item, dict) else "invalid"
+        counts[str(kind)] = counts.get(str(kind), 0) + 1
+    structured = response.get("structuredContent")
+    structured_kind = "none" if structured is None else type(structured).__name__
+    values = ",".join(f"{key}:{counts[key]}" for key in sorted(counts))
+    return (
+        f"content={len(content)}[{values}];structured={structured_kind};"
+        f"is_error={str(response.get('isError')).lower()}"
+    )
+
+
+def production_repeat_args(
+    name: str,
+    spec: ProductionSpec,
+    repeat_ctx: Context,
+) -> dict[str, Any]:
+    result = dict(spec.arguments)
+    if name == "render_thumbnail_to_path":
+        result["output_path"] = str(repeat_ctx.thumb_arg)
+    elif name == "render_viewport_to_path":
+        result["output_path"] = str(repeat_ctx.view_arg)
+    return result
+
+
+def production_bounded_ack_line(
+    stream: Any | None = None,
+) -> tuple[str | None, str | None, bytes]:
+    source = sys.stdin.buffer if stream is None else stream
+    raw = source.readline(ACK_MAX_BYTES + 1)
+    if not raw:
+        return None, "ack EOF", raw
+    if len(raw) > ACK_MAX_BYTES:
+        return None, "ack oversize", raw
+    if not raw.endswith(b"\n"):
+        return None, "ack missing newline", raw
+    try:
+        line = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, "ack is not UTF-8", raw
+    return line, None, raw
+
+
+def production_failure_ack(
+    event_id: str,
+    response_sha: str,
+) -> tuple[str | None, str | None]:
+    print(cbytes({
+        "action": "FAILURE_ACK_REQUIRED",
+        "event_id": event_id,
+        "response_sha256": response_sha,
+    }).decode("utf-8"), flush=True)
+    line, read_error, _ = production_bounded_ack_line()
+    if read_error is not None:
+        return None, read_error
+    assert line is not None
+    return production_parse_ack(line, event_id, response_sha)
+
+
+def production_parse_ack(
+    line: str,
+    event_id: str,
+    response_sha: str,
+) -> tuple[str | None, str | None]:
+    if not line:
+        return None, "ack EOF"
+    try:
+        value = strict_json(line.encode("utf-8"), "failure acknowledgement")
+    except R2Error as exc:
+        return None, f"invalid ack JSON: {exc}"
+    expected = {"action", "event_id", "response_sha256", "first_hypothesis"}
+    if not isinstance(value, dict) or set(value) != expected:
+        return None, "ack fields differ"
+    hypothesis = value["first_hypothesis"]
+    if (
+        value["action"] != "failure_ack"
+        or value["event_id"] != event_id
+        or value["response_sha256"] != response_sha
+        or not isinstance(hypothesis, str)
+        or not hypothesis
+        or hypothesis.strip() != hypothesis
+    ):
+        return None, "ack identity differs"
+    return hypothesis, None
+
+
+def production_close_deviation(
+    audit_fd: int,
+    pending_call: dict[str, object] | None,
+) -> None:
+    issues = ["MODEL-PLAN-05"]
+    if pending_call is not None:
+        write_fd(audit_fd, end(pending_call, "deviation", issues))
+    write_fd(audit_fd, end(STAGE_ID, "deviation", issues))
+    write_fd(audit_fd, end(TASK_ID, "deviation", issues))
+
+
+def production_close_failure(
+    audit_fd: int,
+    pending_call: dict[str, object] | None,
+    issue_ids: list[str],
+    response_sha: str,
+    symptom: str,
+) -> bool:
+    identity = pending_call or STAGE_ID
+    hypothesis, ack_error = production_failure_ack(str(identity["event_id"]), response_sha)
+    if ack_error is not None:
+        production_close_deviation(audit_fd, pending_call)
+        return False
+    assert hypothesis is not None
+    if pending_call is not None:
+        write_fd(audit_fd, end(pending_call, "fail", issue_ids, symptom, hypothesis))
+    write_fd(audit_fd, end(STAGE_ID, "fail", issue_ids, symptom, hypothesis))
+    write_fd(audit_fd, end(
+        TASK_ID,
+        "fail",
+        sorted(set(issue_ids + ["MODEL-PLAN-05"])),
+        symptom,
+        hypothesis,
+    ))
+    return True
+
+
+async def production_invoke(
+    session: Any,
+    manifest: Manifest,
+    audit_fd: int,
+    root: Path,
+    ctx: Context,
+    ordinal: int,
+    name: str,
+    spec: ProductionSpec,
+    classification: str,
+    repeat_of: str | None,
+    pending_box: dict[str, dict[str, object]],
+) -> dict[str, Any]:
+    event_id = (
+        f"r2-call-{ordinal:04d}"
+        if classification == "first"
+        else f"r2-repeat-{ordinal:04d}"
+    )
+    identity: dict[str, object] = {
+        "event_id": event_id,
+        "scope": "call",
+        "stage": "final-retest-r2",
+        "attempt": 0,
+        "recovery_of": None,
+    }
+    call_ctx = ctx if classification == "first" else production_repeat_context(ctx, name, ordinal)
+    call_args = (
+        dict(spec.arguments)
+        if classification == "first"
+        else production_repeat_args(name, spec, call_ctx)
+    )
+    expected_args = exact_arguments(call_ctx)[name] if name in KNOWN else {}
+    if not exact_json(call_args, expected_args):
+        raise R2Error("ARGS", f"exact arguments differ before dispatch: {name}")
+    if name in {"render_thumbnail_to_path", "render_viewport_to_path"}:
+        source = Path(call_args["output_path"])
+        if source.parent != ctx.scratch or os.path.lexists(source):
+            raise R2Error("ARTIFACT", f"render source must be a fresh scratch child: {source}")
+    pending_box["identity"] = identity
+    write_fd(audit_fd, start(identity))
+    dispatch_start_ns = time.monotonic_ns()
+    try:
+        raw = await session.call_tool(name, call_args)
+    except Exception as exc:
+        dispatch_end_ns = time.monotonic_ns()
+        response: dict[str, Any] = {
+            "dispatch_exception_type": type(exc).__name__,
+            "dispatch_exception_message": str(exc),
+        }
+        dispatch_error: str | None = f"{type(exc).__name__}: {exc}"
+    else:
+        dispatch_end_ns = time.monotonic_ns()
+        try:
+            response = response_dump(raw)
+        except Exception as exc:
+            response = {
+                "response_serialization_exception_type": type(exc).__name__,
+                "response_serialization_exception_message": str(exc),
+            }
+            dispatch_error = f"response serialization: {type(exc).__name__}: {exc}"
+        else:
+            dispatch_error = None
+
+    artifact_value: dict[str, Any] | None = None
+    acceptance_error: str | None = None
+    acceptance_result: str | None = None
+    shape = "dispatch exception"
+    if dispatch_error is None:
+        shape = production_shape(response)
+        try:
+            artifact_value = production_save_artifact(
+                name, response, call_args, call_ctx, ordinal, classification
+            )
+            acceptance_result = production_accept(
+                name, response, call_args, call_ctx, replay=False
+            )
+        except Exception as exc:
+            acceptance_error = f"{type(exc).__name__}: {exc}"
+    outcome = "pass" if dispatch_error is None and acceptance_error is None else "fail"
+    duration_ns = dispatch_end_ns - dispatch_start_ns
+    row: dict[str, Any] = {
+        "record_type": "call",
+        "attempt_id": root.name,
+        "event_id": event_id,
+        "ordinal": ordinal,
+        "tool": name,
+        "classification": classification,
+        "repeat_of": repeat_of,
+        "request": call_args,
+        "request_sha256": digest(call_args),
+        "response": response,
+        "response_sha256": digest(response),
+        "dispatch_start_ns": dispatch_start_ns,
+        "dispatch_end_ns": dispatch_end_ns,
+        "duration_ns": duration_ns,
+        "controller_dispatch_wall_ms": str(
+            Decimal(duration_ns) / Decimal(1_000_000)
+        ),
+        "threshold_ms": spec.threshold_ms,
+        "acceptance": {"lane": spec.lane, "result": acceptance_result},
+        "observed_shape": shape,
+        "artifact": artifact_value,
+        "dispatch_error": dispatch_error,
+        "acceptance_error": acceptance_error,
+        "outcome": outcome,
+    }
+    manifest.append(row)
+    if outcome == "pass":
+        write_fd(audit_fd, end(identity))
+        pending_box.clear()
+        return row
+    raise ProductionCallFailure(row, identity, spec.issue_ids)
+
+def production_visuals(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    values: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in calls:
+        artifact_value = row.get("artifact")
+        if not isinstance(artifact_value, dict):
+            continue
+        path = artifact_value.get("path")
+        if not isinstance(path, str) or path in seen:
+            raise R2Error("ARTIFACT", "duplicate or invalid retained visual path")
+        seen.add(path)
+        values.append({
+            "path": path,
+            "bytes": artifact_value.get("bytes"),
+            "sha256": artifact_value.get("sha256"),
+        })
+    required = {
+        "area-screenshot.png", "window-screenshot.png", "thumbnail.png", "viewport.png"
+    }
+    if not required <= seen:
+        raise R2Error("ARTIFACT", "base retained visuals are incomplete")
+    return values
+
+
+def production_visual_prompt(
+    root: Path,
+    visuals: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "action": "VISUAL_ACK_REQUIRED",
+        "attempt_id": root.name,
+        "artifacts": [
+            {"path": item["path"], "sha256": item["sha256"]}
+            for item in visuals
+        ],
+    }
+
+
+def production_expected_visual_ack(prompt: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "action": "visual_ack",
+        "attempt_id": prompt["attempt_id"],
+        "artifacts": [
+            {**item, "result": "pass"}
+            for item in prompt["artifacts"]
+        ],
+    }
+
+
+def production_parse_visual_ack(
+    line: str,
+    expected: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        value = strict_json(line.encode("utf-8"), "visual acknowledgement")
+    except R2Error as exc:
+        return None, f"invalid visual ack JSON: {exc}"
+    if not isinstance(value, dict) or not exact_json(value, expected):
+        return None, "visual ack identity/artifacts differ"
+    return value, None
+
+
+def production_visual_ack(
+    root: Path,
+    calls: list[dict[str, Any]],
+    manifest: Manifest,
+) -> dict[str, Any]:
+    visuals = production_visuals(calls)
+    prompt = production_visual_prompt(root, visuals)
+    expected = production_expected_visual_ack(prompt)
+    print(cbytes(prompt).decode("utf-8"), flush=True)
+    line, read_error, raw = production_bounded_ack_line()
+    acknowledgement: dict[str, Any] | None = None
+    ack_error = read_error
+    if ack_error is None:
+        assert line is not None
+        acknowledgement, ack_error = production_parse_visual_ack(line, expected)
+    if ack_error is not None:
+        deviation = {
+            "record_type": "visual_ack",
+            "attempt_id": root.name,
+            "prompt": prompt,
+            "prompt_sha256": digest(prompt),
+            "acknowledgement": acknowledgement,
+            "acknowledgement_raw_sha256": hashlib.sha256(raw).hexdigest(),
+            "outcome": "deviation",
+            "error": ack_error,
+        }
+        try:
+            manifest.append(deviation)
+        except Exception as exc:
+            raise VisualAckDeviation(
+                "VISUAL",
+                f"{ack_error}; visual deviation manifest append failed: {type(exc).__name__}: {exc}",
+            ) from exc
+        raise VisualAckDeviation("VISUAL", ack_error)
+    assert acknowledgement is not None
+    value = {
+        "record_type": "visual_ack",
+        "attempt_id": root.name,
+        "prompt": prompt,
+        "prompt_sha256": digest(prompt),
+        "acknowledgement": acknowledgement,
+        "acknowledgement_sha256": digest(acknowledgement),
+        "visual_artifacts": visuals,
+        "outcome": "pass",
+    }
+    try:
+        manifest.append(value)
+    except Exception as exc:
+        raise VisualAckDeviation(
+            "VISUAL",
+            f"visual acknowledgement manifest append failed: {type(exc).__name__}: {exc}",
+        ) from exc
+    return value
+
+
+def production_validate_visual_record(
+    root: Path,
+    row: dict[str, Any],
+    calls: list[dict[str, Any]],
+) -> None:
+    visuals = production_visuals(calls)
+    prompt = production_visual_prompt(root, visuals)
+    acknowledgement = production_expected_visual_ack(prompt)
+    if set(row) != {
+        "record_type", "attempt_id", "prompt", "prompt_sha256",
+        "acknowledgement", "acknowledgement_sha256", "visual_artifacts", "outcome",
+    } or (
+        row.get("record_type") != "visual_ack"
+        or row.get("attempt_id") != root.name
+        or not exact_json(row.get("prompt"), prompt)
+        or row.get("prompt_sha256") != digest(prompt)
+        or not exact_json(row.get("acknowledgement"), acknowledgement)
+        or row.get("acknowledgement_sha256") != digest(acknowledgement)
+        or not exact_json(row.get("visual_artifacts"), visuals)
+        or row.get("outcome") != "pass"
+    ):
+        raise R2Error("VISUAL", "visual acknowledgement manifest record differs")
+
+
+
+def production_report(
+    names: list[str],
+    calls: list[dict[str, Any]],
+    visual_record: dict[str, Any],
+) -> bytes:
+    first = [row for row in calls if row["classification"] == "first"]
+    repeats = [row for row in calls if row["classification"] == "threshold_repeat"]
+    repeat_by = {row["repeat_of"]: row for row in repeats}
+    if [row["tool"] for row in first] != names:
+        raise R2Error("REPORT", "first rows differ from catalog")
+    tick = chr(96)
+    lines = [
+        "# Final retest R2",
+        "",
+        "## Timing semantics",
+        "",
+        "controller_dispatch_wall_ms brackets the same awaited MCP call_tool; "
+        "it includes controller transport/server/Blender/response wall and is not pure server compute.",
+        "",
+        "## Tool results",
+        "",
+        TABLE_HEADER,
+        TABLE_SEPARATOR,
+    ]
+    for ordinal, row in enumerate(first, 1):
+        shape = row["observed_shape"]
+        if not isinstance(shape, str) or "|" in shape or "\n" in shape:
+            raise R2Error("REPORT", "observed shape is not table safe")
+        retry = 1 if row["event_id"] in repeat_by else 0
+        lines.append(
+            f"| {ordinal} | {tick}{row['tool']}{tick} | pass | "
+            f"{row['controller_dispatch_wall_ms']} | {shape} | {retry} | none |"
+        )
+    lines.extend(["", "## Threshold repeats", ""])
+    if not repeats:
+        lines.append("none")
+    else:
+        for row in repeats:
+            original = next(item for item in first if item["event_id"] == row["repeat_of"])
+            classification = (
+                "first_call_spike"
+                if Decimal(str(row["controller_dispatch_wall_ms"]))
+                <= Decimal(str(row["threshold_ms"]))
+                else "confirmed_over_threshold"
+            )
+            lines.append(
+                f"- {tick}{row['tool']}{tick} first={original['controller_dispatch_wall_ms']}ms "
+                f"threshold={row['threshold_ms']}ms repeat={row['controller_dispatch_wall_ms']}ms "
+                f"classification={classification}"
+            )
+    expected_ack = production_expected_visual_ack(visual_record["prompt"])
+    if not exact_json(visual_record.get("acknowledgement"), expected_ack):
+        raise R2Error("REPORT", "visual acknowledgement differs before report")
+    lines.extend(["", VISUAL_HEADING, "", VISUAL_HEADER, VISUAL_SEPARATOR])
+    for value in visual_record["acknowledgement"]["artifacts"]:
+        lines.append(f"| {value['path']} | {value['sha256']} | {value['result']} |")
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def production_validate_report(
+    root: Path,
+    names: list[str],
+    calls: list[dict[str, Any]],
+    visual_record: dict[str, Any],
+    run_end: dict[str, Any],
+) -> bytes:
+    report = production_read_owned(root, "r2-report.md")
+    expected = production_report(names, calls, visual_record)
+    if report != expected or run_end.get("report_sha256") != hashlib.sha256(report).hexdigest():
+        raise R2Error("REPORT", "R2 report bytes/digest differ")
+    return report
+
+
+async def production_run(args: argparse.Namespace) -> dict[str, Any]:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    audit_fd = args.audit_fd
+    manifest: Manifest | None = None
+    pending_call: dict[str, object] | None = None
+    calls: list[dict[str, Any]] = []
+    pending_box: dict[str, dict[str, object]] = {}
+    closed = False
+    # The persistent-PTY caller is the sole emitter of the task/stage start events: it
+    # must open the journal and bracket ruff and `probe` before `run` starts, so writing
+    # them again here would be a duplicate event_id the recorder rejects. `run` still
+    # owns the matching ends, including the failure-closure ends.
+    global _PRODUCTION_SNAPSHOTS
+    previous_snapshots = _PRODUCTION_SNAPSHOTS
+    snapshots: ProductionSnapshotSet | None = None
+    mcp_stderr: ProductionBoundedStderr | None = None
+    try:
+        if audit_fd < 3:
+            raise R2Error(
+                "INPUT",
+                "audit fd must be a caller-provided descriptor above stderr",
+            )
+        try:
+            os.fstat(audit_fd)
+        except OSError as exc:
+            raise R2Error("INPUT", "audit fd is not open") from exc
+        root = production_root(args.root)
+        snapshots = ProductionSnapshotSet(root)
+        _PRODUCTION_SNAPSHOTS = snapshots
+        controller_sha = production_controller_sha(root, args.controller_sha256)
+        scratch = production_private_scratch(args.scratch)
+        codex_bin = Path(os.path.abspath(args.codex_bin))
+        config_path = Path(os.path.abspath(args.config))
+        feature_root = Path(os.path.abspath(args.feature_root))
+        if (
+            Path(os.path.realpath(feature_root)) != feature_root
+            or not feature_root.is_dir()
+        ):
+            raise R2Error("INPUT", "feature root differs")
+        production_safe_executable(codex_bin, "Codex")
+        section, on_disk, source_mcp = production_config(config_path)
+        tracked_sources = production_git_pin(source_mcp)
+        source = production_source_names(source_mcp, tracked_sources)
+        app_live, effective = production_app_catalogs(codex_bin, feature_root, root)
+        for required in ("fixture.blend", "library_source.blend", "model_body.py", "cli_body.py"):
+            production_read_owned(root, required)
+        if os.path.lexists(root / "known-missing.png"):
+            raise R2Error("FIXTURE", "controlled missing file unexpectedly exists")
+        params = StdioServerParameters(
+            command=section["command"],
+            args=section["args"],
+            env=production_child_env(),
+        )
+        mcp_stderr = ProductionBoundedStderr()
+        async with stdio_client(params, errlog=mcp_stderr.errlog) as streams:
+            async with ClientSession(
+                *streams,
+                read_timeout_seconds=timedelta(seconds=120),
+            ) as session:
+                await session.initialize()
+                tools = await production_listed(session)
+                schema_rows = production_schema_rows(tools)
+                direct = production_names(
+                    [row["name"] for row in schema_rows], "direct list_tools"
+                )
+                if not (direct == app_live == source == effective == on_disk):
+                    raise R2Error(
+                        "CATALOG",
+                        "direct/App-live/source/effective/on-disk catalogs differ",
+                    )
+                for filename, values in zip(
+                    CATALOG_FILES,
+                    (direct, app_live, source, effective, on_disk),
+                ):
+                    create_owned(root, filename, cbytes(values) + b"\n")
+                create_owned(root, "tool-schema.json", cbytes(schema_rows) + b"\n")
+                create_owned(root, "catalog-bindings.json", cbytes({
+                    "catalog_count": len(direct),
+                    "catalog_sha256": digest(direct),
+                    "catalogs": {
+                        name: hashlib.sha256(production_read_owned(root, name)).hexdigest()
+                        for name in CATALOG_FILES
+                    },
+                    "tool_schema_sha256": digest(schema_rows),
+                }) + b"\n")
+                ctx = production_context(root, direct, scratch)
+                specs = production_specs(direct, schema_rows, ctx)
+                manifest = Manifest(root)
+                manifest.append({
+                    "record_type": "run_start",
+                    "attempt_id": root.name,
+                    "source_pin": SOURCE_PIN,
+                    "controller_sha256": controller_sha,
+                    "config_path": str(config_path),
+                    "source_mcp": str(source_mcp),
+                    "catalog": direct,
+                    "catalog_sha256": digest(direct),
+                    "tool_schema_sha256": digest(schema_rows),
+                    "scratch": str(scratch),
+                    "timing": "controller_dispatch_wall_ms; not pure server compute",
+                })
+                for ordinal, name in enumerate(direct, 1):
+                    spec = specs[name]
+                    try:
+                        first = await production_invoke(
+                            session,
+                            manifest,
+                            audit_fd,
+                            root,
+                            ctx,
+                            ordinal,
+                            name,
+                            spec,
+                            "first",
+                            None,
+                            pending_box,
+                        )
+                    except ProductionCallFailure as exc:
+                        pending_call = exc.identity
+                        raise
+                    calls.append(first)
+                    threshold = spec.threshold_ms
+                    if threshold is None:
+                        continue
+                    if (
+                        Decimal(str(first["controller_dispatch_wall_ms"]))
+                        <= Decimal(str(threshold))
+                    ):
+                        continue
+                    try:
+                        repeated = await production_invoke(
+                            session,
+                            manifest,
+                            audit_fd,
+                            root,
+                            ctx,
+                            ordinal,
+                            name,
+                            spec,
+                            "threshold_repeat",
+                            str(first["event_id"]),
+                            pending_box,
+                        )
+                    except ProductionCallFailure as exc:
+                        pending_call = exc.identity
+                        raise
+                    calls.append(repeated)
+                    if (
+                        Decimal(str(repeated["controller_dispatch_wall_ms"]))
+                        > Decimal(str(threshold))
+                    ):
+                        raise R2Error(
+                            "ABNORMAL",
+                            f"reproducible abnormal controller dispatch wall: {name}",
+                        )
+                try:
+                    visual_record = production_visual_ack(root, calls, manifest)
+                except VisualAckDeviation:
+                    if not closed:
+                        closed = True
+                        production_close_deviation(audit_fd, None)
+                    raise
+                report = production_report(direct, calls, visual_record)
+                create_owned(root, "r2-report.md", report)
+                run_end = {
+                    "record_type": "run_end",
+                    "attempt_id": root.name,
+                    "outcome": "pass",
+                    "first_call_count": len(direct),
+                    "threshold_repeat_count": len(calls) - len(direct),
+                    "recoveries": 0,
+                    "report_sha256": hashlib.sha256(report).hexdigest(),
+                    "visual_artifacts": production_visuals(calls),
+                    "visual_ack_sha256": visual_record["acknowledgement_sha256"],
+                }
+                manifest.append(run_end)
+        mcp_stderr.close()
+        mcp_stderr.require_bounded()
+        manifest.close()
+        manifest = None
+        snapshots.recheck_all()
+        write_fd(audit_fd, end(STAGE_ID))
+        write_fd(audit_fd, end(TASK_ID))
+        closed = True
+        return {
+            "status": "dispatch_complete",
+            "attempt_id": root.name,
+            "tools": len(direct),
+            "threshold_repeats": len(calls) - len(direct),
+        }
+    except BaseException as exc:
+        # `KeyboardInterrupt`, `SystemExit`, `asyncio.CancelledError` and the anyio
+        # `BaseExceptionGroup` raised out of `stdio_client`/`ClientSession` are not
+        # `Exception`. Catching only `Exception` left the call, stage and task scopes
+        # started at the top of this function permanently open on exactly the
+        # protocol deviations this controller exists to close.
+        if pending_call is None:
+            pending_call = pending_box.get("identity")
+        issue_ids = production_issue_ids(exc)
+        response_sha = digest({
+            "exception_type": type(exc).__name__,
+            "message": str(exc),
+        })
+        if isinstance(exc, ProductionCallFailure):
+            response_sha = str(exc.row["response_sha256"])
+        elif isinstance(exc, AppEvidenceError):
+            response_sha = exc.response_sha256
+        if not isinstance(exc, VisualAckDeviation) and not closed:
+            closed = True
+            production_close_failure(
+                audit_fd,
+                pending_call,
+                issue_ids,
+                response_sha,
+                f"{type(exc).__name__}: {exc}"[:2_000],
+            )
+        if isinstance(exc, R2Error) or not isinstance(exc, Exception):
+            raise
+        raise R2Error("CONTROLLER", f"{type(exc).__name__}: {exc}") from exc
+    finally:
+        _PRODUCTION_SNAPSHOTS = previous_snapshots
+        if mcp_stderr is not None:
+            mcp_stderr.close()
+        if manifest is not None:
+            try:
+                manifest.close()
+            except (R2Error, OSError):
+                pass
+
+def production_manifest_rows(root: Path) -> list[dict[str, Any]]:
+    data = production_read_owned(root, "dispatch-manifest.ndjson", limit=128 * 1024 * 1024)
+    rows: list[dict[str, Any]] = []
+    for number, line in enumerate(data.splitlines(), 1):
+        if not line:
+            raise R2Error("MANIFEST", f"blank manifest line: {number}")
+        value = strict_json(line, f"manifest line {number}")
+        if not isinstance(value, dict):
+            raise R2Error("MANIFEST", f"manifest line is not object: {number}")
+        rows.append(value)
+    return rows
+
+
+def production_existing_scratch(raw: str) -> Path:
+    path = Path(os.path.abspath(raw))
+    if Path(os.path.realpath(path)) != path:
+        raise R2Error("SCRATCH", "retained scratch path contains a symlink")
+    info = os.lstat(path)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise R2Error("SCRATCH", "retained scratch directory differs")
+    return path
+
+
+def production_verify_artifact(
+    root: Path,
+    row: dict[str, Any],
+    ctx: Context,
+) -> None:
+    name = str(row["tool"])
+    ordinal = int(row["ordinal"])
+    classification = str(row["classification"])
+    future_data = production_future_png(row["response"]) if name not in KNOWN else None
+    expected_name = production_artifact_name(name, ordinal, classification)
+    if future_data is not None:
+        expected_name = (
+            f"r2-future-{ordinal:04d}.png"
+            if classification == "first"
+            else f"r2-repeat-{ordinal:04d}.png"
+        )
+    artifact_value = row.get("artifact")
+    if expected_name is None:
+        if artifact_value is not None:
+            raise R2Error("ARTIFACT", f"unexpected artifact: {name}")
+        return
+    if not isinstance(artifact_value, dict) or set(artifact_value) != {
+        "path", "bytes", "sha256", "width", "height"
+    }:
+        raise R2Error("ARTIFACT", f"artifact metadata differs: {name}")
+    if artifact_value["path"] != expected_name:
+        raise R2Error("ARTIFACT", f"artifact path differs: {name}")
+    data = production_read_owned(root, expected_name, limit=64 * 1024 * 1024)
+    width, height = production_png_dimensions(data)
+    if (
+        not exact_int(artifact_value["bytes"])
+        or artifact_value["bytes"] <= 0
+        or artifact_value["bytes"] != len(data)
+        or not exact_int(artifact_value["width"])
+        or not exact_int(artifact_value["height"])
+        or artifact_value["width"] <= 0
+        or artifact_value["height"] <= 0
+        or not isinstance(artifact_value["sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", artifact_value["sha256"]) is None
+        or artifact_value["sha256"] != hashlib.sha256(data).hexdigest()
+        or artifact_value["width"] != width
+        or artifact_value["height"] != height
+    ):
+        raise R2Error("ARTIFACT", f"artifact bytes/digest/dimensions differ: {name}")
+    if name in IMAGE_TOOLS and png_bytes(row["response"], 48_000) != data:
+        raise R2Error("ARTIFACT", f"screenshot response/copy differs: {name}")
+    if future_data is not None and future_data != data:
+        raise R2Error("ARTIFACT", f"future image response/copy differs: {name}")
+    if name == "render_thumbnail_to_path" and (width, height) != (320, 320):
+        raise R2Error("ARTIFACT", "thumbnail dimensions differ")
+    if name == "render_viewport_to_path" and (width, height) != (480, 480):
+        raise R2Error("ARTIFACT", "viewport dimensions differ")
+
+
+def production_validate_call(
+    root: Path,
+    row: dict[str, Any],
+    name: str,
+    ordinal: int,
+    classification: str,
+    repeat_of: str | None,
+    spec: ProductionSpec,
+    ctx: Context,
+) -> None:
+    if set(row) != CALL_KEYS:
+        raise R2Error("MANIFEST", f"call keys differ: {name}")
+    call_ctx = ctx if classification == "first" else production_repeat_context(ctx, name, ordinal)
+    expected_args = (
+        dict(spec.arguments)
+        if classification == "first"
+        else production_repeat_args(name, spec, call_ctx)
+    )
+    expected_event = (
+        f"r2-call-{ordinal:04d}"
+        if classification == "first"
+        else f"r2-repeat-{ordinal:04d}"
+    )
+    if (
+        row.get("record_type") != "call"
+        or row.get("attempt_id") != root.name
+        or row.get("event_id") != expected_event
+        or not exact_int(row.get("ordinal"))
+        or row.get("ordinal") != ordinal
+        or row.get("tool") != name
+        or row.get("classification") != classification
+        or row.get("repeat_of") != repeat_of
+        or not exact_json(row.get("request"), expected_args)
+        or row.get("threshold_ms") != spec.threshold_ms
+        or row.get("outcome") != "pass"
+        or row.get("dispatch_error") is not None
+        or row.get("acceptance_error") is not None
+    ):
+        raise R2Error("MANIFEST", f"exact call identity/state differs: {name}")
+    duration = row.get("duration_ns")
+    start_ns = row.get("dispatch_start_ns")
+    end_ns = row.get("dispatch_end_ns")
+    if (
+        not isinstance(duration, int)
+        or isinstance(duration, bool)
+        or duration <= 0
+        or not isinstance(start_ns, int)
+        or isinstance(start_ns, bool)
+        or not isinstance(end_ns, int)
+        or isinstance(end_ns, bool)
+        or end_ns - start_ns != duration
+        or Decimal(str(row.get("controller_dispatch_wall_ms")))
+        != Decimal(duration) / Decimal(1_000_000)
+        or row.get("request_sha256") != digest(row.get("request"))
+        or row.get("response_sha256") != digest(row.get("response"))
+        or not isinstance(row.get("response"), dict)
+    ):
+        raise R2Error("MANIFEST", f"wall/request/response digest differs: {name}")
+    acceptance_result = production_accept(
+        name,
+        row["response"],
+        expected_args,
+        call_ctx,
+        replay=True,
+    )
+    expected_acceptance = {"lane": spec.lane, "result": acceptance_result}
+    if row.get("acceptance") != expected_acceptance:
+        raise R2Error("ACCEPT", f"stored acceptance differs: {name}")
+    if row.get("observed_shape") != production_shape(row["response"]):
+        raise R2Error("ACCEPT", f"stored response shape differs: {name}")
+    production_verify_artifact(root, row, call_ctx)
+
+
+def production_check_immediate_layout(
+    calls: list[dict[str, Any]],
+    names: list[str],
+    specs: dict[str, ProductionSpec],
+) -> None:
+    position = 0
+    for name in names:
+        if position >= len(calls):
+            raise R2Error("MANIFEST", f"first call missing from layout: {name}")
+        first = calls[position]
+        if first.get("tool") != name or first.get("classification") != "first":
+            raise R2Error("MANIFEST", f"first-call layout differs: {name}")
+        position += 1
+        threshold = specs[name].threshold_ms
+        high = (
+            threshold is not None
+            and Decimal(str(first.get("controller_dispatch_wall_ms")))
+            > Decimal(str(threshold))
+        )
+        if high:
+            if position >= len(calls):
+                raise R2Error("THRESHOLD", f"immediate repeat missing from layout: {name}")
+            repeated = calls[position]
+            if (
+                repeated.get("tool") != name
+                or repeated.get("classification") != "threshold_repeat"
+                or repeated.get("repeat_of") != first.get("event_id")
+            ):
+                raise R2Error("THRESHOLD", f"threshold repeat is not immediate: {name}")
+            position += 1
+    if position != len(calls):
+        raise R2Error("MANIFEST", "orphan or delayed call in layout")
+
+
+def production_validate_sequence(
+    root: Path,
+    rows: list[dict[str, Any]],
+    names: list[str],
+    specs: dict[str, ProductionSpec],
+    ctx: Context,
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, Any],
+    dict[str, Any],
+]:
+    if len(rows) < 3 or rows[0].get("record_type") != "run_start":
+        raise R2Error("MANIFEST", "run_start boundary differs")
+    if rows[-1].get("record_type") != "run_end":
+        raise R2Error("MANIFEST", "run_end boundary differs")
+    if any(
+        row.get("record_type") not in {"run_start", "call", "visual_ack", "run_end"}
+        for row in rows
+    ):
+        raise R2Error("MANIFEST", "unknown manifest record type")
+    start_row = rows[0]
+    if set(start_row) != {
+        "record_type", "attempt_id", "source_pin", "catalog", "catalog_sha256",
+        "tool_schema_sha256", "scratch", "timing", "controller_sha256",
+        "config_path", "source_mcp",
+    } or (
+        start_row["attempt_id"] != root.name
+        or start_row["source_pin"] != SOURCE_PIN
+        or not exact_json(start_row["catalog"], names)
+        or start_row["catalog_sha256"] != digest(names)
+        or not isinstance(start_row["controller_sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", start_row["controller_sha256"]) is None
+        or not isinstance(start_row["config_path"], str)
+        or not isinstance(start_row["source_mcp"], str)
+        or start_row["timing"] != "controller_dispatch_wall_ms; not pure server compute"
+    ):
+        raise R2Error("MANIFEST", "run_start fields differ")
+    call_rows = rows[1:-2]
+    production_check_immediate_layout(call_rows, names, specs)
+    first: list[dict[str, Any]] = []
+    repeats: list[dict[str, Any]] = []
+    position = 1
+    for ordinal, name in enumerate(names, 1):
+        if position >= len(rows) - 2:
+            raise R2Error("MANIFEST", f"first call missing: {name}")
+        row = rows[position]
+        production_validate_call(
+            root, row, name, ordinal, "first", None, specs[name], ctx
+        )
+        first.append(row)
+        position += 1
+        threshold = specs[name].threshold_ms
+        high = (
+            threshold is not None
+            and Decimal(str(row["controller_dispatch_wall_ms"])) > Decimal(str(threshold))
+        )
+        if high:
+            if position >= len(rows) - 2:
+                raise R2Error("THRESHOLD", f"immediate repeat missing: {name}")
+            repeated = rows[position]
+            production_validate_call(
+                root,
+                repeated,
+                name,
+                ordinal,
+                "threshold_repeat",
+                str(row["event_id"]),
+                specs[name],
+                ctx,
+            )
+            if Decimal(str(repeated["controller_dispatch_wall_ms"])) > Decimal(str(threshold)):
+                raise R2Error("ABNORMAL", f"threshold repeat remains high: {name}")
+            repeats.append(repeated)
+            position += 1
+    if position != len(rows) - 2:
+        raise R2Error("MANIFEST", "orphan, delayed, or extra call row")
+    visual_row = rows[-2]
+    production_validate_visual_record(root, visual_row, call_rows)
+    end_row = rows[-1]
+    visual = production_visuals(call_rows)
+    if set(end_row) != {
+        "record_type", "attempt_id", "outcome", "first_call_count",
+        "threshold_repeat_count", "recoveries", "report_sha256", "visual_artifacts",
+        "visual_ack_sha256",
+    } or (
+        end_row["attempt_id"] != root.name
+        or end_row["outcome"] != "pass"
+        or not exact_int(end_row["first_call_count"])
+        or end_row["first_call_count"] != len(names)
+        or not exact_int(end_row["threshold_repeat_count"])
+        or end_row["threshold_repeat_count"] != len(repeats)
+        or not exact_int(end_row["recoveries"])
+        or end_row["recoveries"] != 0
+        or not exact_json(end_row["visual_artifacts"], visual)
+        or end_row["visual_ack_sha256"] != visual_row["acknowledgement_sha256"]
+    ):
+        raise R2Error("MANIFEST", "run_end fields differ")
+    return first, repeats, visual_row, end_row
+
+
+def production_validate_journal(
+    root: Path,
+    calls: list[dict[str, Any]],
+) -> None:
+    data = production_read_owned(root, "events.ndjson", limit=128 * 1024 * 1024)
+    events: list[dict[str, Any]] = []
+    for number, line in enumerate(data.splitlines(), 1):
+        value = strict_json(line, f"journal line {number}")
+        if not isinstance(value, dict):
+            raise R2Error("JOURNAL", "journal event must be object")
+        events.append(value)
+    expected_clients = [start(TASK_ID), start(STAGE_ID)]
+    for row in calls:
+        identity = {
+            "event_id": row["event_id"],
+            "scope": "call",
+            "stage": "final-retest-r2",
+            "attempt": 0,
+            "recovery_of": None,
+        }
+        expected_clients.extend([start(identity), end(identity)])
+    expected_clients.extend([end(STAGE_ID), end(TASK_ID)])
+    generated = {"clock_id", "recorded_at_utc", "monotonic_ns", "sequence"}
+    if len(events) != len(expected_clients):
+        raise R2Error("JOURNAL", "journal event count differs")
+    clocks = {event.get("clock_id") for event in events}
+    if len(clocks) != 1 or None in clocks:
+        raise R2Error("JOURNAL", "journal clock identity differs")
+    clock_id = next(iter(clocks))
+    try:
+        parsed_clock = uuid.UUID(str(clock_id))
+    except ValueError as exc:
+        raise R2Error("JOURNAL", "journal clock identity is not UUID") from exc
+    if str(parsed_clock) != clock_id or parsed_clock.version != 4:
+        raise R2Error("JOURNAL", "journal clock identity is not canonical UUID4")
+    previous_monotonic: int | None = None
+    previous_utc: datetime | None = None
+    for sequence, (event, expected) in enumerate(zip(events, expected_clients), 1):
+        if set(event) != set(expected) | generated:
+            raise R2Error("JOURNAL", f"journal keys differ at sequence {sequence}")
+        client = {key: value for key, value in event.items() if key not in generated}
+        if (
+            not exact_json(client, expected)
+            or not exact_int(event.get("sequence"))
+            or event.get("sequence") != sequence
+            or not exact_int(event.get("monotonic_ns"))
+            or event["monotonic_ns"] < 0
+            or not isinstance(event.get("recorded_at_utc"), str)
+            or "internal_ms" in event
+        ):
+            raise R2Error("JOURNAL", f"journal event differs at sequence {sequence}")
+        utc_text = event["recorded_at_utc"]
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z", utc_text) is None:
+            raise R2Error("JOURNAL", f"journal UTC format differs at sequence {sequence}")
+        try:
+            current_utc = datetime.strptime(
+                utc_text, "%Y-%m-%dT%H:%M:%S.%fZ"
+            ).replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise R2Error("JOURNAL", f"journal UTC value differs at sequence {sequence}") from exc
+        current_monotonic = event["monotonic_ns"]
+        if (
+            previous_utc is not None
+            and (current_utc <= previous_utc or current_monotonic <= previous_monotonic)
+        ):
+            raise R2Error("JOURNAL", f"journal clock order differs at sequence {sequence}")
+        previous_utc = current_utc
+        previous_monotonic = current_monotonic
+    for index, row in enumerate(calls):
+        begin = events[2 + index * 2]
+        finish = events[3 + index * 2]
+        if not (
+            begin["monotonic_ns"] <= row["dispatch_start_ns"]
+            < row["dispatch_end_ns"] <= finish["monotonic_ns"]
+        ):
+            raise R2Error("JOURNAL", f"journal does not envelope dispatch: {row['tool']}")
+
+
+def production_tool_section(text: str) -> list[str]:
+    lines = text.splitlines()
+    if lines.count("## Tool results") != 1 or lines.count("## Threshold repeats") != 1:
+        raise R2Error("REPORT", "Tool results section boundary differs")
+    begin = lines.index("## Tool results")
+    finish = lines.index("## Threshold repeats")
+    if finish <= begin or lines[begin:finish].count(TABLE_HEADER) != 1:
+        raise R2Error("REPORT", "Tool results table differs")
+    return lines[begin:finish]
+
+
+def production_visual_section(text: str) -> list[str]:
+    lines = text.splitlines()
+    if lines.count(VISUAL_HEADING) != 1:
+        raise R2Error("AUDIT", "visual acknowledgement heading count differs")
+    begin = lines.index(VISUAL_HEADING)
+    finish = next(
+        (index for index in range(begin + 1, len(lines)) if lines[index].startswith("## ")),
+        len(lines),
+    )
+    if finish < len(lines) and finish > begin and lines[finish - 1] == "":
+        finish -= 1
+    section = lines[begin:finish]
+    if len(section) < 5 or section[:4] != [
+        VISUAL_HEADING, "", VISUAL_HEADER, VISUAL_SEPARATOR,
+    ]:
+        raise R2Error("AUDIT", "visual acknowledgement section shape differs")
+    return section
+
+
+def production_binding_once(lines: list[str], expected: str) -> None:
+    prefix = expected.split(":", 1)[0] + ":"
+    matches = [line for line in lines if line.startswith(prefix)]
+    if matches != [expected]:
+        raise R2Error("AUDIT", f"active audit binding count/value differs: {prefix[:-1]}")
+
+
+def production_summary_value(
+    root: Path,
+    validation: dict[str, Any],
+    report: bytes,
+    rows: list[dict[str, Any]],
+    evidence_sha: str,
+) -> dict[str, Any]:
+    dispatch = production_read_owned(
+        root, "dispatch-manifest.ndjson", limit=128 * 1024 * 1024
+    )
+    run_end = rows[-1]
+    report_sha = hashlib.sha256(report).hexdigest()
+    bindings = [
+        f"R2_ATTEMPT_ID: {root.name}",
+        f"R2_CONTROLLER_SHA256: {rows[0]['controller_sha256']}",
+        f"R2_REPORT_SHA256: {report_sha}",
+        f"R2_DISPATCH_MANIFEST_SHA256: {hashlib.sha256(dispatch).hexdigest()}",
+        f"R2_EVIDENCE_MANIFEST_SHA256: {evidence_sha}",
+        f"R2_VISUAL_RUN_END_SHA256: {digest(run_end)}",
+        f"R2_VISUAL_REPORT_SHA256: {report_sha}",
+        f"R2_VISUAL_EVIDENCE_MANIFEST_SHA256: {evidence_sha}",
+        f"R2_VISUAL_ACK_SHA256: {run_end['visual_ack_sha256']}",
+    ]
+    if len(bindings) != 9 or len({line.split(":", 1)[0] for line in bindings}) != 9:
+        raise R2Error("AUDIT", "canonical active-audit binding set differs")
+    if (
+        validation.get("attempt_id") != root.name
+        or validation.get("tools") != run_end.get("first_call_count")
+        or validation.get("threshold_repeats")
+        != run_end.get("threshold_repeat_count")
+    ):
+        raise R2Error("AUDIT", "validated summary counts differ")
+    return {
+        "status": "ok",
+        "attempt_id": root.name,
+        "tools": validation["tools"],
+        "threshold_repeats": validation["threshold_repeats"],
+        "bindings": bindings,
+        "report": report.decode("utf-8"),
+    }
+
+
+def production_active_audit(
+    active_path: Path,
+    report: bytes,
+    rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+) -> None:
+    text = production_read_path(active_path, limit=8 * 1024 * 1024).decode("utf-8")
+    lines = text.splitlines()
+    report_text = report.decode("utf-8")
+    if production_tool_section(text) != production_tool_section(report_text):
+        raise R2Error("AUDIT", "active Tool results bytes differ from R2 report")
+    if production_visual_section(text) != production_visual_section(report_text):
+        raise R2Error("AUDIT", "active visual section bytes differ from R2 report")
+    bindings = summary.get("bindings")
+    if not isinstance(bindings, list) or len(bindings) != 9:
+        raise R2Error("AUDIT", "validated active-audit bindings absent")
+    for value in bindings:
+        if not isinstance(value, str):
+            raise R2Error("AUDIT", "validated active-audit binding is not text")
+        production_binding_once(lines, value)
+    expected = [VISUAL_HEADING, "", VISUAL_HEADER, VISUAL_SEPARATOR]
+    visual_record = rows[-2]
+    for item in visual_record["acknowledgement"]["artifacts"]:
+        expected.append(f"| {item['path']} | {item['sha256']} | {item['result']} |")
+    if production_visual_section(text) != expected:
+        raise R2Error("AUDIT", "visual acknowledgement table differs")
+
+
+def production_dynamic_artifacts(rows: list[dict[str, Any]]) -> set[str]:
+    values: set[str] = set()
+    for row in rows:
+        if row.get("record_type") != "call" or not isinstance(row.get("artifact"), dict):
+            continue
+        path = row["artifact"].get("path")
+        if path in BASE_EVIDENCE:
+            continue
+        valid_repeat = (
+            row.get("classification") == "threshold_repeat"
+            and isinstance(path, str)
+            and re.fullmatch(r"r2-repeat-\d{4}\.png", path) is not None
+        )
+        valid_future_first = (
+            row.get("classification") == "first"
+            and row.get("tool") not in KNOWN
+            and isinstance(path, str)
+            and re.fullmatch(r"r2-future-\d{4}\.png", path) is not None
+        )
+        if not (valid_repeat or valid_future_first) or path in values:
+            raise R2Error("EVIDENCE", "dynamic visual path/classification differs")
+        values.add(path)
+    return values
+
+
+def production_validate_evidence(
+    root: Path,
+    rows: list[dict[str, Any]],
+) -> tuple[dict[str, Any], str]:
+    data = production_read_owned(root, "evidence-manifest.json", limit=16 * 1024 * 1024)
+    value = strict_json(data, "evidence manifest")
+    if not isinstance(value, dict) or set(value) != {
+        "version", "attempt_id", "source_pin", "catalog_count", "timing_semantics",
+        "report_sha256", "journal_sha256", "dispatch_manifest_sha256", "files",
+    }:
+        raise R2Error("EVIDENCE", "evidence manifest top-level schema differs")
+    names = production_catalog(root, "direct-catalog.json")
+    report = production_read_owned(root, "r2-report.md")
+    journal = production_read_owned(root, "events.ndjson", limit=128 * 1024 * 1024)
+    dispatch = production_read_owned(root, "dispatch-manifest.ndjson", limit=128 * 1024 * 1024)
+    if (
+        not exact_int(value["version"])
+        or value["version"] != 1
+        or value["attempt_id"] != root.name
+        or value["source_pin"] != SOURCE_PIN
+        or not exact_int(value["catalog_count"])
+        or value["catalog_count"] != len(names)
+        or value["timing_semantics"] != "controller_dispatch_wall_ms; not pure server compute"
+        or value["report_sha256"] != hashlib.sha256(report).hexdigest()
+        or value["journal_sha256"] != hashlib.sha256(journal).hexdigest()
+        or value["dispatch_manifest_sha256"] != hashlib.sha256(dispatch).hexdigest()
+        or not isinstance(value["files"], list)
+    ):
+        raise R2Error("EVIDENCE", "evidence manifest bindings differ")
+    allowed = BASE_EVIDENCE | production_dynamic_artifacts(rows)
+    actual = (
+        _PRODUCTION_SNAPSHOTS.names()
+        if _PRODUCTION_SNAPSHOTS is not None
+        and root == _PRODUCTION_SNAPSHOTS.root
+        else ProductionSnapshotSet(root).names()
+    )
+    if actual != allowed | {"evidence-manifest.json"}:
+        raise R2Error("EVIDENCE", "terminal attempt-root allowlist differs")
+    files = value["files"]
+    if [item.get("path") for item in files if isinstance(item, dict)] != sorted(allowed):
+        raise R2Error("EVIDENCE", "evidence file paths differ")
+    for item in files:
+        if not isinstance(item, dict) or set(item) != {"path", "bytes", "mode", "sha256"}:
+            raise R2Error("EVIDENCE", "evidence file-entry schema differs")
+        if (
+            not isinstance(item["path"], str)
+            or Path(item["path"]).name != item["path"]
+            or item["path"] in {"", ".", ".."}
+            or not exact_int(item["bytes"])
+            or item["bytes"] <= 0
+            or item["mode"] != "0600"
+            or not isinstance(item["sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is None
+        ):
+            raise R2Error("EVIDENCE", "evidence file-entry types differ")
+        file_data = production_read_owned(root, item["path"])
+        if (
+            item["bytes"] != len(file_data)
+            or item["mode"] != "0600"
+            or item["sha256"] != hashlib.sha256(file_data).hexdigest()
+        ):
+            raise R2Error("EVIDENCE", f"evidence file entry differs: {item['path']}")
+    return value, hashlib.sha256(data).hexdigest()
+
+
+def _production_validate_snapshot(args: argparse.Namespace) -> dict[str, Any]:
+    root = production_root(args.root)
+    controller_sha = production_controller_sha(root)
+    catalogs = [production_catalog(root, name) for name in CATALOG_FILES]
+    if any(value != catalogs[0] for value in catalogs[1:]):
+        raise R2Error("CATALOG", "five retained catalogs differ")
+    names = catalogs[0]
+    schema_value = strict_json(production_read_owned(root, "tool-schema.json"), "tool schema")
+    if not isinstance(schema_value, list) or not all(isinstance(row, dict) for row in schema_value):
+        raise R2Error("SCHEMA", "retained tool schema differs")
+    schema_rows = list(schema_value)
+    if [row.get("name") for row in schema_rows] != names:
+        raise R2Error("SCHEMA", "retained schema names differ")
+    expected_catalog_bindings = {
+        "catalog_count": len(names),
+        "catalog_sha256": digest(names),
+        "catalogs": {
+            name: hashlib.sha256(production_read_owned(root, name)).hexdigest()
+            for name in CATALOG_FILES
+        },
+        "tool_schema_sha256": digest(schema_rows),
+    }
+    if production_read_owned(root, "catalog-bindings.json") != (
+        cbytes(expected_catalog_bindings) + b"\n"
+    ):
+        raise R2Error("CATALOG", "catalog-bindings bytes differ")
+    rows = production_manifest_rows(root)
+    if not rows or rows[0].get("controller_sha256") != controller_sha:
+        raise R2Error("CONTROLLER", "run_start controller SHA-256 differs")
+    config_path = Path(os.path.abspath(args.config))
+    if rows[0].get("config_path") != str(config_path):
+        raise R2Error("CONFIG", "run_start config path differs from trusted validation input")
+    _, current_on_disk, source_mcp = production_config(config_path)
+    tracked_sources = production_git_pin(source_mcp)
+    current_source = production_source_names(source_mcp, tracked_sources)
+    if (
+        rows[0].get("source_mcp") != str(source_mcp)
+        or current_on_disk != names
+        or current_source != names
+    ):
+        raise R2Error("CATALOG", "fresh source/config catalogs differ from retained catalog")
+    scratch = production_existing_scratch(str(rows[0].get("scratch")))
+    ctx = production_context(root, names, scratch)
+    specs = production_specs(names, schema_rows, ctx)
+    if rows[0].get("tool_schema_sha256") != digest(schema_rows):
+        raise R2Error("SCHEMA", "run_start tool schema digest differs")
+    first, repeats, visual_record, run_end = production_validate_sequence(
+        root, rows, names, specs, ctx
+    )
+    calls = rows[1:-2]
+    production_validate_journal(root, calls)
+    report = production_validate_report(root, names, calls, visual_record, run_end)
+    result = {
+        "status": "ok",
+        "attempt_id": root.name,
+        "tools": len(first),
+        "threshold_repeats": len(repeats),
+        "report_sha256": hashlib.sha256(report).hexdigest(),
+        "dispatch_manifest_sha256": hashlib.sha256(
+            production_read_owned(root, "dispatch-manifest.ndjson", limit=128 * 1024 * 1024)
+        ).hexdigest(),
+        "journal_sha256": hashlib.sha256(
+            production_read_owned(root, "events.ndjson", limit=128 * 1024 * 1024)
+        ).hexdigest(),
+    }
+    if args.active_audit:
+        if production_read_owned(root, "dispatch-validation.json") != cbytes(result) + b"\n":
+            raise R2Error("MANIFEST", "stored dispatch-validation bytes differ")
+        _, evidence_sha = production_validate_evidence(root, rows)
+        summary = production_summary_value(root, result, report, rows, evidence_sha)
+        production_active_audit(Path(args.active_audit), report, rows, summary)
+    if args.output:
+        if args.active_audit:
+            raise R2Error("OUTPUT", "active-audit validation cannot create output")
+    return result
+
+
+def production_validate(
+    args: argparse.Namespace,
+    *,
+    snapshots: ProductionSnapshotSet | None = None,
+) -> dict[str, Any]:
+    global _PRODUCTION_SNAPSHOTS
+    root = production_root(args.root)
+    owned = snapshots if snapshots is not None else ProductionSnapshotSet(root)
+    if owned.root != root:
+        raise R2Error("INPUT", "snapshot-set root differs")
+    previous = _PRODUCTION_SNAPSHOTS
+    _PRODUCTION_SNAPSHOTS = owned
+    try:
+        result = _production_validate_snapshot(args)
+        owned.recheck_all()
+        if args.output:
+            create_owned(root, args.output, cbytes(result) + b"\n")
+        return result
+    finally:
+        _PRODUCTION_SNAPSHOTS = previous
+
+def production_atomic_publish(
+    root: Path,
+    name: str,
+    data: bytes,
+    *,
+    hook: Any = None,
+) -> bytes:
+    root = Path(os.path.abspath(root))
+    if (
+        Path(os.path.realpath(root)) != root
+        or Path(name).name != name
+        or name in {"", ".", ".."}
+        or not data
+    ):
+        raise R2Error("OUTPUT", "unsafe atomic publication input")
+    root_before = os.lstat(root)
+    root_binding = (root_before.st_dev, root_before.st_ino)
+    if (
+        stat.S_ISLNK(root_before.st_mode)
+        or not stat.S_ISDIR(root_before.st_mode)
+        or root_before.st_uid != os.getuid()
+        or stat.S_IMODE(root_before.st_mode) != 0o700
+    ):
+        raise R2Error("OUTPUT", "unsafe atomic publication parent")
+    temporary = f".{name}.{uuid.uuid4().hex}.tmp"
+    directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    temporary_fd = -1
+    temporary_exists = False
+
+    def parent_state(stage: str, expected: os.stat_result | None = None) -> os.stat_result:
+        opened = os.fstat(directory_fd)
+        current = os.lstat(root)
+        if (
+            (opened.st_dev, opened.st_ino) != root_binding
+            or production_stat_identity(opened) != production_stat_identity(current)
+            or expected is not None
+            and production_stat_identity(opened) != production_stat_identity(expected)
+        ):
+            raise R2Error("OUTPUT", f"atomic parent changed {stage}")
+        return opened
+
+    try:
+        parent_state("while opening", root_before)
+        try:
+            os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise R2Error("OUTPUT", f"atomic target already exists: {name}")
+        temporary_fd = os.open(
+            temporary,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        temporary_exists = True
+        view = memoryview(data)
+        while view:
+            view = view[os.write(temporary_fd, view):]
+        os.fsync(temporary_fd)
+        temporary_info = os.fstat(temporary_fd)
+        if (
+            not stat.S_ISREG(temporary_info.st_mode)
+            or temporary_info.st_uid != os.getuid()
+            or stat.S_IMODE(temporary_info.st_mode) != 0o600
+            or temporary_info.st_nlink != 1
+            or temporary_info.st_size != len(data)
+            or production_stat_identity(
+                os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
+            ) != production_stat_identity(temporary_info)
+        ):
+            raise R2Error("OUTPUT", "atomic temporary metadata differs")
+        if hook is not None:
+            hook("before_link")
+        parent_state("before link")
+        os.link(
+            temporary,
+            name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        os.unlink(temporary, dir_fd=directory_fd)
+        temporary_exists = False
+        os.fsync(directory_fd)
+        parent_after_publish = parent_state("after link")
+        if hook is not None:
+            hook("before_final_validation")
+        parent_state("before final validation", parent_after_publish)
+        final_fd = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        try:
+            final_before = os.fstat(final_fd)
+            if (
+                (final_before.st_dev, final_before.st_ino)
+                != (temporary_info.st_dev, temporary_info.st_ino)
+                or not stat.S_ISREG(final_before.st_mode)
+                or final_before.st_uid != os.getuid()
+                or stat.S_IMODE(final_before.st_mode) != 0o600
+                or final_before.st_nlink != 1
+                or final_before.st_size != len(data)
+            ):
+                raise R2Error("OUTPUT", "atomic published metadata differs")
+            chunks: list[bytes] = []
+            remaining = final_before.st_size
+            while remaining:
+                chunk = os.read(final_fd, min(1_048_576, remaining))
+                if not chunk:
+                    raise R2Error("OUTPUT", "atomic published file shrank")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(final_fd, 1):
+                raise R2Error("OUTPUT", "atomic published file grew")
+            published = b"".join(chunks)
+            if (
+                published != data
+                or production_stat_identity(os.fstat(final_fd))
+                != production_stat_identity(final_before)
+                or production_stat_identity(
+                    os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                ) != production_stat_identity(final_before)
+            ):
+                raise R2Error("OUTPUT", "atomic published bytes or identity differ")
+        finally:
+            os.close(final_fd)
+        parent_state("after final validation", parent_after_publish)
+        return published
+    finally:
+        if temporary_exists:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        if temporary_fd >= 0:
+            os.close(temporary_fd)
+        os.close(directory_fd)
+
+
+def production_finalize(args: argparse.Namespace) -> dict[str, Any]:
+    global _PRODUCTION_SNAPSHOTS
+    root = production_root(args.root)
+    if os.path.lexists(root / "evidence-manifest.json"):
+        raise R2Error("OUTPUT", "evidence manifest target already exists")
+    snapshots = ProductionSnapshotSet(root)
+    previous = _PRODUCTION_SNAPSHOTS
+    _PRODUCTION_SNAPSHOTS = snapshots
+    try:
+        validation = production_validate(argparse.Namespace(
+            root=str(root), config=args.config, active_audit=None, output=None,
+        ), snapshots=snapshots)
+        stored_validation = production_read_owned(root, "dispatch-validation.json")
+        if stored_validation != cbytes(validation) + b"\n":
+            raise R2Error("EVIDENCE", "dispatch validation bytes differ from no-active validation")
+        rows = production_manifest_rows(root)
+        allowed = BASE_EVIDENCE | production_dynamic_artifacts(rows)
+        if snapshots.names() != allowed:
+            raise R2Error("EVIDENCE", "attempt-root allowlist differs before finalization")
+        files: list[dict[str, Any]] = []
+        for name in sorted(allowed):
+            data = production_read_owned(root, name)
+            files.append({
+                "path": name,
+                "bytes": len(data),
+                "mode": "0600",
+                "sha256": hashlib.sha256(data).hexdigest(),
+            })
+        report = production_read_owned(root, "r2-report.md")
+        journal = production_read_owned(root, "events.ndjson", limit=128 * 1024 * 1024)
+        dispatch = production_read_owned(root, "dispatch-manifest.ndjson", limit=128 * 1024 * 1024)
+        names = production_catalog(root, "direct-catalog.json")
+        value = {
+            "version": 1,
+            "attempt_id": root.name,
+            "source_pin": SOURCE_PIN,
+            "catalog_count": len(names),
+            "timing_semantics": "controller_dispatch_wall_ms; not pure server compute",
+            "report_sha256": hashlib.sha256(report).hexdigest(),
+            "journal_sha256": hashlib.sha256(journal).hexdigest(),
+            "dispatch_manifest_sha256": hashlib.sha256(dispatch).hexdigest(),
+            "files": files,
+        }
+        final_bytes = cbytes(value) + b"\n"
+        snapshots.recheck_all()
+        if production_atomic_publish(root, "evidence-manifest.json", final_bytes) != final_bytes:
+            raise R2Error("EVIDENCE", "published evidence manifest bytes differ")
+        return value
+    finally:
+        _PRODUCTION_SNAPSHOTS = previous
+
+
+def production_summary(args: argparse.Namespace) -> dict[str, Any]:
+    global _PRODUCTION_SNAPSHOTS
+    root = production_root(args.root)
+    snapshots = ProductionSnapshotSet(root)
+    previous = _PRODUCTION_SNAPSHOTS
+    _PRODUCTION_SNAPSHOTS = snapshots
+    try:
+        validation = production_validate(argparse.Namespace(
+            root=str(root), config=args.config, active_audit=None, output=None,
+        ), snapshots=snapshots)
+        if production_read_owned(root, "dispatch-validation.json") != cbytes(validation) + b"\n":
+            raise R2Error("MANIFEST", "stored dispatch-validation bytes differ")
+        rows = production_manifest_rows(root)
+        report = production_read_owned(root, "r2-report.md")
+        _, evidence_sha = production_validate_evidence(root, rows)
+        result = production_summary_value(root, validation, report, rows, evidence_sha)
+        snapshots.recheck_all()
+        return result
+    finally:
+        _PRODUCTION_SNAPSHOTS = previous
+
+def production_start_events() -> list[dict[str, object]]:
+    return [start(TASK_ID), start(STAGE_ID)]
+
+
+def production_internal_error(exc: Exception) -> str:
+    message = str(exc).replace("\n", " ")[:2_000]
+    return f"ERROR[INTERNAL]: {type(exc).__name__}: {message}"
+
+
+def production_probe() -> None:
+    if not __debug__:
+        raise SystemExit("STOP: probe requires assertions; unset PYTHONOPTIMIZE")
+    positive = 0
+    negative = 0
+
+    # `accepted` counts positive controls. Membership rule: the function under
+    # test is a validator that also has at least one paired `rejected` lane
+    # driving the same function with tampered input. The positive control proves
+    # those negative lanes are not passing vacuously -- a validator that rejects
+    # everything would fail here. It is deliberately NOT "every unconditional
+    # production entry call": non-validating emitters such as
+    # production_close_deviation have no accept/reject semantics and therefore no
+    # meaningful positive result, so they are verified instead by asserting their
+    # emitted events directly inside the negative lanes that call them.
+    def accepted(label: str, function: Any) -> None:
+        nonlocal positive
+        try:
+            function()
+        except (AssertionError, OSError, RuntimeError, ValueError, R2Error) as exc:
+            raise AssertionError(f"positive probe failed: {label}: {exc}") from exc
+        positive += 1
+
+    # Negative lanes routed through this helper name the rejection classes the
+    # production code raises, so a TypeError or NameError introduced by a refactor
+    # surfaces as a probe crash instead of silently counting as a passing rejection.
+    # The remaining inline `negative += 1` lanes are not covered by that property and
+    # instead assert over the observed failure evidence directly.
+    def rejected(label: str, function: Any) -> None:
+        nonlocal negative
+        try:
+            function()
+        except (AssertionError, OSError, RuntimeError, ValueError, R2Error):
+            negative += 1
+            return
+        raise AssertionError(f"negative probe passed: {label}")
+
+    readonly = {
+        "name": "future_summary",
+        "annotations": {"readOnlyHint": True},
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    }
+    assert catalog_lane(readonly) == "future_readonly_empty_smoke"
+    content_only = {
+        "content": [{"type": "text", "text": "ok"}],
+        "isError": False,
+        "structuredContent": None,
+    }
+    assert accept_future_readonly_smoke(content_only) == "future_readonly_empty_smoke"
+    assert THRESHOLD_MS.get("execute_blender_code") is None
+    assert THRESHOLD_MS.get("execute_blender_code_for_cli") is None
+    assert MODEL_BODY_LINES == 368 and MODEL_BODY_SHA256.startswith("534f38")
+    assert CLI_BODY_LINES == 33 and CLI_BODY_SHA256.startswith("c358ad")
+    assert production_internal_error(KeyError("probe")).startswith(
+        "ERROR[INTERNAL]: KeyError:"
+    )
+    assert "\n" not in production_internal_error(RuntimeError("a\nb"))
+
+    raw_error = b'{"id":7,"error":{"code":-1,"message":"exact"}}\n'
+    protocol = AppProtocolFailure("mcpServerStatus/list", {"code": -1}, raw_error)
+    assert protocol.raw == raw_error
+    raw_sha = hashlib.sha256(raw_error).hexdigest()
+    evidence_error = AppEvidenceError(
+        "retained", raw_sha, "app-server-raw-transcript.bin", False
+    )
+    assert evidence_error.response_sha256 == raw_sha
+    assert evidence_error.identity_kind == "app-server-raw-transcript.bin"
+    assert production_issue_ids(evidence_error) == ["MODEL-PLAN-07"]
+    oversize_error = AppEvidenceError(
+        "retained", raw_sha, "app-server-raw-transcript.bin", True
+    )
+    assert production_issue_ids(oversize_error) == ["MODEL-PLAN-07", "MODEL-RUN-08"]
+    future_failure = ProductionCallFailure(
+        {"tool": "future_summary", "dispatch_error": "x", "acceptance_error": None},
+        {"event_id": "future"},
+        ("MODEL-PLAN-07",),
+    )
+    known_failure = ProductionCallFailure(
+        {"tool": "known", "dispatch_error": "x", "acceptance_error": None},
+        {"event_id": "known"},
+        ("MODEL-PLAN-05",),
+    )
+    assert production_issue_ids(future_failure) == ["MODEL-PLAN-07"]
+    assert production_issue_ids(known_failure) == ["MODEL-PLAN-05"]
+    assert KNOWN_ISSUES["execute_blender_code"] == ("MODEL-RUN-01", "MODEL-PLAN-04")
+    assert KNOWN_ISSUES["execute_blender_code_for_cli"] == ("MODEL-RUN-06",)
+    assert KNOWN_ISSUES["get_python_api_docs"] == ("MODEL-RUN-07",)
+    assert KNOWN_ISSUES["get_screenshot_of_window_as_image"] == ("MODEL-RUN-08",)
+    assert KNOWN_ISSUES["render_thumbnail_to_path"] == (
+        "MODEL-RUN-09", "MODEL-PLAN-08", "MODEL-PLAN-09",
+    )
+
+    def app_failure(
+        payload: bytes,
+        *,
+        close_writer: bool = True,
+        timeout_seconds: float = 0.1,
+    ) -> AppProtocolFailure:
+        read_fd, write_pipe = os.pipe()
+        stdin = tempfile.TemporaryFile()
+        stdout = os.fdopen(read_fd, "rb", buffering=0)
+        selector = selectors.DefaultSelector()
+        try:
+            os.set_blocking(read_fd, False)
+            selector.register(stdout, selectors.EVENT_READ)
+            def feed() -> None:
+                view = memoryview(payload)
+                while view:
+                    view = view[os.write(write_pipe, view):]
+                if close_writer:
+                    os.close(write_pipe)
+
+            feeder = threading.Thread(target=feed)
+            feeder.start()
+            process = type("ProbeProcess", (), {"stdin": stdin, "stdout": stdout})()
+            observed_lines: list[bytes] = []
+            observed_total = [0]
+            try:
+                production_app_request(
+                    process,
+                    selector,
+                    bytearray(),
+                    observed_lines,
+                    observed_total,
+                    7,
+                    "probe",
+                    {},
+                    timeout_seconds=timeout_seconds,
+                )
+            except AppProtocolFailure as exc:
+                return exc
+            raise AssertionError("App protocol negative was accepted")
+        finally:
+            selector.close()
+            stdout.close()
+            stdin.close()
+            if not close_writer:
+                os.close(write_pipe)
+            feeder.join()
+
+    app_raw = app_failure(raw_error)
+    assert app_raw.raw == raw_error and hashlib.sha256(app_raw.raw).hexdigest() == raw_sha
+    negative += 1
+    wrong_id = b'{"id":8,"result":{}}\n'
+    assert app_failure(wrong_id).raw == wrong_id
+    negative += 1
+    boolean_id = b'{"id":true,"result":{}}\n'
+    assert app_failure(boolean_id).raw_lines == (boolean_id,)
+    negative += 1
+    observed_sequence = [
+        b'{"id":8,"result":{}}\n',
+        b'{"method":"notice","params":{}}\n',
+        raw_error,
+    ]
+    ordered_error = app_failure(b"".join(observed_sequence))
+    assert ordered_error.raw_lines == tuple(observed_sequence)
+    negative += 1
+    flood = wrong_id * 10_000 + b'{"id":7,"result":[]}\n'
+    read_fd, write_pipe = os.pipe()
+    stdin = tempfile.TemporaryFile()
+    stdout = os.fdopen(read_fd, "rb", buffering=0)
+    selector = selectors.DefaultSelector()
+    try:
+        os.set_blocking(read_fd, False)
+        selector.register(stdout, selectors.EVENT_READ)
+        process = type("FloodProcess", (), {"stdin": stdin, "stdout": stdout})()
+        flood_lines: list[bytes] = []
+        flood_total = [0]
+        started = time.monotonic()
+        try:
+            production_app_request(
+                process,
+                selector,
+                bytearray(flood),
+                flood_lines,
+                flood_total,
+                7,
+                "flood-probe",
+                {},
+                timeout_seconds=0.01,
+            )
+        except AppProtocolFailure as exc:
+            elapsed = time.monotonic() - started
+            assert exc.error.get("timeout") is True
+            assert b"".join(exc.raw_lines) == flood
+            assert exc.observed_bytes == len(flood)
+            assert elapsed < 0.2
+            negative += 1
+        else:
+            raise AssertionError("small-line flood bypassed total deadline")
+    finally:
+        selector.close()
+        stdout.close()
+        stdin.close()
+        os.close(write_pipe)
+    partial = b'{"id":7,"result":'
+    partial_error = app_failure(partial, close_writer=False, timeout_seconds=0.01)
+    assert partial_error.raw == partial and partial_error.error.get("timeout") is True
+    negative += 1
+    oversize_raw = b"x" * (1_048_576 + 1)
+    oversize = app_failure(oversize_raw)
+    assert len(oversize.raw) <= 1_048_577 and oversize.error.get("oversize") is True
+    negative += 1
+
+    def fake_app_catalog(code: str, root: Path) -> tuple[list[str], list[str]]:
+        original_popen = subprocess.Popen
+
+        def launch(_: Any, **kwargs: Any) -> Any:
+            assert kwargs.get("stderr") == subprocess.PIPE
+            return original_popen([sys.executable, "-c", code], **kwargs)
+
+        subprocess.Popen = launch  # type: ignore[assignment]
+        try:
+            return production_app_catalogs(Path("/fake/codex"), root.parent, root)
+        finally:
+            subprocess.Popen = original_popen
+
+    valid_app_code = (
+        "import json,sys,time\n"
+        "for _ in range(3):\n"
+        " request=json.loads(sys.stdin.buffer.readline())\n"
+        " method=request['method']\n"
+        " if method=='initialize': result={}\n"
+        " elif method=='config/read': result={'config':{'mcp_servers':"
+        "{'blender':{'enabled_tools':['probe']}}}}\n"
+        " else: result={'data':[{'name':'blender','tools':{'probe':{}}}],"
+        "'nextCursor':None}\n"
+        " sys.stdout.write(json.dumps({'id':request['id'],'result':result})+'\\n')\n"
+        " sys.stdout.flush()\n"
+        "time.sleep(5)\n"
+    )
+    stderr_flood_code = (
+        "import os\n"
+        "remaining=20_000_000\n"
+        "chunk=b'x'*65536\n"
+        "while remaining:\n"
+        " try: written=os.write(2,chunk[:min(len(chunk),remaining)])\n"
+        " except BrokenPipeError: break\n"
+        " remaining-=written\n"
+    )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        temporary_root = Path(os.path.realpath(temporary))
+        raw_root = temporary_root / "raw-failure"
+        raw_root.mkdir(mode=0o700)
+        raw_lines = [wrong_id, raw_error]
+        raw_transcript = b"".join(raw_lines)
+        raw_failure = AppProtocolFailure(
+            "mcpServerStatus/list",
+            {"code": -1},
+            raw_error,
+            raw_lines=raw_lines,
+            observed_bytes=len(raw_transcript),
+        )
+        try:
+            production_retain_app_failure(raw_root, raw_failure, b"stderr", 6, 1)
+        except AppEvidenceError as exc:
+            transcript = production_read_owned(
+                raw_root, "app-server-raw-transcript.bin"
+            )
+            evidence_value = strict_json(
+                production_read_owned(raw_root, "app-server-failure.json"),
+                "raw failure evidence",
+            )
+            assert isinstance(evidence_value, dict)
+            assert transcript == raw_transcript
+            assert exc.identity_kind == "app-server-raw-transcript.bin"
+            assert exc.response_sha256 == hashlib.sha256(raw_transcript).hexdigest()
+            assert evidence_value["raw_response_sha256"] == exc.response_sha256
+            negative += 1
+        else:
+            raise AssertionError("raw App failure did not bind retained transcript")
+
+        silent_root = temporary_root / "silent-app"
+        silent_root.mkdir(mode=0o700)
+        assert fake_app_catalog(valid_app_code, silent_root) == (["probe"], ["probe"])
+        assert list(silent_root.iterdir()) == []
+
+        cap_root = temporary_root / "stderr-cap"
+        cap_root.mkdir(mode=0o700)
+        started = time.monotonic()
+        try:
+            fake_app_catalog(stderr_flood_code, cap_root)
+        except AppEvidenceError as exc:
+            elapsed = time.monotonic() - started
+            evidence_value = strict_json(
+                production_read_owned(cap_root, "app-server-failure.json"),
+                "stderr cap evidence",
+            )
+            assert isinstance(evidence_value, dict)
+            assert len(production_read_owned(cap_root, "app-server.stderr")) == APP_STDERR_MAX
+            assert evidence_value["stderr_observed_bytes"] == APP_STDERR_MAX + 1
+            assert evidence_value["stderr_retained_bytes"] == APP_STDERR_MAX
+            assert evidence_value["stderr_truncated"] is True
+            assert evidence_value["protocol_error"]["kind"] == "stderr_oversize"
+            assert evidence_value["process_exit"] not in (None, 0)
+            assert exc.identity_kind == "app-server-failure.json"
+            assert elapsed < 5
+            negative += 1
+        else:
+            raise AssertionError("20MB App stderr flood escaped bounded capture")
+
+        exit_root = temporary_root / "exit-17"
+        exit_root.mkdir(mode=0o700)
+        try:
+            fake_app_catalog("raise SystemExit(17)\n", exit_root)
+        except AppEvidenceError as exc:
+            exit_evidence = strict_json(
+                production_read_owned(exit_root, "app-server-failure.json"),
+                "exit-17 evidence",
+            )
+            assert isinstance(exit_evidence, dict)
+            assert exit_evidence["stderr_observed_bytes"] == 0
+            assert exit_evidence["process_exit"] == 17
+            assert exc.identity_kind == "app-server-failure.json"
+            negative += 1
+        else:
+            raise AssertionError("silent App exit 17 escaped failure evidence")
+
+        signal_root = temporary_root / "signal-exit"
+        signal_root.mkdir(mode=0o700)
+        signal_code = "import os,signal\nos.kill(os.getpid(),signal.SIGTERM)\n"
+        try:
+            fake_app_catalog(signal_code, signal_root)
+        except AppEvidenceError:
+            signal_evidence = strict_json(
+                production_read_owned(signal_root, "app-server-failure.json"),
+                "signal evidence",
+            )
+            assert isinstance(signal_evidence, dict)
+            assert signal_evidence["process_exit"] == -15
+            negative += 1
+        else:
+            raise AssertionError("signalled App exit escaped failure evidence")
+
+        partial_root = temporary_root / "partial-stderr-cap"
+        partial_root.mkdir(mode=0o700)
+        partial_bytes = b'{"id":1,"result":'
+        partial_code = (
+            "import os,time\n"
+            f"os.write(1,{partial_bytes!r})\n"
+            "time.sleep(.05)\n"
+            + stderr_flood_code
+        )
+        try:
+            fake_app_catalog(partial_code, partial_root)
+        except AppEvidenceError as exc:
+            assert production_read_owned(
+                partial_root, "app-server-raw-transcript.bin"
+            ) == partial_bytes
+            partial_evidence = strict_json(
+                production_read_owned(partial_root, "app-server-failure.json"),
+                "partial stderr evidence",
+            )
+            assert isinstance(partial_evidence, dict)
+            assert partial_evidence["stderr_observed_bytes"] == APP_STDERR_MAX + 1
+            assert exc.identity_kind == "app-server-raw-transcript.bin"
+            assert exc.response_sha256 == hashlib.sha256(partial_bytes).hexdigest()
+            negative += 1
+        else:
+            raise AssertionError("partial stdout plus stderr cap escaped raw binding")
+
+        race_code = (
+            "import json,os,sys,time\n"
+            "request=json.loads(sys.stdin.buffer.readline())\n"
+            "os.write(1,(json.dumps({'id':request['id'],'result':{}})+'\\n').encode())\n"
+            "time.sleep(.05)\n"
+            + stderr_flood_code
+        )
+        race = subprocess.Popen(
+            [sys.executable, "-c", race_code],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        assert race.stdin is not None and race.stdout is not None and race.stderr is not None
+        os.set_blocking(race.stdout.fileno(), False)
+        os.set_blocking(race.stderr.fileno(), False)
+        race_selector = selectors.DefaultSelector()
+        race_selector.register(race.stdout, selectors.EVENT_READ)
+        race_stderr = bytearray()
+        race_stderr_observed = [0]
+        race_failure = threading.Event()
+        race_detail: dict[str, Any] = {}
+        race_thread = threading.Thread(
+            target=production_drain_app_stderr,
+            args=(
+                race,
+                race.stderr.fileno(),
+                race_stderr,
+                race_stderr_observed,
+                race_failure,
+                race_detail,
+            ),
+        )
+
+        class CountingWriter:
+            def __init__(self, stream: Any) -> None:
+                self.stream = stream
+                self.written = 0
+
+            def write(self, data: Any) -> int:
+                count = self.stream.write(data)
+                self.written += count
+                return count
+
+            def flush(self) -> None:
+                self.stream.flush()
+
+        counted_stdin = CountingWriter(race.stdin)
+        race.stdin = counted_stdin  # type: ignore[assignment]
+        race_lines: list[bytes] = []
+        race_total = [0]
+        race_thread.start()
+        try:
+            first_result, first_raw = production_app_request(
+                race,
+                race_selector,
+                bytearray(),
+                race_lines,
+                race_total,
+                1,
+                "race-1",
+                {},
+                stderr_failure=race_failure,
+                stderr_failure_detail=race_detail,
+            )
+            assert first_result == {} and first_raw == b'{"id": 1, "result": {}}\n'
+            first_write_bytes = counted_stdin.written
+            assert race_failure.wait(timeout=5)
+            try:
+                production_app_request(
+                    race,
+                    race_selector,
+                    bytearray(),
+                    race_lines,
+                    race_total,
+                    2,
+                    "race-2",
+                    {},
+                    stderr_failure=race_failure,
+                    stderr_failure_detail=race_detail,
+                )
+            except AppProtocolFailure as exc:
+                assert exc.error["kind"] == "stderr_oversize"
+                assert exc.error["phase"] == "before_request_write"
+                assert b"".join(exc.raw_lines) == first_raw
+                assert counted_stdin.written == first_write_bytes
+                negative += 1
+            else:
+                raise AssertionError("stderr cap race allowed a second request write")
+        finally:
+            if race.poll() is None:
+                race.kill()
+            race.wait(timeout=5)
+            race_thread.join(timeout=5)
+            race_selector.close()
+            for stream in (counted_stdin.stream, race.stdout, race.stderr):
+                if not stream.closed:
+                    stream.close()
+        assert not race_thread.is_alive()
+        assert len(race_stderr) == APP_STDERR_MAX
+        assert race_stderr_observed[0] == APP_STDERR_MAX + 1
+
+        app_root = temporary_root / "app-failure"
+        app_root.mkdir(mode=0o700)
+        original_popen = subprocess.Popen
+
+        def fail_spawn(*_: Any, **__: Any) -> Any:
+            raise OSError("injected spawn failure")
+
+        subprocess.Popen = fail_spawn  # type: ignore[assignment]
+        try:
+            production_app_catalogs(Path("/missing/codex"), app_root.parent, app_root)
+        except AppEvidenceError as exc:
+            evidence_bytes = production_read_owned(app_root, "app-server-failure.json")
+            evidence_value = strict_json(evidence_bytes, "spawn failure evidence")
+            assert isinstance(evidence_value, dict)
+            assert exc.identity_kind == "app-server-failure.json"
+            assert exc.response_sha256 == hashlib.sha256(evidence_bytes).hexdigest()
+            assert evidence_value["raw_responses"] == []
+            assert evidence_value["process_exit"] is None
+            assert not os.path.lexists(app_root / "app-server-raw-transcript.bin")
+            negative += 1
+        else:
+            raise AssertionError("spawn failure did not retain exact evidence")
+        finally:
+            subprocess.Popen = original_popen
+
+    rejected("duplicate-catalog", lambda: production_names(["a", "a"], "probe"))
+    rejected("catalog-pipe-injection", lambda: production_names(["safe", "bad|row"], "probe"))
+    rejected("catalog-control-injection", lambda: production_names(["safe", "bad\nrow"], "probe"))
+    rejected("catalog-backtick-injection", lambda: production_names(["safe", "bad`row"], "probe"))
+    rejected("known-tool-removal", lambda: production_require_known_names(list(KNOWN[1:])))
+    rejected(
+        "area-enum-drift",
+        lambda: production_property_contract(
+            "get_screenshot_of_area_as_image",
+            {"area_ui_type": "VIEW_3D", "size_limit_in_bytes": 48_000},
+            {
+                "area_ui_type": {"type": "string", "enum": ["IMAGE_EDITOR"]},
+                "size_limit_in_bytes": {"type": "integer", "default": 0},
+            },
+        ),
+    )
+    rejected(
+        "size-limit-boolean-default",
+        lambda: production_property_contract(
+            "get_screenshot_of_area_as_image",
+            {"area_ui_type": "VIEW_3D", "size_limit_in_bytes": 48_000},
+            {
+                "area_ui_type": {"type": "string", "enum": ["VIEW_3D"]},
+                "size_limit_in_bytes": {"type": "integer", "default": False},
+            },
+        ),
+    )
+    rejected(
+        "context-boolean-default",
+        lambda: production_property_contract(
+            "search_api_docs",
+            {"query": "q", "max_results": 5, "context": 1},
+            {
+                "query": {"type": "string"},
+                "max_results": {"type": "integer", "default": 20},
+                "context": {"type": "integer", "default": False},
+            },
+        ),
+    )
+    rejected("properties-not-object", lambda: catalog_lane({
+        **readonly,
+        "inputSchema": {"type": "object", "properties": [], "required": []},
+    }))
+    rejected("unsafe-required-future", lambda: catalog_lane({
+        **readonly,
+        "inputSchema": {"type": "object", "properties": {}, "required": ["path"]},
+    }))
+    rejected("empty-future-content", lambda: accept_future_readonly_smoke({
+        "content": [], "isError": False, "structuredContent": None,
+    }))
+    mismatch = {
+        "content": [{"type": "text", "text": "{}"}],
+        "isError": False,
+        "structuredContent": {"status": "ok"},
+    }
+    rejected("structured-text-mismatch", lambda: structured_result(mismatch))
+    boolean_mismatch = {
+        "content": [{"type": "text", "text": '{"value":true}'}],
+        "isError": False,
+        "structuredContent": {"value": 1},
+    }
+    rejected(
+        "structured-text-boolean-number-mismatch",
+        lambda: structured_result(boolean_mismatch),
+    )
+
+    assert production_parse_ack("", "call", "0" * 64)[1] == "ack EOF"
+    negative += 1
+    wrong = cbytes({
+        "action": "failure_ack",
+        "event_id": "wrong",
+        "response_sha256": "0" * 64,
+        "first_hypothesis": "observed",
+    }).decode("utf-8") + "\n"
+    assert production_parse_ack(wrong, "call", "0" * 64)[1] == "ack identity differs"
+    negative += 1
+    for raw, expected_error in (
+        (b"", "ack EOF"),
+        (b"{}", "ack missing newline"),
+        (b"x" * (ACK_MAX_BYTES + 1), "ack oversize"),
+        (b"\xff\n", "ack is not UTF-8"),
+    ):
+        _, error, _ = production_bounded_ack_line(io.BytesIO(raw))
+        assert error == expected_error
+        negative += 1
+    visual_prompt = {
+        "action": "VISUAL_ACK_REQUIRED",
+        "attempt_id": "attempt-0001",
+        "artifacts": [{"path": "thumbnail.png", "sha256": "1" * 64}],
+    }
+    visual_expected = production_expected_visual_ack(visual_prompt)
+    visual_line = cbytes(visual_expected).decode("utf-8") + "\n"
+    assert production_parse_visual_ack(visual_line, visual_expected) == (visual_expected, None)
+    wrong_visual = {**visual_expected, "attempt_id": "attempt-0002"}
+    assert production_parse_visual_ack(
+        cbytes(wrong_visual).decode("utf-8") + "\n", visual_expected
+    )[1] == "visual ack identity/artifacts differ"
+    negative += 1
+    rejected(
+        "stale-active-binding-prefix",
+        lambda: production_binding_once(
+            ["R2_REPORT_SHA256: good", "R2_REPORT_SHA256: stale"],
+            "R2_REPORT_SHA256: good",
+        ),
+    )
+    visual_section = "\n".join([
+        VISUAL_HEADING,
+        "",
+        VISUAL_HEADER,
+        VISUAL_SEPARATOR,
+        "| thumbnail.png | " + "1" * 64 + " | pass |",
+    ])
+    assert len(production_visual_section(visual_section)) == 5
+    rejected(
+        "extra-active-visual-row",
+        lambda: production_visual_section(
+            visual_section + "\n| stale.png | " + "2" * 64 + " | pass |"
+        )
+        if production_visual_section(visual_section + "\n| stale.png | " + "2" * 64 + " | pass |")
+        == production_visual_section(visual_section)
+        else (_ for _ in ()).throw(R2Error("AUDIT", "visual section differs")),
+    )
+
+    first_a = {
+        "tool": "a", "classification": "first", "event_id": "r2-call-0001",
+        "repeat_of": None, "controller_dispatch_wall_ms": "6000",
+    }
+    first_b = {
+        "tool": "b", "classification": "first", "event_id": "r2-call-0002",
+        "repeat_of": None, "controller_dispatch_wall_ms": "1",
+    }
+    repeat_a = {
+        "tool": "a", "classification": "threshold_repeat", "event_id": "r2-repeat-0001",
+        "repeat_of": "r2-call-0001", "controller_dispatch_wall_ms": "1",
+    }
+    layout_specs = {
+        "a": ProductionSpec({}, "future_readonly_empty_smoke", 5_000.0, ()),
+        "b": ProductionSpec({}, "future_readonly_empty_smoke", 5_000.0, ()),
+    }
+    rejected(
+        "delayed-threshold-repeat",
+        lambda: production_check_immediate_layout(
+            [first_a, first_b, repeat_a], ["a", "b"], layout_specs
+        ),
+    )
+    execution_first = {
+        "tool": "execute_blender_code",
+        "classification": "first",
+        "event_id": "r2-call-0001",
+        "repeat_of": None,
+        "controller_dispatch_wall_ms": "999999",
+    }
+    execution_repeat = {
+        "tool": "execute_blender_code",
+        "classification": "threshold_repeat",
+        "event_id": "r2-repeat-0001",
+        "repeat_of": "r2-call-0001",
+        "controller_dispatch_wall_ms": "1",
+    }
+    rejected(
+        "execution-repeat",
+        lambda: production_check_immediate_layout(
+            [execution_first, execution_repeat],
+            ["execute_blender_code"],
+            {"execute_blender_code": ProductionSpec({}, "known_semantic", None, ())},
+        ),
+    )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        parent = Path(os.path.realpath(temporary)) / "final-retest-r2"
+        parent.mkdir(mode=0o700)
+        root = parent / "attempt-0001"
+        root.mkdir(mode=0o700)
+        scratch = root / "scratch"
+        scratch.mkdir(mode=0o700)
+        ctx = Context(
+            r2_root=root,
+            fixture=root / "fixture.blend",
+            library=root / "library_source.blend",
+            missing=root / "known-missing.png",
+            scratch=scratch,
+            thumb_arg=scratch / "attempt-0001-r2-call-0001-thumbnail.png",
+            view_arg=scratch / "attempt-0001-r2-call-0001-viewport.png",
+            thumb_copy=root / "thumbnail.png",
+            view_copy=root / "viewport.png",
+            model_code="",
+            cli_code="",
+        )
+        accepted("supported-blender-version", lambda: assert_blender_version([5, 2, 0]))
+        rejected("short-version-rehash", lambda: assert_blender_version([999]))
+        rejected("boolean-version-rehash", lambda: assert_blender_version([True, 2, 0]))
+        rejected(
+            "cli-raw-resolved-rehash",
+            lambda: assert_cli_path(
+                "//other.blend", str(ctx.fixture), ctx.fixture, ctx.fixture
+            ),
+        )
+        rejected(
+            "cli-datablock-context-rehash",
+            lambda: assert_cli_datablock_context({
+                "render_engine": "BLENDER_EEVEE", "scene_name": "", "workspaces": [],
+            }),
+        )
+        spec = ProductionSpec({}, "future_readonly_empty_smoke", 5_000.0, ())
+        duration = 1_000
+        valid = {
+            "record_type": "call",
+            "attempt_id": root.name,
+            "event_id": "r2-call-0001",
+            "ordinal": 1,
+            "tool": "future_summary",
+            "classification": "first",
+            "repeat_of": None,
+            "request": {},
+            "request_sha256": digest({}),
+            "response": content_only,
+            "response_sha256": digest(content_only),
+            "dispatch_start_ns": 10_000,
+            "dispatch_end_ns": 10_000 + duration,
+            "duration_ns": duration,
+            "controller_dispatch_wall_ms": str(Decimal(duration) / Decimal(1_000_000)),
+            "threshold_ms": 5_000.0,
+            "acceptance": {
+                "lane": "future_readonly_empty_smoke",
+                "result": "future_readonly_empty_smoke",
+            },
+            "observed_shape": production_shape(content_only),
+            "artifact": None,
+            "dispatch_error": None,
+            "acceptance_error": None,
+            "outcome": "pass",
+        }
+        accepted(
+            "valid-call-record",
+            lambda: production_validate_call(
+                root, valid, "future_summary", 1, "first", None, spec, ctx
+            ),
+        )
+        call_identity = {
+            "event_id": "r2-call-0001",
+            "scope": "call",
+            "stage": "final-retest-r2",
+            "attempt": 0,
+            "recovery_of": None,
+        }
+        client_events = [
+            start(TASK_ID), start(STAGE_ID), start(call_identity), end(call_identity),
+            end(STAGE_ID), end(TASK_ID),
+        ]
+        base_utc = datetime(2026, 8, 11, tzinfo=timezone.utc)
+        monotonic_values = [8_000, 9_000, 9_500, 11_500, 12_000, 13_000]
+        clock = "12345678-1234-4234-8234-123456789abc"
+        journal_rows = []
+        for sequence, (event, monotonic_ns) in enumerate(
+            zip(client_events, monotonic_values), 1
+        ):
+            journal_rows.append({
+                **event,
+                "clock_id": clock,
+                "recorded_at_utc": (
+                    base_utc + timedelta(microseconds=sequence)
+                ).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+                "monotonic_ns": monotonic_ns,
+                "sequence": sequence,
+            })
+
+        def replace_probe_file(path: Path, data: bytes) -> None:
+            fd = os.open(path, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+
+        journal_bytes = b"".join(cbytes(row) + b"\n" for row in journal_rows)
+        create_owned(root, "events.ndjson", journal_bytes)
+        accepted("valid-journal", lambda: production_validate_journal(root, [valid]))
+        tampered_journal = [dict(row) for row in journal_rows]
+        tampered_journal[2]["recorded_at_utc"] = "x"
+        replace_probe_file(
+            root / "events.ndjson",
+            b"".join(cbytes(row) + b"\n" for row in tampered_journal),
+        )
+        rejected("journal-invalid-utc-rehash", lambda: production_validate_journal(root, [valid]))
+        tampered_journal = [dict(row) for row in journal_rows]
+        tampered_journal[1]["monotonic_ns"] = 7_000
+        replace_probe_file(
+            root / "events.ndjson",
+            b"".join(cbytes(row) + b"\n" for row in tampered_journal),
+        )
+        rejected(
+            "journal-task-stage-clock-rehash",
+            lambda: production_validate_journal(root, [valid]),
+        )
+        for index, scope in ((0, "task"), (1, "stage"), (2, "call")):
+            tampered_journal = [dict(row) for row in journal_rows]
+            tampered_journal[index]["attempt"] = False
+            replace_probe_file(
+                root / "events.ndjson",
+                b"".join(cbytes(row) + b"\n" for row in tampered_journal),
+            )
+            rejected(
+                f"journal-boolean-{scope}-attempt-rehash",
+                lambda: production_validate_journal(root, [valid]),
+            )
+        replace_probe_file(root / "events.ndjson", journal_bytes)
+        bad = dict(valid)
+        bad["ordinal"] = True
+        rejected(
+            "boolean-ordinal-rehash",
+            lambda: production_validate_call(
+                root, bad, "future_summary", 1, "first", None, spec, ctx
+            ),
+        )
+        rejected("boolean-vector-rehash", lambda: finite_vector([True, 1.0, 2.0]))
+        future_png = PNG + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 1, 1) + b"F"
+        future_response = {
+            "content": [{
+                "type": "image",
+                "mimeType": "image/png",
+                "data": base64.b64encode(future_png).decode("ascii"),
+            }],
+            "isError": False,
+            "structuredContent": None,
+        }
+        assert accept_future_readonly_smoke(future_response) == "future_readonly_empty_smoke"
+        future_first = production_save_artifact(
+            "future_image", future_response, {}, ctx, 99, "first"
+        )
+        future_repeat = production_save_artifact(
+            "future_image", future_response, {}, ctx, 99, "threshold_repeat"
+        )
+        assert future_first is not None and future_first["path"] == "r2-future-0099.png"
+        assert future_repeat is not None and future_repeat["path"] == "r2-repeat-0099.png"
+        assert production_dynamic_artifacts([
+            {"record_type": "call", "classification": "first", "tool": "future_image",
+             "artifact": future_first},
+            {"record_type": "call", "classification": "threshold_repeat",
+             "tool": "future_image", "artifact": future_repeat},
+        ]) == {"r2-future-0099.png", "r2-repeat-0099.png"}
+        future_row = {
+            **valid,
+            "event_id": "r2-call-0099",
+            "ordinal": 99,
+            "tool": "future_image",
+            "response": future_response,
+            "response_sha256": digest(future_response),
+            "acceptance": {
+                "lane": "future_readonly_empty_smoke",
+                "result": "future_readonly_empty_smoke",
+            },
+            "observed_shape": production_shape(future_response),
+            "artifact": future_first,
+        }
+        for field in ("width", "height"):
+            bad_future = {**future_row, "artifact": {**future_first, field: True}}
+            rejected(
+                f"future-artifact-boolean-{field}-rehash",
+                lambda row=bad_future: production_validate_call(
+                    root, row, "future_image", 99, "first", None, spec, ctx
+                ),
+            )
+
+        bad = dict(valid)
+        bad["classification"] = "other"
+        rejected(
+            "classification-tamper",
+            lambda: production_validate_call(
+                root, bad, "future_summary", 1, "first", None, spec, ctx
+            ),
+        )
+        bad = dict(valid)
+        bad["request"] = {"tampered": True}
+        bad["request_sha256"] = digest(bad["request"])
+        rejected(
+            "request-tamper-rehash",
+            lambda: production_validate_call(
+                root, bad, "future_summary", 1, "first", None, spec, ctx
+            ),
+        )
+        bad = dict(valid)
+        bad_response = {
+            "content": [{"type": "text", "text": "tampered"}],
+            "isError": True,
+            "structuredContent": None,
+        }
+        bad["response"] = bad_response
+        bad["response_sha256"] = digest(bad_response)
+        bad["observed_shape"] = production_shape(bad_response)
+        rejected(
+            "response-tamper-rehash",
+            lambda: production_validate_call(
+                root, bad, "future_summary", 1, "first", None, spec, ctx
+            ),
+        )
+        bad = dict(valid)
+        bad["threshold_ms"] = None
+        rejected(
+            "threshold-null-tamper",
+            lambda: production_validate_call(
+                root, bad, "future_summary", 1, "first", None, spec, ctx
+            ),
+        )
+        bad = dict(valid)
+        bad["artifact"] = {
+            "path": "unexpected.png", "bytes": 1, "sha256": "0" * 64,
+            "width": 1, "height": 1,
+        }
+        rejected(
+            "artifact-tamper",
+            lambda: production_validate_call(
+                root, bad, "future_summary", 1, "first", None, spec, ctx
+            ),
+        )
+
+        png = PNG + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 1, 1)
+        create_owned(root, "source.png", png)
+        rejected(
+            "render-wrong-expected-path",
+            lambda: safe_png_source(root / "source.png", root / "other.png"),
+        )
+        render_bytes = PNG + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 320, 320) + b"A"
+        create_owned(scratch, ctx.thumb_arg.name, render_bytes)
+        create_owned(root, "thumbnail.png", render_bytes)
+        render_structured = {
+            "status": "ok",
+            "result": {"status": "ok", "filepath": str(ctx.thumb_arg)},
+        }
+        render_response = {
+            "content": [{"type": "text", "text": cbytes(render_structured).decode("utf-8")}],
+            "isError": False,
+            "structuredContent": render_structured,
+        }
+        render_args = {"output_path": str(ctx.thumb_arg)}
+        assert production_accept(
+            "render_thumbnail_to_path", render_response, render_args, ctx, replay=True
+        ) == "pass"
+        replacement = render_bytes[:-1] + b"B"
+        fd = os.open(ctx.thumb_copy, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.write(fd, replacement)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        attacker_rehash = hashlib.sha256(replacement).hexdigest()
+        assert attacker_rehash != hashlib.sha256(render_bytes).hexdigest()
+        rejected(
+            "render-copy-tamper-rehash",
+            lambda: production_accept(
+                "render_thumbnail_to_path", render_response, render_args, ctx, replay=True
+            ),
+        )
+        rejected(
+            "duplicate-json-key",
+            lambda: strict_json(b'{"a":1,"a":2}', "probe"),
+        )
+
+        create_owned(root, "metadata.bin", b"AAAA")
+        os.chmod(root / "metadata.bin", 0o640)
+        rejected(
+            "evidence-mode-change",
+            lambda: production_read_owned(root, "metadata.bin"),
+        )
+        os.chmod(root / "metadata.bin", 0o600)
+        os.link(root / "metadata.bin", root / "metadata-link.bin")
+        rejected(
+            "evidence-hardlink-change",
+            lambda: production_read_owned(root, "metadata.bin"),
+        )
+        os.unlink(root / "metadata-link.bin")
+        before_identity = production_stat_identity(os.lstat(root / "metadata.bin"))
+        fd = os.open(root / "metadata.bin", os.O_WRONLY | os.O_TRUNC)
+        try:
+            os.write(fd, b"BBBB")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        after_identity = production_stat_identity(os.lstat(root / "metadata.bin"))
+        assert before_identity != after_identity
+        negative += 1
+        os.unlink(root / "metadata.bin")
+
+        create_owned(root, "generation-a.bin", b"AAAA")
+        create_owned(root, "generation-b.bin", b"BBBB")
+        generation = ProductionSnapshotSet(root)
+        assert generation.read("generation-a.bin", limit=4) == b"AAAA"
+        replace_probe_file(root / "generation-a.bin", b"CCCC")
+        replace_probe_file(root / "generation-b.bin", b"DDDD")
+        assert generation.read("generation-b.bin", limit=4) == b"DDDD"
+        rejected("multi-file-generation-swap", generation.recheck_all)
+        os.unlink(root / "generation-a.bin")
+        os.unlink(root / "generation-b.bin")
+
+        atomic_root = root / "atomic"
+        atomic_root.mkdir(mode=0o700)
+        assert production_atomic_publish(atomic_root, "value.json", b"{}\n") == b"{}\n"
+        rejected(
+            "atomic-second-create",
+            lambda: production_atomic_publish(atomic_root, "value.json", b"{}\n"),
+        )
+
+        competing_root = root / "atomic-competing"
+        competing_root.mkdir(mode=0o700)
+        def competing_creator(phase: str) -> None:
+            if phase == "before_link":
+                create_owned(competing_root, "value.json", b"competitor\n")
+        rejected(
+            "atomic-competing-creator",
+            lambda: production_atomic_publish(
+                competing_root, "value.json", b"ours\n", hook=competing_creator
+            ),
+        )
+        assert production_read_path(competing_root / "value.json") == b"competitor\n"
+
+        def parent_replacement_probe(stage: str) -> None:
+            publish_root = root / f"atomic-parent-{stage}"
+            publish_root.mkdir(mode=0o700)
+            displaced = root / f"atomic-parent-{stage}-displaced"
+            def replace_parent(phase: str) -> None:
+                if phase == stage:
+                    os.rename(publish_root, displaced)
+                    publish_root.mkdir(mode=0o700)
+            rejected(
+                f"atomic-parent-replacement-{stage}",
+                lambda: production_atomic_publish(
+                    publish_root, "value.json", b"ours\n", hook=replace_parent
+                ),
+            )
+        parent_replacement_probe("before_link")
+        parent_replacement_probe("before_final_validation")
+
+        class FakeRaw:
+            def model_dump(self, **_: Any) -> dict[str, Any]:
+                return dict(content_only)
+
+        class FakeSession:
+            async def call_tool(self, name: str, arguments: dict[str, Any]) -> FakeRaw:
+                return FakeRaw()
+
+        class FailingManifest:
+            def append(self, value: object) -> None:
+                raise OSError("injected manifest append failure")
+
+        read_fd, write_pipe = os.pipe()
+        pending: dict[str, dict[str, object]] = {}
+        for event in production_start_events():
+            write_fd(write_pipe, event)
+        try:
+            asyncio.run(production_invoke(
+                FakeSession(),
+                FailingManifest(),
+                write_pipe,
+                root,
+                ctx,
+                1,
+                "future_summary",
+                spec,
+                "first",
+                None,
+                pending,
+            ))
+        except OSError:
+            pass
+        else:
+            raise AssertionError("manifest append failure did not escape")
+        assert pending.get("identity", {}).get("event_id") == "r2-call-0001"
+        production_close_deviation(write_pipe, pending["identity"])
+        os.close(write_pipe)
+        event_lines = os.read(read_fd, 1_000_000).splitlines()
+        os.close(read_fd)
+        event_values = [strict_json(line, "pending probe") for line in event_lines]
+        assert len(event_values) == 6
+        identities = [
+            (value["event_id"], value["kind"])
+            for value in event_values
+            if isinstance(value, dict)
+        ]
+        assert identities.count(("final-retest-r2", "start")) == 1
+        assert identities.count(("final-retest-r2-tools", "start")) == 1
+        assert identities.count(("r2-call-0001", "start")) == 1
+        assert identities.count(("r2-call-0001", "end")) == 1
+        assert identities.count(("final-retest-r2-tools", "end")) == 1
+        assert identities.count(("final-retest-r2", "end")) == 1
+        assert all(
+            value.get("outcome") == "deviation"
+            for value in event_values[3:]
+            if isinstance(value, dict)
+        )
+        negative += 1
+
+        # production_failure_ack and production_close_failure are emitters, not
+        # validators, so -- like production_close_deviation above -- they are
+        # verified by asserting their emitted events directly rather than through
+        # accepted()/rejected(). Both branches of the operator acknowledgement are
+        # covered: an accepted ack closes fail, an unusable ack falls back to the
+        # deviation closure.
+        class AckStdin:
+            def __init__(self, payload: bytes) -> None:
+                self.buffer = io.BytesIO(payload)
+
+        def drive_close_failure(ack: bytes) -> tuple[bool, list[Any], str]:
+            read_fd, write_pipe = os.pipe()
+            captured = io.StringIO()
+            saved_stdin, saved_stdout = sys.stdin, sys.stdout
+            sys.stdin, sys.stdout = AckStdin(ack), captured  # type: ignore[assignment]
+            try:
+                closed = production_close_failure(
+                    write_pipe,
+                    None,
+                    ["MODEL-RUN-01"],
+                    "b" * 64,
+                    "probe symptom",
+                )
+            finally:
+                sys.stdin, sys.stdout = saved_stdin, saved_stdout
+                os.close(write_pipe)
+            raw = os.read(read_fd, 1_000_000).splitlines()
+            os.close(read_fd)
+            return (
+                closed,
+                [strict_json(line, "close failure probe") for line in raw],
+                captured.getvalue(),
+            )
+
+        good_ack = cbytes({
+            "action": "failure_ack",
+            "event_id": STAGE_ID["event_id"],
+            "response_sha256": "b" * 64,
+            "first_hypothesis": "probe hypothesis",
+        }) + b"\n"
+        closed, values, prompt = drive_close_failure(good_ack)
+        assert closed is True
+        prompt_value = strict_json(prompt.strip().encode("utf-8"), "ack prompt")
+        assert isinstance(prompt_value, dict)
+        assert prompt_value["action"] == "FAILURE_ACK_REQUIRED"
+        assert prompt_value["event_id"] == STAGE_ID["event_id"]
+        assert prompt_value["response_sha256"] == "b" * 64
+        assert len(values) == 2
+        assert [value["event_id"] for value in values] == [
+            STAGE_ID["event_id"],
+            TASK_ID["event_id"],
+        ]
+        assert all(value["outcome"] == "fail" for value in values)
+        assert all(value["first_hypothesis"] == "probe hypothesis" for value in values)
+        assert all(value["symptom"] == "probe symptom" for value in values)
+        assert values[0]["issue_ids"] == ["MODEL-RUN-01"]
+        assert values[1]["issue_ids"] == ["MODEL-PLAN-05", "MODEL-RUN-01"]
+
+        for label, bad_ack in (
+            ("eof", b""),
+            ("wrong-identity", cbytes({
+                "action": "failure_ack",
+                "event_id": "not-the-stage",
+                "response_sha256": "b" * 64,
+                "first_hypothesis": "probe hypothesis",
+            }) + b"\n"),
+            ("oversize", b"{" + b"x" * (ACK_MAX_BYTES + 8) + b"\n"),
+        ):
+            closed, values, _ = drive_close_failure(bad_ack)
+            assert closed is False, label
+            assert len(values) == 2, label
+            assert all(value["outcome"] == "deviation" for value in values), label
+            assert all(value["issue_ids"] == ["MODEL-PLAN-05"] for value in values), label
+
+    with tempfile.TemporaryDirectory() as temporary:
+        base = Path(os.path.realpath(temporary))
+        parent = base / "final-retest-r2"
+        parent.mkdir(mode=0o700)
+        root = parent / "attempt-0001"
+        root.mkdir(mode=0o700)
+        scratch = base / "scratch"
+        scratch.mkdir(mode=0o700)
+        ctx = Context(
+            r2_root=root,
+            fixture=root / "fixture.blend",
+            library=root / "library_source.blend",
+            missing=root / "known-missing.png",
+            scratch=scratch,
+            thumb_arg=scratch / "attempt-0001-r2-call-0003-thumbnail.png",
+            view_arg=scratch / "attempt-0001-r2-call-0004-viewport.png",
+            thumb_copy=root / "thumbnail.png",
+            view_copy=root / "viewport.png",
+            model_code="",
+            cli_code="",
+        )
+        screenshot_png = PNG + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 1, 1) + b"S"
+        thumbnail_png = PNG + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 320, 320) + b"T"
+        viewport_png = PNG + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 480, 480) + b"V"
+
+        def image_response(data: bytes) -> dict[str, Any]:
+            return {
+                "content": [{
+                    "type": "image", "mimeType": "image/png",
+                    "data": base64.b64encode(data).decode("ascii"),
+                }],
+                "isError": False,
+                "structuredContent": None,
+            }
+
+        def text_response(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+            structured = (
+                {"status": "ok", "result": payload}
+                if name in GUI_BRIDGE
+                else payload
+            )
+            return {
+                "content": [{"type": "text", "text": cbytes(structured).decode("utf-8")}],
+                "isError": False,
+                "structuredContent": structured,
+            }
+
+        create_owned(root, "fixture.blend", b"F")
+        create_owned(root, "library_source.blend", b"L")
+        create_owned(scratch, ctx.thumb_arg.name, thumbnail_png)
+        create_owned(scratch, ctx.view_arg.name, viewport_png)
+        model_payload = {
+            "objects": sorted(OBJECTS),
+            "materials": sorted(MATERIALS),
+            "data": EXPECTED_DATA,
+            "collections": MEMBERSHIPS,
+            "scene_children": ["FinalRetestLamp"],
+            "parents": PARENTS,
+            "bounds_min": [-1.55, -1.55, 0.0],
+            "bounds_max": [2.4, 1.55, 3.05],
+            "engine": "BLENDER_EEVEE",
+            "resolution": [640, 640, 75],
+            "selected": ["Lamp_Shade"],
+            "active": "Lamp_Shade",
+            "camera": "Camera",
+            "sentinel": "official-blender-mcp-r2",
+            "socket_identifiers": {
+                "principled_metallic": "Metallic",
+                "background_color": "Color",
+                "background_strength": "Strength",
+            },
+            "metallic_readbacks": METALLIC_READBACKS,
+            "background_color_readback": [0.004, 0.006, 0.012, 1.0],
+            "background_strength_readback": 0.18,
+            "missing_path": str(ctx.missing),
+            "linked_library": str(ctx.library),
+            "filepath": "",
+            "is_saved": False,
+            "is_dirty": True,
+        }
+        cli_payload = {
+            "version": [5, 2, 0],
+            "filepath_raw": "//fixture.blend",
+            "filepath_resolved": str(ctx.fixture),
+            "objects": ["RetestFixtureCamera", "RetestFixtureLocal", "RetestLinkedSource"],
+            "images": [{
+                "name": "RetestKnownMissing",
+                "filepath_raw": "//known-missing.png",
+                "filepath_resolved": str(ctx.missing),
+                "fake_user": True,
+            }],
+            "libraries": [{
+                "filepath_raw": "//library_source.blend",
+                "filepath_resolved": str(ctx.library),
+            }],
+        }
+        gui_counts = {
+            "objects": 14, "materials": 5, "cameras": 1, "lights": 2,
+            "meshes": 11, "images": 1, "libraries": 1,
+        }
+        cli_counts = {
+            "objects": 3, "materials": 0, "meshes": 2, "cameras": 1,
+            "images": 1, "libraries": 1,
+        }
+        library_payload = {
+            "status": "ok",
+            "total_library_count": 1,
+            "direct_libraries": [{
+                "name": "library_source.blend",
+                "filepath": "//library_source.blend",
+                "linked_datablocks_count": 1,
+            }],
+            "indirect_libraries": [],
+        }
+        usage_payload = {
+            "status": "ok",
+            "usage_guesses": {
+                name: {"score": 50, "certainty": 50} for name in USAGES
+            },
+        }
+        object_rows = [{
+            "name": name,
+            "type": TYPES[name],
+            "data_name": DATA_NAMES[name],
+            "parent": PARENTS.get(name),
+            "selected": name == "Lamp_Shade",
+            "visible": True,
+            "hide_viewport": False,
+        } for name in sorted(OBJECTS)]
+        payloads: dict[str, dict[str, Any]] = {
+            "execute_blender_code": model_payload,
+            "execute_blender_code_for_cli": cli_payload,
+            "get_blendfile_summary_datablocks": {
+                "status": "ok", "datablock_counts": gui_counts,
+                "render_engine": "BLENDER_EEVEE", "scene_name": "Scene",
+                "active_workspace": "Layout",
+            },
+            "get_blendfile_summary_datablocks_for_cli": {
+                "status": "ok", "datablock_counts": cli_counts,
+                "render_engine": "BLENDER_EEVEE", "scene_name": "Scene",
+                "workspaces": ["Layout"],
+            },
+            "get_blendfile_summary_missing_files": {
+                "status": "ok", "total_checked": 1,
+                "missing_files": [{
+                    "id_type": "Image", "id_name": "RetestKnownMissingGui",
+                    "path": "//known-missing.png",
+                }],
+            },
+            "get_blendfile_summary_missing_files_for_cli": {
+                "status": "ok", "total_checked": 1,
+                "missing_files": [{
+                    "id_type": "Image", "id_name": "RetestKnownMissing",
+                    "path": "//known-missing.png",
+                }],
+            },
+            "get_blendfile_summary_of_linked_libraries": library_payload,
+            "get_blendfile_summary_of_linked_libraries_for_cli": library_payload,
+            "get_blendfile_summary_path_info": {
+                "status": "ok", "filepath": "", "is_saved": False,
+                "is_dirty": True, "age_seconds": None, "file_size_bytes": None,
+                "backups": None,
+            },
+            "get_blendfile_summary_path_info_for_cli": {
+                "status": "ok", "filepath": str(ctx.fixture), "is_saved": True,
+                "is_dirty": False, "age_seconds": 0.0,
+                "file_size_bytes": ctx.fixture.stat().st_size, "backups": [],
+            },
+            "get_blendfile_summary_usage_guess": usage_payload,
+            "get_blendfile_summary_usage_guess_for_cli": usage_payload,
+            "get_object_detail_summary": {
+                "status": "ok", "name": "Lamp_Shade", "type": "MESH",
+                "data_name": "Lamp_Shade_Mesh", "materials": ["Mat_Shade"],
+                "parent": "Lamp_Arm_Upper", "children": ["Lamp_Bulb"],
+                "collections": ["FinalRetestLamp"], "constraints": [],
+                "location": [0.0, 0.0, 0.0], "rotation": [0.0, 0.0, 0.0],
+                "scale": [1.0, 1.0, 1.0], "dimensions": [1.0, 1.0, 1.0],
+            },
+            "get_objects_summary": {
+                "status": "ok", "scene_name": "Scene", "active_workspace": "Layout",
+                "active_object": "Lamp_Shade", "object_mode": "OBJECT",
+                "camera_object": "Camera",
+                "collections": [{
+                    "name": "FinalRetestLamp", "objects": object_rows, "children": [],
+                }],
+            },
+            "get_python_api_docs": {
+                "kind": "exact", "found": True, "identifier": "bpy.types.NodeSocket",
+                "content": "NodeSocket docs", "examples": [],
+            },
+            "get_screenshot_of_window_as_json": {
+                "status": "ok", "workspace": "Layout", "scene": "Scene",
+                "window_width": 640, "window_height": 640,
+                "areas": [{"type": "VIEW_3D", "space": {"type": "VIEW_3D"}}],
+                "active_object": {
+                    "name": "Lamp_Shade", "type": "MESH", "mode": "OBJECT",
+                    "location": [0.0, 0.0, 0.0],
+                },
+                "selected_objects": [{"name": "Lamp_Shade", "type": "MESH"}],
+            },
+            "jump_to_tab_by_name": {"status": "ok", "workspace": "Layout"},
+            "jump_to_tab_by_space_type": {
+                "status": "ok", "workspace": "Layout", "space_type": "VIEW_3D",
+                "created": False,
+            },
+            "jump_to_view3d_object_by_name": {
+                "status": "ok", "object": "Lamp_Shade", "type": "MESH",
+                "message": None, "location": [0.0, 0.0, 0.0],
+            },
+            "jump_to_view3d_object_data_by_name": {
+                "status": "ok", "object": "Lamp_Shade", "data_name": "Lamp_Shade_Mesh",
+                "type": "MESH", "message": None, "location": [0.0, 0.0, 0.0],
+            },
+            "render_thumbnail_to_path": {
+                "status": "ok", "filepath": str(ctx.thumb_arg),
+            },
+            "render_viewport_to_path": {
+                "status": "ok", "filepath": str(ctx.view_arg),
+            },
+            "search_api_docs": {
+                "truncated": False,
+                "hits": [{
+                    "index": 0, "path": "api/bpy.ops.mesh.rst", "text": "mesh",
+                    "breadcrumb": "API", "score": 1,
+                }],
+            },
+            "search_manual_docs": {
+                "truncated": False,
+                "hits": [{
+                    "index": 0, "path": "manual/scene_layout/object/editing/parent.rst",
+                    "text": "parent", "breadcrumb": "Manual", "score": 1,
+                }],
+            },
+        }
+        names = list(KNOWN)
+        arguments = {name: {} for name in names}
+        arguments.update({
+            "execute_blender_code": {"code": ""},
+            "execute_blender_code_for_cli": {"blend_file": str(ctx.fixture), "code": ""},
+            **{
+                name: {"blend_file": str(ctx.fixture)}
+                for name in names if name.endswith("_for_cli")
+            },
+            "get_object_detail_summary": {"name": "Lamp_Shade"},
+            "get_python_api_docs": {"identifier": "bpy.types.NodeSocket"},
+            "get_screenshot_of_area_as_image": {
+                "area_ui_type": "VIEW_3D", "size_limit_in_bytes": 48_000,
+            },
+            "get_screenshot_of_window_as_image": {"size_limit_in_bytes": 48_000},
+            "jump_to_tab_by_name": {"name": "Layout"},
+            "jump_to_tab_by_space_type": {"space_type": "VIEW_3D", "allow_edits": False},
+            "jump_to_view3d_object_by_name": {"name": "Lamp_Shade", "allow_edits": False},
+            "jump_to_view3d_object_data_by_name": {
+                "name": "Lamp_Shade_Mesh", "allow_edits": False,
+            },
+            "render_thumbnail_to_path": {"output_path": str(ctx.thumb_arg)},
+            "render_viewport_to_path": {"output_path": str(ctx.view_arg)},
+            "search_api_docs": {
+                "query": "bpy.ops.mesh primitive_cylinder_add", "max_results": 5, "context": 1,
+            },
+            "search_manual_docs": {
+                "query": "parent inverse keep transform", "max_results": 5, "context": 1,
+            },
+        })
+        responses = {
+            name: (
+                image_response(screenshot_png)
+                if name in IMAGE_TOOLS
+                else text_response(name, payloads[name])
+            )
+            for name in names
+        }
+        bad_library = {**library_payload, "total_library_count": True}
+        rejected(
+            "library-boolean-total-rehash",
+            lambda: assert_libraries(bad_library, ctx),
+        )
+        bad_hits = {
+            **payloads["search_api_docs"],
+            "hits": [{**payloads["search_api_docs"]["hits"][0], "index": True}],
+        }
+        rejected(
+            "docs-boolean-index-rehash",
+            lambda: assert_hits(bad_hits, "api/"),
+        )
+        bad_model = {**model_payload, "bounds_min": [True, -1.55, 0.0]}
+        rejected(
+            "model-boolean-bound-rehash",
+            lambda: accept_known(
+                "execute_blender_code",
+                text_response("execute_blender_code", bad_model),
+                arguments["execute_blender_code"],
+                ctx,
+            ),
+        )
+        bad_path_info = {
+            **payloads["get_blendfile_summary_path_info_for_cli"],
+            "file_size_bytes": True,
+        }
+        rejected(
+            "path-info-boolean-file-size-rehash",
+            lambda: accept_known(
+                "get_blendfile_summary_path_info_for_cli",
+                text_response("get_blendfile_summary_path_info_for_cli", bad_path_info),
+                arguments["get_blendfile_summary_path_info_for_cli"],
+                ctx,
+            ),
+        )
+        specs = {
+            name: ProductionSpec(arguments[name], "known_semantic", THRESHOLD_MS.get(name), ())
+            for name in names
+        }
+        schema_rows = [{"name": name} for name in names]
+        calls: list[dict[str, Any]] = []
+        for ordinal, name in enumerate(names, 1):
+            artifact_value = production_save_artifact(
+                name, responses[name], arguments[name], ctx, ordinal, "first"
+            )
+            duration = 1_000
+            start_ns = 20_000 + ordinal * 10_000
+            calls.append({
+                "record_type": "call",
+                "attempt_id": root.name,
+                "event_id": f"r2-call-{ordinal:04d}",
+                "ordinal": ordinal,
+                "tool": name,
+                "classification": "first",
+                "repeat_of": None,
+                "request": arguments[name],
+                "request_sha256": digest(arguments[name]),
+                "response": responses[name],
+                "response_sha256": digest(responses[name]),
+                "dispatch_start_ns": start_ns,
+                "dispatch_end_ns": start_ns + duration,
+                "duration_ns": duration,
+                "controller_dispatch_wall_ms": str(Decimal(duration) / Decimal(1_000_000)),
+                "threshold_ms": THRESHOLD_MS.get(name),
+                "acceptance": {"lane": "known_semantic", "result": "pass"},
+                "observed_shape": production_shape(responses[name]),
+                "artifact": artifact_value,
+                "dispatch_error": None,
+                "acceptance_error": None,
+                "outcome": "pass",
+            })
+        docs_ordinal = names.index("search_api_docs") + 1
+        bad_docs_call = dict(calls[docs_ordinal - 1])
+        bad_docs_request = dict(bad_docs_call["request"])
+        bad_docs_request["context"] = True
+        bad_docs_call["request"] = bad_docs_request
+        bad_docs_call["request_sha256"] = digest(bad_docs_request)
+        rejected(
+            "request-boolean-context-rehash",
+            lambda: production_validate_call(
+                root,
+                bad_docs_call,
+                "search_api_docs",
+                docs_ordinal,
+                "first",
+                None,
+                specs["search_api_docs"],
+                ctx,
+            ),
+        )
+        visuals = production_visuals(calls)
+        prompt = production_visual_prompt(root, visuals)
+        acknowledgement = production_expected_visual_ack(prompt)
+        visual_record = {
+            "record_type": "visual_ack",
+            "attempt_id": root.name,
+            "prompt": prompt,
+            "prompt_sha256": digest(prompt),
+            "acknowledgement": acknowledgement,
+            "acknowledgement_sha256": digest(acknowledgement),
+            "visual_artifacts": visuals,
+            "outcome": "pass",
+        }
+        report = production_report(names, calls, visual_record)
+        run_start = {
+            "record_type": "run_start",
+            "attempt_id": root.name,
+            "source_pin": SOURCE_PIN,
+            "controller_sha256": "1" * 64,
+            "config_path": "/tmp/config.toml",
+            "source_mcp": "/tmp/mcp",
+            "catalog": names,
+            "catalog_sha256": digest(names),
+            "tool_schema_sha256": digest(schema_rows),
+            "scratch": str(scratch),
+            "timing": "controller_dispatch_wall_ms; not pure server compute",
+        }
+        run_end = {
+            "record_type": "run_end",
+            "attempt_id": root.name,
+            "outcome": "pass",
+            "first_call_count": len(names),
+            "threshold_repeat_count": 0,
+            "recoveries": 0,
+            "report_sha256": hashlib.sha256(report).hexdigest(),
+            "visual_artifacts": visuals,
+            "visual_ack_sha256": visual_record["acknowledgement_sha256"],
+        }
+        rows = [run_start, *calls, visual_record, run_end]
+        accepted(
+            "full-chain-sequence",
+            lambda: production_validate_sequence(root, rows, names, specs, ctx),
+        )
+        for field in ("threshold_repeat_count", "recoveries"):
+            boolean_end = {**run_end, field: True}
+            rejected(
+                f"run-end-boolean-{field}-rehash",
+                lambda end_row=boolean_end: production_validate_sequence(
+                    root, [run_start, *calls, visual_record, end_row], names, specs, ctx
+                ),
+            )
+
+        tampered_rows = [dict(row) for row in rows]
+        tampered_rows[0]["controller_sha256"] = "bad"
+        rejected(
+            "full-chain-controller-binding-rehash",
+            lambda: production_validate_sequence(root, tampered_rows, names, specs, ctx),
+        )
+        tampered_calls = [dict(row) for row in calls]
+        high_index = next(
+            index for index, row in enumerate(tampered_calls)
+            if specs[row["tool"]].threshold_ms is not None
+        )
+        tampered_calls[high_index]["duration_ns"] = 11_000_000_000
+        tampered_calls[high_index]["dispatch_end_ns"] = (
+            tampered_calls[high_index]["dispatch_start_ns"]
+            + tampered_calls[high_index]["duration_ns"]
+        )
+        tampered_calls[high_index]["controller_dispatch_wall_ms"] = "11000"
+        rejected(
+            "full-chain-missing-immediate-repeat-rehash",
+            lambda: production_validate_sequence(
+                root, [run_start, *tampered_calls, visual_record, run_end], names, specs, ctx
+            ),
+        )
+        bad_visual = dict(visual_record)
+        bad_ack = dict(acknowledgement)
+        bad_ack["artifacts"] = list(reversed(acknowledgement["artifacts"]))
+        bad_visual["acknowledgement"] = bad_ack
+        bad_visual["acknowledgement_sha256"] = digest(bad_ack)
+        bad_end = {**run_end, "visual_ack_sha256": digest(bad_ack)}
+        rejected(
+            "full-chain-visual-reorder-rehash",
+            lambda: production_validate_sequence(
+                root, [run_start, *calls, bad_visual, bad_end], names, specs, ctx
+            ),
+        )
+
+        create_owned(root, "dispatch-manifest.ndjson", b"".join(
+            cbytes(row) + b"\n" for row in rows
+        ))
+        create_owned(root, "r2-report.md", report)
+        evidence_sha = "2" * 64
+        active_lines = report.decode("utf-8").splitlines()
+        active_lines.extend([
+            "", "## Bindings", "",
+            f"R2_ATTEMPT_ID: {root.name}",
+            f"R2_CONTROLLER_SHA256: {run_start['controller_sha256']}",
+            f"R2_REPORT_SHA256: {hashlib.sha256(report).hexdigest()}",
+            "R2_DISPATCH_MANIFEST_SHA256: "
+            + hashlib.sha256(production_read_owned(root, "dispatch-manifest.ndjson")).hexdigest(),
+            f"R2_EVIDENCE_MANIFEST_SHA256: {evidence_sha}",
+            f"R2_VISUAL_RUN_END_SHA256: {digest(run_end)}",
+            f"R2_VISUAL_REPORT_SHA256: {hashlib.sha256(report).hexdigest()}",
+            f"R2_VISUAL_EVIDENCE_MANIFEST_SHA256: {evidence_sha}",
+            f"R2_VISUAL_ACK_SHA256: {visual_record['acknowledgement_sha256']}",
+        ])
+        create_owned(base, "active.md", ("\n".join(active_lines) + "\n").encode())
+        probe_summary = production_summary_value(
+            root,
+            {
+                "attempt_id": root.name,
+                "tools": len(names),
+                "threshold_repeats": 0,
+            },
+            report,
+            rows,
+            evidence_sha,
+        )
+        accepted(
+            "full-chain-active-audit",
+            lambda: production_active_audit(base / "active.md", report, rows, probe_summary),
+        )
+        stale_active = ("\n".join(active_lines) + "\nR2_REPORT_SHA256: stale\n").encode()
+        replace_probe_file(base / "active.md", stale_active)
+        rejected(
+            "full-chain-active-prefix-rehash",
+            lambda: production_active_audit(
+                base / "active.md", report, rows, probe_summary
+            ),
+        )
+        rejected(
+            "full-chain-report-tamper-rehash",
+            lambda: require(report + b"tampered\n" == production_report(names, calls, visual_record),
+                            "report replay accepted tamper"),
+        )
+
+        journal_clients = [start(TASK_ID), start(STAGE_ID)]
+        journal_monotonic = [10_000, 20_000]
+        for call in calls:
+            identity = {
+                "event_id": call["event_id"],
+                "scope": "call",
+                "stage": "final-retest-r2",
+                "attempt": 0,
+                "recovery_of": None,
+            }
+            journal_clients.extend([start(identity), end(identity)])
+            journal_monotonic.extend([
+                call["dispatch_start_ns"] - 1_000,
+                call["dispatch_end_ns"] + 1_000,
+            ])
+        journal_clients.extend([end(STAGE_ID), end(TASK_ID)])
+        journal_monotonic.extend([
+            calls[-1]["dispatch_end_ns"] + 10_000,
+            calls[-1]["dispatch_end_ns"] + 20_000,
+        ])
+        base_utc = datetime(2026, 8, 11, tzinfo=timezone.utc)
+        journal_rows = [
+            {
+                **event,
+                "clock_id": "12345678-1234-4234-8234-123456789abc",
+                "recorded_at_utc": (
+                    base_utc + timedelta(microseconds=sequence)
+                ).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+                "monotonic_ns": monotonic_ns,
+                "sequence": sequence,
+            }
+            for sequence, (event, monotonic_ns) in enumerate(
+                zip(journal_clients, journal_monotonic), 1
+            )
+        ]
+        create_owned(root, "events.ndjson", b"".join(
+            cbytes(row) + b"\n" for row in journal_rows
+        ))
+        accepted("full-chain-journal", lambda: production_validate_journal(root, calls))
+
+        for name in CATALOG_FILES:
+            create_owned(root, name, cbytes(names) + b"\n")
+        schema_bytes = cbytes(schema_rows) + b"\n"
+        catalog_bindings = {
+            "catalog_count": len(names),
+            "catalog_sha256": digest(names),
+            "catalogs": {
+                name: hashlib.sha256(cbytes(names) + b"\n").hexdigest()
+                for name in CATALOG_FILES
+            },
+            "tool_schema_sha256": digest(schema_rows),
+        }
+        placeholders = {
+            "r2_controller.py": b"x",
+            "fixture_setup.py": b"fixture\n",
+            "model_body.py": b"model\n",
+            "cli_body.py": b"cli\n",
+            "tool-schema.json": schema_bytes,
+            "catalog-bindings.json": cbytes(catalog_bindings) + b"\n",
+        }
+        for name, data in placeholders.items():
+            create_owned(root, name, data)
+        assert {path.name for path in root.iterdir()} == BASE_EVIDENCE - {
+            "dispatch-validation.json"
+        }
+
+        module = globals()
+        external_names = (
+            "production_controller_sha", "production_config", "production_git_pin",
+            "production_source_names", "production_context", "production_specs",
+        )
+        original_external = {name: module[name] for name in external_names}
+        module["production_controller_sha"] = lambda _root, expected=None: "1" * 64
+        module["production_config"] = lambda _path: ({}, names, Path("/tmp/mcp"))
+        module["production_git_pin"] = lambda _source: frozenset({"mcp/blmcp/server.py"})
+        module["production_source_names"] = lambda _source, _tracked=None: names
+        module["production_context"] = lambda _root, _names, _scratch: ctx
+        module["production_specs"] = lambda _names, _schema, _ctx: specs
+        validation_args = argparse.Namespace(
+            root=str(root), config="/tmp/config.toml", active_audit=None, output=None,
+        )
+        try:
+            validation = production_validate(validation_args)
+            assert validation["tools"] == len(KNOWN)
+            create_owned(root, "dispatch-validation.json", cbytes(validation) + b"\n")
+            assert {path.name for path in root.iterdir()} == BASE_EVIDENCE
+            evidence = production_finalize(argparse.Namespace(
+                root=str(root), config="/tmp/config.toml",
+            ))
+            assert production_validate_evidence(root, rows)[0] == evidence
+
+            evidence_bytes = production_read_owned(root, "evidence-manifest.json")
+            evidence_sha = hashlib.sha256(evidence_bytes).hexdigest()
+            active_lines = report.decode("utf-8").splitlines()
+            active_lines.extend([
+                "", "## Bindings", "",
+                f"R2_ATTEMPT_ID: {root.name}",
+                f"R2_CONTROLLER_SHA256: {run_start['controller_sha256']}",
+                f"R2_REPORT_SHA256: {hashlib.sha256(report).hexdigest()}",
+                "R2_DISPATCH_MANIFEST_SHA256: "
+                + hashlib.sha256(
+                    production_read_owned(root, "dispatch-manifest.ndjson")
+                ).hexdigest(),
+                f"R2_EVIDENCE_MANIFEST_SHA256: {evidence_sha}",
+                f"R2_VISUAL_RUN_END_SHA256: {digest(run_end)}",
+                f"R2_VISUAL_REPORT_SHA256: {hashlib.sha256(report).hexdigest()}",
+                f"R2_VISUAL_EVIDENCE_MANIFEST_SHA256: {evidence_sha}",
+                f"R2_VISUAL_ACK_SHA256: {visual_record['acknowledgement_sha256']}",
+            ])
+            active_bytes = ("\n".join(active_lines) + "\n").encode()
+            replace_probe_file(base / "active.md", active_bytes)
+            active_args = argparse.Namespace(
+                root=str(root), config="/tmp/config.toml",
+                active_audit=str(base / "active.md"), output=None,
+            )
+            assert production_validate(active_args) == validation
+
+            stale_controller = active_bytes.replace(
+                f"R2_CONTROLLER_SHA256: {run_start['controller_sha256']}".encode(),
+                b"R2_CONTROLLER_SHA256: " + b"0" * 64,
+            )
+            replace_probe_file(base / "active.md", stale_controller)
+            rejected(
+                "full-chain-active-controller-binding-rehash",
+                lambda: production_validate(active_args),
+            )
+            replace_probe_file(base / "active.md", active_bytes)
+
+            for field in ("version", "catalog_count"):
+                boolean_top = {**evidence, field: True}
+                replace_probe_file(
+                    root / "evidence-manifest.json", cbytes(boolean_top) + b"\n"
+                )
+                rejected(
+                    f"evidence-boolean-{field}-rehash",
+                    lambda: production_validate_evidence(root, rows),
+                )
+            bool_evidence = dict(evidence)
+            bool_files = [dict(item) for item in evidence["files"]]
+            next(item for item in bool_files if item["path"] == "r2_controller.py")[
+                "bytes"
+            ] = True
+            bool_evidence["files"] = bool_files
+            replace_probe_file(
+                root / "evidence-manifest.json", cbytes(bool_evidence) + b"\n"
+            )
+            rejected(
+                "evidence-boolean-bytes-rehash",
+                lambda: production_validate_evidence(root, rows),
+            )
+            replace_probe_file(root / "evidence-manifest.json", evidence_bytes)
+
+            tampered_report = report + b"tampered\n"
+            replace_probe_file(root / "r2-report.md", tampered_report)
+            tampered_evidence = {
+                **evidence,
+                "report_sha256": hashlib.sha256(tampered_report).hexdigest(),
+            }
+            tampered_files = [dict(item) for item in evidence["files"]]
+            report_entry = next(
+                item for item in tampered_files if item["path"] == "r2-report.md"
+            )
+            report_entry["bytes"] = len(tampered_report)
+            report_entry["sha256"] = hashlib.sha256(tampered_report).hexdigest()
+            tampered_evidence["files"] = tampered_files
+            replace_probe_file(
+                root / "evidence-manifest.json", cbytes(tampered_evidence) + b"\n"
+            )
+            assert production_validate_evidence(root, rows)[0] == tampered_evidence
+            tampered_end = {
+                **run_end,
+                "report_sha256": hashlib.sha256(tampered_report).hexdigest(),
+            }
+            rejected(
+                "full-chain-evidence-report-tamper-rehash",
+                lambda: production_validate_report(
+                    root, names, calls, visual_record, tampered_end
+                ),
+            )
+        finally:
+            module.update(original_external)
+
+    assert positive == 6
+    assert negative == 85
+    print("R2_PROTOCOL_R20_1_GREEN positive=6 negative=85")
+
+
+def parser() -> argparse.ArgumentParser:
+    value = argparse.ArgumentParser()
+    sub = value.add_subparsers(dest="command", required=True)
+    sub.add_parser("start-events")
+
+    command = sub.add_parser("run")
+    command.add_argument("--root", required=True)
+    command.add_argument("--scratch", required=True)
+    command.add_argument("--codex-bin", required=True)
+    command.add_argument("--config", required=True)
+    command.add_argument("--feature-root", required=True)
+    command.add_argument("--controller-sha256", required=True)
+    command.add_argument("--audit-fd", type=int, default=9)
+
+    command = sub.add_parser("validate")
+    command.add_argument("--root", required=True)
+    command.add_argument("--config", required=True)
+    command.add_argument("--active-audit")
+    command.add_argument("--output")
+
+    command = sub.add_parser("finalize")
+    command.add_argument("--root", required=True)
+    command.add_argument("--config", required=True)
+
+    command = sub.add_parser("summary")
+    command.add_argument("--root", required=True)
+    command.add_argument("--config", required=True)
+
+    sub.add_parser("probe")
+    return value
+
+
+def main() -> int:
+    try:
+        if sys.version_info[:2] != (3, 13):
+            raise R2Error("PYTHON", "controller requires uv-managed Python 3.13")
+        if not __debug__:
+            raise R2Error("PYTHON", "controller requires assertions; unset PYTHONOPTIMIZE")
+        args = parser().parse_args()
+        os.umask(0o077)
+        if args.command == "start-events":
+            for event in production_start_events():
+                print(cbytes(event).decode("utf-8"))
+            result = None
+        elif args.command == "run":
+            result = asyncio.run(production_run(args))
+        elif args.command == "validate":
+            result = production_validate(args)
+        elif args.command == "finalize":
+            result = production_finalize(args)
+        elif args.command == "summary":
+            result = production_summary(args)
+        else:
+            production_probe()
+            result = None
+        if result is not None:
+            print(cbytes(result).decode("utf-8"))
+        return 0
+    except (R2Error, AcceptanceError, OSError, subprocess.SubprocessError, ValueError) as exc:
+        category = exc.category if isinstance(exc, R2Error) else type(exc).__name__
+        print(f"ERROR[{category}]: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(production_internal_error(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+````
+<!-- R2_CONTROLLER_END -->
+
+The controller is authoritative for the exact per-tool arguments, response shapes,
+semantic predicates, timing brackets, immediate threshold repeats, safe-future lane,
+five-way catalog equality, journal replay, report bytes and evidence finalization. Do
+not reproduce those rules in an LLM-authored sidecar or hardcode the current catalog
+count. Both execution tools are unthresholded; all other thresholds come only from the
+controller. A first safe-future image is retained as `r2-future-NNNN.png`; every visual
+threshold repeat is retained as `r2-repeat-NNNN.png`.
+
+Run the following in the same persistent `/bin/bash` PTY after copying the allocation
+block's one printed `ATTEMPT_ROOT`. Its first lines arm that PTY: whether an interactive
+`/bin/bash -euo pipefail` honours errexit is unsettled here -- independent harnesses on
+this machine disagree and the difference is unexplained, so treat it as unverified -- and
+independently of it a failing `A`
+in `A && B` and a failed `${VAR:?}` expansion abort nothing, so the guards in this fence
+and in the three that continue it are made binding by an exiting `ERR` trap, by explicit
+`|| { ...; exit 1; }`, and by one guard per line rather than by shell options. A guard
+failure ends the PTY, which closes FD 9 through the recorder's `EXIT` trap and leaves the
+numbered attempt immutable and invalid, exactly as a failed dispatch does. It extracts the
+four marked fences from
+the generated native-`0600` `task-7-brief.md`, creates each attempt input exclusively,
+checks exact bytes, compiles in memory, runs Ruff without a cache and executes both
+controller probes. It does not use `py_compile` and must not create `__pycache__`:
+
+```bash
+# This fence and the three that continue it are hand-pasted into one persistent PTY, so
+# `set -e` cannot be the enforcement mechanism here. Whether an interactive shell ignores
+# errexit is unverified -- it was reported once and did not reproduce on two later
+# harnesses, and the disagreement is unexplained -- but the two load-bearing reasons stand
+# on their own and reproduced on every harness: `A && B` never aborts on a failing A even
+# under errexit or an exiting ERR trap, and a failed `${VAR:?}` expansion does not end an
+# interactive shell. Every guard below is therefore made binding by an ERR
+# trap that exits, by explicit `|| { ...; exit 1; }` where a trap cannot see the failure,
+# and by one guard per line. Each continuation fence re-asserts that this preamble ran, so
+# pasting one of them into an unprepared shell fails closed instead of running advisory.
+case "${BASH_VERSION-}" in "") echo 'STOP: this PTY must be /bin/bash' >&2; exit 1 ;; esac
+set -uo pipefail
+set -E
+trap 'R2_GUARD_STATUS=$?; echo "STOP: guarded command failed with status $R2_GUARD_STATUS; this attempt is invalid" >&2; exit "$R2_GUARD_STATUS"' ERR
+test -n "${ATTEMPT_ROOT-}" || { echo 'STOP: copy the allocation block exact attempt root' >&2; exit 1; }
+test -n "${BRIEF_SHA256-}" || { echo 'STOP: copy the controller-recorded Task 7 brief SHA-256' >&2; exit 1; }
+test -n "${BRIEF_DEV-}" || { echo 'STOP: copy the controller-recorded Task 7 brief device' >&2; exit 1; }
+test -n "${BRIEF_INO-}" || { echo 'STOP: copy the controller-recorded Task 7 brief inode' >&2; exit 1; }
+test -n "${BLENDER_BIN-}" || { echo 'STOP: absolute Blender 5.2-or-newer executable required' >&2; exit 1; }
+test -n "${MCP_SOURCE_DIR-}" || { echo 'STOP: absolute pinned official source checkout required' >&2; exit 1; }
+FEATURE_ROOT=/Users/yeminjie/Developer/BlenderDesign/.worktrees/official-blender-mcp-install
+TASK7_BRIEF="$FEATURE_ROOT/.superpowers/sdd/modeling-remediation/task-7-brief.md"
+AUDIT_SCRIPT="$FEATURE_ROOT/scripts/official_blender_mcp_audit.py"
+UV_BIN="${UV_BIN:-$HOME/.local/bin/uv}"
+UVX_BIN="${UVX_BIN:-$HOME/.local/bin/uvx}"
+CODEX_BIN="${CODEX_BIN:-$(command -v codex)}"
+CODEX_CONFIG="${CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
+CONTROLLER_SHA256=cc325e471aa0d1a0349deade58d0f7517575c35d901fb99f00ee1cc4de7f640a
+for absolute in "$FEATURE_ROOT" "$ATTEMPT_ROOT" "$BLENDER_BIN" \
+  "$MCP_SOURCE_DIR" "$UV_BIN" "$UVX_BIN" "$CODEX_BIN" "$CODEX_CONFIG"; do
+  case "$absolute" in /*) ;; *) echo "STOP: non-absolute path: $absolute" >&2; exit 1 ;; esac
+done
+case "$ATTEMPT_ROOT" in
+  "$FEATURE_ROOT"/.superpowers/sdd/modeling-remediation/final-retest-r2/attempt-[0-9][0-9][0-9][0-9]) ;;
+  *) echo 'STOP: selected attempt binding differs' >&2; exit 1 ;;
+esac
+test "${ATTEMPT_ROOT##*/}" != attempt-0000
+# One guard per line: in an `A && B` list a failing A aborts under neither errexit nor
+# the ERR trap, so the first three tests below used to be advisory.
+test -x "$BLENDER_BIN"
+test -x "$UV_BIN"
+test -x "$UVX_BIN"
+test -x "$CODEX_BIN"
+test -f "$CODEX_CONFIG"
+test ! -L "$CODEX_CONFIG"
+export FEATURE_ROOT ATTEMPT_ROOT BRIEF_SHA256 BRIEF_DEV BRIEF_INO
+export BLENDER_BIN MCP_SOURCE_DIR UV_BIN UVX_BIN
+export CODEX_BIN CODEX_CONFIG CONTROLLER_SHA256
+export GIT_NO_REPLACE_OBJECTS=1 PYTHONDONTWRITEBYTECODE=1
+umask 077
+# Set here rather than at the top, where it meant only "this preamble started": it
+# preceded the six emptiness guards, every absoluteness `case` and every executability
+# test, so a continuation fence could assert it and then use a variable the preamble had
+# never validated. It is *not* the last line of the fence -- roughly three hundred lines
+# follow, including the Task 7 brief validation and the `r2_python` definition the
+# continuation fences call. What it now means precisely is: every path and executable a
+# continuation fence consumes by name has been checked. Anything failing after this
+# point terminates the shell through the exiting ERR trap above rather than leaving the
+# sentinel set on a half-prepared shell.
+# Exported because the final fence is a child `/bin/bash`, not this PTY.
+R2_GUARDED_SHELL=1
+export R2_GUARDED_SHELL
+
+"$UV_BIN" run --quiet --no-project --python 3.13 python - \
+  "$TASK7_BRIEF" "$ATTEMPT_ROOT" <<'PY'
+from __future__ import annotations
+
+import ast
+import hashlib
+import os
+import stat
+import sys
+from pathlib import Path
+
+brief_path = Path(os.path.abspath(sys.argv[1]))
+root = Path(os.path.abspath(sys.argv[2]))
+if os.path.realpath(root) != os.fspath(root):
+    raise RuntimeError("attempt path contains a symlink")
+root_info = os.lstat(root)
+if (
+    stat.S_ISLNK(root_info.st_mode)
+    or not stat.S_ISDIR(root_info.st_mode)
+    or root_info.st_uid != os.getuid()
+    or stat.S_IMODE(root_info.st_mode) != 0o700
+):
+    raise RuntimeError("unsafe attempt metadata")
+
+# GATE_SNAPSHOT_READER_BEGIN
+def gate_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def gate_snapshot(
+    raw: Path,
+    *,
+    label: str,
+    limit: int,
+    mode: int,
+    expected: tuple[int, int] | None = None,
+) -> tuple[bytes, os.stat_result]:
+    path = Path(os.path.abspath(raw))
+    parent, leaf = path.parent, path.name
+    if limit <= 0 or leaf in {"", ".", ".."} or os.path.realpath(parent) != os.fspath(parent):
+        raise RuntimeError(f"unsafe {label} path")
+    parent_before = os.lstat(parent)
+    parent_bound = gate_identity(parent_before)
+    if (
+        stat.S_ISLNK(parent_before.st_mode)
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or parent_before.st_uid != os.getuid()
+        or stat.S_IMODE(parent_before.st_mode) & 0o022
+    ):
+        raise RuntimeError(f"unsafe {label} parent")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = -1
+    try:
+        if gate_identity(os.fstat(parent_fd)) != parent_bound or gate_identity(os.lstat(parent)) != parent_bound:
+            raise RuntimeError(f"{label} parent changed while opening")
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        bound = gate_identity(before)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != mode
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > limit
+            or expected is not None
+            and (before.st_dev, before.st_ino) != expected
+        ):
+            raise RuntimeError(f"unsafe {label} metadata")
+        descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        if gate_identity(os.fstat(descriptor)) != bound:
+            raise RuntimeError(f"{label} changed while opening")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                raise RuntimeError(f"{label} shrank while reading")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew while reading")
+        payload = b"".join(chunks)
+        if (
+            len(payload) != before.st_size
+            or gate_identity(os.fstat(descriptor)) != bound
+            or gate_identity(os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)) != bound
+            or gate_identity(os.fstat(parent_fd)) != parent_bound
+            or gate_identity(os.lstat(parent)) != parent_bound
+        ):
+            raise RuntimeError(f"{label} changed while reading")
+        return payload, before
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+# GATE_SNAPSHOT_READER_END
+
+
+brief, brief_info = gate_snapshot(
+    brief_path,
+    label="Task 7 brief",
+    limit=2 * 1024 * 1024,
+    mode=0o600,
+    expected=(int(os.environ["BRIEF_DEV"]), int(os.environ["BRIEF_INO"])),
+)
+if hashlib.sha256(brief).hexdigest() != os.environ["BRIEF_SHA256"]:
+    raise RuntimeError("Task 7 brief digest differs from controller allocation")
+
+# `rindex` alone bound the *last* occurrence of each anchor, and nothing required there to
+# be only one -- the same payload already demands `count(...) == 1` for the four fences. A
+# second, unpinned ruff line earlier in the brief was therefore neither searched for nor
+# detected, and the ruff anchor stopped before its target argument, so a brief that linted
+# some other file still satisfied the ordering.
+ORDER_ANCHORS = (
+    ("recorder_open", b'\nexec 9>' + b'"$EVENT_FIFO"', 3),
+    ("task_start",
+     b'{"attempt":0,"event_id":"final-retest-r2","kind":"start",'
+     + b'"recovery_of":null,"scope":"task","stage":"final-retest-r2"}', 1),
+    ("stage_start",
+     b'{"attempt":0,"event_id":"final-retest-r2-tools","kind":"start",'
+     + b'"recovery_of":null,"scope":"stage","stage":"final-retest-r2"}', 1),
+    ("ruff_execution",
+     b'\n"$UVX_BIN" --quiet ruff@0.16.2 '
+     + b'check --no-cache --isolated --select E4,E7,E9,F \\\n  "$ATTEMPT_ROOT/r2_controller.py"',
+     1),
+    ("probe_execution",
+     b'\nPROBE_OUTPUT="$(r2_python ' + b'"$ATTEMPT_ROOT/r2_controller.py" probe)"', 1),
+    ("private_tmp_probe",
+     b'\nPRIVATE_TMP_PROBE="$(TMPDIR=/private/tmp ' + b'r2_python \\', 1),
+    ("fixture_execution", b'\n"$BLENDER_BIN" --background ' + b'--factory-startup', 1),
+    ("run_dispatch", b'\nr2_python "$ATTEMPT_ROOT/r2_controller.py" ' + b'run \\', 1),
+)
+at = {}
+for anchor_name, anchor, occurrences in ORDER_ANCHORS:
+    if brief.count(anchor) != occurrences:
+        raise RuntimeError(
+            f"envelope anchor appears {brief.count(anchor)} times, not {occurrences}: "
+            f"{anchor_name}"
+        )
+    at[anchor_name] = brief.rindex(anchor)
+# The pinned anchor makes the *pinned* invocation mandatory but says nothing about a
+# second, unpinned one somewhere else in the envelope. Every use of the uvx binary in the
+# brief is counted instead, which is what a second lint line would have to go through.
+uvx_uses = brief.count(b'"$UVX' + b'_BIN"')
+if uvx_uses != 4:
+    raise RuntimeError(
+        f"the brief uses the uvx binary {uvx_uses} times, not 4; a second uvx invocation "
+        "is outside the pinned ruff anchor"
+    )
+recorder_open = at["recorder_open"]
+task_start = at["task_start"]
+stage_start = at["stage_start"]
+if not recorder_open < task_start < stage_start < min(
+    at["ruff_execution"], at["probe_execution"], at["private_tmp_probe"],
+    at["fixture_execution"], at["run_dispatch"],
+):
+    raise RuntimeError(
+        "recorder/start events must precede every command inside the envelope"
+    )
+
+markers = {
+    "r2_controller.py": (
+        b"<!-- R2_CONTROLLER_BEGIN -->\n````python\n",
+        b"````\n<!-- R2_CONTROLLER_END -->",
+    ),
+    "fixture_setup.py": (
+        b"<!-- R2_FIXTURE_SETUP_BEGIN -->\n```python\n",
+        b"```\n<!-- R2_FIXTURE_SETUP_END -->",
+    ),
+    "model_body.py": (
+        b"<!-- R2_MODEL_BODY_BEGIN -->\n```python\n",
+        b"```\n<!-- R2_MODEL_BODY_END -->",
+    ),
+    "cli_body.py": (
+        b"<!-- R2_CLI_BODY_BEGIN -->\n```python\n",
+        b"```\n<!-- R2_CLI_BODY_END -->",
+    ),
+}
+expected = {
+    "r2_controller.py": (
+        6193,
+        254319,
+        "cc325e471aa0d1a0349deade58d0f7517575c35d901fb99f00ee1cc4de7f640a",
+    ),
+    "fixture_setup.py": (
+        57,
+        2288,
+        "b94433e1aea2d8087a0ebd4596a4cb2d19c04955086abcbf8ee388a989cd8681",
+    ),
+    "model_body.py": (
+        368,
+        14604,
+        "534f38477d968d8ae4262340b1f172d51cba25e206c86a6a41976071aa638034",
+    ),
+    "cli_body.py": (
+        33,
+        944,
+        "c358ad5ec7f30c8bdf7d7fae28ef1f71682d118b2b6dd462ac5ee522a7e241d2",
+    ),
+}
+# This is the only file creator in the Plan that bound its parent by pathname rather
+# than by descriptor: the root was validated once and then re-resolved by name for the
+# write, the lstat, the directory fsync, the allowlist check and the __pycache__ check,
+# with O_NOFOLLOW guarding only the final component -- and what it writes is the
+# controller that is then executed. Bind it once here and use the descriptor throughout.
+root_before = os.lstat(root)
+if (
+    stat.S_ISLNK(root_before.st_mode)
+    or not stat.S_ISDIR(root_before.st_mode)
+    or root_before.st_uid != os.getuid()
+    or stat.S_IMODE(root_before.st_mode) != 0o700
+):
+    raise RuntimeError("owned native mode-0700 attempt root required")
+root_bound = (root_before.st_dev, root_before.st_ino)
+root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    root_opened = os.fstat(root_fd)
+    if (
+        (root_opened.st_dev, root_opened.st_ino) != root_bound
+        or root_opened.st_uid != os.getuid()
+        or stat.S_IMODE(root_opened.st_mode) != 0o700
+    ):
+        raise RuntimeError("attempt root changed while opening")
+    # The allowlist is checked here as well as after the write. Statting only the four
+    # marker names let an unrelated file pass the pre-check, and the failure then landed
+    # after all four payloads -- including the controller that gets executed -- were on
+    # disk with nothing rolling them back.
+    if set(os.listdir(root_fd)):
+        raise RuntimeError("attempt root must be empty before extraction")
+    payloads: dict[str, bytes] = {}
+    for name, (begin_marker, end_marker) in markers.items():
+        if brief.count(begin_marker) != 1 or brief.count(end_marker) != 1:
+            raise RuntimeError(f"marked fence boundary differs: {name}")
+        begin = brief.index(begin_marker) + len(begin_marker)
+        finish = brief.index(end_marker, begin)
+        payload = brief[begin:finish]
+        lines, size, sha256 = expected[name]
+        if (
+            len(payload.splitlines()) != lines
+            or len(payload) != size
+            or hashlib.sha256(payload).hexdigest() != sha256
+        ):
+            raise RuntimeError(f"marked fence bytes differ: {name}")
+        compile(payload, name, "exec")
+        payloads[name] = payload
+    controller_tree = ast.parse(payloads["r2_controller.py"], filename="r2_controller.py")
+    top_names = [
+        node.name for node in controller_tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+    if len(top_names) != len(set(top_names)):
+        raise RuntimeError("duplicate controller top-level definition")
+    for name, payload in payloads.items():
+        fd = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=root_fd,
+        )
+        try:
+            view = memoryview(payload)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+            opened = os.fstat(fd)
+        finally:
+            os.close(fd)
+        final = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(final.st_mode)
+            or stat.S_ISLNK(final.st_mode)
+            or final.st_uid != os.getuid()
+            or final.st_nlink != 1
+            or stat.S_IMODE(final.st_mode) != 0o600
+            or (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise RuntimeError(f"unsafe extracted input: {name}")
+        reopened = os.fstat(root_fd)
+        if (reopened.st_dev, reopened.st_ino) != root_bound:
+            raise RuntimeError("attempt root changed during extraction")
+    os.fsync(root_fd)
+    if set(os.listdir(root_fd)) != set(markers):
+        raise RuntimeError("attempt input allowlist differs after extraction")
+    try:
+        os.stat("__pycache__", dir_fd=root_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        raise RuntimeError("compile created forbidden __pycache__")
+finally:
+    os.close(root_fd)
+print(
+    "R2_INPUTS_GREEN controller=cc325e471aa0d1a0349deade58d0f7517575c35d901fb99f00ee1cc4de7f640a "
+    "fixture=b94433e1aea2d8087a0ebd4596a4cb2d19c04955086abcbf8ee388a989cd8681 "
+    "model=534f38477d968d8ae4262340b1f172d51cba25e206c86a6a41976071aa638034 "
+    "cli=c358ad5ec7f30c8bdf7d7fae28ef1f71682d118b2b6dd462ac5ee522a7e241d2"
+)
+PY
+
+r2_python() {
+  "$UV_BIN" run --quiet --no-project --python 3.13 \
+    --with 'mcp[cli]>=1.2.0,<2' \
+    --with-editable "$MCP_SOURCE_DIR/mcp" \
+    python "$@"
+}
+```
+
+Continue in that same fresh Task 7 implementer's persistent PTY/controller shell. After
+exclusive input creation, start exactly one recorder and emit the literal controller
+Task/stage starts exactly once before Ruff, the first controller probe, fixture or any
+other controller/payload execution; leave FD 9 inherited through fixture, dispatch and
+the Task/stage ends written by `run`.
+The FIFO and recorder stderr live outside the selected attempt so the final evidence
+allowlist remains exact. A fixture or GUI-preflight failure invalidates this numbered
+attempt; close FD 9, retain its incomplete/rejected journal and external recorder
+diagnostics unchanged, and start a new numbered attempt after fixing the cause:
+
+```bash
+test "${R2_GUARDED_SHELL-}" = 1 || { echo 'STOP: paste the guarded preamble fence into this PTY first' >&2; exit 1; }
+RECORDER_ROOT="$("$UV_BIN" run --quiet --no-project --python 3.13 python - \
+  "${ATTEMPT_ROOT##*/}" <<'PY'
+import os
+import stat
+import sys
+import tempfile
+
+base = os.path.realpath(tempfile.gettempdir())
+root = tempfile.mkdtemp(prefix=f"{sys.argv[1]}-recorder-", dir=base)
+info = os.lstat(root)
+if (
+    os.path.realpath(root) != root
+    or not stat.S_ISDIR(info.st_mode)
+    or stat.S_ISLNK(info.st_mode)
+    or info.st_uid != os.getuid()
+    or stat.S_IMODE(info.st_mode) != 0o700
+):
+    raise RuntimeError("unsafe recorder root")
+print(root)
+PY
+)"
+EVENT_FIFO="$RECORDER_ROOT/events.fifo"
+RECORDER_STDERR="$RECORDER_ROOT/recorder.stderr"
+JOURNAL="$ATTEMPT_ROOT/events.ndjson"
+test ! -e "$EVENT_FIFO"
+test ! -e "$RECORDER_STDERR"
+test ! -e "$JOURNAL"
+mkfifo -m 600 "$EVENT_FIFO"
+RECORDER_PID=''
+RECORDER_FD_OPEN=0
+finish_r2_recorder() {
+  if [ "$RECORDER_FD_OPEN" = 1 ]; then exec 9>&-; RECORDER_FD_OPEN=0; fi
+  if [ -n "$RECORDER_PID" ]; then wait "$RECORDER_PID" || true; RECORDER_PID=''; fi
+}
+trap finish_r2_recorder EXIT
+r2_python "$AUDIT_SCRIPT" record --output "$JOURNAL" \
+  <"$EVENT_FIFO" 2>"$RECORDER_STDERR" &
+RECORDER_PID=$!
+exec 9>"$EVENT_FIFO"
+RECORDER_FD_OPEN=1
+printf '%s\n' \
+  '{"attempt":0,"event_id":"final-retest-r2","kind":"start","recovery_of":null,"scope":"task","stage":"final-retest-r2"}' \
+  '{"attempt":0,"event_id":"final-retest-r2-tools","kind":"start","recovery_of":null,"scope":"stage","stage":"final-retest-r2"}' >&9
+
+# Pinned deliberately: --isolated drops config discovery so the result cannot depend on
+# the CWD, --select restates the repository pyproject rule set because Ruff's wider
+# built-in defaults fail this file, and the version freezes E4/E7/E9/F membership.
+"$UVX_BIN" --quiet ruff@0.16.2 check --no-cache --isolated --select E4,E7,E9,F \
+  "$ATTEMPT_ROOT/r2_controller.py"
+PROBE_OUTPUT="$(r2_python "$ATTEMPT_ROOT/r2_controller.py" probe)"
+test "$PROBE_OUTPUT" = 'R2_PROTOCOL_R20_1_GREEN positive=6 negative=85'
+printf '%s\n' "$PROBE_OUTPUT"
+PRIVATE_TMP_PROBE="$(TMPDIR=/private/tmp r2_python \
+  "$ATTEMPT_ROOT/r2_controller.py" probe)"
+test "$PRIVATE_TMP_PROBE" = 'R2_PROTOCOL_R20_1_GREEN positive=6 negative=85'
+printf '%s\n' "$PRIVATE_TMP_PROBE"
+test ! -e "$ATTEMPT_ROOT/__pycache__"
+
+"$BLENDER_BIN" --background --factory-startup \
+  --python "$ATTEMPT_ROOT/fixture_setup.py"
+"$UV_BIN" run --quiet --no-project --python 3.13 python - \
+  "$ATTEMPT_ROOT" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+required = {
+    "r2_controller.py", "fixture_setup.py", "model_body.py", "cli_body.py",
+    "library_source.blend", "fixture.blend", "events.ndjson",
+}
+if {path.name for path in root.iterdir()} != required:
+    raise RuntimeError("post-fixture attempt allowlist differs")
+if os.path.lexists(root / "known-missing.png"):
+    raise RuntimeError("controlled missing file unexpectedly exists")
+for name in required:
+    info = os.lstat(root / name)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_size == 0
+    ):
+        raise RuntimeError(f"unsafe post-fixture file: {name}")
+print("R2_FIXTURE_GREEN files=7")
+PY
+```
+
+Now use **Computer Use** for the GUI boundary. First record the sole old
+`127.0.0.1:9876` listener PID. End the old Blender process without saving and wait
+until the listener is absent. Through the visible UI/Terminal, launch the exact
+`BLENDER_BIN` with `--factory-startup`, enable the already-installed official extension
+if needed, and require one different listener PID. In Blender's visible Python Console,
+inspect and record `bpy.app.version`, `bpy.data.filepath`, `bpy.data.is_saved`, the
+factory object set, mode, and `bpy.app.tempdir`; require Blender `>= (5, 2, 0)`, unsaved
+factory state, `OBJECT` mode and exactly `Camera`, `Cube`, `Light`. Set `R2_SCRATCH` in
+the persistent PTY to `realpath(bpy.app.tempdir)/blender_mcp`. Do not continue on a
+missing/duplicate listener, reused PID, saved/dirty non-factory scene, or unsafe temp
+path.
+
+Validate that manually observed scratch path, then invoke `run` directly in the same
+PTY. This command must remain interactive. It prints either a failure-ACK prompt or one
+visual-ACK prompt; never pipe or precompute stdin:
+
+```bash
+test "${R2_GUARDED_SHELL-}" = 1 || { echo 'STOP: paste the guarded preamble fence into this PTY first' >&2; exit 1; }
+test -n "${R2_SCRATCH-}" || { echo 'STOP: set R2_SCRATCH from the visible Blender bpy.app.tempdir observation' >&2; exit 1; }
+"$UV_BIN" run --quiet --no-project --python 3.13 python - \
+  "$R2_SCRATCH" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+path = Path(os.path.abspath(sys.argv[1]))
+if path.name != "blender_mcp" or os.path.realpath(path) != os.fspath(path):
+    raise RuntimeError("scratch must be canonical bpy.app.tempdir/blender_mcp")
+if os.path.lexists(path):
+    info = os.lstat(path)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise RuntimeError("existing render scratch is unsafe")
+print(f"R2_SCRATCH_GREEN path={path}")
+PY
+export R2_SCRATCH
+
+# `set +e` would not disable the ERR trap, so the one command whose non-zero exit must be
+# captured rather than aborted on is placed on the left of `||`, where neither errexit nor
+# the ERR trap fires. Its status is still tested below, and now bindingly.
+R2_RUN_EXIT=0
+r2_python "$ATTEMPT_ROOT/r2_controller.py" run \
+  --root "$ATTEMPT_ROOT" \
+  --scratch "$R2_SCRATCH" \
+  --codex-bin "$CODEX_BIN" \
+  --config "$CODEX_CONFIG" \
+  --feature-root "$FEATURE_ROOT" \
+  --controller-sha256 "$CONTROLLER_SHA256" \
+  --audit-fd 9 || R2_RUN_EXIT=$?
+exec 9>&-
+RECORDER_FD_OPEN=0
+RECORDER_EXIT=0
+wait "$RECORDER_PID" || RECORDER_EXIT=$?
+RECORDER_PID=''
+trap - EXIT
+test "$R2_RUN_EXIT" = 0
+test "$RECORDER_EXIT" = 0
+test ! -s "$RECORDER_STDERR"
+printf 'R2_DISPATCH_AND_JOURNAL_GREEN attempt=%s\n' "${ATTEMPT_ROOT##*/}"
+
+r2_python "$ATTEMPT_ROOT/r2_controller.py" validate \
+  --root "$ATTEMPT_ROOT" \
+  --config "$CODEX_CONFIG" \
+  --output dispatch-validation.json
+r2_python "$ATTEMPT_ROOT/r2_controller.py" finalize \
+  --root "$ATTEMPT_ROOT" \
+  --config "$CODEX_CONFIG"
+```
+
+When `run` prints `VISUAL_ACK_REQUIRED`, its manifest-derived ordered list includes
+every base PNG and any future/repeat PNG. Use `view_image` on the absolute
+`$ATTEMPT_ROOT/<path>` for **each** listed row and verify a nonblank, coherent lamp or
+requested UI/render view. Only after all images are individually inspected, manually
+type one exact single-line `visual_ack` object with the same attempt, order, paths and
+SHA-256 values and literal `result:"pass"` for every row. The acknowledgement is a
+human decision in the live PTY, not an LLM timing/event and not controller-generated.
+Wrong, missing, reordered, duplicate, corrupt, blank or uninspected imagery invalidates
+the attempt; do not answer `pass`.
+
+If `FAILURE_ACK_REQUIRED` appears, stop dispatch. Read the retained raw transcript or
+failure JSON named by the prompt and its exact SHA, immediately append the verbatim
+first hypothesis to `task-7-report.md`, then type at most one exact `failure_ack` for
+that same event/digest. Wrong JSON, identity, digest, EOF or a second answer closes the
+same pending call/stage/Task as deviation. In either failure path the attempt remains
+immutable invalid and none of the validation/finalization/success commands above may
+run.
+
+After clean no-active validation and exclusive manifest publication, print the exact
+nine active-audit bindings and the canonical report. This is read-only and creates no
+sidecar:
+
+```bash
+test "${R2_GUARDED_SHELL-}" = 1 || { echo 'STOP: paste the guarded preamble fence into this PTY first' >&2; exit 1; }
+R2_SUMMARY="$(r2_python "$ATTEMPT_ROOT/r2_controller.py" summary \
+  --root "$ATTEMPT_ROOT" \
+  --config "$CODEX_CONFIG")"
+export R2_SUMMARY
+r2_python - <<'PY'
+import json
+import os
+
+raw = os.environ["R2_SUMMARY"].encode("utf-8")
+if not raw or len(raw) > 64 * 1024 * 1024:
+    raise RuntimeError("controller summary size differs")
+def reject_duplicates(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise RuntimeError(f"duplicate summary key: {key}")
+        value[key] = item
+    return value
+summary = json.loads(raw, object_pairs_hook=reject_duplicates)
+if not isinstance(summary, dict) or set(summary) != {
+    "status", "attempt_id", "tools", "threshold_repeats", "bindings", "report",
+}:
+    raise RuntimeError("controller summary schema differs")
+bindings = summary["bindings"]
+# Length and distinctness alone were satisfied by a nine-character string with nine
+# distinct characters. The controller's own `production_active_audit` carries both type
+# checks; the operator-facing path was the weaker of the two, and its `report` goes
+# straight to a PTY.
+if not isinstance(bindings, list) or not all(isinstance(line, str) for line in bindings):
+    raise RuntimeError("controller summary bindings must be a list of strings")
+if not isinstance(summary["report"], str):
+    raise RuntimeError("controller summary report must be a string")
+if len(bindings) != 9 or len({line.split(":", 1)[0] for line in bindings}) != 9:
+    raise RuntimeError("canonical active-audit binding set differs")
+print("R2_BINDINGS_BEGIN")
+print(*bindings, sep="\n")
+print("R2_BINDINGS_END")
+print(summary["report"], end="")
+PY
+```
+
+Perform Task 7 Step 3 now: replace only the active audit's sole Tool-results and visual
+sections with the exact `r2-report.md` sections, insert each printed binding exactly
+once, record the r1-invalid/r2 facts, and commit that audit. Then run this final
+read-only block from the same clean reviewed HEAD. The tracked validator consumes the
+direct/source/effective lanes while the controller has already proved and retained all
+five equal lanes:
+
+```bash
+/bin/bash -euo pipefail <<'BASH'
+# This fence installs `$MCP_SOURCE_DIR/mcp` editable into the interpreter that then
+# runs the validator, and it was the only fence asserting neither that the guarded
+# preamble completed nor that its paths are absolute -- while its own `:?` message
+# claims the absoluteness it never checked. The two defects composed.
+test "${R2_GUARDED_SHELL-}" = 1 || { echo 'STOP: paste the guarded preamble fence into this PTY first' >&2; exit 1; }
+: "${ATTEMPT_ROOT:?selected finalized attempt required}"
+: "${MCP_SOURCE_DIR:?absolute pinned official source checkout required}"
+: "${R2_SUMMARY:?validated controller summary required}"
+FEATURE_ROOT=/Users/yeminjie/Developer/BlenderDesign/.worktrees/official-blender-mcp-install
+ACTIVE_AUDIT="$FEATURE_ROOT/docs/audits/2026-08-10-official-blender-mcp-modeling-validation.md"
+AUDIT_SCRIPT="$FEATURE_ROOT/scripts/official_blender_mcp_audit.py"
+UV_BIN="${UV_BIN:-$HOME/.local/bin/uv}"
+CODEX_CONFIG="${CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
+for absolute in "$FEATURE_ROOT" "$ATTEMPT_ROOT" "$MCP_SOURCE_DIR" "$UV_BIN" "$CODEX_CONFIG"; do
+  case "$absolute" in /*) ;; *) echo "STOP: non-absolute path: $absolute" >&2; exit 1 ;; esac
+done
+export GIT_NO_REPLACE_OBJECTS=1 PYTHONDONTWRITEBYTECODE=1
+r2_python() {
+  "$UV_BIN" run --quiet --no-project --python 3.13 \
+    --with 'mcp[cli]>=1.2.0,<2' \
+    --with-editable "$MCP_SOURCE_DIR/mcp" \
+    python "$@"
+}
+test "$(git -C "$FEATURE_ROOT" status --porcelain=v1 --untracked-files=all)" = ''
+ACTIVE_VALIDATION="$(r2_python "$ATTEMPT_ROOT/r2_controller.py" validate \
+  --root "$ATTEMPT_ROOT" \
+  --config "$CODEX_CONFIG" \
+  --active-audit "$ACTIVE_AUDIT")"
+r2_python "$AUDIT_SCRIPT" validate \
+  --journal "$ATTEMPT_ROOT/events.ndjson" \
+  --audit "$ACTIVE_AUDIT" \
+  --live-catalog "$ATTEMPT_ROOT/direct-catalog.json" \
+  --source-catalog "$ATTEMPT_ROOT/source-catalog.json" \
+  --config-catalog "$ATTEMPT_ROOT/effective-config-catalog.json"
+ACTIVE_AUDIT_BLOB="$(git -C "$FEATURE_ROOT" rev-parse \
+  HEAD:docs/audits/2026-08-10-official-blender-mcp-modeling-validation.md)"
+case "$ACTIVE_AUDIT_BLOB" in *[!0-9a-f]*) exit 1 ;; esac
+test "${#ACTIVE_AUDIT_BLOB}" = 40
+printf 'R2_ACTIVE_VALIDATION_BEGIN\n'
+printf 'ACTIVE_AUDIT_BLOB: %s\n' "$ACTIVE_AUDIT_BLOB"
+printf 'CONTROLLER_ACTIVE_VALIDATION: %s\n' "$ACTIVE_VALIDATION"
+printf 'TRACKED_AUDIT_VALIDATION: ok\n'
+printf 'R2_ACTIVE_VALIDATION_END\n'
+R2_COUNTS="$(r2_python - <<'PY'
+import json
+import os
+
+raw = os.environ["R2_SUMMARY"].encode("utf-8")
+if not raw or len(raw) > 64 * 1024 * 1024:
+    raise RuntimeError("controller summary size differs")
+def reject_duplicates(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise RuntimeError(f"duplicate summary key: {key}")
+        value[key] = item
+    return value
+summary = json.loads(raw, object_pairs_hook=reject_duplicates)
+if (
+    not isinstance(summary, dict)
+    or set(summary) != {
+        "status", "attempt_id", "tools", "threshold_repeats", "bindings", "report",
+    }
+    or summary["status"] != "ok"
+    or not isinstance(summary["attempt_id"], str)
+    or not isinstance(summary["tools"], int)
+    or isinstance(summary["tools"], bool)
+    or summary["tools"] <= 0
+    or not isinstance(summary["threshold_repeats"], int)
+    or isinstance(summary["threshold_repeats"], bool)
+    or summary["threshold_repeats"] < 0
+):
+    raise RuntimeError("final dynamic count/run-end binding differs")
+print(summary["tools"], summary["threshold_repeats"], summary["attempt_id"])
+PY
+)"
+IFS=' ' read -r R2_TOOL_COUNT R2_REPEAT_COUNT R2_ATTEMPT_ID <<EOF
+$R2_COUNTS
+EOF
+case "$R2_TOOL_COUNT:$R2_REPEAT_COUNT" in
+  *[!0-9:]*|:*|*:) exit 1 ;;
+esac
+test "$R2_TOOL_COUNT" -gt 0
+printf 'FINAL_RETEST_R2_GREEN tools=%s retries=0 threshold_repeats=%s attempt=%s\n' \
+  "$R2_TOOL_COUNT" "$R2_REPEAT_COUNT" "$R2_ATTEMPT_ID"
+BASH
+```
+
+The `R2_ACTIVE_VALIDATION_BEGIN`…`R2_ACTIVE_VALIDATION_END` block is the retained
+binding for the active lane, which cannot use `--output`: the controller writes
+`--output` into the attempt root, and by this point `finalize` has already published
+`evidence-manifest.json` over a closed allowlist, so any new file there would break the
+attempt immutability the later terminal review re-verifies. Copy those five lines
+verbatim into `task-7-report.md` — that report is inode-bound, digest-bound and
+bounded-read by the controller, so the active-lane result survives as bound bytes rather
+than as free prose. The Task 7 final gate rejects a report without exactly one such
+block, and every value in it is independently re-derivable without adding a single
+unbounded read: `ACTIVE_AUDIT_BLOB` is the committed Git blob id of the audit the two
+validators just consumed — the block already requires a clean worktree, so the blob is
+the validated bytes — and `CONTROLLER_ACTIVE_VALIDATION` follows from the frozen
+retained evidence plus that same blob.
+
+Expected clean terminal markers include exact input/probe/fixture/dispatch/journal
+success, controller no-active and active validation, the tracked audit validation, and
+`FINAL_RETEST_R2_GREEN tools=<runtime-positive-N> retries=0 threshold_repeats=<runtime-nonnegative-count> attempt=attempt-000N`.
+Any failure
+suppresses this marker, preserves the selected attempt byte-for-byte, discards the
+unsaved GUI without saving and restarts only after fix-forward in a new numbered root.
