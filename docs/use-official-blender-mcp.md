@@ -172,6 +172,16 @@ discard unsaved scene，并用新 recorder PID、新 `clock_id`、`attempt=0` �
 同一失败再次出现时停止盲目重试，保留两次证据并进入根因分析。不得用 `.001`
 对象、局部删除或强制修改 dirty flag 掩盖 partial state。
 
+`same failure` 必须按 canonical recursive exception tree 判定：记录每个 exception/group
+的 module-qualified type、完整有界 message 和有序 child tree；不得只哈希顶层
+`ExceptionGroup` 摘要。direct MCP session 在请求 failure acknowledgement 前，必须先
+exclusive-create 并 fsync `direct-session-failure.json` 与 bounded
+`direct-session.stderr`，把 exception-tree SHA-256、stderr observed/retained bytes、
+digest、truncation 和 drain error 绑定进 acknowledgement identity。缺少这些证据的
+grouped exception 只能证明 controller fail-closed，不能证明两个底层失败相同。
+tree capture 以 root depth 0 计最多 16 条 parent→child 边（最多 17 个层级）、256 节点；超限必须显式记录 truncated，且不得据此声明
+leaf-complete 或 same failure。
+
 ## 6. Interpreter、fixture 与文档查询 contract
 
 所有 source/config harness 使用解析后的绝对 `UV_BIN`、Python 3.13 和 Server
