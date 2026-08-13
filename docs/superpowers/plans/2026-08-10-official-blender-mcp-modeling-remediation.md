@@ -76,6 +76,14 @@ single reviewer must return both specification and code-quality verdicts; do not
 separate spec and quality reviewers. Task 0, Task 8, and the terminal/merge phases are
 controller-only gates and do not get task briefs.
 
+This continuation has one immutable failed pre-amendment Task 6 attempt at the original
+`task-6-brief.md` / `task-6-report.md` paths. Preserve those files byte-for-byte. For
+the only authorized retry, the controller exports `TASK_ATTEMPT=2` for dispatch, review
+package generation, review parsing, and the progress entry; those commands then bind
+only the absent `task-6-attempt-2-{brief,report,review-rN}` namespace. No other Task or
+attempt value is valid, and no command may rename, remove, truncate, overwrite, or use
+the attempt-1 artifacts as attempt-2 input.
+
 The controller resolves `SDD_SKILL_ROOT` from the loaded skill path and runs:
 
 ```bash
@@ -83,14 +91,20 @@ The controller resolves `SDD_SKILL_ROOT` from the loaded skill path and runs:
 : "${SDD_SKILL_ROOT:?set to the loaded subagent-driven-development skill directory}"
 : "${TASK_N:?set implementation Task 1..7}"
 case "$TASK_N" in 1|2|3|4|5|6|7) ;; *) exit 1 ;; esac
+TASK_ATTEMPT="${TASK_ATTEMPT-}"
+case "$TASK_N:$TASK_ATTEMPT" in
+  6:2) TASK_STEM=task-6-attempt-2 ;;
+  1:|2:|3:|4:|5:|7:) TASK_STEM="task-$TASK_N" ;;
+  *) echo 'STOP: invalid Task attempt namespace' >&2; exit 1 ;;
+esac
 PLAN=docs/superpowers/plans/2026-08-10-official-blender-mcp-modeling-remediation.md
 RUN_DIR=.superpowers/sdd/modeling-remediation
-BRIEF="$RUN_DIR/task-$TASK_N-brief.md"
-REPORT="$RUN_DIR/task-$TASK_N-report.md"
+BRIEF="$RUN_DIR/$TASK_STEM-brief.md"
+REPORT="$RUN_DIR/$TASK_STEM-report.md"
 UV="${UV:-$HOME/.local/bin/uv}"
 case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
 ALLOCATED="$("$UV" run --quiet --no-project --python 3.13 python - \
-  "$SDD_SKILL_ROOT/scripts/task-brief" "$PLAN" "$TASK_N" "$RUN_DIR" <<'PY'
+  "$SDD_SKILL_ROOT/scripts/task-brief" "$PLAN" "$TASK_N" "$RUN_DIR" "$TASK_STEM" <<'PY'
 from __future__ import annotations
 
 import hashlib
@@ -106,8 +120,12 @@ helper = Path(os.path.abspath(sys.argv[1]))
 plan_path = Path(os.path.abspath(sys.argv[2]))
 task_n = sys.argv[3]
 run_dir = Path(os.path.abspath(sys.argv[4]))
+task_stem = sys.argv[5]
 if re.fullmatch(r"[1-7]", task_n) is None:
     raise RuntimeError("invalid implementation Task")
+expected_stem = "task-6-attempt-2" if task_n == "6" else f"task-{task_n}"
+if task_stem != expected_stem:
+    raise RuntimeError("invalid implementation Task namespace")
 # The one external executable in the dispatch path was the least verified input here:
 # every data file in this Plan gets an eight-field identity binding, while this got
 # non-symlink and S_ISREG and was then executed with the Plan bytes on a bound fd.
@@ -355,6 +373,65 @@ def publish(directory: int, name: str, payload: bytes) -> os.stat_result:
 plan, plan_info, plan_parent_info = bounded_snapshot(
     plan_path, label="Plan", limit=PLAN_MAX_BYTES, mode=0o644
 )
+attempt1_snapshots: list[tuple[Path, os.stat_result, os.stat_result]] = []
+if task_n == "6":
+    failed_brief_path = run_dir / "task-6-brief.md"
+    failed_report_path = run_dir / "task-6-report.md"
+    failed_brief, failed_brief_info, failed_brief_parent = bounded_snapshot(
+        failed_brief_path, label="failed Task 6 brief", limit=2 * 1024 * 1024,
+        mode=0o600,
+    )
+    failed_report, failed_report_info, failed_report_parent = bounded_snapshot(
+        failed_report_path, label="failed Task 6 report", limit=64 * 1024 * 1024,
+        mode=0o600,
+    )
+    if (
+        (failed_brief_info.st_dev, failed_brief_info.st_ino)
+        != (16777232, 294729012)
+        or (failed_report_info.st_dev, failed_report_info.st_ino)
+        != (16777232, 294742617)
+        or
+        len(failed_brief) != 76281
+        or hashlib.sha256(failed_brief).hexdigest()
+        != "ced473a49581081f340e87ba339edc8ae94eeb8e1689eaf279e3c518f286d558"
+        or len(failed_report) != 7555
+        or hashlib.sha256(failed_report).hexdigest()
+        != "31e4e4433929d2b6aa145717433571391fefc577ca23fd8b8a2cbfeb3d3d39a8"
+    ):
+        raise RuntimeError("failed Task 6 attempt identity differs")
+    failed_text = failed_report.decode("utf-8")
+    for literal in (
+        "STATUS: BLOCKED",
+        "98c8815a495efe1d6c595150dbed05063b684346",
+        "7 failed, 362 passed in 30.33s",
+    ):
+        if failed_text.count(literal) != 1:
+            raise RuntimeError(f"failed Task 6 report literal differs: {literal}")
+    attempt1_snapshots.extend(
+        (
+            (failed_brief_path, failed_brief_info, failed_brief_parent),
+            (failed_report_path, failed_report_info, failed_report_parent),
+        )
+    )
+progress_snapshot: tuple[Path, os.stat_result, os.stat_result] | None = None
+if task_n == "7":
+    progress_path = run_dir.parent / "progress.md"
+    progress, progress_info, progress_parent = bounded_snapshot(
+        progress_path, label="progress ledger", limit=2 * 1024 * 1024, mode=0o644
+    )
+    current_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout.decode("ascii").strip()
+    marker = re.compile(
+        rb"(?m)^TASK_REVIEW_READY task=6 attempt=2 head="
+        + re.escape(current_head.encode("ascii"))
+        + rb" package_sha256=[0-9a-f]{64} report_sha256=[0-9a-f]{64} "
+        + rb"review_sha256=[0-9a-f]{64}$"
+    )
+    if len(marker.findall(progress)) != 1:
+        raise RuntimeError("Task 7 requires one current-head Task 6 attempt-2 review")
+    progress_snapshot = (progress_path, progress_info, progress_parent)
 headings = {
     "A0": b"## Appendix A0: Exact initial/pre-live runbook bytes\n",
     "A": b"## Appendix A: Exact runbook bytes\n",
@@ -380,7 +457,7 @@ if any(plan.count(heading) != 1 for heading in headings.values()):
     raise RuntimeError("expected one of every Appendix heading")
 positions = {name: plan.index(heading) for name, heading in headings.items()}
 run_fd = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-stage_name = f".task-{task_n}-brief-stage-{secrets.token_hex(16)}"
+stage_name = f".{task_stem}-brief-stage-{secrets.token_hex(16)}"
 stage_fd = -1
 helper_fd = -1
 plan_copy_fd = -1
@@ -391,7 +468,7 @@ try:
     if task_n != "7":
         try:
             os.stat(
-                f"task-{task_n}-report.md",
+                f"{task_stem}-report.md",
                 dir_fd=run_fd,
                 follow_symlinks=False,
             )
@@ -461,6 +538,34 @@ try:
     recheck_snapshot(
         plan_path, plan_info, plan_parent_info, label="Plan"
     )
+    for failed_path, failed_info, failed_parent in attempt1_snapshots:
+        failed_parent_fd = os.open(
+            failed_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
+        try:
+            current_parent = os.fstat(failed_parent_fd)
+            pathname_parent = os.lstat(failed_path.parent)
+            stable_parent = lambda value: (
+                value.st_dev, value.st_ino, value.st_uid, value.st_mode,
+            )
+            if (
+                snapshot_identity(
+                    os.stat(
+                        failed_path.name, dir_fd=failed_parent_fd,
+                        follow_symlinks=False,
+                    )
+                ) != snapshot_identity(failed_info)
+                or stable_parent(current_parent) != stable_parent(failed_parent)
+                or stable_parent(pathname_parent) != stable_parent(failed_parent)
+            ):
+                raise RuntimeError("failed Task 6 attempt changed after snapshot")
+        finally:
+            os.close(failed_parent_fd)
+    if progress_snapshot is not None:
+        recheck_snapshot(
+            progress_snapshot[0], progress_snapshot[1], progress_snapshot[2],
+            label="progress ledger",
+        )
     pieces = [brief]
     for name in required:
         start = positions[name]
@@ -504,11 +609,11 @@ try:
         for forbidden in (b"### Task 8:",):
             if forbidden in payload:
                 raise RuntimeError(f"Task 7 brief leaked {forbidden!r}")
-    brief_name = f"task-{task_n}-brief.md"
+    brief_name = f"{task_stem}-brief.md"
     brief_info = publish(run_fd, brief_name, payload)
     report_dev = report_ino = 0
     if task_n == "7":
-        report_name = "task-7-report.md"
+        report_name = f"{task_stem}-report.md"
         report_fd = os.open(
             report_name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -569,8 +674,8 @@ IFS=' ' read -r BRIEF_SHA256 BRIEF_DEV BRIEF_INO PLAN_DEV PLAN_INO PLAN_SHA256 \
 $ALLOCATED
 EOF
 TASK_BASE="$(git rev-parse HEAD)"
-printf 'task=%s\nbase=%s\nbrief=%s\nbrief_sha256=%s\nbrief_dev=%s\nbrief_ino=%s\n' \
-  "$TASK_N" "$TASK_BASE" "$BRIEF" "$BRIEF_SHA256" "$BRIEF_DEV" "$BRIEF_INO"
+printf 'task=%s\nattempt=%s\nbase=%s\nbrief=%s\nbrief_sha256=%s\nbrief_dev=%s\nbrief_ino=%s\n' \
+  "$TASK_N" "${TASK_ATTEMPT:-initial}" "$TASK_BASE" "$BRIEF" "$BRIEF_SHA256" "$BRIEF_DEV" "$BRIEF_INO"
 printf 'plan_dev=%s\nplan_ino=%s\nplan_sha256=%s\n' \
   "$PLAN_DEV" "$PLAN_INO" "$PLAN_SHA256"
 printf 'report=%s\nreport_dev=%s\nreport_ino=%s\n' \
@@ -609,17 +714,23 @@ original Task base (never `HEAD~1`):
 case "$BRIEF_SHA256" in [0-9a-f]*) ;; *) exit 1 ;; esac
 case "$TASK_N" in 1|2|3|4|5|6|7) ;; *) exit 1 ;; esac
 case "$ROUND" in 0|*[!0-9]*|'') exit 1 ;; esac
+TASK_ATTEMPT="${TASK_ATTEMPT-}"
+case "$TASK_N:$TASK_ATTEMPT" in
+  6:2) TASK_STEM=task-6-attempt-2 ;;
+  1:|2:|3:|4:|5:|7:) TASK_STEM="task-$TASK_N" ;;
+  *) echo 'STOP: invalid Task attempt namespace' >&2; exit 1 ;;
+esac
 UV="${UV:-$HOME/.local/bin/uv}"
 case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
 RUN_DIR=.superpowers/sdd/modeling-remediation
-BRIEF="$RUN_DIR/task-$TASK_N-brief.md"
-REPORT="$RUN_DIR/task-$TASK_N-report.md"
-PACKAGE="$RUN_DIR/task-$TASK_N-review-r$ROUND.diff"
-REVIEW="$RUN_DIR/task-$TASK_N-review-r$ROUND.md"
+BRIEF="$RUN_DIR/$TASK_STEM-brief.md"
+REPORT="$RUN_DIR/$TASK_STEM-report.md"
+PACKAGE="$RUN_DIR/$TASK_STEM-review-r$ROUND.diff"
+REVIEW="$RUN_DIR/$TASK_STEM-review-r$ROUND.md"
 TASK_HEAD="$(git rev-parse HEAD)"
 ALLOCATED="$("$UV" run --quiet --no-project --python 3.13 \
   python - "$SDD_SKILL_ROOT/scripts/review-package" "$TASK_BASE" "$TASK_HEAD" \
-  "$RUN_DIR" "$TASK_N" "$ROUND" "$BRIEF_SHA256" "$BRIEF_DEV" "$BRIEF_INO" <<'PY'
+  "$RUN_DIR" "$TASK_N" "$ROUND" "$BRIEF_SHA256" "$BRIEF_DEV" "$BRIEF_INO" "$TASK_STEM" <<'PY'
 from __future__ import annotations
 
 import hashlib
@@ -637,8 +748,12 @@ run_dir = Path(os.path.abspath(sys.argv[4]))
 task_n, round_n = sys.argv[5:7]
 dispatched_brief_sha256 = sys.argv[7]
 dispatched_brief_identity = (int(sys.argv[8]), int(sys.argv[9]))
+task_stem = sys.argv[10]
 if re.fullmatch(r"[1-7]", task_n) is None or re.fullmatch(r"[1-9][0-9]*", round_n) is None:
     raise RuntimeError("invalid Task/review round")
+expected_stem = "task-6-attempt-2" if task_n == "6" else f"task-{task_n}"
+if task_stem != expected_stem:
+    raise RuntimeError("invalid Task review namespace")
 if re.fullmatch(r"[0-9a-f]{64}", dispatched_brief_sha256) is None:
     raise RuntimeError("invalid dispatch-recorded brief SHA-256")
 if os.path.realpath(helper) != os.fspath(helper):
@@ -855,15 +970,41 @@ def publish(directory: int, name: str, payload: bytes) -> os.stat_result:
 
 
 run_fd = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-stage_name = f".task-{task_n}-review-stage-{round_n}-{secrets.token_hex(16)}"
+stage_name = f".{task_stem}-review-stage-{round_n}-{secrets.token_hex(16)}"
 stage_fd = -1
 helper_fd = -1
 try:
     opened_run = os.fstat(run_fd)
     if (opened_run.st_dev, opened_run.st_ino) != (run_info.st_dev, run_info.st_ino):
         raise RuntimeError("run directory changed while opening")
-    brief_name = f"task-{task_n}-brief.md"
-    report_name = f"task-{task_n}-report.md"
+    if task_n == "6":
+        failed_brief, _ = read_owned_entry(
+            run_dir, "task-6-brief.md", label="failed Task 6 brief",
+            limit=BRIEF_MAX_BYTES, expected_identity=(16777232, 294729012),
+        )
+        failed_report, _ = read_owned_entry(
+            run_dir, "task-6-report.md", label="failed Task 6 report",
+            limit=REPORT_MAX_BYTES, expected_identity=(16777232, 294742617),
+        )
+        if (
+            len(failed_brief) != 76281
+            or hashlib.sha256(failed_brief).hexdigest()
+            != "ced473a49581081f340e87ba339edc8ae94eeb8e1689eaf279e3c518f286d558"
+            or len(failed_report) != 7555
+            or hashlib.sha256(failed_report).hexdigest()
+            != "31e4e4433929d2b6aa145717433571391fefc577ca23fd8b8a2cbfeb3d3d39a8"
+        ):
+            raise RuntimeError("failed Task 6 attempt identity differs before review")
+        failed_text = failed_report.decode("utf-8")
+        for literal in (
+            "STATUS: BLOCKED",
+            "98c8815a495efe1d6c595150dbed05063b684346",
+            "7 failed, 362 passed in 30.33s",
+        ):
+            if failed_text.count(literal) != 1:
+                raise RuntimeError("failed Task 6 attempt content differs before review")
+    brief_name = f"{task_stem}-brief.md"
+    report_name = f"{task_stem}-report.md"
     brief_payload, _ = read_owned_entry(
         run_dir,
         brief_name,
@@ -876,6 +1017,14 @@ try:
     report_payload, report_info = read_owned_entry(
         run_dir, report_name, label="report", limit=REPORT_MAX_BYTES
     )
+    if task_n == "6":
+        report_text = report_payload.decode("utf-8")
+        status_lines = [
+            line for line in report_text.splitlines()
+            if re.match(r"^STATUS(?:=|:)", line)
+        ]
+        if status_lines != ["STATUS: PASS"]:
+            raise RuntimeError("Task 6 attempt-2 report is not successful")
     if task_n == "7":
         expected_header = (
             f"REPORT_DEV: {report_info.st_dev}\n"
@@ -884,7 +1033,7 @@ try:
         if not report_payload.startswith(expected_header):
             raise RuntimeError("Task 7 report inode self-binding differs")
     else:
-        review_name = f"task-{task_n}-review-r{round_n}.md"
+        review_name = f"{task_stem}-review-r{round_n}.md"
         try:
             os.stat(review_name, dir_fd=run_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -918,11 +1067,11 @@ try:
     package_payload = read_helper_output(
         stage_fd, helper_fd, "helper-output", helper_before
     )
-    package_name = f"task-{task_n}-review-r{round_n}.diff"
+    package_name = f"{task_stem}-review-r{round_n}.diff"
     publish(run_fd, package_name, package_payload)
     review_dev = review_ino = 0
     if task_n == "7":
-        review_name = f"task-7-review-r{round_n}.md"
+        review_name = f"{task_stem}-review-r{round_n}.md"
         review_fd = os.open(
             review_name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -1008,6 +1157,12 @@ test -z "${PYTHONOPTIMIZE-}"
 : "${REPORT_SHA256:?bounded implementation report SHA-256 required}"
 case "$TASK_N" in 1|2|3|4|5|6|7) ;; *) exit 1 ;; esac
 case "$ROUND" in 0|*[!0-9]*|'') exit 1 ;; esac
+TASK_ATTEMPT="${TASK_ATTEMPT-}"
+case "$TASK_N:$TASK_ATTEMPT" in
+  6:2) TASK_STEM=task-6-attempt-2 ;;
+  1:|2:|3:|4:|5:|7:) TASK_STEM="task-$TASK_N" ;;
+  *) echo 'STOP: invalid Task attempt namespace' >&2; exit 1 ;;
+esac
 if [ "$TASK_N" = 7 ]; then
   : "${REVIEW_DEV:?controller-recorded Task 7 review st_dev required}"
   : "${REVIEW_INO:?controller-recorded Task 7 review st_ino required}"
@@ -1020,9 +1175,9 @@ test "${#TASK_HEAD}" = 40
 UV="${UV:-$HOME/.local/bin/uv}"
 case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
 RUN_DIR=.superpowers/sdd/modeling-remediation
-PACKAGE="$RUN_DIR/task-$TASK_N-review-r$ROUND.diff"
-REVIEW="$RUN_DIR/task-$TASK_N-review-r$ROUND.md"
-REPORT="$RUN_DIR/task-$TASK_N-report.md"
+PACKAGE="$RUN_DIR/$TASK_STEM-review-r$ROUND.diff"
+REVIEW="$RUN_DIR/$TASK_STEM-review-r$ROUND.md"
+REPORT="$RUN_DIR/$TASK_STEM-report.md"
 CURRENT_REF="$(git symbolic-ref -q HEAD)"
 test "$CURRENT_REF" = refs/heads/codex/official-blender-mcp-install
 test "$(git rev-parse HEAD)" = "$TASK_HEAD"
@@ -1030,7 +1185,7 @@ test "$(git rev-parse "$CURRENT_REF")" = "$TASK_HEAD"
 
 "$UV" run --quiet --no-project --python 3.13 python - \
   "$PACKAGE" "$REVIEW" "$REPORT" "$REPORT_SHA256" "$TASK_HEAD" "$TASK_N" \
-  "$REVIEW_DEV" "$REVIEW_INO" <<'PY'
+  "$REVIEW_DEV" "$REVIEW_INO" "$TASK_STEM" <<'PY'
 # TASK_REVIEW_PARSER_BEGIN
 from __future__ import annotations
 
@@ -1197,12 +1352,50 @@ def parse_report(payload: bytes, expected: list[tuple[str, str]]) -> None:
         raise RuntimeError("missing reserved marker")
 
 
+if sys.argv[6] == "6":
+    failed_brief = read_owned_path(
+        ".superpowers/sdd/modeling-remediation/task-6-brief.md",
+        label="failed Task 6 brief", limit=BRIEF_MAX_BYTES,
+        expected_identity=(16777232, 294729012),
+    )
+    failed_report = read_owned_path(
+        ".superpowers/sdd/modeling-remediation/task-6-report.md",
+        label="failed Task 6 report", limit=REPORT_MAX_BYTES,
+        expected_identity=(16777232, 294742617),
+    )
+    if (
+        len(failed_brief) != 76281
+        or hashlib.sha256(failed_brief).hexdigest()
+        != "ced473a49581081f340e87ba339edc8ae94eeb8e1689eaf279e3c518f286d558"
+        or len(failed_report) != 7555
+        or hashlib.sha256(failed_report).hexdigest()
+        != "31e4e4433929d2b6aa145717433571391fefc577ca23fd8b8a2cbfeb3d3d39a8"
+    ):
+        raise RuntimeError("failed Task 6 attempt identity differs at acceptance")
+    failed_text = failed_report.decode("utf-8")
+    for literal in (
+        "STATUS: BLOCKED",
+        "98c8815a495efe1d6c595150dbed05063b684346",
+        "7 failed, 362 passed in 30.33s",
+    ):
+        if failed_text.count(literal) != 1:
+            raise RuntimeError("failed Task 6 attempt content differs at acceptance")
+
+
 package = read_owned_path(
     sys.argv[1], label="package", limit=PACKAGE_MAX_BYTES
 )
 report = read_owned_path(
     sys.argv[3], label="report", limit=REPORT_MAX_BYTES
 )
+if sys.argv[6] == "6":
+    report_text = report.decode("utf-8")
+    status_lines = [
+        line for line in report_text.splitlines()
+        if re.match(r"^STATUS(?:=|:)", line)
+    ]
+    if status_lines != ["STATUS: PASS"]:
+        raise RuntimeError("Task 6 attempt-2 report is not successful")
 expected_report_sha = sys.argv[4]
 if (
     re.fullmatch(r"[0-9a-f]{64}", expected_report_sha) is None
@@ -1210,6 +1403,10 @@ if (
 ):
     raise RuntimeError("implementation report digest differs")
 is_task7 = sys.argv[6] == "7"
+task_stem = sys.argv[9]
+expected_stem = "task-6-attempt-2" if sys.argv[6] == "6" else f"task-{sys.argv[6]}"
+if task_stem != expected_stem:
+    raise RuntimeError("review parser Task namespace differs")
 review_identity = (
     (int(sys.argv[7]), int(sys.argv[8])) if is_task7 else None
 )
@@ -1248,7 +1445,9 @@ parse_report(
     expected,
 )
 print(
-    f"TASK_REVIEW_READY head={task_head} package_sha256={package_sha} "
+    f"TASK_REVIEW_READY task={sys.argv[6]} "
+    f"attempt={'2' if task_stem == 'task-6-attempt-2' else 'initial'} "
+    f"head={task_head} package_sha256={package_sha} "
     f"report_sha256={expected_report_sha} review_sha256={review_sha}"
 )
 # TASK_REVIEW_PARSER_END
@@ -1259,6 +1458,9 @@ BASH
 For Task 7, retain the emitted `report_sha256` and `review_sha256` values as
 `TASK7_REPORT_SHA256` and `TASK7_REVIEW_SHA256`; terminal allocation accepts no
 recomputed or manually transcribed substitute.
+Append every accepted parser line verbatim to `.superpowers/sdd/progress.md`. Task 6
+completion must therefore carry literal `task=6 attempt=2`; Task 7 dispatch rejects a
+missing, duplicate, stale-head, or initial-attempt Task 6 completion line.
 
 Before any Task 1–7 review parser may emit `TASK_REVIEW_READY`, run this disposable
 reader/parser probe from the repository root. It extracts all four controller/P6/final-gate copies,
@@ -1483,6 +1685,7 @@ reader_positives: list[str] = []
 reader_negatives: list[str] = []
 parser_tasks: list[str] = []
 blocked_before_ready: list[str] = []
+status_negatives: list[str] = []
 
 
 def rejects(
@@ -1646,8 +1849,53 @@ with tempfile.TemporaryDirectory(
 
     rejects(parent_swap, action=replace_parent_directory)
 
+    failed_brief_probe = root / "task-6-brief.md"
+    failed_report_probe = root / "task-6-report.md"
+    failed_brief_payload = b"disposable failed Task 6 brief\n"
+    failed_report_payload = (
+        b"STATUS: BLOCKED\n"
+        b"98c8815a495efe1d6c595150dbed05063b684346\n"
+        b"7 failed, 362 passed in 30.33s\n"
+    )
+    write_owned(failed_brief_probe, failed_brief_payload)
+    write_owned(failed_report_probe, failed_report_payload)
+    failed_brief_info = os.lstat(failed_brief_probe)
+    failed_report_info = os.lstat(failed_report_probe)
+    probe_parser_source = parser_source
+    probe_replacements = (
+        (
+            '".superpowers/sdd/modeling-remediation/task-6-brief.md"',
+            repr(os.fspath(failed_brief_probe)),
+        ),
+        (
+            '".superpowers/sdd/modeling-remediation/task-6-report.md"',
+            repr(os.fspath(failed_report_probe)),
+        ),
+        (
+            "expected_identity=(16777232, 294729012)",
+            f"expected_identity=({failed_brief_info.st_dev}, {failed_brief_info.st_ino})",
+        ),
+        (
+            "expected_identity=(16777232, 294742617)",
+            f"expected_identity=({failed_report_info.st_dev}, {failed_report_info.st_ino})",
+        ),
+        ("len(failed_brief) != 76281", f"len(failed_brief) != {len(failed_brief_payload)}"),
+        (
+            '"ced473a49581081f340e87ba339edc8ae94eeb8e1689eaf279e3c518f286d558"',
+            repr(hashlib.sha256(failed_brief_payload).hexdigest()),
+        ),
+        ("len(failed_report) != 7555", f"len(failed_report) != {len(failed_report_payload)}"),
+        (
+            '"31e4e4433929d2b6aa145717433571391fefc577ca23fd8b8a2cbfeb3d3d39a8"',
+            repr(hashlib.sha256(failed_report_payload).hexdigest()),
+        ),
+    )
+    for original, replacement in probe_replacements:
+        if probe_parser_source.count(original) != 1:
+            raise RuntimeError(f"parser probe seam count differs: {original}")
+        probe_parser_source = probe_parser_source.replace(original, replacement)
     parser_path = root / "task-review-parser.py"
-    write_owned(parser_path, parser_source.encode("utf-8"))
+    write_owned(parser_path, probe_parser_source.encode("utf-8"))
     head = "a" * 40
     for task_n in map(str, range(1, 8)):
         case = root / f"parser-task-{task_n}"
@@ -1657,7 +1905,10 @@ with tempfile.TemporaryDirectory(
         review = case / "review.md"
         report = case / "report.md"
         package_payload = f"package-{task_n}\n".encode("ascii")
-        report_payload = f"report-{task_n}\n".encode("ascii")
+        report_payload = (
+            b"STATUS: PASS\n" if task_n == "6"
+            else f"report-{task_n}\n".encode("ascii")
+        )
         write_owned(package, package_payload)
         write_owned(report, report_payload)
         package_sha = hashlib.sha256(package_payload).hexdigest()
@@ -1706,6 +1957,7 @@ with tempfile.TemporaryDirectory(
                 task_n,
                 str(review_info.st_dev if task_n == "7" else 0),
                 str(review_info.st_ino if task_n == "7" else 0),
+                "task-6-attempt-2" if task_n == "6" else f"task-{task_n}",
             ],
             check=False,
             stdout=subprocess.PIPE,
@@ -1713,7 +1965,9 @@ with tempfile.TemporaryDirectory(
             text=True,
         )
         expected_marker = (
-            f"TASK_REVIEW_READY head={head} package_sha256={package_sha} "
+            f"TASK_REVIEW_READY task={task_n} "
+            f"attempt={'2' if task_n == '6' else 'initial'} "
+            f"head={head} package_sha256={package_sha} "
             f"report_sha256={report_sha} "
             f"review_sha256={hashlib.sha256(review.read_bytes()).hexdigest()}\n"
         )
@@ -1723,6 +1977,41 @@ with tempfile.TemporaryDirectory(
             )
         reader_positives.append(f"parser-task-{task_n}")
         parser_tasks.append(task_n)
+        if task_n == "6":
+            cases = {
+                "prose": b"prose says STATUS: PASS but has no reserved line\n",
+                "suffixed": b"STATUS: PASSING\n",
+                "duplicate": b"STATUS: PASS\nSTATUS: PASS\n",
+                "unknown": b"STATUS: PASS\nSTATUS: OTHER\n",
+                "blocked": b"STATUS: BLOCKED\n",
+                "missing": b"no status marker\n",
+            }
+            for label, status_payload in cases.items():
+                status_report = case / f"report-{label}.md"
+                write_owned(status_report, status_payload)
+                status_sha = hashlib.sha256(status_payload).hexdigest()
+                rejected = subprocess.run(
+                    [
+                        sys.executable,
+                        parser_path,
+                        package,
+                        review,
+                        status_report,
+                        status_sha,
+                        head,
+                        task_n,
+                        "0",
+                        "0",
+                        "task-6-attempt-2",
+                    ],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                if rejected.returncode == 0 or "TASK_REVIEW_READY" in rejected.stdout:
+                    raise RuntimeError(f"Task 6 status negative accepted: {label}")
+                status_negatives.append(label)
         if task_n == "1":
             os.chmod(review, 0o666)
             rejected = subprocess.run(
@@ -1737,6 +2026,7 @@ with tempfile.TemporaryDirectory(
                     task_n,
                     "0",
                     "0",
+                    "task-1",
                 ],
                 check=False,
                 stdout=subprocess.PIPE,
@@ -1755,17 +2045,22 @@ if (
     or len(parser_tasks) != 7
     or sorted(parser_tasks) != ["1", "2", "3", "4", "5", "6", "7"]
     or len(blocked_before_ready) != 1
+    or sorted(status_negatives) != [
+        "blocked", "duplicate", "missing", "prose", "suffixed", "unknown"
+    ]
 ):
     raise RuntimeError(
         "task review reader coverage differs: "
         f"positives={sorted(reader_positives)} negatives={sorted(reader_negatives)} "
-        f"parser_tasks={sorted(parser_tasks)} blocked={blocked_before_ready}"
+        f"parser_tasks={sorted(parser_tasks)} blocked={blocked_before_ready} "
+        f"status_negatives={sorted(status_negatives)}"
     )
 print(
     f"TASK_REVIEW_READER_GREEN positives={len(reader_positives)} "
     f"negatives={len(reader_negatives)} "
     f"parser_tasks={len(parser_tasks)} "
-    f"blocked_before_ready={len(blocked_before_ready)}"
+    f"blocked_before_ready={len(blocked_before_ready)} "
+    f"status_negatives={len(status_negatives)}"
 )
 PY
 BASH
@@ -1774,7 +2069,7 @@ BASH
 Expected exactly:
 
 ```text
-TASK_REVIEW_READER_GREEN positives=14 negatives=12 parser_tasks=7 blocked_before_ready=1
+TASK_REVIEW_READER_GREEN positives=14 negatives=12 parser_tasks=7 blocked_before_ready=1 status_negatives=6
 ```
 
 Before the first Task 7 dispatch and again before terminal allocation/merge, run this
@@ -2598,7 +2893,7 @@ This section is intentionally outside every numeric Task so the standard task-br
 helper cannot include it. On a fresh full execution, Task 0 reviews the initial Plan and
 the controller does not execute P6 when first reading this section; it returns here only
 after Task 5 has a clean combined review. In the current post-Task-5 continuation, P6
-must be complete before `task-6-brief.md` is generated.
+must be complete before `task-6-attempt-2-brief.md` is generated.
 
 Publication is one-shot and irreversible. If
 `.superpowers/sdd/modeling-remediation/final-retest-r1/invalid-journals.sha256` already
@@ -3523,6 +3818,8 @@ DIGEST_SITES = {
     "R2_CONTROLLER": 7,
 }
 EXTERNAL_DIGESTS = {
+    "ced473a49581081f340e87ba339edc8ae94eeb8e1689eaf279e3c518f286d558": 4,
+    "31e4e4433929d2b6aa145717433571391fefc577ca23fd8b8a2cbfeb3d3d39a8": 4,
     "8292ac78073804687faab381181881ac7f522da1edea2dffe625626c1482c535": 8,
     "b6f2568116080d4936a3d753a419c771c00233a67111ed626cc2bbe169c79f0e": 1,
     "909fb6510a7ae4f115688add9d1eb0b25430ec9d4f490d16fb56b72343b24e7b": 1,
@@ -3541,6 +3838,10 @@ EXTERNAL_DIGESTS = {
     "4e3ce3f97b448f2abdccb3ddd30157a3d070d9e9611d0e1cff5d61a568209d94": 1,
     "19d4fc39ada3725d762aef5bd68a6adf7a678299bef92885e466cbda8f0fde71": 1,
     "957b7a6178af7b6217fb336fbddbe861512ee13bee5fa7de915849e1b51cee69": 1,
+    "431b9175cc13f32283b49a609736914ae963adeb7741c46f63814cd323afce89": 2,
+    "517c7e28b156c1a788e581ddeea1d7eb7d305139eb47e178a88d41006f995600": 1,
+    "c59aa76b9f88c735fb817df7483b261adcf3e6d57cc5af6b45213f53a9a78567": 1,
+    "b0ea799a5ae715e9110534fc4c01b8be5f3964669a4184f9e9be165380404f83": 1,
 }
 # Digests this block measures from the Plan's own bytes instead of from a payload fence.
 # One per marked block family -- which now includes the two module-level reader programs
@@ -3560,7 +3861,7 @@ MARKED_BLOCKS = {
     "P6_MANIFEST_READER": (1, "ddfbecc8357e10a95578a3fcfe4b49e0cd426e005f6e333f1ae456f6a35be5c4"),
     "TASK_REPORT_SNAPSHOT_READER": (1, "7f99bbe472fb470d816e245d188a063ed43cff63fcc605d4b1f1cf9777c3b623"),
     "TASK_ARTIFACT_READER": (4, "570c8fb1afabd4b9e452ce2e8b4dda78013452b51645b328397f8ed4ab45980b"),
-    "TASK_REVIEW_PARSER": (1, "283c5506f33d992511b3016d51f7ba02561ba9031b8d358cc61717e7f4c7e574"),
+    "TASK_REVIEW_PARSER": (1, "40742e94b2e5955d6431217c33979ac005b5fa92ed7bc21e47ed69c714404a13"),
     "TERMINAL_BOUNDED_READER": (4, "91fe59f357272548e772670588c1325a488455058e4899789fad187bc7331b8e"),
     "TERMINAL_MANIFEST_VALIDATOR": (2, "1b7c3af254f36bf8d7976f0a028b170c41d20de1402ad330ab1210ee4bc48956"),
 }
@@ -3740,6 +4041,10 @@ COMMIT_PINS = {
     "4309a39646e644261624bfcd2bca669b343b7621": 9,
     "4f1913c364c995c93432bb24b1cc3c9ad1b8590f": 4,
     "09bf5c2089fe27b8dcdaa9af8115ec4d151359c3": 1,
+    "59805fea5e69ccc894c5c3826cee3c48c72f4f27": 3,
+    "98c8815a495efe1d6c595150dbed05063b684346": 5,
+    "245f2677bf0cef733693e2db9393fa497b643413": 1,
+    "0bd1700be6987fe391db1d847be3a9830ae11d95": 1,
 }
 expected_pins = {pin: count + 1 for pin, count in COMMIT_PINS.items()}
 pin_counts: dict[str, int] = {}
@@ -4565,7 +4870,7 @@ BASH
 <!-- PLAN_IDENTITY_GATE_END -->
 
 The SHA-256 of the fence body above, measured between its own markers, is
-`2947f916b4a9d7faac7179e463ba05cddce9889a8a1ba4fab6c28a61cef157cc`. The block measures that itself and requires this
+`845a319fa2e35422405cd28eb6523a6b3748b817c01f952ccacfd9159a5f267a`. The block measures that itself and requires this
 line and the Step 5 acceptance literal to be its only two declarations, and Step 5
 re-hashes the extracted bytes against the same value before executing them.
 
@@ -4575,9 +4880,9 @@ whose coverage is not a claim: every byte outside those 64 characters is inside 
 It detects and does not localise; every dimension inside the fence above exists to
 say *which* region moved. Regenerate it with the Plan, last, after every other edit.
 
-PLAN_BODY_DIGEST b1bf8c0c5ed8f45166ffbce1217e3eb17cf6a79a559ae6313bf7f6e36b9d0f60
+PLAN_BODY_DIGEST 63d09200ee1d0d7ed92449ee9744cb97d116d7a339e549da1278680a70ad4bb4
 
-Expected with `ALLOCATE=0` exactly one line, `PLAN_PAYLOAD_IDENTITY_GREEN payloads=11 digest_sites=38 claims=56 identity_copies=28 readers=24 blocks=25 free_defs=133 commit_pins=17 publish_copies=4`; with `ALLOCATE=1` that same line followed by `PLAN_REVIEW_ROUND_ALLOCATED n=<N> lenses=3`. Any other output, including a partial one, blocks the round: fix the Plan and rerun before a reviewer sees these bytes.
+Expected with `ALLOCATE=0` exactly one line, `PLAN_PAYLOAD_IDENTITY_GREEN payloads=11 digest_sites=38 claims=56 identity_copies=28 readers=24 blocks=25 free_defs=133 commit_pins=31 publish_copies=4`; with `ALLOCATE=1` that same line followed by `PLAN_REVIEW_ROUND_ALLOCATED n=<N> lenses=3`. Any other output, including a partial one, blocks the round: fix the Plan and rerun before a reviewer sees these bytes.
 
 - [ ] **Step 1: Run the specification and safety review**
 
@@ -4639,9 +4944,9 @@ PY
 GATE_SHA256="$(printf '%s\n' "$GATE_SOURCE" | "$UV" run --quiet --no-project \
   --python 3.13 python -P -c \
   'import hashlib, sys; sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
-test "$GATE_SHA256" = '2947f916b4a9d7faac7179e463ba05cddce9889a8a1ba4fab6c28a61cef157cc'
+test "$GATE_SHA256" = '845a319fa2e35422405cd28eb6523a6b3748b817c01f952ccacfd9159a5f267a'
 GATE_OUTPUT="$(ALLOCATE=0 /bin/bash -euo pipefail -c "$GATE_SOURCE")"
-test "$GATE_OUTPUT" = 'PLAN_PAYLOAD_IDENTITY_GREEN payloads=11 digest_sites=38 claims=56 identity_copies=28 readers=24 blocks=25 free_defs=133 commit_pins=17 publish_copies=4'
+test "$GATE_OUTPUT" = 'PLAN_PAYLOAD_IDENTITY_GREEN payloads=11 digest_sites=38 claims=56 identity_copies=28 readers=24 blocks=25 free_defs=133 commit_pins=31 publish_copies=4'
 git add -- "$PLAN"
 # Task 6 Step 4 and Task 7 Step 1 both assert the staged set and this commit did not,
 # so a path staged before this block ran was swept into the Plan-only commit.
@@ -5985,10 +6290,12 @@ Expected: Task 5 completes only with `SPEC_VERDICT: PASS`,
 
 **Files:**
 - Modify: `scripts/official_blender_mcp_audit.py`
-- Report, ignored: `.superpowers/sdd/modeling-remediation/task-6-report.md`
+- Report, ignored: `.superpowers/sdd/modeling-remediation/task-6-attempt-2-report.md`
 
 **Interfaces:**
-- Consumes: the clean reviewed Task 5 HEAD and Appendices B2 and C only.
+- Consumes: the current clean P6-approved Plan commit, whose ancestry contains the
+  clean combined-reviewed Task 5 HEAD `59805fea5e69ccc894c5c3826cee3c48c72f4f27`,
+  and Appendices B2 and C only.
 - Produces: one real CLI-only commit with the bounded descriptor reader, the complete
   reader adversarial matrix, and one clean standard combined review.
 
@@ -5998,14 +6305,17 @@ verdict, invoke Blender or MCP, or modify the runbook, audit, Plan, gate, depend
 helpers, or services. Orchestration resumes only after the implementer commits, writes
 the report, and returns; the controller then runs the one standard combined review.
 
-- [ ] **Step 1: Prove the current reader fails the new contract**
+- [ ] **Step 1: Bind the post-P6 base and prove the current reader fails the new contract**
 
-Require a clean reviewed Task 5 HEAD. The current CLI must be the exact initial B2I
-payload: 626 lines, 24,168 bytes, SHA-256
+Require the current clean HEAD to equal `TASK_BASE`, and require the clean reviewed
+Task 5 HEAD `59805fea5e69ccc894c5c3826cee3c48c72f4f27` to be its ancestor with
+`git merge-base --is-ancestor`. The current CLI must be the exact initial B2I payload:
+626 lines, 24,168 bytes, SHA-256
 `4a45f69f8aae1f72711119e9ecd4e4f6a91a3fcfe88488b737c7c154696ec3fe`.
 Extract Appendix C's sole Python fence to the ignored
 `.superpowers/sdd/modeling-remediation/appendix-c-probe.py`, mode `0600`, then run
-Appendix C's exact RED block. Record its literal output in `task-6-report.md`.
+Appendix C's exact RED block. Record its literal output in
+`task-6-attempt-2-report.md`; the failed attempt-1 report is immutable history.
 
 Expected: `READER_HARDENING_RED`; a green result is a stop condition.
 
@@ -6024,6 +6334,8 @@ from the Step 1 hash, and this command must succeed:
 /bin/bash -euo pipefail <<'BASH'
 test -n "${TASK_BASE:?Task base required}"
 test "$(git rev-parse HEAD)" = "$TASK_BASE"
+TASK5_REVIEWED_HEAD=59805fea5e69ccc894c5c3826cee3c48c72f4f27
+git merge-base --is-ancestor "$TASK5_REVIEWED_HEAD" "$TASK_BASE"
 test "$(git status --short --untracked-files=all)" = " M scripts/official_blender_mcp_audit.py"
 test "$(git diff --name-only -- scripts/official_blender_mcp_audit.py | wc -l | tr -d ' ')" = 1
 if git diff --quiet -- scripts/official_blender_mcp_audit.py; then
@@ -6041,25 +6353,26 @@ size and opened device, inode, UID, mode, link count, timestamps, and size; read
 exactly that positive bound; and rechecks the descriptor, current pathname, parent
 descriptor, and parent pathname before decoding UTF-8.
 
-- [ ] **Step 3: Run the focused and full green gates**
+- [ ] **Step 3: Run the focused green gate and pre-commit hygiene**
 
 Run Appendix C's exact GREEN block, including Ruff `--no-cache`, strict mypy with its
 exclusive `/private/tmp` cache, compilation of both extracted files, `reader-green`,
-and `all-green`. Then run:
+and `all-green`. Then verify the sole intended uncommitted delta:
 
 ```bash
 /bin/bash -euo pipefail <<'BASH'
-./scripts/checks.sh
 git diff --check
+test "$(git status --short --untracked-files=all)" = " M scripts/official_blender_mcp_audit.py"
 test "$(git diff --name-only)" = scripts/official_blender_mcp_audit.py
 BASH
 ```
 
 Expected: the normal and exact-limit positives pass; parent/leaf symlink, hardlink,
 unsafe-mode, oversize, grow, shrink, in-place mutation, and pathname-replacement cases
-all fail closed; the repository gate reports exactly 369 passed.
+all fail closed. Do not run the full repository gate while this required tracked delta
+is uncommitted: its formal-provenance tests deliberately require a clean worktree.
 
-- [ ] **Step 4: Commit the real CLI delta and finish the report**
+- [ ] **Step 4: Commit the real CLI delta, run the clean full gate, and finish the report**
 
 ```bash
 /bin/bash -euo pipefail <<'BASH'
@@ -6077,13 +6390,42 @@ if git diff --quiet "$TASK_BASE..$TASK_HEAD" -- scripts/official_blender_mcp_aud
   echo "Task 6 CLI commit is a no-op" >&2
   exit 1
 fi
+CHECKED_HEAD="$TASK_HEAD"
+set +e
+CHECKS_OUTPUT="$(./scripts/checks.sh 2>&1)"
+CHECKS_EXIT=$?
+set -e
+printf '%s\n' "$CHECKS_OUTPUT"
+test "$CHECKS_EXIT" = 0
+test "$(printf '%s\n' "$CHECKS_OUTPUT" | /usr/bin/grep -Ec '^369 passed in [0-9]+(\.[0-9]+)?s$')" = 1
+test "$(printf '%s\n' "$CHECKS_OUTPUT" | /usr/bin/grep -Ec '^ALL CHECKS PASSED$')" = 1
+git diff --check
+test "$(git rev-parse HEAD)" = "$CHECKED_HEAD"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
 BASH
 ```
 
 Append the exact RED/GREEN/full-gate commands and output, base/head/commit, extracted
-payload identity, self-review, and concerns to `task-6-report.md`, then return. Any
+payload identity, self-review, and concerns to `task-6-attempt-2-report.md`, then return.
+Write exactly one `STATUS: PASS` only after the clean 369-test gate and every final
+identity/status check succeeds; any stop writes `STATUS: BLOCKED` instead, never both.
+The review-package generator and parser reject a report without the unique PASS marker
+or with any BLOCKED marker. Any
 combined-review finding returns to this implementer, requires a covering rerun and a
 new CLI-only commit, and receives another standard combined review.
+
+The clean post-commit repository gate must report exactly 369 passed. If it fails,
+retain the CLI-only commit and record the literal output with `STATUS: BLOCKED`; do not
+amend, reset, rebase, modify tests/helpers/the gate, reduce the test inventory, or hide
+worktree state. That failure terminates this Plan at Task 6: do not reuse or replace the
+bound `task-6-attempt-2-brief.md` or `task-6-attempt-2-report.md`, generate a review package, enter combined
+review, or start Task 7. Any retry requires a separate follow-up Plan that defines a
+fresh attempt-scoped brief/report namespace, its own base and allowed history, and the
+owner-specific correction; that Plan receives a fresh P6 three-lens zero-finding review
+before any retry dispatch. The `TASK_ATTEMPT=2` namespace above is the one follow-up
+attempt created for the already-retained pre-amendment failure; it does not authorize a
+third attempt after an attempt-2 failure. Only a clean committed HEAD may enter combined
+review or Task 7.
 
 Expected: Task 6 completes only with `SPEC_VERDICT: PASS`,
 `QUALITY_VERDICT: APPROVED`, zero findings, and a clean reviewed HEAD.
@@ -6103,7 +6445,8 @@ Expected: Task 6 completes only with `SPEC_VERDICT: PASS`,
 - Consumes: the clean reviewed Task 6 HEAD, Appendices A, C, D, F, and both immutable
   invalid r1 journals.
 - Produces: exact runbook bytes, r1 root cause plus validated clean-r2 audit evidence,
-  one reviewed Task 7 HEAD, and the standard progress-ledger completion line.
+  a user-supplied visual acknowledgement for every retained PNG, one reviewed Task 7
+  HEAD, and the standard progress-ledger completion line.
 
 **Role boundary:** P6 must already have approved and committed the exact Plan bytes,
 Task 6 must have a clean combined review at the current clean HEAD, and the Task 7 base
@@ -6112,7 +6455,13 @@ fresh `gpt-5.6-sol` high-effort
 implementer receives only the standard generated `task-7-brief.md` and edits the
 controller-created `task-7-report.md`. It owns every Step below, commits, and returns
 before the controller dispatches one fresh standard combined reviewer. It may not write
-a verdict or dispatch another agent.
+a verdict or dispatch another agent. The sole exception is the visual decision/input
+boundary: at `VISUAL_ACK_REQUIRED` the implementer must preserve the live PTY, report
+its session identity plus the ordered artifact paths/SHA-256 values to the controller,
+and stop without constructing or sending an acknowledgement. The controller presents
+every ordered image to the user, waits for an explicit pass/fail decision for each one,
+and only then writes the exact user-authorized acknowledgement into that same live PTY.
+The implementer resumes only after the controller confirms that write.
 
 - [ ] **Step 1: Apply the exact durable corrections**
 
@@ -6730,10 +7079,11 @@ case "$R2_ATTEMPT" in attempt-[0-9][0-9][0-9][0-9]) ;; *) exit 1 ;; esac
 test "$R2_ATTEMPT" != attempt-0000
 UV="${UV:-$HOME/.local/bin/uv}"
 case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
-BASELINE=.superpowers/sdd/modeling-remediation/external-baseline/baseline.json
+BASELINE=.superpowers/sdd/modeling-remediation/external-baseline/continuation-after-main-245f267-r3.json
 REVIEW_DIR=.superpowers/sdd/modeling-remediation/terminal-r$ROUND
 BASE_VALUES="$("$UV" run --quiet --no-project --python 3.13 python -P - \
   "$BASELINE" <<'PY'
+import hashlib
 import json
 import os
 import re
@@ -6934,6 +7284,8 @@ raw, _ = read_bounded_path(
     limit=MANIFEST_MAX_BYTES,
     label="external baseline",
 )
+if hashlib.sha256(raw).hexdigest() != "431b9175cc13f32283b49a609736914ae963adeb7741c46f63814cd323afce89":
+    raise SystemExit("continuation baseline digest differs")
 value = json.loads(raw)
 items = (value.get("review_base_head"), value.get("initial_main_anchor"))
 if not all(isinstance(item, str) and re.fullmatch(r"[0-9a-f]{40}", item) for item in items):
@@ -9086,19 +9438,18 @@ nested evidence and a rehashed-but-noncanonical manifest fail closed. Remove eac
 fixture after recording those results; never run this adversary against the real
 review directory.
 
-Any terminal finding dispatches one fix-forward implementer with the complete finding
-list, but evidence and review are appended to the report of the Task that owns each
-changed tracked path. The Plan remains controller-owned and requires a fresh P6
-three-lens Plan round before commit; `scripts/checks.sh` routes to Task 1;
-`scripts/official_blender_mcp_audit.py` routes to Task 6; the amended runbook and active
-audit route to Task 7. A multi-owner fix receives a fresh combined review for every
-owner whose path changed. A CLI fix first regenerates the Task 6 B2/C brief, runs its
-reader/full probes and 369-test gate, and obtains a clean Task 6 combined review. After
-every owning review is clean, regenerate the Task 7 brief from the approved Plan, run
-all Task 7 A/C/D/F clean-r2 probes and the 369-test gate on the new
-HEAD, append only `task-7-report.md`, and obtain a fresh clean combined Task 7 review.
-Then start a fresh terminal round. Never append Task 7 or terminal-fix evidence to the
-Task 5 report. Old review directories are never overwritten.
+Any terminal finding blocks Phase M and terminates this Plan without dispatching a
+fix-forward implementer. Preserve the locked terminal round and every Task brief,
+report, package, review and r2 artifact unchanged; the fixed/O_EXCL namespaces in this
+Plan are completed evidence and may not be regenerated or reused. Recovery requires a
+separate controller-owned follow-up Plan that names fresh owner- and attempt-scoped
+brief/report/review/evidence paths, binds the failed terminal round and reviewed HEAD,
+defines its own base and allowed multi-owner history, and receives a fresh P6
+three-lens zero-finding review before dispatch. `scripts/checks.sh` still routes to the
+Task 1 owner, `scripts/official_blender_mcp_audit.py` to Task 6, and the amended runbook
+or active audit to Task 7, but no such routing occurs inside this Plan after a terminal
+finding. Never append terminal-fix evidence to an occupied Task report or overwrite an
+old review directory.
 
 ---
 
@@ -9107,9 +9458,8 @@ Task 5 report. Old review directories are never overwritten.
 This controller-only merge phase runs only after approved Task 7 and Phase R; it does
 not replace Task 7 and never dispatches Task 8. Run one self-contained block from the
 feature worktree. For the first merge set `EXPECTED_MAIN_ANCHOR` to the captured
-`initial_main_anchor` and leave `PREVIOUS_REVIEW_DIR` unset. For a clean postmerge
-fix-forward retry set `EXPECTED_MAIN_ANCHOR` to the old reviewed HEAD and
-`PREVIOUS_REVIEW_DIR` to that locked old review directory.
+`initial_main_anchor`. This Plan has no postmerge fix-forward retry path; exit 85 uses
+the separately reviewed follow-up-Plan boundary below.
 
 ```bash
 /bin/bash -euo pipefail <<'BASH'
@@ -9121,9 +9471,8 @@ case "$UV" in /*) ;; *) echo 'STOP: UV must be absolute' >&2; exit 1 ;; esac
 case "$EXPECTED_MAIN_ANCHOR" in *[!0-9a-f]*) exit 1 ;; esac
 test "${#EXPECTED_MAIN_ANCHOR}" = 40
 test -z "${PYTHONPATH-}"
-PREVIOUS_REVIEW_DIR="${PREVIOUS_REVIEW_DIR-}"
 BINDINGS="$("$UV" run --quiet --no-project --python 3.13 python -P - \
-  "$REVIEW_DIR" "$PREVIOUS_REVIEW_DIR" <<'PY'
+  "$REVIEW_DIR" <<'PY'
 from __future__ import annotations
 
 import hashlib
@@ -9873,28 +10222,15 @@ expected = [
 for report in REPORTS:
     parse_report(current[report], expected)
 review_hashes = [hashlib.sha256(current[name]).hexdigest() for name in REPORTS]
-previous = "-"
-if sys.argv[2]:
-    old, old_r2 = frozen_directory(sys.argv[2])
-    evidence_sha256(old, old_r2["evidence-manifest.json"])
-    previous = old["reviewed-head"].decode("ascii").removesuffix("\n")
-    if HEX40.fullmatch(previous) is None:
-        raise RuntimeError("invalid previous reviewed-head")
-print(base, initial, reviewed, package_sha, evidence_sha, *review_hashes, previous)
+print(base, initial, reviewed, package_sha, evidence_sha, *review_hashes)
 PY
 )"
 IFS=' ' read -r REVIEW_BASE_HEAD INITIAL_MAIN_ANCHOR REVIEWED_HEAD \
   PACKAGE_SHA256 EVIDENCE_SHA256 CODE_REVIEW_SHA256 ADVERSARIAL_REVIEW_SHA256 \
-  PONYTAIL_REVIEW_SHA256 PREVIOUS_REVIEWED_HEAD <<EOF
+  PONYTAIL_REVIEW_SHA256 <<EOF
 $BINDINGS
 EOF
-if [ "$EXPECTED_MAIN_ANCHOR" = "$INITIAL_MAIN_ANCHOR" ]; then
-  test -z "$PREVIOUS_REVIEW_DIR"
-  test "$PREVIOUS_REVIEWED_HEAD" = -
-else
-  test -n "$PREVIOUS_REVIEW_DIR"
-  test "$PREVIOUS_REVIEWED_HEAD" = "$EXPECTED_MAIN_ANCHOR"
-fi
+test "$EXPECTED_MAIN_ANCHOR" = "$INITIAL_MAIN_ANCHOR"
 FEATURE_ROOT="$(git rev-parse --show-toplevel)"
 MAIN_ROOT="$(git worktree list --porcelain | awk '
   /^worktree / { root=substr($0, 10) }
@@ -10318,15 +10654,14 @@ overlong-line, or live-cap-overflow run is clean failure 85 unless dirty state
 dominates as exit 86.
 
 On exit 85, main is clean at the old reviewed object. Preserve the original
-`review_base_head`, old locked review directory, bound evidence and postmerge report;
-do not reset/rebase/revert main. Dispatch one fix-forward implementer with the complete
-failure, route every changed path to its owning Task/report/combined review exactly as
-Phase R specifies, then regenerate and fully execute Task 7 (including a fresh selected
-attempt, manifest/report, 369-test gate and combined review) on the new HEAD. Generate
-the next whole-branch package from the original `review_base_head`, pass all three
-terminal reviews on new package/evidence digests, then rerun this block with the old
-review directory as `PREVIOUS_REVIEW_DIR`. If main is dirty (exit 86), fail closed and
-ask the user; never stash, clean, checkout, reset, revert, or continue automatically.
+`review_base_head`, old locked review directory, reviewed HEAD, bound evidence and
+postmerge report; do not reset/rebase/revert main. Exit 85 terminates this Plan without
+dispatching or regenerating any occupied Task/terminal artifact. Recovery requires the
+same separate, fresh-P6-approved follow-up Plan required after a Phase R finding: it
+binds all preserved objects, names fresh owner/attempt/report/review/evidence
+namespaces, and defines its own merge-recovery contract. If main is dirty (exit 86),
+fail closed and ask the user; never stash, clean, checkout, reset, revert, or continue
+automatically.
 
 ---
 
@@ -14990,9 +15325,13 @@ its runbook and its audit before rerunning this appendix, so there is one Task 7
 invocation and no dirty Task 7 lane -- the `case` below rejects one.
 `TASK_N` and `TASK_REPORT` bind lanes.
 Before initial controller merge verification, leave `EXPECTED_MAIN_ANCHOR` empty so
-Appendix E's initial anchor is used. After a clean controller merge-gate failure, set
-it to the exact prior reviewed HEAD for the next fix-forward round; the review package
-base does not move.
+the preserved r3 continuation baseline's user-authorized main anchor is used. The
+original `baseline.json` and the invalid/r2 continuation attempts remain immutable and
+are never accepted. A clean controller merge-gate failure terminates
+this Plan and cannot create another Appendix D round under these occupied namespaces.
+Appendix D binds the current `main` ref and its ancestry but does not require the main
+worktree to be clean: it performs no main write. The final controller fast-forward
+retains the existing hard stop on any main worktree change.
 
 The recorder starts before the first App Server, effective-config, on-disk config,
 source, external-baseline, audit, or Git-scope integration read. Bootstrap
@@ -15336,7 +15675,8 @@ CODEX_CONFIG="${CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
 REPO_ROOT="$(pwd -P)"
 AUDIT_FILE="$REPO_ROOT/docs/audits/2026-08-10-official-blender-mcp-modeling-validation.md"
 AUDIT_SCRIPT="$REPO_ROOT/scripts/official_blender_mcp_audit.py"
-EXTERNAL_BASELINE="$REPO_ROOT/.superpowers/sdd/modeling-remediation/external-baseline/baseline.json"
+EXTERNAL_BASELINE="$REPO_ROOT/.superpowers/sdd/modeling-remediation/external-baseline/continuation-after-main-245f267-r3.json"
+EXTERNAL_BASELINE_SHA256="431b9175cc13f32283b49a609736914ae963adeb7741c46f63814cd323afce89"
 BASE_COMMIT="09bf5c2089fe27b8dcdaa9af8115ec4d151359c3"
 EXPECTED_ACTIVE_AUDIT_DIRTY="${EXPECTED_ACTIVE_AUDIT_DIRTY:-1}"
 TASK_N="${TASK_N:?set to 4, 5, or 7}"
@@ -15387,7 +15727,7 @@ for owned_input in "$AUDIT_FILE" "$AUDIT_SCRIPT" "$EXTERNAL_BASELINE"; do
     || { echo "STOP: group/world-writable input: $owned_input" >&2; exit 1; }
 done
 AUDIT_SCRIPT_SHA256="$(shasum -a 256 "$AUDIT_SCRIPT" | awk '{print $1}')"
-export AUDIT_SCRIPT_SHA256
+export AUDIT_SCRIPT_SHA256 EXTERNAL_BASELINE_SHA256
 
 export UV_BIN CODEX_BIN CODEX_CONFIG AUDIT_FILE AUDIT_SCRIPT EXTERNAL_BASELINE
 export BASE_COMMIT EXPECTED_ACTIVE_AUDIT_DIRTY TASK_N TASK_REPORT
@@ -17706,6 +18046,10 @@ def git_blob(root: Path, object_id: str) -> bytes:
 _, _, baseline_bytes = file_bytes(
     Path(os.environ["EXTERNAL_BASELINE"]), limit=4 * 1024 * 1024
 )
+if hashlib.sha256(baseline_bytes).hexdigest() != os.environ[
+    "EXTERNAL_BASELINE_SHA256"
+]:
+    raise RuntimeError("continuation baseline digest differs")
 baseline = json.loads(baseline_bytes)
 if not isinstance(baseline, dict) or not isinstance(baseline.get("paths"), dict):
     raise RuntimeError("invalid external baseline")
@@ -17722,6 +18066,21 @@ main_root = Path(paths["main_root"]["resolved_path"])
 source_root = Path(paths["source_root"]["resolved_path"])
 baseline_feature = baseline["feature_head"]
 current_feature = git(feature_root, "rev-parse", "HEAD")
+continuation = baseline.get("continuation")
+if continuation != {
+    "authorized_main_anchor": "245f2677bf0cef733693e2db9393fa497b643413",
+    "feature_merge_commit": "0bd1700be6987fe391db1d847be3a9830ae11d95",
+    "invalid_attempt_sha256": "517c7e28b156c1a788e581ddeea1d7eb7d305139eb47e178a88d41006f995600",
+    "previous_attempt_sha256": "c59aa76b9f88c735fb817df7483b261adcf3e6d57cc5af6b45213f53a9a78567",
+    "previous_baseline_sha256": "b0ea799a5ae715e9110534fc4c01b8be5f3964669a4184f9e9be165380404f83",
+}:
+    raise RuntimeError("continuation baseline ancestry binding differs")
+subprocess.run(
+    ["git", "-C", os.fspath(feature_root), "merge-base", "--is-ancestor",
+     continuation["feature_merge_commit"], current_feature],
+    check=True,
+    capture_output=True,
+)
 provenance = baseline.get("gate_provenance")
 if not isinstance(provenance, dict) or set(provenance) != {
     "old_checks_blob", "old_checks_sha256", "retained_evidence_sha256"
@@ -17823,8 +18182,15 @@ if hashlib.sha256(git_blob(feature_root, task1_adapter_blob)).hexdigest() != (
 task1_checks_blob = git(
     feature_root, "rev-parse", f"{task1_head}:scripts/checks.sh"
 )
-if git_blob(feature_root, task1_checks_blob) != final_checks_bytes:
-    raise RuntimeError("Task 1 checks Git blob differs from final checks bytes")
+if git_blob(feature_root, task1_checks_blob) == final_checks_bytes:
+    raise RuntimeError("continuation merge did not add the authorized main gate")
+merge_checks_blob = git(
+    feature_root,
+    "rev-parse",
+    f"{continuation['feature_merge_commit']}:scripts/checks.sh",
+)
+if git_blob(feature_root, merge_checks_blob) != final_checks_bytes:
+    raise RuntimeError("continuation merge checks Git blob differs from final bytes")
 _, _, retained_evidence = file_bytes(
     feature_root / ".superpowers/sdd/modeling-remediation/uv-hidden-flag-research.md",
     limit=4 * 1024 * 1024,
@@ -17858,8 +18224,6 @@ current_main = git(main_root, "rev-parse", "HEAD")
 if current_main != expected_main_anchor:
     raise RuntimeError("main HEAD differs from this round's fixed anchor")
 main_clean = git(main_root, "status", "--porcelain=v1", "--untracked-files=all") == ""
-if not main_clean:
-    raise RuntimeError("main worktree must remain clean")
 subprocess.run(
     ["git", "-C", os.fspath(feature_root), "merge-base", "--is-ancestor",
      review_base, expected_main_anchor],
@@ -17888,21 +18252,30 @@ subprocess.run(
 )
 changed = set(git_z(
     feature_root, "diff", "--name-only", "--no-renames", "-z",
-    f"{base_commit}..{current_feature}", "--",
+    f"{base_commit}..{current_feature}", "--", *sorted(REQUIRED_TRACKED),
 ))
-if not REQUIRED_TRACKED <= changed:
+if changed != REQUIRED_TRACKED:
     raise RuntimeError("required remediation paths are absent from the tracked delta")
-if not changed <= ALLOWED_TRACKED:
-    raise RuntimeError("net tracked path outside the remediation allowlist")
 
 history_changed: set[str] = set()
 commits = git(
-    feature_root, "rev-list", "--reverse", f"{base_commit}..{current_feature}"
+    feature_root, "rev-list", "--first-parent", "--reverse",
+    f"{base_commit}..{current_feature}"
 ).splitlines()
 for commit in commits:
     fields = git(feature_root, "rev-list", "--parents", "-n", "1", commit).split()
-    if len(fields) < 2 or fields[0] != commit:
+    if fields[0] != commit:
         raise RuntimeError("remediation commit lacks a parent")
+    if commit == continuation["feature_merge_commit"]:
+        if fields != [
+            commit,
+            "98c8815a495efe1d6c595150dbed05063b684346",
+            continuation["authorized_main_anchor"],
+        ]:
+            raise RuntimeError("authorized continuation merge parents differ")
+        continue
+    if len(fields) != 2:
+        raise RuntimeError("unexpected remediation merge commit")
     history_changed.update(git_z(
         feature_root, "diff", "--name-only", "--no-renames", "-z",
         fields[1], commit, "--",
@@ -25932,14 +26305,20 @@ r2_python "$ATTEMPT_ROOT/r2_controller.py" finalize \
 ```
 
 When `run` prints `VISUAL_ACK_REQUIRED`, its manifest-derived ordered list includes
-every base PNG and any future/repeat PNG. Use `view_image` on the absolute
-`$ATTEMPT_ROOT/<path>` for **each** listed row and verify a nonblank, coherent lamp or
-requested UI/render view. Only after all images are individually inspected, manually
-type one exact single-line `visual_ack` object with the same attempt, order, paths and
-SHA-256 values and literal `result:"pass"` for every row. The acknowledgement is a
-human decision in the live PTY, not an LLM timing/event and not controller-generated.
-Wrong, missing, reordered, duplicate, corrupt, blank or uninspected imagery invalidates
-the attempt; do not answer `pass`.
+every base PNG and any future/repeat PNG. The implementer must not call `view_image`,
+construct an acknowledgement, infer/default `pass`, or write stdin. It preserves the
+live PTY and yields its session identity plus the prompt's exact ordered artifact
+paths/SHA-256 values to the controller. The controller uses `view_image` on every
+absolute `$ATTEMPT_ROOT/<path>`, presents every image and matching SHA-256 to the user,
+and waits for the user's explicit pass/fail decision for each row. Only when the user
+has explicitly passed every row may the controller type one exact single-line
+`visual_ack` object with the same attempt, order, paths and SHA-256 values and literal
+`result:"pass"` into that same live PTY, then tell the implementer to resume. No
+implementer, reviewer, or controller may infer, default, precompute, or auto-generate a
+live `pass`; `production_expected_visual_ack` defines the parser's exact shape only and
+is never evidence of or authority for a live pass. Any user fail, missing response, wrong/missing/reordered/
+duplicate image or digest, corrupt/blank/uninspected imagery, or lost/replaced PTY
+invalidates the attempt; do not answer `pass`, validate, finalize, or publish success.
 
 If `FAILURE_ACK_REQUIRED` appears, stop dispatch. Read the retained raw transcript or
 failure JSON named by the prompt and its exact SHA, immediately append the verbatim
