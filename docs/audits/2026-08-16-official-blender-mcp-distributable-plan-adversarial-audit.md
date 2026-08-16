@@ -4,7 +4,7 @@ Date: 2026-08-16
 
 Plan: `docs/superpowers/plans/2026-08-16-official-blender-mcp-distributable-codex-installer.md`
 
-Current plan SHA-256: `1d4ee2c51f0d41ac1eab7d01f898e2169280a5cb03a2c0b3625cfa7aec46a518`
+Current plan SHA-256: `25643502672caea41606e740b9db172bbca3a641c8b93f1d419f811a680bdacf`
 
 Initial frozen plan SHA-256: `fb69e31ef0445d38c2caeed277c69519f95ed19c5f067eabcd7e7733dc767d72`
 
@@ -195,3 +195,14 @@ The reviewed implementation ends at `7203316`. The amendment produced the
 current SHA above. Under the simplified process requested by the user, one
 combined adversarial security/specification/executability/minimality review
 returned READY with 0 Critical and 0 Important findings.
+
+## Task 6 uv command amendment
+
+Pinned uv 0.12.2 mechanically rejected two literal combinations in the prior
+Task 6 prose. The locked install now uses the already-reviewed hash-required,
+wheel-only, no-dependency form with `UV_NO_BUILD=1` and no redundant
+`--no-build`; the separately manifest-hash-bound local wheel omits
+`UV_REQUIRE_HASHES` while retaining `--no-deps --no-build`. Task 8 explicitly
+owns the matching fake-host argv update. The reviewed Task 6 implementation
+ends at `e9d9880`, with independent review APPROVED at 0 Critical / 0
+Important / 0 Minor.

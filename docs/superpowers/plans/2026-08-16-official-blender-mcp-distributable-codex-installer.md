@@ -677,12 +677,12 @@ Stage with:
 ~~~text
 uv venv --relocatable --python <resolved-local-3.13> <deterministic-stage>
 uv pip install --python <stage-python> --require-hashes --only-binary :all:
-  --no-build --no-deps --default-index https://pypi.org/simple
+  --no-deps --default-index https://pypi.org/simple
   -r runtime-requirements.lock
 uv pip install --python <stage-python> --no-deps --no-build <verified-wheel>
 ~~~
 
-Subprocess environment sets UV_REQUIRE_HASHES=1, UV_NO_BUILD=1, fixed index, and literal bridge values while removing competing uv/pip/index/bridge variables. uv cache/network writes during install are an explicit non-managed side effect. Exact runtime is no-op. Different, incomplete, or altered runtime uses Task 3 state machine.
+The locked-requirements command sets UV_REQUIRE_HASHES=1, UV_NO_BUILD=1, the fixed index, and literal bridge values while removing competing uv/pip/index/bridge variables. The separate direct-wheel command retains UV_NO_BUILD=1 but omits UV_REQUIRE_HASHES only after the local private wheel copy is bound to the release-manifest size/hash; it still uses --no-deps --no-build. uv cache/network writes during install are an explicit non-managed side effect. Exact runtime is no-op. Different, incomplete, or altered runtime uses Task 3 state machine.
 
 Stage writes runtime/bin/blender-mcp-managed as the only Codex command. The launcher uses os.execve on the verified official blender-mcp entry point. It discards inherited environment and constructs exactly PATH=/usr/bin:/bin:/usr/sbin:/sbin, HOME, BLENDER_USER_RESOURCES, BLENDER_USER_CONFIG, BLENDER_USER_EXTENSIONS, BLENDER_PATH, BLENDER_MCP_HOST=localhost, BLENDER_MCP_PORT=9876, PYTHONNOUSERSITE=1, and PYTHONSAFEPATH=1. LANG, LC_ALL, TMPDIR, PYTHONPATH, PYTHONHOME, PYTHONUSERBASE, PYTHONSTARTUP, PYTHONINSPECT, VIRTUAL_ENV, UV_*, PIP_*, and all other BLENDER_* values are absent. Tests execute the actual launcher under a hostile parent and assert the exact environment, runtime import path, selected binary/profile, and bridge identity.
 
@@ -781,6 +781,7 @@ git commit -m "feat: verify Blender MCP without managed writes"
 - Create: plugins/blender-mcp-installer/scripts/blender_mcp_installer/cli.py
 - Create: tests/distribution/test_cli.py
 - Modify: tests/distribution/fault_driver.py
+- Modify: tests/distribution/fake_host.py
 
 **Interfaces:**
 
@@ -872,7 +873,8 @@ Expected: all tests pass; each failure/crash parameter has exact postconditions;
 ~~~bash
 git add plugins/blender-mcp-installer/scripts/install.py \
   plugins/blender-mcp-installer/scripts/blender_mcp_installer/cli.py \
-  tests/distribution/test_cli.py tests/distribution/fault_driver.py
+  tests/distribution/test_cli.py tests/distribution/fault_driver.py \
+  tests/distribution/fake_host.py
 git commit -m "feat: orchestrate recoverable Blender MCP installation"
 ~~~
 
