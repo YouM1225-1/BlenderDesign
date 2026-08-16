@@ -656,8 +656,10 @@ def test_receipt_action_enum_transition_and_nullability() -> None:
             value["intended_post"] = _present_tree()
         if state not in {"planned", "staged"}:
             value["actual_post"] = _present_tree()
-        if state in {"parked", "completed", "restoring", "restored", "cleaned"}:
+        if state in {"parked", "completed", "restoring"}:
             value["recovery_image"] = _present_tree()
+        elif state in {"restored", "cleaned"}:
+            value["recovery_image"] = _absent_tree()
         assert ReceiptAction.from_dict(value).state.value == state
     for state in (
         "planned",
@@ -673,8 +675,10 @@ def test_receipt_action_enum_transition_and_nullability() -> None:
             value["intended_post"] = _present_tree()
         if state not in {"planned", "staged"}:
             value["actual_post"] = _present_tree()
-        if state in {"restoring", "restored", "cleaned"}:
+        if state == "restoring":
             value["recovery_image"] = _present_tree()
+        elif state in {"restored", "cleaned"}:
+            value["recovery_image"] = _absent_tree()
         assert ReceiptAction.from_dict(value).state.value == state
     codex = {
         **runtime,
@@ -1479,13 +1483,14 @@ def test_copy_tree_rejects_foreign_owner_and_source_change(
         assert isinstance(changing_stage, StagedTree)
         original_copy = filesystem._copy_file
 
-        def mutate_after_copy(source_fd: int, name: str, target_fd: int, uid: int) -> None:
-            original_copy(source_fd, name, target_fd, uid)
+        def mutate_after_copy(source_fd: int, name: str, target_fd: int, uid: int) -> FileImage:
+            result = original_copy(source_fd, name, target_fd, uid)
             fd = os.open(name, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, dir_fd=source_fd)
             try:
                 os.write(fd, b"changed")
             finally:
                 os.close(fd)
+            return result
 
         monkeypatch.setattr(filesystem, "_copy_file", mutate_after_copy)
         with pytest.raises(ValueError, match="source tree changed"):
@@ -1694,6 +1699,10 @@ def test_present_file_restore_retries_after_each_reverse_rename(tmp_path: Path) 
         assert stage2.capture() == post2
         assert (
             restore_file(target, pre, post2, stage2, recovery, NoOpFaultInjector())
+            is RestoreState.RESTORING
+        )
+        assert (
+            restore_file(target, pre, post2, stage2, recovery, NoOpFaultInjector())
             is RestoreState.RESTORED
         )
         assert stage2.capture().state is ImageState.ABSENT
@@ -1711,10 +1720,15 @@ def test_file_restore_cleans_only_the_closed_p0_stage(tmp_path: Path, present: b
         stage = _staged_file(root, "stage", b"post")
         assert (
             restore_file(target, pre, stage.image, stage, recovery, NoOpFaultInjector())
-            is RestoreState.RESTORED
+            is RestoreState.RESTORING
         )
         assert capture_file(root, target.relative) == pre
         assert stage.capture().state is ImageState.ABSENT
+        assert capture_file(root, recovery.relative) == stage.image
+        assert (
+            restore_file(target, pre, stage.image, stage, recovery, NoOpFaultInjector())
+            is RestoreState.RESTORED
+        )
         assert capture_file(root, recovery.relative).state is ImageState.ABSENT
 
 
@@ -1914,3 +1928,579 @@ def test_absent_tree_publish_and_ar1_retry(tmp_path: Path) -> None:
             is RestoreState.RESTORED
         )
         assert recovery.capture().state is ImageState.ABSENT
+
+
+class _CrashAt:
+    def __init__(self, point: str):
+        self.point = point
+
+    def hit(self, point: str) -> None:
+        if point == self.point:
+            raise _InjectedCrash(point)
+
+
+@pytest.mark.parametrize(
+    "point",
+    ["after_native_rename", "after_source_parent_fsync", "after_destination_parent_fsync"],
+)
+@pytest.mark.parametrize("row", ["p1", "p2", "a1", "r1", "ar1"])
+def test_recognized_cross_parent_prefix_redrives_both_parent_fsyncs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    point: str,
+    row: str,
+) -> None:
+    target_path = tmp_path / "target-parent"
+    stage_path = tmp_path / "stage-parent"
+    recovery_path = tmp_path / "recovery-parent"
+    for path in (target_path, stage_path, recovery_path):
+        path.mkdir()
+    with (
+        _safe(target_path) as target_root,
+        _safe(stage_path) as stage_root,
+        _safe(recovery_path) as recovery_root,
+    ):
+        target = TargetRef(target_root, PurePath("target"))
+        recovery = TargetRef(recovery_root, PurePath("recovery"))
+        present = row in {"p1", "p2", "r1"}
+        if present:
+            _write_private_bytes(target.path, b"pre")
+        pre = capture_file(target_root, target.relative)
+        stage = _staged_file(stage_root, "stage", b"post")
+        post = stage.image
+
+        if row in {"p2", "r1"}:
+            assert (
+                forward_file(target, pre, stage, recovery, NoOpFaultInjector())
+                is NativeState.SWAPPED
+            )
+        if row == "r1":
+            assert (
+                forward_file(target, pre, stage, recovery, NoOpFaultInjector())
+                is NativeState.PARKED
+            )
+        if row == "ar1":
+            assert (
+                forward_file(target, pre, stage, recovery, NoOpFaultInjector())
+                is NativeState.PUBLISHED
+            )
+        if row in {"p1", "p2", "a1"}:
+            with pytest.raises(_InjectedCrash):
+                forward_file(target, pre, stage, recovery, _CrashAt(point))
+        else:
+            with pytest.raises(_InjectedCrash):
+                restore_file(target, pre, post, stage, recovery, _CrashAt(point))
+
+        synced: list[int] = []
+        real_fsync = os.fsync
+
+        def record_fsync(fd: int) -> None:
+            synced.append(os.fstat(fd).st_ino)
+            real_fsync(fd)
+
+        monkeypatch.setattr(filesystem.os, "fsync", record_fsync)
+        if row in {"p1", "p2", "a1"}:
+            forward_file(target, pre, stage, recovery, NoOpFaultInjector())
+            expected = {
+                "p1": {target_root.fd, stage_root.fd},
+                "p2": {stage_root.fd, recovery_root.fd},
+                "a1": {stage_root.fd, target_root.fd},
+            }[row]
+        else:
+            restore_file(target, pre, post, stage, recovery, NoOpFaultInjector())
+            expected = {target_root.fd, recovery_root.fd}
+        expected_inodes = {os.fstat(fd).st_ino for fd in expected}
+        assert expected_inodes <= set(synced)
+
+
+def _foreign_object(parent_fd: int, name: str, *, tree: bool) -> None:
+    if tree:
+        os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        try:
+            child = os.open(
+                "foreign",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=fd,
+            )
+            os.write(child, b"foreign")
+            os.close(child)
+        finally:
+            os.close(fd)
+    else:
+        fd = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_fd,
+        )
+        os.write(fd, b"foreign")
+        os.close(fd)
+
+
+@pytest.mark.parametrize("tree", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_swap_races_reverse_either_replaced_operand(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tree: bool,
+    reverse: bool,
+    side: str,
+) -> None:
+    tmp_path.chmod(0o700)
+    target_path = tmp_path / "target"
+    source_path = tmp_path / "source"
+    target_path.mkdir()
+    source_path.mkdir()
+    _write_private_bytes(target_path / "pre", b"pre")
+    _write_private_bytes(source_path / "post", b"post")
+    with _safe(tmp_path) as root:
+        if tree:
+            target: TargetRef = TreeRef(root, PurePath("target"))
+            recovery: TargetRef = TreeRef(root, PurePath("recovery"))
+            pre = capture_tree(root, target.relative)
+            created = create_deterministic_stage(
+                root, "stage", TreeImage.absent(), NoOpFaultInjector()
+            )
+            assert isinstance(created, StagedTree)
+            stage: StagedFile | StagedTree = created.with_image(
+                copy_tree(TreeRef(root, PurePath("source")), created)
+            )
+            post = stage.image
+            forward = forward_tree
+            restore = restore_tree
+        else:
+            shutil.rmtree(target_path)
+            target = TargetRef(root, PurePath("target"))
+            recovery = TargetRef(root, PurePath("recovery"))
+            _write_private_bytes(target.path, b"pre")
+            pre = capture_file(root, target.relative)
+            stage = _staged_file(root, "stage", b"post")
+            post = stage.image
+            forward = forward_file
+            restore = restore_file
+        if reverse:
+            while (
+                forward(target, pre, stage, recovery, NoOpFaultInjector())
+                is not NativeState.COMPLETED
+            ):
+                pass
+            right_ref = recovery
+        else:
+            right_ref = stage
+        left_ref = target
+        expected_left = (
+            capture_tree(root, left_ref.relative) if tree else capture_file(root, left_ref.relative)
+        )
+        expected_right = (
+            capture_tree(root, right_ref.relative)
+            if tree
+            else capture_file(root, right_ref.relative)
+        )
+        real = filesystem._rename_atomic
+        raced = False
+
+        def race(source_fd: int, source: str, target_fd: int, name: str, *, swap: bool) -> None:
+            nonlocal raced
+            if not raced and swap:
+                raced = True
+                chosen_fd, chosen_name = (
+                    (source_fd, source) if side == "left" else (target_fd, name)
+                )
+                os.rename(chosen_name, f"lost-{side}", src_dir_fd=chosen_fd, dst_dir_fd=chosen_fd)
+                _foreign_object(chosen_fd, chosen_name, tree=tree)
+            real(source_fd, source, target_fd, name, swap=swap)
+
+        monkeypatch.setattr(filesystem, "_rename_atomic", race)
+        with pytest.raises(InstallerError, match="transaction state conflict"):
+            if reverse:
+                restore(target, pre, post, stage, recovery, NoOpFaultInjector())
+            else:
+                forward(target, pre, stage, recovery, NoOpFaultInjector())
+        current_left = (
+            capture_tree(root, left_ref.relative) if tree else capture_file(root, left_ref.relative)
+        )
+        current_right = (
+            capture_tree(root, right_ref.relative)
+            if tree
+            else capture_file(root, right_ref.relative)
+        )
+        if side == "left":
+            assert current_left not in {expected_left, expected_right}
+            assert current_right == expected_right
+        else:
+            assert current_left == expected_left
+            assert current_right not in {expected_left, expected_right}
+
+
+@pytest.mark.parametrize("tree", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_excl_source_race_moves_exact_foreign_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tree: bool,
+    reverse: bool,
+) -> None:
+    tmp_path.chmod(0o700)
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    _write_private_bytes(source_path / "post", b"post")
+    with _safe(tmp_path) as root:
+        if tree:
+            target: TargetRef = TreeRef(root, PurePath("target"))
+            recovery: TargetRef = TreeRef(root, PurePath("recovery"))
+            created = create_deterministic_stage(
+                root, "stage", TreeImage.absent(), NoOpFaultInjector()
+            )
+            assert isinstance(created, StagedTree)
+            stage: StagedFile | StagedTree = created.with_image(
+                copy_tree(TreeRef(root, PurePath("source")), created)
+            )
+            pre = TreeImage.absent()
+            post = stage.image
+            forward = forward_tree
+            restore = restore_tree
+        else:
+            target = TargetRef(root, PurePath("target"))
+            recovery = TargetRef(root, PurePath("recovery"))
+            stage = _staged_file(root, "stage", b"post")
+            pre = FileImage.absent()
+            post = stage.image
+            forward = forward_file
+            restore = restore_file
+        if reverse:
+            assert (
+                forward(target, pre, stage, recovery, NoOpFaultInjector()) is NativeState.PUBLISHED
+            )
+            source_ref = target
+            destination_ref = recovery
+        else:
+            source_ref = stage
+            destination_ref = target
+        real = filesystem._rename_atomic
+        raced = False
+
+        def race(source_fd: int, source: str, target_fd: int, name: str, *, swap: bool) -> None:
+            nonlocal raced
+            if not raced and not swap:
+                raced = True
+                os.rename(source, "lost-source", src_dir_fd=source_fd, dst_dir_fd=source_fd)
+                _foreign_object(source_fd, source, tree=tree)
+            real(source_fd, source, target_fd, name, swap=swap)
+
+        monkeypatch.setattr(filesystem, "_rename_atomic", race)
+        with pytest.raises(InstallerError, match="transaction state conflict"):
+            if reverse:
+                restore(target, pre, post, stage, recovery, NoOpFaultInjector())
+            else:
+                forward(target, pre, stage, recovery, NoOpFaultInjector())
+        foreign = (
+            capture_tree(root, source_ref.relative)
+            if tree
+            else capture_file(root, source_ref.relative)
+        )
+        destination = (
+            capture_tree(root, destination_ref.relative)
+            if tree
+            else capture_file(root, destination_ref.relative)
+        )
+        assert foreign.state is ImageState.PRESENT and foreign != post
+        assert destination.state is ImageState.ABSENT
+
+
+@pytest.mark.parametrize("mutation", ["add", "rename", "remove", "collision"])
+def test_copy_tree_never_adopts_or_cleans_foreign_destination_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    _write_private_bytes(source_path / "payload", b"payload")
+    with _safe(tmp_path) as root:
+        stage = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
+        assert isinstance(stage, StagedTree)
+        original_copy = filesystem._copy_file
+
+        def mutate(source_fd: int, name: str, target_fd: int, uid: int) -> FileImage:
+            if mutation == "collision":
+                _foreign_object(target_fd, name, tree=False)
+                return original_copy(source_fd, name, target_fd, uid)
+            result = original_copy(source_fd, name, target_fd, uid)
+            if mutation == "add":
+                _foreign_object(target_fd, "foreign", tree=False)
+            elif mutation == "rename":
+                os.rename(name, "foreign", src_dir_fd=target_fd, dst_dir_fd=target_fd)
+            else:
+                os.unlink(name, dir_fd=target_fd)
+            return result
+
+        monkeypatch.setattr(filesystem, "_copy_file", mutate)
+        with pytest.raises((InstallerError, FileExistsError, ValueError)):
+            copy_tree(TreeRef(root, PurePath("source")), stage)
+        assert capture_tree(root, stage.relative).state is ImageState.PRESENT
+
+
+def test_copy_tree_pure_partial_failure_removes_stage_for_clean_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    for name in ("a", "b"):
+        _write_private_bytes(source_path / name, name.encode())
+    with _safe(tmp_path) as root:
+        stage = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
+        assert isinstance(stage, StagedTree)
+        original_copy = filesystem._copy_file
+        calls = 0
+
+        def fail_second(source_fd: int, name: str, target_fd: int, uid: int) -> FileImage:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError(errno.EIO, "injected copy failure")
+            return original_copy(source_fd, name, target_fd, uid)
+
+        monkeypatch.setattr(filesystem, "_copy_file", fail_second)
+        with pytest.raises(OSError, match="injected copy failure"):
+            copy_tree(TreeRef(root, PurePath("source")), stage)
+        assert capture_tree(root, stage.relative).state is ImageState.ABSENT
+        assert isinstance(
+            create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector()),
+            StagedTree,
+        )
+
+
+def test_copy_tree_partial_file_write_removes_only_created_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    _write_private_bytes(source_path / "payload", b"payload")
+    with _safe(tmp_path) as root:
+        stage = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
+        assert isinstance(stage, StagedTree)
+
+        def fail_partial(fd: int, raw: bytes) -> None:
+            os.write(fd, raw[:1])
+            raise OSError(errno.EIO, "injected partial write")
+
+        monkeypatch.setattr(filesystem, "_write_all", fail_partial)
+        with pytest.raises(OSError, match="injected partial write"):
+            copy_tree(TreeRef(root, PurePath("source")), stage)
+        assert capture_tree(root, stage.relative).state is ImageState.ABSENT
+
+
+def test_reverse_paths_quarantine_post_before_cleanup(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    with _safe(tmp_path) as root:
+        target = TargetRef(root, PurePath("target"))
+        recovery = TargetRef(root, PurePath("recovery"))
+        _write_private_bytes(target.path, b"pre")
+        pre = capture_file(root, target.relative)
+        stage = _staged_file(root, "stage", b"post")
+        post = stage.image
+        assert (
+            restore_file(target, pre, post, stage, recovery, NoOpFaultInjector())
+            is RestoreState.RESTORING
+        )
+        assert (
+            capture_file(root, target.relative),
+            stage.capture(),
+            capture_file(root, recovery.relative),
+        ) == (
+            pre,
+            FileImage.absent(),
+            post,
+        )
+        assert (
+            restore_file(target, pre, post, stage, recovery, NoOpFaultInjector())
+            is RestoreState.RESTORED
+        )
+
+        stage2 = _staged_file(root, "stage2", b"post2")
+        post2 = stage2.image
+        assert (
+            forward_file(target, pre, stage2, recovery, NoOpFaultInjector()) is NativeState.SWAPPED
+        )
+        assert (
+            restore_file(target, pre, post2, stage2, recovery, NoOpFaultInjector())
+            is RestoreState.RESTORING
+        )
+        assert stage2.capture() == post2
+        assert (
+            restore_file(target, pre, post2, stage2, recovery, NoOpFaultInjector())
+            is RestoreState.RESTORING
+        )
+        assert stage2.capture().state is ImageState.ABSENT
+        assert capture_file(root, recovery.relative) == post2
+
+
+def test_tree_recovery_cleanup_retries_exact_deletion_prefix(
+    tmp_path: Path,
+) -> None:
+    tmp_path.chmod(0o700)
+    source = tmp_path / "source"
+    source.mkdir()
+    for name in ("a", "z"):
+        _write_private_bytes(source / name, name.encode())
+    with _safe(tmp_path) as root:
+        target = TreeRef(root, PurePath("target"))
+        recovery = TreeRef(root, PurePath("recovery"))
+        stage0 = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
+        assert isinstance(stage0, StagedTree)
+        stage = stage0.with_image(copy_tree(TreeRef(root, PurePath("source")), stage0))
+        post = stage.image
+        assert (
+            restore_tree(target, TreeImage.absent(), post, stage, recovery, NoOpFaultInjector())
+            is RestoreState.RESTORING
+        )
+        with pytest.raises(_InjectedCrash):
+            restore_tree(
+                target,
+                TreeImage.absent(),
+                post,
+                stage,
+                recovery,
+                _CrashAt("after_cleanup_entry"),
+            )
+        remaining = recovery.capture()
+        assert remaining.state is ImageState.PRESENT
+        assert 0 < len(remaining.entries) < len(post.entries)
+        assert (
+            restore_tree(target, TreeImage.absent(), post, stage, recovery, NoOpFaultInjector())
+            is RestoreState.RESTORED
+        )
+
+
+@pytest.mark.parametrize("mutation", ["change", "extra"])
+def test_tree_recovery_cleanup_preserves_foreign_remainder(tmp_path: Path, mutation: str) -> None:
+    tmp_path.chmod(0o700)
+    source = tmp_path / "source"
+    source.mkdir()
+    for name in ("a", "z"):
+        _write_private_bytes(source / name, name.encode())
+    with _safe(tmp_path) as root:
+        target = TreeRef(root, PurePath("target"))
+        recovery = TreeRef(root, PurePath("recovery"))
+        created = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
+        assert isinstance(created, StagedTree)
+        stage = created.with_image(copy_tree(TreeRef(root, PurePath("source")), created))
+        post = stage.image
+        assert (
+            restore_tree(target, TreeImage.absent(), post, stage, recovery, NoOpFaultInjector())
+            is RestoreState.RESTORING
+        )
+
+        class MutateBeforeDelete:
+            def hit(self, point: str) -> None:
+                if point != "before_cleanup_delete":
+                    return
+                if mutation == "change":
+                    (recovery.path / "z").write_bytes(b"foreign")
+                else:
+                    _write_private_bytes(recovery.path / "foreign", b"foreign")
+
+        with pytest.raises(InstallerError, match="transaction state conflict"):
+            restore_tree(target, TreeImage.absent(), post, stage, recovery, MutateBeforeDelete())
+        assert (recovery.path / "a").read_bytes() == b"a"
+        if mutation == "change":
+            assert (recovery.path / "z").read_bytes() == b"foreign"
+        else:
+            assert (recovery.path / "foreign").read_bytes() == b"foreign"
+
+
+def test_native_and_model_basenames_reject_embedded_nul(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    _write_private_bytes(tmp_path / "left", b"left")
+    _write_private_bytes(tmp_path / "right", b"right")
+    with _safe(tmp_path) as root:
+        for operation, args in (
+            (rename_excl, (root, "left\0suffix", root, "new")),
+            (rename_swap, (root, "left", root, "right\0suffix")),
+        ):
+            with pytest.raises(ValueError, match="basename"):
+                operation(*args, NoOpFaultInjector())
+    valid = ReceiptAction.from_dict(_bundle_action())
+    for changes in (
+        {"stage_basename": "stage\0suffix"},
+        {
+            "kind": ActionKind.RUNTIME_TREE,
+            "object_kind": ObjectKind.TREE,
+            "target_role": TargetRole.RUNTIME,
+            "recovery_basename": "recovery\0suffix",
+            "pre": TreeImage.absent(),
+        },
+    ):
+        with pytest.raises(ValueError, match="basename"):
+            replace(valid, **changes)
+
+
+def test_receipt_action_encodes_every_native_reverse_row() -> None:
+    pre = TreeImage.from_dict(_present_tree())
+    post = replace(pre, ino=pre.ino + 100)
+    absent = TreeImage.absent()
+    base = {
+        **_bundle_action(),
+        "kind": "runtime_tree",
+        "object_kind": "tree",
+        "target_role": "runtime",
+        "target_path": "/tmp/runtime",
+        "stage_basename": ".stage",
+        "recovery_basename": ".recovery",
+        "intended_post": post.to_dict(),
+        "actual_post": post.to_dict(),
+    }
+    rows = (
+        ({"state": "parked", "pre": pre.to_dict(), "recovery_image": pre.to_dict()}),
+        ({"state": "completed", "pre": pre.to_dict(), "recovery_image": pre.to_dict()}),
+        ({"state": "restoring", "pre": pre.to_dict(), "recovery_image": None}),
+        ({"state": "restoring", "pre": pre.to_dict(), "recovery_image": post.to_dict()}),
+        ({"state": "restored", "pre": pre.to_dict(), "recovery_image": absent.to_dict()}),
+        ({"state": "cleaned", "pre": pre.to_dict(), "recovery_image": absent.to_dict()}),
+        ({"state": "restoring", "pre": absent.to_dict(), "recovery_image": post.to_dict()}),
+        ({"state": "restored", "pre": absent.to_dict(), "recovery_image": absent.to_dict()}),
+        ({"state": "cleaned", "pre": absent.to_dict(), "recovery_image": absent.to_dict()}),
+    )
+    for row in rows:
+        assert ReceiptAction.from_dict({**base, **row}).state.value == row["state"]
+    for invalid in (
+        {"state": "restored", "pre": pre.to_dict(), "recovery_image": pre.to_dict()},
+        {"state": "restoring", "pre": absent.to_dict(), "recovery_image": None},
+        {"state": "restoring", "pre": pre.to_dict(), "recovery_image": pre.to_dict()},
+        {"state": "restored", "pre": pre.to_dict(), "recovery_image": None},
+    ):
+        with pytest.raises(ValueError):
+            ReceiptAction.from_dict({**base, **invalid})
+
+
+def test_receipt_action_keeps_semantic_restore_images_closed() -> None:
+    pre = FileImage.from_dict(_present_file())
+    post = replace(pre, ino=pre.ino + 100)
+    rollback = replace(pre, ino=pre.ino + 200)
+    base = {
+        **_bundle_action(),
+        "kind": "codex_file",
+        "object_kind": "codex",
+        "target_role": "codex_config",
+        "target_path": "/tmp/config.toml",
+        "stage_basename": ".stage",
+        "recovery_basename": ".recovery",
+        "pre": pre.to_dict(),
+        "intended_post": post.to_dict(),
+        "actual_post": post.to_dict(),
+        "rollback_intended": rollback.to_dict(),
+        "rollback_displaced": post.to_dict(),
+    }
+    restoring = {**base, "state": "restoring", "recovery_image": pre.to_dict()}
+    restored = {
+        **base,
+        "state": "restored",
+        "recovery_image": FileImage.absent().to_dict(),
+    }
+    assert ReceiptAction.from_dict(restoring).state is ActionState.RESTORING
+    assert ReceiptAction.from_dict(restored).state is ActionState.RESTORED
+    with pytest.raises(ValueError):
+        ReceiptAction.from_dict({**restoring, "recovery_image": post.to_dict()})
+    with pytest.raises(ValueError):
+        ReceiptAction.from_dict({**restored, "recovery_image": pre.to_dict()})

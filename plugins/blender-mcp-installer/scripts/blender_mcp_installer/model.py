@@ -97,7 +97,13 @@ def _string(value: object, label: str) -> str:
 
 def _basename(value: object, label: str) -> str:
     name = _string(value, label)
-    if Path(name).name != name or "/" in name or "\\" in name or name in {".", ".."}:
+    if (
+        Path(name).name != name
+        or "/" in name
+        or "\\" in name
+        or "\0" in name
+        or name in {".", ".."}
+    ):
         raise ValueError(f"invalid {label}")
     return name
 
@@ -642,7 +648,14 @@ class ReceiptAction:
         ):
             if image is not None and type(image) is not image_type:
                 raise ValueError("invalid action image variant")
-            if image is not None and image.state is not ImageState.PRESENT:
+            if (
+                image is not None
+                and image.state is not ImageState.PRESENT
+                and not (
+                    image is self.recovery_image
+                    and self.state in {ActionState.RESTORED, ActionState.CLEANED}
+                )
+            ):
                 raise ValueError("action post/recovery images must be present")
         if self.kind is ActionKind.BUNDLE_STAGE:
             if (
@@ -693,31 +706,32 @@ class ReceiptAction:
             raise ValueError("invalid action transition")
         required_intended = self.state is not ActionState.PLANNED
         required_actual = self.state not in {ActionState.PLANNED, ActionState.STAGED}
-        required_recovery = (
-            present
-            and self.state
-            in {
-                ActionState.PARKED,
-                ActionState.COMPLETED,
-                ActionState.RESTORING,
-                ActionState.RESTORED,
-                ActionState.CLEANED,
-                *semantic,
-            }
-        ) or (
-            not present
-            and self.state in {ActionState.RESTORING, ActionState.RESTORED, ActionState.CLEANED}
-        )
-        if (
-            (self.intended_post is not None) != required_intended
-            or (self.actual_post is not None) != required_actual
-            or (self.recovery_image is not None) != required_recovery
-        ):
+        if (self.intended_post is not None) != required_intended or (
+            self.actual_post is not None
+        ) != required_actual:
             raise ValueError("invalid managed action image nullability")
         if self.actual_post is not None and self.intended_post != self.actual_post:
             raise ValueError("actual postimage does not match intended postimage")
-        if present and self.recovery_image is not None and self.recovery_image != self.pre:
-            raise ValueError("protected recovery does not match the preimage")
+        absent = image_type.absent()
+        semantic_restore = self.kind is ActionKind.CODEX_FILE and (
+            self.rollback_intended is not None or self.rollback_displaced is not None
+        )
+        if self.state in semantic:
+            valid_recovery = self.recovery_image == self.pre
+        elif self.state in {ActionState.PARKED, ActionState.COMPLETED} and present:
+            valid_recovery = self.recovery_image == self.pre
+        elif self.state is ActionState.RESTORING and semantic_restore:
+            valid_recovery = self.recovery_image == self.pre
+        elif self.state is ActionState.RESTORING and present:
+            valid_recovery = self.recovery_image in {None, self.actual_post}
+        elif self.state is ActionState.RESTORING:
+            valid_recovery = self.recovery_image == self.actual_post
+        elif self.state in {ActionState.RESTORED, ActionState.CLEANED}:
+            valid_recovery = self.recovery_image == absent
+        else:
+            valid_recovery = self.recovery_image is None
+        if not valid_recovery:
+            raise ValueError("invalid managed action recovery image")
         if self.state is ActionState.SEMANTIC_STAGED:
             if self.rollback_intended is None or self.rollback_displaced is not None:
                 raise ValueError("invalid semantic staged images")
