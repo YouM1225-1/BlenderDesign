@@ -790,30 +790,29 @@ def _validate_semantic_merge(
     intended: FileImage,
 ) -> None:
     source_fd = _open_reference(source, source_image)
-    pre_fd = _open_reference(recovery, recovery_image)
     assert source_fd is not None
     try:
-        output = _invoke_helper(
-            anchor,
-            {
-                "mode": "validate",
-                "current_fd": source_fd,
-                "pre_fd": pre_fd,
-                "stage_fd": None,
-                "desired": desired.helper_dict(),
-            },
-            runtime_python,
-            tuple(fd for fd in (source_fd, pre_fd) if fd is not None),
-        )
-        if _fd_image(source_fd, "Codex rollback state conflict") != source_image or (
-            pre_fd is not None
-            and _fd_image(pre_fd, "Codex rollback state conflict") != recovery_image
-        ):
-            raise InstallerError("Codex rollback state conflict")
+        pre_fd = _open_reference(recovery, recovery_image)
+        try:
+            output = _invoke_helper(
+                anchor,
+                {
+                    "mode": "validate",
+                    "current_fd": source_fd,
+                    "pre_fd": pre_fd,
+                    "stage_fd": None,
+                    "desired": desired.helper_dict(),
+                },
+                runtime_python,
+                tuple(fd for fd in (source_fd, pre_fd) if fd is not None),
+            )
+            _revalidate_reference(source, source_image, source_fd)
+            _revalidate_reference(recovery, recovery_image, pre_fd)
+        finally:
+            if pre_fd is not None:
+                os.close(pre_fd)
     finally:
         os.close(source_fd)
-        if pre_fd is not None:
-            os.close(pre_fd)
     if (
         set(output) != {"changed", "sha256", "size"}
         or type(output["changed"]) is not bool
@@ -822,6 +821,16 @@ def _validate_semantic_merge(
         or _capture(source) != source_image
         or _capture(recovery) != recovery_image
     ):
+        raise InstallerError("Codex rollback state conflict")
+
+
+def _revalidate_reference(
+    reference: TargetRef,
+    expected: FileImage,
+    fd: int | None,
+) -> None:
+    actual = _capture(reference) if fd is None else _fd_image(fd, "Codex rollback state conflict")
+    if actual != expected:
         raise InstallerError("Codex rollback state conflict")
 
 
@@ -1109,29 +1118,33 @@ def _semantic_c0(
     current_image = _capture(context.target)
     stage = _create_rollback_stage(context)
     current_fd = _open_reference(context.target, current_image)
-    pre_fd = _open_reference(recovery, recovery_image)
     try:
+        pre_fd = _open_reference(recovery, recovery_image)
         try:
-            merged, _ = _run_helper(
-                "rollback", current_fd, pre_fd, keys.desired, runtime_python, stage
-            )
-        except InstallerError:
-            if stage.capture() == stage.image:
-                conditional_remove_file(
-                    stage,
-                    stage.image,
-                    (
-                        (context.target, current_image),
-                        (recovery, recovery_image),
-                    ),
-                    NoOpFaultInjector(),
+            try:
+                merged, _ = _run_helper(
+                    "rollback", current_fd, pre_fd, keys.desired, runtime_python, stage
                 )
-            raise
+                _revalidate_reference(context.target, current_image, current_fd)
+                _revalidate_reference(recovery, recovery_image, pre_fd)
+            except InstallerError:
+                if stage.capture() == stage.image:
+                    conditional_remove_file(
+                        stage,
+                        stage.image,
+                        (
+                            (context.target, current_image),
+                            (recovery, recovery_image),
+                        ),
+                        NoOpFaultInjector(),
+                    )
+                raise
+        finally:
+            if pre_fd is not None:
+                os.close(pre_fd)
     finally:
         if current_fd is not None:
             os.close(current_fd)
-        if pre_fd is not None:
-            os.close(pre_fd)
     result = _result(
         RollbackState.C1,
         context,
@@ -1184,7 +1197,9 @@ def rollback_codex(
     if not allowed_recovery:
         raise InstallerError("Codex rollback state conflict")
     if not semantic and (
-        live == installer_post or current.state in {RollbackState.RESTORING, RollbackState.RESTORED}
+        live == installer_post
+        or (pre.state is ImageState.ABSENT and live == pre)
+        or current.state in {RollbackState.RESTORING, RollbackState.RESTORED}
     ):
         return _native_rollback(current, protected_recovery, pre, installer_post, fault)
     state = current.state

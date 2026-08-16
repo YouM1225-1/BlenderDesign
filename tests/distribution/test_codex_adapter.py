@@ -98,6 +98,18 @@ def _read_fd(fd: int) -> bytes:
     return result
 
 
+def _open_fds() -> set[int]:
+    return {int(name) for name in os.listdir("/dev/fd")}
+
+
+def _close_new_fds(before: set[int]) -> None:
+    for fd in _open_fds() - before:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def _stage(root: SafeRoot, basename: str = "codex.stage") -> StagedFile:
     created = create_deterministic_stage(root, basename, FileImage.absent(), NoOpFaultInjector())
     assert isinstance(created, StagedFile)
@@ -651,6 +663,52 @@ def test_current_original_bytes_are_durably_already_restored(tmp_path: Path) -> 
     root.close()
 
 
+def test_absent_original_already_restored_is_native_and_idempotent(tmp_path: Path) -> None:
+    root = _open_root(tmp_path / "codex")
+    desired = _desired(tmp_path)
+    target, pre, change, recovery = _installed(root, desired, None)
+    assert pre == FileImage.absent()
+    target.path.unlink()
+    journal: list = []
+
+    first = rollback_codex(
+        _rollback_context(root, target, change.post, journal),
+        recovery,
+        change.post,
+        change.managed_keys,
+        Path(sys.executable),
+        NoOpFaultInjector(),
+    )
+    persisted = type(first).from_dict(json.loads(json.dumps(first.to_dict())))
+
+    assert first.state is RollbackState.RESTORED
+    assert [item.state for item in journal] == [RollbackState.RESTORED]
+    assert not target.path.exists()
+    assert not recovery.path.exists()
+    assert not (root.path / "codex.rollback.stage").exists()
+
+    root.close()
+    reopened = _open_root(tmp_path / "codex")
+    second = rollback_codex(
+        _rollback_context(
+            reopened,
+            TargetRef(reopened, PurePath("config.toml")),
+            change.post,
+            [],
+            persisted,
+        ),
+        StagedFile(reopened, PurePath("codex.recovery"), FileImage.absent()),
+        change.post,
+        change.managed_keys,
+        Path(sys.executable),
+        NoOpFaultInjector(),
+    )
+
+    assert second.state is RollbackState.RESTORED
+    assert list(reopened.path.iterdir()) == []
+    reopened.close()
+
+
 def _semantic_fixture(tmp_path: Path):
     root = _open_root(tmp_path / "codex")
     desired = _desired(tmp_path)
@@ -683,6 +741,128 @@ def _semantic_fixture(tmp_path: Path):
     )
     _write_private(target.path, current.encode())
     return root, desired, pre_raw, target, change, recovery
+
+
+@pytest.mark.parametrize("authority", ["current", "pre", "absent_pre"])
+def test_semantic_c0_revalidates_every_authority_after_helper(
+    monkeypatch, tmp_path: Path, authority: str
+) -> None:
+    if authority == "absent_pre":
+        root = _open_root(tmp_path / "codex")
+        desired = _desired(tmp_path)
+        target, _, change, recovery = _installed(root, desired, None)
+        with target.path.open("a") as stream:
+            stream.write('\n[foreign_after]\nvalue = "keep"\n')
+        target.path.chmod(0o600)
+    else:
+        root, desired, _, target, change, recovery = _semantic_fixture(tmp_path)
+    original = codex_adapter._run_helper
+
+    def mutate(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if authority == "current":
+            _write_private(target.path, b'foreign = "changed-current"\n')
+        elif authority == "pre":
+            _write_private(recovery.path, b'foreign = "changed-pre"\n')
+        else:
+            _write_private(recovery.path, b'foreign = "appeared-pre"\n')
+        return result
+
+    monkeypatch.setattr(codex_adapter, "_run_helper", mutate)
+    journal: list = []
+    with pytest.raises(InstallerError, match="Codex rollback state conflict"):
+        rollback_codex(
+            _rollback_context(root, target, change.post, journal),
+            recovery,
+            change.post,
+            change.managed_keys,
+            Path(sys.executable),
+            NoOpFaultInjector(),
+        )
+
+    assert journal == []
+    root.close()
+
+
+def test_semantic_c0_closes_current_fd_when_pre_open_fails(monkeypatch, tmp_path: Path) -> None:
+    root, _, _, target, change, recovery = _semantic_fixture(tmp_path)
+    context = _rollback_context(root, target, change.post, [])
+    original = codex_adapter._open_reference
+    calls = 0
+
+    def fail_second(reference, expected):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise InstallerError("Codex rollback state conflict")
+        return original(reference, expected)
+
+    monkeypatch.setattr(codex_adapter, "_open_reference", fail_second)
+    before = _open_fds()
+    try:
+        with pytest.raises(InstallerError, match="Codex rollback state conflict"):
+            codex_adapter._semantic_c0(
+                context,
+                recovery,
+                recovery.image,
+                change.managed_keys,
+                Path(sys.executable),
+                NoOpFaultInjector(),
+            )
+        assert len(_open_fds()) == len(before)
+    finally:
+        _close_new_fds(before)
+    assert calls == 2
+    root.close()
+
+
+def test_semantic_validation_closes_source_fd_when_pre_open_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    root, desired, _, target, change, recovery = _semantic_fixture(tmp_path)
+    journal: list = []
+    with pytest.raises(RuntimeError, match="injected crash"):
+        rollback_codex(
+            _rollback_context(root, target, change.post, journal),
+            recovery,
+            change.post,
+            change.managed_keys,
+            Path(sys.executable),
+            CrashAt("after_codex_semantic_stage_fsync"),
+        )
+    intended = journal[-1].rollback_intended
+    assert intended is not None
+    anchor = StagedFile(root, PurePath("codex.rollback.stage"), intended)
+    source_image = capture_file(root, PurePath("config.toml"))
+    original = codex_adapter._open_reference
+    calls = 0
+
+    def fail_second(reference, expected):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise InstallerError("Codex rollback state conflict")
+        return original(reference, expected)
+
+    monkeypatch.setattr(codex_adapter, "_open_reference", fail_second)
+    before = _open_fds()
+    try:
+        with pytest.raises(InstallerError, match="Codex rollback state conflict"):
+            codex_adapter._validate_semantic_merge(
+                target,
+                source_image,
+                recovery,
+                recovery.image,
+                desired,
+                Path(sys.executable),
+                anchor,
+                intended,
+            )
+        assert len(_open_fds()) == len(before)
+    finally:
+        _close_new_fds(before)
+    assert calls == 2
+    root.close()
 
 
 def test_semantic_rollback_preserves_foreign_additions_and_pre_nodes(tmp_path: Path) -> None:
