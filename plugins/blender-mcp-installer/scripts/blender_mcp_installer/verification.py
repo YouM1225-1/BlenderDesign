@@ -205,7 +205,7 @@ class OfficialMCPProbe:
         clean[_MCP_COMMAND_ENV] = json.dumps(argv, separators=(",", ":"))
         try:
             process = subprocess.Popen(
-                (str(self.runtime_python), "-I", "-c", _MCP_HELPER),
+                (str(self.runtime_python), "-I", "-B", "-c", _MCP_HELPER),
                 cwd=Path(argv[0]).parent,
                 env=clean,
                 stdin=subprocess.DEVNULL,

@@ -21,7 +21,15 @@ sys.path.insert(
 from blender_mcp_installer.bundle import parse_manifest
 from blender_mcp_installer.bundle import StagedBundle
 from blender_mcp_installer.blender_adapter import BlenderState
-from blender_mcp_installer.filesystem import InstallerError
+from blender_mcp_installer.filesystem import (
+    InstallerError,
+    NoOpFaultInjector,
+    SafeRoot,
+    StagedTree,
+    create_deterministic_stage,
+)
+from blender_mcp_installer.model import TreeImage
+from blender_mcp_installer.runtime import stage_runtime
 from blender_mcp_installer import verification
 from blender_mcp_installer.verification import (
     HostCapabilityError,
@@ -32,6 +40,8 @@ from blender_mcp_installer.verification import (
     verify_live,
 )
 from tests.distribution.test_filesystem import INSTALL_ID, _active, _receipt, _roots
+from tests.distribution.test_runtime import _bundle as _runtime_bundle
+from tests.distribution.test_runtime import _profile as _runtime_profile
 
 
 MANIFEST = parse_manifest(
@@ -897,12 +907,65 @@ def test_official_probe_uses_runtime_python_and_returns_closed_results(
     assert client.initialize() == payload["initialize"]
     assert tuple(client.list_tools()) == MANIFEST.tools
     assert client.call_tool("get_blendfile_summary_datablocks", {}) == payload["call"]
-    assert seen[0][0][:3] == (str(runtime_python), "-I", "-c")
+    assert seen[0][0][:4] == (str(runtime_python), "-I", "-B", "-c")
     assert seen[0][1]["stdin"] is subprocess.DEVNULL
     assert "SECRET" not in seen[0][0][2]
     handle.close()
     handle.terminate()
     assert handle.wait(2.0) == 0
+
+
+def test_official_probe_keeps_locked_runtime_tree_and_marker_exact(tmp_path: Path) -> None:
+    bundle = _runtime_bundle(tmp_path)
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    with SafeRoot.open(data, os.getuid(), data) as root:
+        created = create_deterministic_stage(
+            root, "runtime.stage", TreeImage.absent(), NoOpFaultInjector()
+        )
+        assert isinstance(created, StagedTree)
+
+        def run(argv, *, cwd: Path, env):
+            return subprocess.run(argv, cwd=cwd, env=env, text=True, capture_output=True)
+
+        image = stage_runtime(
+            bundle,
+            Path(os.environ["UV"]).resolve(strict=True),
+            Path(sys.executable).resolve(strict=True),
+            _runtime_profile(tmp_path),
+            created,
+            run,
+        )
+        stage = created.with_image(image)
+        marker = stage.path / ".blender-mcp-runtime.json"
+        marker_raw = marker.read_bytes()
+
+        def bytecode_paths():
+            return tuple(
+                path.relative_to(stage.path)
+                for path in stage.path.rglob("*")
+                if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}
+            )
+
+        bytecode_before = bytecode_paths()
+        handle = OfficialMCPProbe(stage.path / "bin/python").spawn(
+            (str(stage.path / "bin/blender-mcp-managed"),),
+            env={"HOME": str(tmp_path / "hostile-home"), "PYTHONDONTWRITEBYTECODE": "0"},
+        )
+        try:
+            client = handle.open_client()
+            initialized = client.initialize()
+            assert type(initialized) is dict and type(initialized.get("protocolVersion")) is str
+            assert tuple(client.list_tools()) == bundle.manifest.tools
+            assert type(client.call_tool("get_blendfile_summary_datablocks", {})) is dict
+        finally:
+            handle.close()
+            handle.terminate()
+            assert handle.wait(2.0) == 0
+
+        assert stage.capture() == image
+        assert marker.read_bytes() == marker_raw
+        assert bytecode_paths() == bytecode_before
 
 
 def test_official_probe_malformed_output_is_redacted_and_cleanup_is_owned(
