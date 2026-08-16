@@ -479,6 +479,31 @@ def _effective_launcher(path: Path, payload: dict[str, object], marker: Path) ->
     path.chmod(0o700)
 
 
+def _effective_raw_launcher(path: Path, raw: str) -> None:
+    path.write_text(f"#!{sys.executable}\nprint({raw!r})\n")
+    path.chmod(0o700)
+
+
+def _nested_effective_payload(desired) -> dict[str, object]:
+    return {
+        "name": "blender",
+        "enabled": True,
+        "disabled_reason": None,
+        "transport": {
+            "type": "stdio",
+            "command": desired.command,
+            "args": [],
+            "env": dict(desired.env),
+            "env_vars": [],
+            "cwd": None,
+        },
+        "enabled_tools": list(desired.enabled_tools),
+        "disabled_tools": None,
+        "startup_timeout_sec": 20.0,
+        "tool_timeout_sec": 60.0,
+    }
+
+
 def test_effective_verification_runs_explicit_command_after_publication(tmp_path: Path) -> None:
     root = _open_root(tmp_path / "codex")
     desired = _desired(tmp_path)
@@ -510,6 +535,124 @@ def test_effective_verification_runs_explicit_command_after_publication(tmp_path
     assert state.enabled_tools == desired.enabled_tools
     assert dict(state.env)["FOREIGN"] == "keep"
     root.close()
+
+
+def test_effective_verification_accepts_observed_stdio_transport_layout(tmp_path: Path) -> None:
+    desired = _desired(tmp_path)
+    codex = tmp_path / "codex"
+    _effective_launcher(
+        codex,
+        _nested_effective_payload(desired),
+        tmp_path / "called",
+    )
+
+    state = verify_codex_effective(codex, desired, {})
+
+    assert state.command == desired.command
+    assert state.args == desired.args
+    assert state.env == desired.env
+    assert state.enabled_tools == desired.enabled_tools
+    assert state.startup_timeout_sec == 20.0
+    assert state.tool_timeout_sec == 60.0
+
+
+@pytest.mark.parametrize("key", ["type", "command", "args", "env", "env_vars", "cwd"])
+def test_effective_transport_rejects_missing_required_field(tmp_path: Path, key: str) -> None:
+    desired = _desired(tmp_path)
+    payload = _nested_effective_payload(desired)
+    del payload["transport"][key]
+    codex = tmp_path / "codex"
+    _effective_launcher(codex, payload, tmp_path / "called")
+
+    with pytest.raises(InstallerError, match="effective Codex configuration mismatch"):
+        verify_codex_effective(codex, desired, {})
+
+
+def test_effective_transport_rejects_extra_field(tmp_path: Path) -> None:
+    desired = _desired(tmp_path)
+    payload = _nested_effective_payload(desired)
+    payload["transport"]["foreign"] = "value"
+    codex = tmp_path / "codex"
+    _effective_launcher(codex, payload, tmp_path / "called")
+
+    with pytest.raises(InstallerError, match="effective Codex configuration mismatch"):
+        verify_codex_effective(codex, desired, {})
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("enabled_tools", ["foreign"]),
+        ("startup_timeout_sec", 21.0),
+        ("tool_timeout_sec", 61.0),
+    ],
+)
+def test_effective_transport_rejects_outer_owned_value_mismatch(
+    tmp_path: Path, key: str, value: object
+) -> None:
+    desired = _desired(tmp_path)
+    payload = _nested_effective_payload(desired)
+    payload[key] = value
+    codex = tmp_path / "codex"
+    _effective_launcher(codex, payload, tmp_path / "called")
+
+    with pytest.raises(InstallerError, match="effective Codex configuration mismatch"):
+        verify_codex_effective(codex, desired, {})
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("type", "sse"),
+        ("type", 1),
+        ("command", "/foreign"),
+        ("command", []),
+        ("args", ["foreign"]),
+        ("args", "foreign"),
+        ("env", {"HOME": "/foreign"}),
+        ("env", []),
+        ("env_vars", ["HOME"]),
+        ("env_vars", None),
+        ("cwd", "/tmp"),
+        ("cwd", {}),
+    ],
+)
+def test_effective_transport_rejects_wrong_type_discriminator_or_value(
+    tmp_path: Path, key: str, value: object
+) -> None:
+    desired = _desired(tmp_path)
+    payload = _nested_effective_payload(desired)
+    payload["transport"][key] = value
+    codex = tmp_path / "codex"
+    _effective_launcher(codex, payload, tmp_path / "called")
+
+    with pytest.raises(InstallerError, match="effective Codex configuration mismatch"):
+        verify_codex_effective(codex, desired, {})
+
+
+@pytest.mark.parametrize("key", ["command", "args", "env"])
+def test_effective_verification_rejects_mixed_layout(tmp_path: Path, key: str) -> None:
+    desired = _desired(tmp_path)
+    payload = _nested_effective_payload(desired)
+    payload[key] = payload["transport"][key]
+    codex = tmp_path / "codex"
+    _effective_launcher(codex, payload, tmp_path / "called")
+
+    with pytest.raises(InstallerError, match="effective Codex configuration mismatch"):
+        verify_codex_effective(codex, desired, {})
+
+
+def test_effective_transport_rejects_duplicate_key(tmp_path: Path) -> None:
+    desired = _desired(tmp_path)
+    raw = json.dumps(_nested_effective_payload(desired), sort_keys=True)
+    command = f'"command": {json.dumps(desired.command)}'
+    assert raw.count(command) == 1
+    raw = raw.replace(command, f"{command}, {command}")
+    codex = tmp_path / "codex"
+    _effective_raw_launcher(codex, raw)
+
+    with pytest.raises(InstallerError, match="effective Codex verification failed"):
+        verify_codex_effective(codex, desired, {})
 
 
 @pytest.mark.parametrize(

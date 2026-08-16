@@ -1108,18 +1108,47 @@ def verify_codex_effective(
         raise InstallerError("effective Codex verification failed") from exc
     if type(value) is not dict:
         raise InstallerError("effective Codex verification failed")
-    effective_env = value.get("env")
-    expected = {
-        "command": desired.command,
-        "args": list(desired.args),
+    legacy_keys = {"command", "args", "env"}
+    if "transport" in value:
+        transport = value["transport"]
+        transport_expected = {
+            "type": "stdio",
+            "command": desired.command,
+            "args": list(desired.args),
+            "env_vars": [],
+            "cwd": None,
+        }
+        if (
+            any(key in value for key in legacy_keys)
+            or type(transport) is not dict
+            or set(transport) != set(transport_expected) | {"env"}
+            or any(
+                type(transport.get(key)) is not type(wanted) or transport.get(key) != wanted
+                for key, wanted in transport_expected.items()
+            )
+        ):
+            raise InstallerError("effective Codex configuration mismatch")
+        effective = transport
+    else:
+        effective = value
+    effective_env = effective.get("env")
+    outer_expected = {
         "enabled_tools": list(desired.enabled_tools),
         "startup_timeout_sec": desired.startup_timeout_sec,
         "tool_timeout_sec": desired.tool_timeout_sec,
     }
+    effective_expected = {
+        "command": desired.command,
+        "args": list(desired.args),
+    }
     if (
         any(
             type(value.get(key)) is not type(wanted) or value.get(key) != wanted
-            for key, wanted in expected.items()
+            for key, wanted in outer_expected.items()
+        )
+        or any(
+            type(effective.get(key)) is not type(wanted) or effective.get(key) != wanted
+            for key, wanted in effective_expected.items()
         )
         or type(effective_env) is not dict
         or any(effective_env.get(key) != wanted for key, wanted in desired.env.items())
@@ -1127,8 +1156,8 @@ def verify_codex_effective(
     ):
         raise InstallerError("effective Codex configuration mismatch")
     return EffectiveCodexState(
-        value["command"],
-        tuple(value["args"]),
+        effective["command"],
+        tuple(effective["args"]),
         effective_env,
         tuple(value["enabled_tools"]),
         value["startup_timeout_sec"],
