@@ -4,7 +4,7 @@ Date: 2026-08-16
 
 Plan: `docs/superpowers/plans/2026-08-16-official-blender-mcp-distributable-codex-installer.md`
 
-Current plan SHA-256: `3f5c697fa91d7cf6fd612b6f6f0c6d37460b78a26f292e2b241e35a775a3b56a`
+Current plan SHA-256: `f36a7af17ecbde9547c1f42d529167421471038b7957814ba6c77f3edb6313b2`
 
 Initial frozen plan SHA-256: `fb69e31ef0445d38c2caeed277c69519f95ed19c5f067eabcd7e7733dc767d72`
 
@@ -100,8 +100,30 @@ command errors in the initially frozen plan:
   from the artifact directory. The plan now uses an artifact-directory
   subshell and still verifies the same commit-bound checksum bytes.
 
-The two-line amendment produced the current SHA above. Three targeted fresh
+The two-line amendment produced SHA-256
+`3f5c697fa91d7cf6fd612b6f6f0c6d37460b78a26f292e2b241e35a775a3b56a`. Three targeted fresh
 reviews—security/specification, executability, and minimality/portability—each
 returned READY with 0 Critical, 0 Important, and 0 Minor findings. The
 amendment aligns the plan with the reviewed Task 1 implementation and does not
 broaden the locked-build or trust boundary.
+
+## Task 2 interface amendment
+
+Task 2 implementation and independent review exposed two stale interfaces in
+the prior plan revision:
+
+- `InstallRoots.discover` now requires explicit keyword-only
+  `source_distribution_root` and `distribution_root` inputs and exposes those
+  paths plus the exact derived `bundle_root`. This completes the literal
+  Derived Paths table without turning receipt strings into path authority.
+- The isolated fault driver now requires a closed `--fixture-kind` and
+  `--preimage` descriptor alongside `--point`, validates the exact Task 8
+  applicability matrix before CLI import, and keeps present/absent swap and
+  publish variants mutually exclusive. The Task 10 crash example supplies
+  `extension_tree` and `absent` explicitly.
+
+The amendment produced the current SHA above. Three targeted reviews—security
+and specification, executability, and minimality/portability—each returned
+READY with 0 Critical, 0 Important, and 0 Minor findings. The security review
+mechanically matched all 17 valid fixture variants and 85 point mappings to the
+Task 8 matrix and confirmed the implementation at `e65d446` matches the plan.

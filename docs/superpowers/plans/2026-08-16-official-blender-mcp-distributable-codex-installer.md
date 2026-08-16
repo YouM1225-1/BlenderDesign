@@ -275,7 +275,7 @@ A fresh process derives C/M again, validates every listed image, and advances on
 
 All names derive from install ID. There is no unjournaled random stage. Protected preimages for the active installed receipt remain until successful rollback; installed cleanup removes verified stages only. Retiring an installed generation's preimages is an explicit future retention operation outside V1.
 
-FaultInjector.hit(point: FailPoint) is explicit dependency injection. tests/distribution/fault_driver.py validates the requested point against the applicable matrix in Task 8, calls run_cli(argv, fault=ExitFaultInjector(point,70)), and exits with a distinct test-contract error if the point was not hit; production main() always calls run_cli(argv, fault=NoOpFaultInjector()) and never reads failure controls from environment.
+FaultInjector.hit(point: FailPoint) is explicit dependency injection. tests/distribution/fault_driver.py requires `--point`, `--fixture-kind`, and `--preimage` before the `--` command separator, validates that closed fixture descriptor against the applicable matrix in Task 8 before importing the CLI, calls run_cli(argv, fault=ExitFaultInjector(point,70)), and exits with a distinct test-contract error if the point was not hit; production main() always calls run_cli(argv, fault=NoOpFaultInjector()) and never reads failure controls from environment.
 
 ---
 
@@ -407,7 +407,7 @@ git commit -m "build: publish locked official Blender MCP bundle"
 
 **Interfaces:**
 
-- InstallRoots.discover(home: Path, codex_home: Path|None, blender: BlenderPaths) -> InstallRoots.
+- InstallRoots.discover(home: Path, codex_home: Path|None, blender: BlenderPaths, *, source_distribution_root: Path, distribution_root: Path) -> InstallRoots.
 - SafeRoot.open(path: Path, owner_uid: int, owned_from: Path) -> SafeRoot; walks every system-prefix component with dirfd/O_NOFOLLOW, then requires current-UID ownership from owned_from through path.
 - InstallerLock.acquire(state_root: SafeRoot) -> context manager using flock(LOCK_EX|LOCK_NB).
 - capture_file(root: SafeRoot, relative: PurePath) -> FileImage.
@@ -416,7 +416,7 @@ git commit -m "build: publish locked official Blender MCP bundle"
 - load_receipt(path: Path, roots: InstallRoots) -> Receipt; accepts only roots.receipts/install_id.json.
 - load_pending/load_active(path: Path, roots: InstallRoots) -> PendingSelector|ActiveSelector|None.
 
-InstallRoots exposes every exact path in Derived Paths; tests compare every field to that table. FileImage, TreeImage, TreeEntry, boundary/target roles, selectors, receipt status, action kind/object/state, and nullability are the closed contracts above.
+InstallRoots exposes every exact path in Derived Paths, including the supplied source_distribution_root and distribution_root and the exact derived bundle_root; tests compare every field to that table. FileImage, TreeImage, TreeEntry, boundary/target roles, selectors, receipt status, action kind/object/state, and nullability are the closed contracts above.
 
 Receipt top-level keys are exactly schema_version, install_id, generation, parent_install_id, status, created_at, bundle, host, consent, targets, actions, verification. schema_version is 1; install_id is canonical UUIDv4; generation is positive; parent_install_id is UUIDv4 or null; created_at is UTC RFC 3339; status uses ReceiptStatus.
 
@@ -439,7 +439,7 @@ Receipt/pending/active files are 0600 and every transition uses write_atomic_jso
 - fake uv handles --version, python find, venv --relocatable, and exact pip install forms. It materializes a deterministic fake runtime and blender-mcp executable.
 - fake blender-mcp implements newline JSON-RPC initialize, tools/list, and tools/call; tools/call succeeds only for get_blendfile_summary_datablocks.
 - every fake appends JSON to commands.jsonl with tool, argv, sanitized env subset, and mutated paths. Fakes never read failure controls from environment.
-- fault_driver.py is invoked by absolute path with Python `-I`; before importing it derives the trusted distribution root from its own resolved `__file__`, inserts only that root's `plugins/blender-mcp-installer/scripts` into `sys.path`, imports run_cli, validates point applicability, and supplies ExitFaultInjector explicitly for one named internal point. It is never packaged into the plugin.
+- fault_driver.py is invoked by absolute path with Python `-I`; it first parses and validates the required `--point POINT --fixture-kind KIND --preimage present|absent|any --` descriptor against its closed matrix, then derives the trusted distribution root from its own resolved `__file__`, inserts only that root's `plugins/blender-mcp-installer/scripts` into `sys.path`, imports run_cli, and supplies ExitFaultInjector explicitly for the named internal point. It is never packaged into the plugin.
 
 - [ ] **Step 1: Write RED tests for closed-state rules**
 
@@ -839,7 +839,7 @@ Closed FAILPOINTS and their only applicable variants are below. Each action/sele
 | active selector reverse | prior present | after_rollback_intent, after_active_restore_swap, after_active_restore_parent_fsync, after_rollback_status, after_active_restore_cleanup |
 | active selector reverse | prior absent | after_rollback_intent, after_active_restore_move, after_active_restore_parent_fsync, after_rollback_status, after_active_restore_cleanup |
 
-fault_driver.py rejects a point not applicable to the fixture's action/preimage state and proves the requested point was hit; an injected hit exits exactly 70. The exhaustive subprocess matrix reruns normal recovery to completion and asserts exact T/S/R/selector/receipt states, retry behavior, retained installed preimages, cleaned installed bundle stage, and no secret sentinel in receipts, errors, duplicate backups, or orphan stages.
+fault_driver.py requires `--point POINT --fixture-kind KIND --preimage present|absent|any -- COMMAND ...`, rejects a point not applicable to that closed fixture/action/preimage state before CLI import, and proves the requested point was hit; an injected hit exits exactly 70. The exhaustive subprocess matrix reruns normal recovery to completion and asserts exact T/S/R/selector/receipt states, retry behavior, retained installed preimages, cleaned installed bundle stage, and no secret sentinel in receipts, errors, duplicate backups, or orphan stages.
 
 - [ ] **Step 2: Run RED**
 
@@ -1319,7 +1319,8 @@ env HOME="$CRASH_HOME" CODEX_HOME="$CRASH_CODEX_HOME" \
   BLENDER_USER_CONFIG="$CRASH_BLENDER_USER_CONFIG" \
   BLENDER_USER_EXTENSIONS="$CRASH_BLENDER_USER_EXTENSIONS" PATH="$CLEAN_PATH" \
   "$PYTHON_BIN" -I "$DISTRIBUTION_ROOT/tests/distribution/fault_driver.py" \
-  --point after_extension_tree_publish -- install \
+  --point after_extension_tree_publish \
+  --fixture-kind extension_tree --preimage absent -- install \
   --bundle-root "$BUNDLE_ROOT" \
   --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
   --blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN" \
