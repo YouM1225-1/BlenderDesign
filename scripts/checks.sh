@@ -45,5 +45,7 @@ fi
 "$UV_BIN" run --frozen python scripts/vendor_protocol.py --check    # 检查 2
 "$UV_BIN" sync --frozen --python 3.13 --reinstall-package blender-codex
 "$UV_BIN" run --frozen python scripts/nested_import_smoke.py        # 检查 3
-"$UV_BIN" run --frozen pytest -q                                    # L1 + L2
+"$UV_BIN" run --frozen pytest -q --ignore=tests/distribution         # L1 + L2
+"$UV_BIN" run --frozen --with tomlkit==0.13.3 \
+  pytest tests/distribution -q                                       # distributable
 echo "ALL CHECKS PASSED"

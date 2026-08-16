@@ -104,17 +104,25 @@ def test_trust_bootstrap_is_fail_fast_commit_derived_and_hook_free() -> None:
         "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY",
         "unset PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT",
         "export PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1",
-        'test "$(git -C "$SOURCE_DISTRIBUTION_ROOT" rev-parse HEAD)" =',
-        'git -C "$SOURCE_DISTRIBUTION_ROOT" diff --quiet',
-        'git -C "$SOURCE_DISTRIBUTION_ROOT" diff --cached --quiet',
-        "--untracked-files=all -- .agents plugins/blender-mcp-installer",
         'TRUST_PARENT="$(mktemp -d /private/tmp/blender-mcp-trust.XXXXXX)"',
         'chmod 700 "$TRUST_PARENT"',
+        'GIT_SAFE_HOME="$TRUST_PARENT/git-home"',
+        "GIT_SAFE_ENV=(/usr/bin/env -i",
+        "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null",
+        "GIT_NO_REPLACE_OBJECTS=1",
+        'GIT_SAFE=("${GIT_SAFE_ENV[@]}" /usr/bin/git --no-pager --no-replace-objects',
+        "-c core.fsmonitor=false",
+        '-c core.hooksPath="$EMPTY_HOOKS"',
+        'test "$("${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" rev-parse HEAD)" =',
+        '"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" diff --no-ext-diff --quiet',
+        '"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" diff --no-ext-diff --cached --quiet',
+        "--untracked-files=all -- .agents plugins/blender-mcp-installer",
         "worktree add --detach --no-checkout",
         'read-tree "$EXPECTED_DISTRIBUTION_COMMIT"',
         'archive --format=tar "$EXPECTED_DISTRIBUTION_COMMIT"',
-        'test -z "$(git -C "$TRUSTED_DISTRIBUTION_ROOT" symbolic-ref -q HEAD || true)"',
-        'git -C "$TRUSTED_DISTRIBUTION_ROOT" show',
+        'test -z "$("${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" symbolic-ref -q HEAD || true)"',
+        '"${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" show',
         'DISTRIBUTION_ROOT="$TRUSTED_DISTRIBUTION_ROOT"',
         'PLUGIN_ROOT="$DISTRIBUTION_ROOT/plugins/blender-mcp-installer"',
         'BUNDLE_ROOT="$PLUGIN_ROOT/artifacts"',
@@ -123,7 +131,15 @@ def test_trust_bootstrap_is_fail_fast_commit_derived_and_hook_free() -> None:
     ]
     positions = [block.index(fragment) for fragment in required_in_order]
     assert positions == sorted(positions)
-    assert block.count('core.hooksPath="$EMPTY_HOOKS"') == 3
+    assert block.count('core.hooksPath="$EMPTY_HOOKS"') == 1
+    assert block.count('"${GIT_SAFE[@]}"') >= 12
+    assert "GIT_CONFIG_COUNT" not in block
+    assert "GIT_REPLACE_REF_BASE" not in block
+    assert "$(git " not in block and "\ngit " not in block
+    cleanup = _shell_block(SKILL.read_text(), "TRUST_CLEANUP")
+    assert "trap - EXIT" in cleanup
+    assert '"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT"' in cleanup
+    assert "\ngit " not in cleanup
     assert "git checkout" not in block
     assert "python" not in block.lower().replace("pythonpath", "").replace(
         "pythonhome", ""
@@ -204,6 +220,63 @@ def test_trust_bootstrap_executes_without_source_hooks_or_redirected_environment
     subprocess.run(["bash", "-c", script], env=env, check=True, capture_output=True, text=True)
     assert not hook_sentinel.exists()
     assert not python_sentinel.exists()
+
+
+def _executable_sentinel(tmp_path: Path, name: str) -> tuple[Path, Path]:
+    sentinel = tmp_path / f"{name}-ran"
+    helper = tmp_path / name
+    helper.write_text(f"#!/bin/sh\ntouch {sentinel}\nexit 0\n")
+    helper.chmod(0o700)
+    return helper, sentinel
+
+
+@pytest.mark.parametrize("source", ["environment", "repository"])
+def test_trust_bootstrap_never_executes_git_fsmonitor_config(tmp_path: Path, source: str) -> None:
+    repo, commit = _trust_fixture(tmp_path)
+    helper, sentinel = _executable_sentinel(tmp_path, f"{source}-fsmonitor")
+    env, _, _ = _trust_env(repo, commit, tmp_path)
+    if source == "environment":
+        env.update(
+            GIT_CONFIG_COUNT="1",
+            GIT_CONFIG_KEY_0="core.fsmonitor",
+            GIT_CONFIG_VALUE_0=str(helper),
+        )
+    else:
+        _git(repo, "config", "core.fsmonitor", str(helper))
+    script = "\n".join(
+        (
+            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            'test ! -e "$CONFIG_SENTINEL"',
+            _shell_block(SKILL.read_text(), "TRUST_CLEANUP"),
+        )
+    )
+    env["CONFIG_SENTINEL"] = str(sentinel)
+    subprocess.run(["bash", "-c", script], env=env, check=True, capture_output=True, text=True)
+    assert not sentinel.exists()
+
+
+def test_trust_bootstrap_rejects_tree_replace_attack_before_materialization(
+    tmp_path: Path,
+) -> None:
+    repo, commit = _trust_fixture(tmp_path)
+    reviewed_tree = _git(repo, "rev-parse", f"{commit}^{{tree}}")
+    (repo / "plugins/blender-mcp-installer/scripts/install.py").write_text("MALICIOUS\n")
+    _git(repo, "add", "plugins/blender-mcp-installer/scripts/install.py")
+    malicious_tree = _git(repo, "write-tree")
+    _git(repo, "replace", reviewed_tree, malicious_tree)
+    evidence = tmp_path / "materialized-installer"
+    env, _, _ = _trust_env(repo, commit, tmp_path)
+    env["MATERIALIZED_EVIDENCE"] = str(evidence)
+    script = "\n".join(
+        (
+            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            'cat "$PLUGIN_ROOT/scripts/install.py" > "$MATERIALIZED_EVIDENCE"',
+            _shell_block(SKILL.read_text(), "TRUST_CLEANUP"),
+        )
+    )
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert not evidence.exists()
 
 
 @pytest.mark.parametrize("mutation", ["dirty_script", "scoped_untracked", "checksum_tamper"])
@@ -409,5 +482,7 @@ def test_docs_index_and_repository_checks_include_plugin_contract() -> None:
         in (ROOT / "docs/README.md").read_text()
     )
     checks = (ROOT / "scripts/checks.sh").read_text()
-    assert '"$UV_BIN" run --frozen pytest -q' in checks
+    assert '"$UV_BIN" run --frozen pytest -q --ignore=tests/distribution' in checks
+    assert '"$UV_BIN" run --frozen --with tomlkit==0.13.3' in checks
+    assert "pytest tests/distribution -q" in checks
     assert 'scripts/validate_plugin.py" plugins/blender-mcp-installer' in checks

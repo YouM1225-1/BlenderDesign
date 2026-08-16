@@ -19,6 +19,8 @@ Git and Python redirection variables, checks a clean scoped source tree, creates
 private detached hook-free worktree from the reviewed commit, and compares the
 commit-object checksum file with the materialized artifacts. All later plugin and
 bundle paths must come from that private worktree in the same fail-fast shell session.
+Its single safe Git argv/environment disables replacement objects and neutralizes
+environment, system/global, and repository-local executable Git configuration.
 
 The operator supplies:
 

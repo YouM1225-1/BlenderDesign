@@ -53,42 +53,64 @@ case "$BLENDER_BIN" in /*) ;; *) echo "BLENDER_BIN must be absolute" >&2; exit 1
 case "$CODEX_BIN" in /*) ;; *) echo "CODEX_BIN must be absolute" >&2; exit 1;; esac
 test -x "$BLENDER_BIN"
 test -x "$CODEX_BIN"
-test "$(git -C "$SOURCE_DISTRIBUTION_ROOT" rev-parse HEAD)" = \
-  "$EXPECTED_DISTRIBUTION_COMMIT"
-git -C "$SOURCE_DISTRIBUTION_ROOT" diff --quiet
-git -C "$SOURCE_DISTRIBUTION_ROOT" diff --cached --quiet
-test -z "$(git -C "$SOURCE_DISTRIBUTION_ROOT" status --porcelain=v1 \
-  --untracked-files=all -- .agents plugins/blender-mcp-installer \
-  docs/distribute-official-blender-mcp.md \
-  docs/audits/2026-08-16-official-blender-mcp-distribution-acceptance.md \
-  scripts/build_official_blender_mcp_distribution.py scripts/requirements)"
 TRUST_PARENT="$(mktemp -d /private/tmp/blender-mcp-trust.XXXXXX)"
 chmod 700 "$TRUST_PARENT"
 TRUSTED_DISTRIBUTION_ROOT="$TRUST_PARENT/distribution"
 EMPTY_HOOKS="$TRUST_PARENT/empty-hooks"
-mkdir "$EMPTY_HOOKS"
-chmod 700 "$EMPTY_HOOKS"
-git -c core.hooksPath="$EMPTY_HOOKS" -C "$SOURCE_DISTRIBUTION_ROOT" \
+GIT_SAFE_HOME="$TRUST_PARENT/git-home"
+mkdir "$EMPTY_HOOKS" "$GIT_SAFE_HOME"
+chmod 700 "$EMPTY_HOOKS" "$GIT_SAFE_HOME"
+TRUSTED_CHECKSUMS=""
+GIT_SAFE_ENV=(/usr/bin/env -i
+  HOME="$GIT_SAFE_HOME" PATH=/usr/bin:/bin LC_ALL=C
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1)
+GIT_SAFE=("${GIT_SAFE_ENV[@]}" /usr/bin/git --no-pager --no-replace-objects
+  -c core.fsmonitor=false -c core.hooksPath="$EMPTY_HOOKS"
+  -c core.attributesFile=/dev/null -c diff.external=)
+cleanup_trust_on_exit() {
+  cleanup_rc=$?
+  trap - EXIT
+  if test -e "$TRUSTED_DISTRIBUTION_ROOT/.git"; then
+    "${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" worktree remove --force \
+      "$TRUSTED_DISTRIBUTION_ROOT" >/dev/null 2>&1 || true
+  else
+    rmdir "$TRUSTED_DISTRIBUTION_ROOT" >/dev/null 2>&1 || true
+  fi
+  test -z "$TRUSTED_CHECKSUMS" || rm -f "$TRUSTED_CHECKSUMS"
+  rmdir "$EMPTY_HOOKS" "$GIT_SAFE_HOME" "$TRUST_PARENT" >/dev/null 2>&1 || true
+  exit "$cleanup_rc"
+}
+trap cleanup_trust_on_exit EXIT
+test "$("${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" rev-parse HEAD)" = \
+  "$EXPECTED_DISTRIBUTION_COMMIT"
+"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" diff --no-ext-diff --quiet
+"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" diff --no-ext-diff --cached --quiet
+test -z "$("${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" status --porcelain=v1 \
+  --untracked-files=all -- .agents plugins/blender-mcp-installer \
+  docs/distribute-official-blender-mcp.md \
+  docs/audits/2026-08-16-official-blender-mcp-distribution-acceptance.md \
+  scripts/build_official_blender_mcp_distribution.py scripts/requirements)"
+"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" \
   worktree add --detach --no-checkout \
   "$TRUSTED_DISTRIBUTION_ROOT" "$EXPECTED_DISTRIBUTION_COMMIT"
 chmod 700 "$TRUSTED_DISTRIBUTION_ROOT"
-git -c core.hooksPath="$EMPTY_HOOKS" -C "$TRUSTED_DISTRIBUTION_ROOT" \
+"${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" \
   read-tree "$EXPECTED_DISTRIBUTION_COMMIT"
-git -c core.hooksPath="$EMPTY_HOOKS" -C "$SOURCE_DISTRIBUTION_ROOT" \
+"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" \
   archive --format=tar "$EXPECTED_DISTRIBUTION_COMMIT" | \
   tar -x -C "$TRUSTED_DISTRIBUTION_ROOT"
-test -z "$(git -C "$TRUSTED_DISTRIBUTION_ROOT" symbolic-ref -q HEAD || true)"
-test "$(git -C "$TRUSTED_DISTRIBUTION_ROOT" rev-parse HEAD)" = \
+test -z "$("${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" symbolic-ref -q HEAD || true)"
+test "$("${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" rev-parse HEAD)" = \
   "$EXPECTED_DISTRIBUTION_COMMIT"
-git -C "$TRUSTED_DISTRIBUTION_ROOT" diff --quiet
-git -C "$TRUSTED_DISTRIBUTION_ROOT" diff --cached --quiet
-test -z "$(git -C "$TRUSTED_DISTRIBUTION_ROOT" status --porcelain=v1 \
+"${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" diff --no-ext-diff --quiet
+"${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" diff --no-ext-diff --cached --quiet
+test -z "$("${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" status --porcelain=v1 \
   --untracked-files=all -- .agents plugins/blender-mcp-installer)"
 test -d "$TRUSTED_DISTRIBUTION_ROOT/.agents"
 test -d "$TRUSTED_DISTRIBUTION_ROOT/plugins/blender-mcp-installer"
 TRUSTED_CHECKSUMS="$(mktemp "$TRUST_PARENT/SHA256SUMS.XXXXXX")"
 chmod 600 "$TRUSTED_CHECKSUMS"
-git -C "$TRUSTED_DISTRIBUTION_ROOT" show \
+"${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" show \
   "$EXPECTED_DISTRIBUTION_COMMIT:plugins/blender-mcp-installer/artifacts/SHA256SUMS" \
   > "$TRUSTED_CHECKSUMS"
 DISTRIBUTION_ROOT="$TRUSTED_DISTRIBUTION_ROOT"
@@ -101,6 +123,10 @@ cmp "$TRUSTED_CHECKSUMS" "$BUNDLE_ROOT/SHA256SUMS"
 
 This `--no-checkout` worktree is materialized with `read-tree` plus built-in
 `git archive`, so source checkout hooks and working-tree filters do not execute.
+Every Git call uses absolute `/usr/bin/git` in an allowlisted environment, disables
+replacement objects, ignores system/global config, and overrides repository-local
+fsmonitor, hooks, pager, and external-diff execution surfaces while isolating global
+attributes.
 Keep the private worktree and checksum file until the workflow is complete; they
 are evidence and all later paths derive from them. Never reset `DISTRIBUTION_ROOT`
 to the source checkout.
@@ -316,10 +342,11 @@ only the private trust objects in this order:
 
 <!-- TRUST_CLEANUP_BEGIN -->
 ```bash
-git -c core.hooksPath="$EMPTY_HOOKS" -C "$SOURCE_DISTRIBUTION_ROOT" \
+trap - EXIT
+"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" \
   worktree remove "$TRUSTED_DISTRIBUTION_ROOT"
 rm "$TRUSTED_CHECKSUMS"
-rmdir "$EMPTY_HOOKS"
+rmdir "$EMPTY_HOOKS" "$GIT_SAFE_HOME"
 rmdir "$TRUST_PARENT"
 ```
 <!-- TRUST_CLEANUP_END -->
