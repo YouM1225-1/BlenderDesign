@@ -41,6 +41,11 @@ _MAX_STDOUT = 1024 * 1024
 _MAX_STDERR = 64 * 1024
 _MCP_TIMEOUT = 30.0
 _VERSION = re.compile(r"[0-9][A-Za-z0-9.+-]*")
+_UV_BUILD = re.compile(
+    r"([0-9][A-Za-z0-9.+-]*) \([0-9a-f]{7,40} "
+    r"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01]) "
+    r"[a-z0-9_]+(?:-[a-z0-9_]+)+\)"
+)
 _MCP_COMMAND_ENV = "_BLENDER_MCP_PROBE_COMMAND"
 _MCP_HELPER = r"""
 import asyncio
@@ -380,6 +385,8 @@ def _version(output: str, product: str) -> str:
     version = lines[0].strip()[len(prefix) :]
     if product == "Blender" and version.endswith(" LTS"):
         version = version.removesuffix(" LTS")
+    elif product == "uv" and (build := _UV_BUILD.fullmatch(version)) is not None:
+        version = build.group(1)
     if _VERSION.fullmatch(version) is None:
         raise InstallerError("host capability probe failed")
     return version

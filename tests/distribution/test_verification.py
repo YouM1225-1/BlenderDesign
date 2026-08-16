@@ -54,7 +54,7 @@ class HostRunner:
         if args[-1:] == ("--version",):
             values = {
                 "codex": "codex-cli 0.148.0-alpha.9\n",
-                "uv": "uv 0.12.2\n",
+                "uv": "uv 0.12.2 (46ead6098 2026-08-05 aarch64-apple-darwin)\n",
                 "Blender": "Blender 5.2.0 LTS\n",
                 "python": "Python 3.13.13\n",
             }
@@ -147,6 +147,16 @@ def test_probe_host_uses_help_without_querying_unpublished_entry(
         ("codex-cli 0.148.0-alpha.9 LTS\n", "codex-cli"),
         ("uv 0.12.2 LTS\n", "uv"),
         ("Python 3.13.13 LTS\n", "Python"),
+        ("uv 0.12.2 (2026-08-05 aarch64-apple-darwin)\n", "uv"),
+        ("uv 0.12.2 (46ead6098 aarch64-apple-darwin)\n", "uv"),
+        ("uv 0.12.2 (46ead6098 2026-08-05)\n", "uv"),
+        ("uv 0.12.2 (not-hex 2026-08-05 aarch64-apple-darwin)\n", "uv"),
+        ("uv 0.12.2 (46ead6098 2026-8-05 aarch64-apple-darwin)\n", "uv"),
+        ("uv 0.12.2 (46ead6098 2026-08-05 aarch64/apple/darwin)\n", "uv"),
+        ("uv 0.12.2 (46ead6098 2026-08-05 aarch64-apple-darwin) extra\n", "uv"),
+        ("codex-cli 0.12.2 (46ead6098 2026-08-05 aarch64-apple-darwin)\n", "uv"),
+        ("codex-cli 0.148.0 (46ead6098 2026-08-05 aarch64-apple-darwin)\n", "codex-cli"),
+        ("Python 3.13.13 (46ead6098 2026-08-05 aarch64-apple-darwin)\n", "Python"),
     ],
 )
 def test_version_parser_rejects_unapproved_suffixes_and_wrong_products(
