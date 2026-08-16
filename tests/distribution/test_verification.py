@@ -5,6 +5,7 @@ import os
 import platform
 import subprocess
 import sys
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,16 +18,18 @@ sys.path.insert(
 )
 
 from blender_mcp_installer.bundle import parse_manifest
+from blender_mcp_installer.bundle import StagedBundle
+from blender_mcp_installer.blender_adapter import BlenderState
 from blender_mcp_installer.filesystem import InstallerError
 from blender_mcp_installer import verification
 from blender_mcp_installer.verification import (
     HostCapabilityError,
     HostCapabilities,
-    InstallationInspection,
     inspect_installation,
     probe_host,
     verify_live,
 )
+from tests.distribution.test_filesystem import INSTALL_ID, _active, _receipt, _roots
 
 
 MANIFEST = parse_manifest(
@@ -40,10 +43,12 @@ class HostRunner:
     def __init__(self, *, json_help: bool = True) -> None:
         self.json_help = json_help
         self.calls: list[tuple[str, ...]] = []
+        self.records: list[tuple[tuple[str, ...], Path, dict[str, str]]] = []
 
     def __call__(self, argv, *, cwd, env):
         args = tuple(map(str, argv))
         self.calls.append(args)
+        self.records.append((args, cwd, dict(env)))
         if args[-1:] == ("--version",):
             values = {
                 "codex": "codex-cli 0.148.0-alpha.9\n",
@@ -74,6 +79,18 @@ def _executable(path: Path, name: str) -> Path:
     return result
 
 
+def _probe_env(tmp_path: Path) -> dict[str, str]:
+    resources = tmp_path / "resources"
+    return {
+        "HOME": str(tmp_path / "home"),
+        "CODEX_HOME": str(tmp_path / "codex-home"),
+        "BLENDER_USER_RESOURCES": str(resources),
+        "BLENDER_USER_CONFIG": str(resources / "config"),
+        "BLENDER_USER_EXTENSIONS": str(resources / "extensions"),
+        "SECRET": "not-forwarded",
+    }
+
+
 def test_probe_host_uses_help_without_querying_unpublished_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -82,7 +99,7 @@ def test_probe_host_uses_help_without_querying_unpublished_entry(
     monkeypatch.setattr(platform, "system", lambda: "Darwin")
     monkeypatch.setattr(platform, "machine", lambda: "arm64")
 
-    host = probe_host(*bins, {"SECRET": "not-forwarded"}, runner=runner)
+    host = probe_host(*bins, _probe_env(tmp_path), runner=runner)
 
     assert host.supported
     assert host.platform_system == "Darwin" and host.platform_machine == "arm64"
@@ -92,6 +109,114 @@ def test_probe_host_uses_help_without_querying_unpublished_entry(
     assert host.blender_arches == ("arm64", "x86_64")
     assert not any(call[-4:] == ("mcp", "get", "blender", "--json") for call in runner.calls)
     assert all("SECRET" not in call for call in runner.calls)
+    expected_env = {
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": str(tmp_path / "home"),
+        "CODEX_HOME": str(tmp_path / "codex-home"),
+        "BLENDER_MCP_HOST": "localhost",
+        "BLENDER_MCP_PORT": "9876",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONSAFEPATH": "1",
+        "BLENDER_USER_RESOURCES": str(tmp_path / "resources"),
+        "BLENDER_USER_CONFIG": str(tmp_path / "resources/config"),
+        "BLENDER_USER_EXTENSIONS": str(tmp_path / "resources/extensions"),
+    }
+    expected_argv = [
+        (str(bins[1]), "--version"),
+        (str(bins[2]), "--version"),
+        (str(bins[0]), "--version"),
+        (str(bins[3]), "--version"),
+        ("/usr/bin/lipo", "-archs", str(bins[0])),
+        (str(bins[1]), "mcp", "get", "--help"),
+        (str(bins[1]), "plugin", "marketplace", "add", "--help"),
+        (str(bins[1]), "plugin", "add", "--help"),
+    ]
+    assert [record[0] for record in runner.records] == expected_argv
+    assert [record[1] for record in runner.records] == [tmp_path] * len(expected_argv)
+    assert all(record[2] == expected_env for record in runner.records)
+
+
+@pytest.mark.parametrize(
+    "completed",
+    [
+        SimpleNamespace(returncode=0, stdout=b"x" * (1024 * 1024 + 1), stderr=b""),
+        SimpleNamespace(returncode=0, stdout=b"ok", stderr=b"x" * (64 * 1024 + 1)),
+        SimpleNamespace(returncode=0, stdout=b"\xff", stderr=b""),
+        SimpleNamespace(returncode=2, stdout=b"ok", stderr=b""),
+    ],
+    ids=("stdout-cap", "stderr-cap", "utf8", "nonzero"),
+)
+def test_injected_host_results_are_capped_and_redacted(tmp_path: Path, completed) -> None:
+    with pytest.raises(InstallerError, match="host capability probe failed"):
+        verification._run(lambda *args, **kwargs: completed, ("tool",), cwd=tmp_path, env={})
+
+
+def test_injected_host_timeout_is_redacted(tmp_path: Path) -> None:
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired("secret", 5)
+
+    with pytest.raises(InstallerError, match="host capability probe failed") as caught:
+        verification._run(timeout, ("tool",), cwd=tmp_path, env={})
+    assert "secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_real_host_reader_stops_at_stream_caps(tmp_path: Path, stream: str) -> None:
+    descriptor = 1 if stream == "stdout" else 2
+    command = (
+        sys.executable,
+        "-c",
+        f"import os;os.write({descriptor},b'x'*{2 * 1024 * 1024})",
+    )
+    with pytest.raises(InstallerError, match="host capability probe failed"):
+        verification._run(
+            verification._default_runner,
+            command,
+            cwd=tmp_path,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+
+
+def test_real_host_reader_enforces_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(verification, "_HOST_TIMEOUT", 0.05)
+    with pytest.raises(InstallerError, match="host capability probe failed"):
+        verification._run(
+            verification._default_runner,
+            (sys.executable, "-c", "import time;time.sleep(1)"),
+            cwd=tmp_path,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+
+
+def test_probe_host_rejects_partial_or_escaping_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bins = tuple(_executable(tmp_path, name) for name in ("Blender", "codex", "uv", "python"))
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(platform, "machine", lambda: "arm64")
+    partial = _probe_env(tmp_path)
+    partial.pop("BLENDER_USER_CONFIG")
+    with pytest.raises(ValueError, match="all three"):
+        probe_host(*bins, partial, runner=HostRunner())
+    escaping = _probe_env(tmp_path)
+    escaping["BLENDER_USER_CONFIG"] = str(tmp_path / "outside")
+    with pytest.raises(ValueError, match="descend"):
+        probe_host(*bins, escaping, runner=HostRunner())
+
+
+def test_probe_host_rejects_symlinked_profile_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bins = tuple(_executable(tmp_path, name) for name in ("Blender", "codex", "uv", "python"))
+    (tmp_path / "actual-resources").mkdir()
+    (tmp_path / "resources").symlink_to(tmp_path / "actual-resources", target_is_directory=True)
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(platform, "machine", lambda: "arm64")
+
+    with pytest.raises(ValueError, match="unsafe host profile path"):
+        probe_host(*bins, _probe_env(tmp_path), runner=HostRunner())
 
 
 def test_probe_host_unsupported_json_retains_redacted_version_evidence(
@@ -103,7 +228,7 @@ def test_probe_host_unsupported_json_retains_redacted_version_evidence(
     monkeypatch.setattr(platform, "machine", lambda: "arm64")
 
     with pytest.raises(HostCapabilityError, match="unsupported host capabilities") as caught:
-        probe_host(*bins, {}, runner=runner)
+        probe_host(*bins, _probe_env(tmp_path), runner=runner)
 
     assert caught.value.capabilities.codex_version == "0.148.0-alpha.9"
     assert not caught.value.capabilities.codex_mcp_get_json
@@ -130,7 +255,7 @@ def test_probe_host_rejects_unsupported_actual_versions_with_evidence(
     monkeypatch.setattr(platform, "machine", lambda: "arm64")
 
     with pytest.raises(HostCapabilityError) as caught:
-        probe_host(*bins, {}, runner=changed)
+        probe_host(*bins, _probe_env(tmp_path), runner=changed)
 
     assert getattr(caught.value.capabilities, f"{tool.lower()}_version") == version.split()[1]
 
@@ -152,8 +277,19 @@ FIELDS = (
 )
 
 
-def _host(tmp_path: Path, runner=object()) -> HostCapabilities:
-    blender = _executable(tmp_path, "Blender")
+def _host(roots, runner=object()) -> HostCapabilities:
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": str(roots.home),
+        "CODEX_HOME": str(roots.codex_home),
+        "BLENDER_MCP_HOST": "localhost",
+        "BLENDER_MCP_PORT": "9876",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONSAFEPATH": "1",
+        "BLENDER_USER_RESOURCES": str(roots.blender.user_resources),
+        "BLENDER_USER_CONFIG": str(roots.blender.user_config),
+        "BLENDER_USER_EXTENSIONS": str(roots.blender.user_extensions),
+    }
     return HostCapabilities(
         "Darwin",
         "arm64",
@@ -165,157 +301,248 @@ def _host(tmp_path: Path, runner=object()) -> HostCapabilities:
         True,
         True,
         True,
-        blender,
-        _executable(tmp_path, "codex"),
-        _executable(tmp_path, "uv"),
-        _executable(tmp_path, "python"),
-        {"HOME": str(tmp_path)},
+        roots.blender.executable,
+        _executable(roots.blender.executable.parent, "codex"),
+        _executable(roots.blender.executable.parent, "uv"),
+        _executable(roots.blender.executable.parent, "python"),
+        env,
         runner,
     )
 
 
-def _inspection(tmp_path: Path, **changes: object) -> InstallationInspection:
-    target = tmp_path / "managed"
-    target.write_text("same")
-    values = {name: True for name in FIELDS}
-    values.update(changes)
-    return InstallationInspection(
-        **values,
-        host=_host(tmp_path),
-        blender_executable=tmp_path / "Blender",
-        runtime_command=(str(tmp_path / "managed-runtime"),),
-        expected_tools=MANIFEST.tools,
-        managed_targets=(target,),
-        managed_images=("file:same",),
-        active_install_id="00000000-0000-4000-8000-000000000001",
+def _installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, runner=object()):
+    roots = _roots(tmp_path)
+    for path in (
+        roots.blender.executable.parent,
+        roots.blender.user_config,
+        roots.blender.user_extensions,
+        roots.runtime,
+        roots.extension_target,
+        roots.codex_config.parent,
+        roots.receipts,
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+    _executable(roots.blender.executable.parent, roots.blender.executable.name)
+    (roots.runtime / "content").write_text("runtime")
+    (roots.extension_target / "content").write_text("extension")
+    roots.userpref_target.write_text("preferences")
+    roots.codex_config.write_text("managed")
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    manifest_raw = (
+        Path(__file__).parents[2] / "plugins/blender-mcp-installer/artifacts/manifest.json"
+    ).read_bytes()
+    (bundle_root / "manifest.json").write_bytes(manifest_raw)
+    (bundle_root / "mcp-1.0.0.zip").write_bytes(b"extension")
+    bundle = StagedBundle(bundle_root, MANIFEST)
+    receipt = _receipt(roots)
+    receipt["status"] = "installed"
+    receipt["bundle"] = {
+        "version": MANIFEST.bundle_version,
+        "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+    }
+    roots.active.write_text(json.dumps(_active(), sort_keys=True))
+    receipt_path = roots.receipts / f"{INSTALL_ID}.json"
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True))
+    roots.active.chmod(0o600)
+    receipt_path.chmod(0o600)
+    digest = "d" * 64
+    blender = BlenderState(
+        roots.blender.executable,
+        ("arm64",),
+        roots.blender.executable,
+        "arm64",
+        "5.2.0",
+        roots.home,
+        roots.blender.user_resources,
+        roots.blender.user_config,
+        roots.userpref_target,
+        roots.blender.user_extensions,
+        "user_default",
+        roots.extension_target,
+        "mcp",
+        "1.0.0",
+        True,
+        True,
+        "localhost",
+        9876,
+        True,
+        digest,
     )
+    host = _host(roots, runner)
+    controls = {
+        "blender": blender,
+        "runtime": True,
+        "blender_files": True,
+        "codex_policy": True,
+        "codex_namespace": True,
+        "codex_effective": True,
+        "runtime_profile": None,
+    }
+    calls: list[str] = []
 
+    def runtime_probe(*args):
+        calls.append("runtime")
+        controls["runtime_profile"] = args[2]
+        if not controls["runtime"]:
+            raise InstallerError("runtime verification failed")
+        return SimpleNamespace(
+            exact=True,
+            launcher_path=roots.runtime / "bin/blender-mcp-managed",
+        )
 
-def test_inspection_exact_requires_every_independent_field(tmp_path: Path) -> None:
-    exact = _inspection(tmp_path)
-    assert exact.exact
-    for field in FIELDS:
-        assert not replace(exact, **{field: False}).exact, field
+    def blender_files(*args):
+        calls.append("blender_files")
+        if not controls["blender_files"]:
+            raise InstallerError("Blender file verification failed")
 
+    def codex_toml(*args):
+        calls.append("codex_toml")
+        if not controls["codex_policy"] or not controls["codex_namespace"]:
+            raise InstallerError("Codex managed configuration mismatch")
 
-def test_inspection_snapshots_all_targets_before_and_after(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    before = _inspection(tmp_path)
-    snapshots: list[tuple[str, ...]] = []
+    def codex_effective(*args):
+        calls.append("codex_effective")
+        if not controls["codex_effective"]:
+            raise InstallerError("effective Codex configuration mismatch")
+        return SimpleNamespace()
 
-    def snapshot(paths):
-        result = tuple(f"image-{len(snapshots)}" for _ in paths)
-        snapshots.append(result)
-        return result
-
-    monkeypatch.setattr(
-        "blender_mcp_installer.verification._managed_paths", lambda roots: before.managed_targets
-    )
-    monkeypatch.setattr("blender_mcp_installer.verification._snapshot", snapshot)
-    monkeypatch.setattr(
-        "blender_mcp_installer.verification._inspect",
-        lambda bundle, roots, blender_state, host, images: replace(before, managed_images=images),
-    )
-
-    with pytest.raises(InstallerError, match="managed targets changed during inspection"):
-        inspect_installation(SimpleNamespace(manifest=MANIFEST), object(), object(), before.host)
-    assert len(snapshots) == 2
-
-
-def test_inspection_still_takes_after_snapshot_when_probe_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    before = _inspection(tmp_path)
-    calls = 0
-
-    def snapshot(paths):
-        nonlocal calls
-        calls += 1
-        return ("unchanged",)
-
-    monkeypatch.setattr(
-        "blender_mcp_installer.verification._managed_paths", lambda roots: before.managed_targets
-    )
-    monkeypatch.setattr("blender_mcp_installer.verification._snapshot", snapshot)
-    monkeypatch.setattr(
-        "blender_mcp_installer.verification._inspect",
-        lambda *args: (_ for _ in ()).throw(ValueError("secret")),
-    )
-
-    with pytest.raises(InstallerError, match="installation inspection failed") as caught:
-        inspect_installation(SimpleNamespace(manifest=MANIFEST), object(), object(), before.host)
-    assert calls == 2 and "secret" not in str(caught.value)
-
-
-def test_inspection_never_queries_effective_codex_before_active_publication(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    data_root = tmp_path / "data"
-    resources = tmp_path / "resources"
-    config = resources / "config"
-    extensions = resources / "extensions"
-    for path in (data_root, config, extensions):
-        path.mkdir(parents=True)
-    runtime = data_root / "runtime"
-    launcher = runtime / "bin/blender-mcp-managed"
-    roots = SimpleNamespace(
-        data_root=data_root,
-        runtime=runtime,
-        extension_target=extensions / "user_default/mcp",
-        userpref_target=config / "userpref.blend",
-        codex_config=tmp_path / "codex/config.toml",
-        active=tmp_path / "state/active.json",
-        state_root=tmp_path / "state",
-        receipts=tmp_path / "state/receipts",
-        home=tmp_path,
-    )
-    blender = SimpleNamespace(
-        repository="user_default",
-        manifest_id="mcp",
-        manifest_version="1.0.0",
-        canonical_payload_digest="digest",
-        enabled=True,
-        online_access=True,
-        host="localhost",
-        port=9876,
-        autostart=True,
-        user_resources=resources,
-        config_root=config,
-        extensions_root=extensions,
-        executable=tmp_path / "Blender",
-        reported_architecture="arm64",
-        version="5.2.0",
-    )
-    monkeypatch.setattr(
-        verification,
-        "inspect_runtime",
-        lambda *args: SimpleNamespace(exact=True, launcher_path=launcher),
-    )
+    monkeypatch.setattr(verification, "inspect_blender", lambda *args: controls["blender"])
+    monkeypatch.setattr(verification, "verify_runtime", runtime_probe)
     monkeypatch.setattr(
         verification,
         "load_extension_payload",
-        lambda path: SimpleNamespace(canonical_digest="digest"),
+        lambda path: SimpleNamespace(canonical_digest=digest),
     )
+    monkeypatch.setattr(verification, "verify_blender_files", blender_files)
     monkeypatch.setattr(
         verification,
-        "_effective",
+        "_codex_checks",
+        lambda *args: (controls["codex_policy"], controls["codex_namespace"]),
+    )
+    monkeypatch.setattr(verification, "verify_codex_toml", codex_toml)
+    monkeypatch.setattr(verification, "verify_codex_effective", codex_effective)
+    return bundle, roots, blender, host, controls, calls, receipt, receipt_path
+
+
+@pytest.mark.parametrize("field", FIELDS)
+def test_adapter_backed_inspection_independently_computes_every_exactness_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    bundle, roots, blender, host, controls, calls, receipt, receipt_path = _installed(
+        tmp_path, monkeypatch
+    )
+    if field == "runtime":
+        controls["runtime"] = False
+    elif field.startswith("extension_") or field in {"enablement", "preferences"}:
+        attribute, value = {
+            "extension_repository": ("repository", "foreign"),
+            "extension_id": ("manifest_id", "foreign"),
+            "extension_version": ("manifest_version", "9.9.9"),
+            "extension_payload_digest": ("canonical_payload_digest", "e" * 64),
+            "enablement": ("enabled", False),
+            "preferences": ("online_access", False),
+        }[field]
+        changes = {attribute: value}
+        if field == "extension_repository":
+            changes["extension_root"] = blender.extensions_root / "foreign/mcp"
+        controls["blender"] = replace(blender, **changes)
+    elif field in {"codex_policy", "codex_namespace", "codex_effective"}:
+        controls[field] = False
+    elif field == "active_generation":
+        receipt["generation"] = 2
+        receipt_path.write_text(json.dumps(receipt, sort_keys=True))
+    elif field == "manifest_hash":
+        receipt["bundle"]["manifest_sha256"] = "e" * 64
+        receipt_path.write_text(json.dumps(receipt, sort_keys=True))
+    elif field == "recorded_blender_executable":
+        other = _executable(roots.blender.executable.parent, "OtherBlender")
+        roots = replace(roots, blender=replace(roots.blender, executable=other))
+        receipt["host"]["blender_executable"] = str(other)
+        receipt_path.write_text(json.dumps(receipt, sort_keys=True))
+
+    inspected = inspect_installation(bundle, roots, blender, host)
+
+    assert not getattr(inspected, field)
+    assert not inspected.exact
+    assert calls[:2] == ["runtime", "blender_files"]
+
+
+def test_adapter_backed_exact_inspection_binds_receipt_and_all_authorities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, controls, calls, _, receipt_path = _installed(
+        tmp_path, monkeypatch
+    )
+
+    inspected = inspect_installation(bundle, roots, blender, host)
+
+    assert inspected.exact and inspected.receipt_path == receipt_path
+    assert inspected.managed_targets == (
+        roots.runtime,
+        roots.extension_target,
+        roots.userpref_target,
+        roots.codex_config,
+        roots.active,
+        receipt_path,
+    )
+    assert len(inspected.managed_images) == 6
+    assert calls == ["runtime", "blender_files", "codex_toml", "codex_effective"]
+    assert controls["runtime_profile"].home == roots.home
+    assert controls["runtime_profile"].blender_path == roots.blender.executable
+
+
+def test_inspection_never_runs_effective_codex_before_active_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, _, _, _, receipt_path = _installed(tmp_path, monkeypatch)
+    roots.active.unlink()
+    receipt_path.unlink()
+    monkeypatch.setattr(
+        verification,
+        "verify_codex_effective",
         lambda *args: (_ for _ in ()).throw(AssertionError("prepublication query")),
     )
 
-    inspected = verification._inspect(
-        SimpleNamespace(
-            manifest=MANIFEST,
-            extension_path=tmp_path / "extension.zip",
-            manifest_path=tmp_path / "manifest.json",
-        ),
-        roots,
-        blender,
-        _host(tmp_path),
-        ("absent",) * 5,
+    with pytest.raises(InstallerError, match="active installation inspection failed"):
+        inspect_installation(bundle, roots, blender, host)
+
+
+def test_inspection_always_takes_after_image_when_fresh_probe_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, _, _, _, _ = _installed(tmp_path, monkeypatch)
+    original_snapshot = verification._snapshot
+    snapshots = 0
+
+    def counted(paths):
+        nonlocal snapshots
+        snapshots += 1
+        return original_snapshot(paths)
+
+    monkeypatch.setattr(verification, "_snapshot", counted)
+    monkeypatch.setattr(
+        verification,
+        "inspect_blender",
+        lambda *args: (_ for _ in ()).throw(ValueError("secret")),
     )
 
-    assert not inspected.active_generation and not inspected.codex_effective
+    with pytest.raises(InstallerError, match="Blender inspection failed") as caught:
+        inspect_installation(bundle, roots, blender, host)
+    assert snapshots == 2 and "secret" not in str(caught.value)
+
+
+def test_current_profile_cross_bind_is_required_for_runtime_and_recorded_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, _, _, _, _ = _installed(tmp_path, monkeypatch)
+    hostile_env = dict(host.env)
+    hostile_env["BLENDER_USER_CONFIG"] = str(tmp_path / "foreign-config")
+
+    inspected = inspect_installation(bundle, roots, blender, replace(host, env=hostile_env))
+
+    assert not inspected.runtime
+    assert not inspected.recorded_blender_executable
 
 
 class LifecycleRunner:
@@ -351,20 +578,32 @@ class LifecycleRunner:
 
 
 class Session:
-    def __init__(self, tools=MANIFEST.tools, *, fail: str | None = None) -> None:
+    def __init__(
+        self, tools=MANIFEST.tools, *, fail: str | None = None, initialize_result=None
+    ) -> None:
         self.tools = tools
         self.fail = fail
+        self.initialize_result = initialize_result
         self.calls: list[tuple[str, object]] = []
-        self.closed = self.terminated = self.waited = False
 
     def initialize(self):
         self.calls.append(("initialize", None))
         if self.fail == "initialize":
             raise ValueError("secret protocol failure")
-        return {"protocolVersion": "2025-06-18"}
+        return (
+            self.initialize_result
+            if self.initialize_result is not None
+            else {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "blender-mcp", "version": "1.0.0"},
+            }
+        )
 
     def list_tools(self):
         self.calls.append(("list_tools", None))
+        if self.fail == "list":
+            raise ValueError("secret list failure")
         return self.tools
 
     def call_tool(self, name, arguments):
@@ -375,36 +614,66 @@ class Session:
             return {"isError": True, "content": [{"type": "text", "text": "secret"}]}
         return {"content": [{"type": "text", "text": "{}"}]}
 
+
+class Handle:
+    def __init__(self, client: Session, *, fail: str | None = None) -> None:
+        self.client = client
+        self.fail = fail
+        self.opened = False
+        self.closed = self.terminated = self.waited = False
+
+    def open_client(self):
+        self.opened = True
+        if self.fail in {"stdout", "stderr", "client"}:
+            raise ValueError(f"secret {self.fail} failure")
+        return self.client
+
     def close(self):
         self.closed = True
-        if self.fail == "close":
+        if self.fail == "close" or self.client.fail == "close":
             raise ValueError("secret close failure")
 
     def terminate(self):
         self.terminated = True
+        if self.fail == "terminate" or self.client.fail == "terminate":
+            raise ValueError("secret terminate failure")
 
     def wait(self, timeout):
         self.waited = timeout
-        if self.fail == "wait":
+        if self.fail == "wait" or self.client.fail == "wait":
             raise subprocess.TimeoutExpired("secret", timeout)
 
 
 class MCPProbe:
-    def __init__(self, session: Session) -> None:
-        self.session = session
+    def __init__(self, handle: Handle, *, fail_spawn: bool = False) -> None:
+        self.handle = handle
+        self.fail_spawn = fail_spawn
         self.command = None
         self.env = None
 
-    def start(self, command, *, env):
+    def spawn(self, command, *, env):
         self.command = tuple(command)
         self.env = dict(env)
-        return self.session
+        if self.fail_spawn:
+            raise ValueError("atomic spawn failure")
+        return self.handle
 
 
-def _live(tmp_path: Path, session: Session, *, listener: str = "selected"):
-    runner = LifecycleRunner(tmp_path / "Blender", listener=listener)
-    inspection = replace(_inspection(tmp_path), host=_host(tmp_path, runner))
-    probe = MCPProbe(session)
+def _live(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session: Session,
+    *,
+    listener: str = "selected",
+    handle_fail: str | None = None,
+    fail_spawn: bool = False,
+):
+    selected = _roots(tmp_path).blender.executable
+    runner = LifecycleRunner(selected, listener=listener)
+    bundle, roots, blender, host, _, _, _, _ = _installed(tmp_path, monkeypatch, runner=runner)
+    inspection = inspect_installation(bundle, roots, blender, host)
+    handle = Handle(session, fail=handle_fail)
+    probe = MCPProbe(handle, fail_spawn=fail_spawn)
     hostile = {
         "HOME": str(tmp_path / "hostile-home"),
         "PYTHONPATH": "hostile-python",
@@ -412,17 +681,17 @@ def _live(tmp_path: Path, session: Session, *, listener: str = "selected"):
         "BLENDER_MCP_PORT": "1",
         "BLENDER_USER_RESOURCES": str(tmp_path / "foreign-profile"),
     }
-    return inspection, probe, hostile
+    return bundle, inspection, probe, handle, hostile
 
 
 def test_live_uses_hostile_parent_exact_catalog_and_only_read_only_no_arg_call(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     session = Session()
-    inspection, probe, hostile = _live(tmp_path, session)
+    bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
 
     result = verify_live(
-        SimpleNamespace(manifest=MANIFEST),
+        bundle,
         inspection,
         inspection.runtime_command,
         inspection.host.codex_bin,
@@ -438,18 +707,124 @@ def test_live_uses_hostile_parent_exact_catalog_and_only_read_only_no_arg_call(
         ("list_tools", None),
         ("get_blendfile_summary_datablocks", {}),
     ]
-    assert session.closed and session.terminated and session.waited == 2.0
+    assert handle.closed and handle.terminated and handle.waited == 2.0
+
+
+@pytest.mark.parametrize("target_index", range(6))
+def test_live_rejects_each_stale_managed_image_before_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_index: int
+) -> None:
+    session = Session()
+    bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
+    target = inspection.managed_targets[target_index]
+    if target.is_dir():
+        (target / "tampered").write_text("after-inspection")
+    else:
+        target.write_text(target.read_text() + "\n")
+
+    with pytest.raises(InstallerError, match="stale installation inspection"):
+        verify_live(
+            bundle,
+            inspection,
+            inspection.runtime_command,
+            inspection.host.codex_bin,
+            hostile,
+            probe,
+        )
+    assert probe.command is None
+    assert not handle.opened
+
+
+@pytest.mark.parametrize("change", ["omitted", "extra", "reordered"])
+def test_live_rejects_noncanonical_managed_target_tuple(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    session = Session()
+    bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
+    paths = inspection.managed_targets
+    forged = {
+        "omitted": paths[:-1],
+        "extra": (*paths, tmp_path / "foreign"),
+        "reordered": tuple(reversed(paths)),
+    }[change]
+
+    with pytest.raises(InstallerError, match="invalid installation inspection"):
+        verify_live(
+            bundle,
+            replace(inspection, managed_targets=forged),
+            inspection.runtime_command,
+            inspection.host.codex_bin,
+            hostile,
+            probe,
+        )
+    assert probe.command is None and not handle.opened
+
+
+@pytest.mark.parametrize(
+    "initialize_result",
+    [
+        {},
+        {
+            "protocolVersion": "wrong",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "blender-mcp", "version": "1.0.0"},
+        },
+        {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "serverInfo": {"name": "blender-mcp", "version": "1.0.0"},
+        },
+        {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": []},
+            "serverInfo": {"name": "blender-mcp", "version": "1.0.0"},
+        },
+        {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "foreign", "version": "1.0.0"},
+        },
+        {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "blender-mcp", "version": "999"},
+        },
+        {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "blender-mcp", "version": "1.0.0"},
+            "extra": True,
+        },
+    ],
+    ids=("missing", "protocol", "capability", "capability-type", "name", "version", "extra"),
+)
+def test_live_rejects_malformed_or_wrong_initialize_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, initialize_result
+) -> None:
+    session = Session(initialize_result=initialize_result)
+    bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
+
+    with pytest.raises(InstallerError, match="MCP handshake failed"):
+        verify_live(
+            bundle,
+            inspection,
+            inspection.runtime_command,
+            inspection.host.codex_bin,
+            hostile,
+            probe,
+        )
+    assert handle.closed and handle.terminated and handle.waited == 2.0
 
 
 @pytest.mark.parametrize("listener", ["missing", "foreign", "ambiguous"])
 def test_live_rejects_listener_not_uniquely_owned_by_selected_blender(
-    tmp_path: Path, listener: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listener: str
 ) -> None:
     session = Session()
-    inspection, probe, hostile = _live(tmp_path, session, listener=listener)
+    bundle, inspection, probe, _, hostile = _live(tmp_path, monkeypatch, session, listener=listener)
     with pytest.raises(InstallerError, match="selected Blender listener verification failed"):
         verify_live(
-            SimpleNamespace(manifest=MANIFEST),
+            bundle,
             inspection,
             inspection.runtime_command,
             inspection.host.codex_bin,
@@ -469,19 +844,21 @@ def test_live_rejects_listener_not_uniquely_owned_by_selected_blender(
     ],
     ids=("missing", "extra", "reordered", "duplicate"),
 )
-def test_live_rejects_any_catalog_difference_and_cleans_up(tmp_path: Path, tools) -> None:
+def test_live_rejects_any_catalog_difference_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tools
+) -> None:
     session = Session(tools)
-    inspection, probe, hostile = _live(tmp_path, session)
+    bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
     with pytest.raises(InstallerError, match="MCP catalog verification failed"):
         verify_live(
-            SimpleNamespace(manifest=MANIFEST),
+            bundle,
             inspection,
             inspection.runtime_command,
             inspection.host.codex_bin,
             hostile,
             probe,
         )
-    assert session.closed and session.terminated and session.waited == 2.0
+    assert handle.closed and handle.terminated and handle.waited == 2.0
     assert all("execute" not in call[0] for call in session.calls)
 
 
@@ -489,20 +866,22 @@ def test_live_rejects_any_catalog_difference_and_cleans_up(tmp_path: Path, tools
     "failure,error",
     [
         ("initialize", "MCP handshake failed"),
+        ("list", "MCP catalog verification failed"),
         ("call", "Blender read-only verification failed"),
         ("call_result", "Blender read-only verification failed"),
         ("close", "MCP cleanup failed"),
+        ("terminate", "MCP cleanup failed"),
         ("wait", "MCP cleanup failed"),
     ],
 )
 def test_live_redacts_failures_and_always_closes_terminates_waits(
-    tmp_path: Path, failure: str, error: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, error: str
 ) -> None:
     session = Session(fail=failure)
-    inspection, probe, hostile = _live(tmp_path, session)
+    bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
     with pytest.raises(InstallerError, match=error) as caught:
         verify_live(
-            SimpleNamespace(manifest=MANIFEST),
+            bundle,
             inspection,
             inspection.runtime_command,
             inspection.host.codex_bin,
@@ -510,43 +889,147 @@ def test_live_redacts_failures_and_always_closes_terminates_waits(
             probe,
         )
     assert "secret" not in str(caught.value)
-    assert session.closed and session.terminated and session.waited == 2.0
+    assert handle.closed and handle.terminated and handle.waited == 2.0
 
 
-def test_live_detects_managed_target_change_after_cleanup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("failure", ["stdout", "stderr", "client"])
+def test_owned_handle_cleans_every_post_spawn_transport_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     session = Session()
-    inspection, probe, hostile = _live(tmp_path, session)
-    calls = 0
-
-    def changing_snapshot(paths):
-        nonlocal calls
-        calls += 1
-        return tuple(f"{calls}:{path}" for path in paths)
-
-    monkeypatch.setattr(
-        "blender_mcp_installer.verification._snapshot",
-        changing_snapshot,
+    bundle, inspection, probe, handle, hostile = _live(
+        tmp_path, monkeypatch, session, handle_fail=failure
     )
-    with pytest.raises(InstallerError, match="managed targets changed during verification"):
+
+    with pytest.raises(InstallerError, match="MCP handshake failed") as caught:
         verify_live(
-            SimpleNamespace(manifest=MANIFEST),
+            bundle,
             inspection,
             inspection.runtime_command,
             inspection.host.codex_bin,
             hostile,
             probe,
         )
-    assert session.closed and session.terminated and session.waited == 2.0
+    assert "secret" not in str(caught.value)
+    assert handle.opened and handle.closed and handle.terminated and handle.waited == 2.0
 
 
-def test_live_rejects_unconfigured_command_before_start(tmp_path: Path) -> None:
+def test_atomic_spawn_failure_has_no_unowned_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     session = Session()
-    inspection, probe, hostile = _live(tmp_path, session)
+    bundle, inspection, probe, handle, hostile = _live(
+        tmp_path, monkeypatch, session, fail_spawn=True
+    )
+
+    with pytest.raises(InstallerError, match="MCP spawn failed"):
+        verify_live(
+            bundle,
+            inspection,
+            inspection.runtime_command,
+            inspection.host.codex_bin,
+            hostile,
+            probe,
+        )
+    assert probe.command == inspection.runtime_command
+    assert not handle.opened and not handle.closed and not handle.terminated and not handle.waited
+
+
+def test_cleanup_failure_supersedes_operation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = Session(fail="initialize")
+    bundle, inspection, probe, handle, hostile = _live(
+        tmp_path, monkeypatch, session, handle_fail="close"
+    )
+
+    with pytest.raises(InstallerError, match="MCP cleanup failed"):
+        verify_live(
+            bundle,
+            inspection,
+            inspection.runtime_command,
+            inspection.host.codex_bin,
+            hostile,
+            probe,
+        )
+    assert handle.closed and handle.terminated and handle.waited == 2.0
+
+
+def test_live_uses_fresh_authoritative_inspection_not_caller_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = Session()
+    bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
+    fresh = replace(inspection, runtime=False)
+    monkeypatch.setattr(verification, "inspect_installation", lambda *args: fresh)
+
+    with pytest.raises(InstallerError, match="installation inspection is not exact"):
+        verify_live(
+            bundle,
+            inspection,
+            inspection.runtime_command,
+            inspection.host.codex_bin,
+            hostile,
+            probe,
+        )
+    assert probe.command is None and not handle.opened
+
+
+def test_live_rejects_fresh_snapshot_divergence_before_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = Session()
+    bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
+    fresh = replace(
+        inspection,
+        managed_images=("changed", *inspection.managed_images[1:]),
+    )
+    monkeypatch.setattr(verification, "inspect_installation", lambda *args: fresh)
+
+    with pytest.raises(InstallerError, match="stale installation inspection"):
+        verify_live(
+            bundle,
+            inspection,
+            inspection.runtime_command,
+            inspection.host.codex_bin,
+            hostile,
+            probe,
+        )
+    assert probe.command is None and not handle.opened
+
+
+def test_live_detects_managed_target_change_after_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = Session()
+    bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
+    original_close = handle.close
+
+    def mutating_close():
+        original_close()
+        inspection.roots.userpref_target.write_text("changed-during-cleanup")
+
+    monkeypatch.setattr(handle, "close", mutating_close)
+    with pytest.raises(InstallerError, match="managed targets changed during verification"):
+        verify_live(
+            bundle,
+            inspection,
+            inspection.runtime_command,
+            inspection.host.codex_bin,
+            hostile,
+            probe,
+        )
+    assert handle.closed and handle.terminated and handle.waited == 2.0
+
+
+def test_live_rejects_unconfigured_command_before_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = Session()
+    bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
     with pytest.raises(InstallerError, match="managed runtime command mismatch"):
         verify_live(
-            SimpleNamespace(manifest=MANIFEST),
+            bundle,
             inspection,
             (sys.executable, "-c", "print('foreign')"),
             inspection.host.codex_bin,
@@ -554,6 +1037,7 @@ def test_live_rejects_unconfigured_command_before_start(tmp_path: Path) -> None:
             probe,
         )
     assert probe.command is None
+    assert not handle.opened
 
 
 def test_fixed_catalog_is_exactly_ordered_and_has_single_safe_probe() -> None:

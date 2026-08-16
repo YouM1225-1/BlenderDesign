@@ -5,7 +5,10 @@ import json
 import os
 import platform
 import re
+import selectors
 import stat
+import subprocess
+import time
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
@@ -14,18 +17,28 @@ from typing import Mapping, Protocol, Sequence
 
 from .blender_adapter import (
     BlenderState,
+    inspect_blender,
     load_extension_payload,
     probe_blender_lifecycle,
+    verify_blender_files,
 )
 from .bundle import ReleaseManifest, StagedBundle
-from .codex_adapter import ManagedProfile, desired_codex_values
+from .codex_adapter import (
+    ManagedProfile,
+    desired_codex_values,
+    verify_codex_effective,
+    verify_codex_toml,
+)
 from .filesystem import InstallerError, SafeRoot, TargetRef
 from .model import ActiveSelector, InstallRoots, ReceiptStatus, parse_receipt
-from .runtime import inspect_runtime
+from .runtime import verify_runtime
 
 
 _SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 _WAIT_TIMEOUT = 2.0
+_HOST_TIMEOUT = 5.0
+_MAX_STDOUT = 1024 * 1024
+_MAX_STDERR = 64 * 1024
 _VERSION = re.compile(r"(?:codex-cli|uv|Blender|Python)\s+([0-9][A-Za-z0-9.+-]*)")
 
 
@@ -33,12 +46,16 @@ class Runner(Protocol):
     def __call__(self, argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> object: ...
 
 
-class MCPSession(Protocol):
+class MCPClient(Protocol):
     def initialize(self) -> object: ...
 
     def list_tools(self) -> Sequence[str]: ...
 
     def call_tool(self, name: str, arguments: Mapping[str, object]) -> object: ...
+
+
+class MCPHandle(Protocol):
+    def open_client(self) -> MCPClient: ...
 
     def close(self) -> None: ...
 
@@ -48,7 +65,8 @@ class MCPSession(Protocol):
 
 
 class MCPProbe(Protocol):
-    def start(self, command: Sequence[str], *, env: Mapping[str, str]) -> MCPSession: ...
+    # spawn is atomic: failure means no child or owned descriptor exists.
+    def spawn(self, command: Sequence[str], *, env: Mapping[str, str]) -> MCPHandle: ...
 
 
 @dataclass(frozen=True)
@@ -116,6 +134,9 @@ class InstallationInspection:
     managed_targets: tuple[Path, ...]
     managed_images: tuple[str, ...]
     active_install_id: str | None
+    roots: InstallRoots
+    blender_state: BlenderState
+    receipt_path: Path
 
     @property
     def exact(self) -> bool:
@@ -159,13 +180,29 @@ def _absolute_executable(path: Path, label: str) -> Path:
     return path
 
 
-def _text(value: object) -> str:
+def _safe_directory_path(path: Path) -> None:
+    current = Path("/")
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise ValueError("unsafe host profile path") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError("unsafe host profile path")
+
+
+def _text(value: object, maximum: int) -> str:
     if isinstance(value, bytes):
+        if len(value) > maximum:
+            raise InstallerError("host capability probe failed")
         try:
             return value.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise InstallerError("host capability probe failed") from exc
-    if type(value) is not str:
+    if type(value) is not str or len(value.encode("utf-8")) > maximum:
         raise InstallerError("host capability probe failed")
     return value
 
@@ -181,13 +218,13 @@ def _run(
     try:
         completed = runner(tuple(argv), cwd=cwd, env=env)
         code = completed.returncode
-        output = _text(completed.stdout)
-        _text(completed.stderr)
+        output = _text(completed.stdout, _MAX_STDOUT)
+        _text(completed.stderr, _MAX_STDERR)
     except InstallerError:
         raise
     except Exception as exc:
         raise InstallerError("host capability probe failed") from exc
-    if type(code) is not int or code not in accepted or len(output.encode()) > 1024 * 1024:
+    if type(code) is not int or code not in accepted:
         raise InstallerError("host capability probe failed")
     return code, output
 
@@ -201,16 +238,70 @@ def _version(output: str) -> str:
 
 
 def _default_runner(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> object:
-    return __import__("subprocess").run(
-        argv,
-        cwd=cwd,
-        env=dict(env),
-        stdin=__import__("subprocess").DEVNULL,
-        capture_output=True,
-        text=False,
-        timeout=5.0,
-        check=False,
-    )
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=dict(env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert process.stdout is not None and process.stderr is not None
+        output = {"stdout": bytearray(), "stderr": bytearray()}
+        limits = {"stdout": _MAX_STDOUT, "stderr": _MAX_STDERR}
+        deadline = time.monotonic() + _HOST_TIMEOUT
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise InstallerError("host capability probe failed")
+                events = selector.select(remaining)
+                if not events:
+                    raise InstallerError("host capability probe failed")
+                for key, _ in events:
+                    name = key.data
+                    chunk = os.read(key.fd, min(64 * 1024, limits[name] - len(output[name]) + 1))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                    else:
+                        output[name].extend(chunk)
+                        if len(output[name]) > limits[name]:
+                            raise InstallerError("host capability probe failed")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise InstallerError("host capability probe failed")
+        try:
+            returncode = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            raise InstallerError("host capability probe failed") from exc
+        return subprocess.CompletedProcess(
+            argv,
+            returncode,
+            bytes(output["stdout"]),
+            bytes(output["stderr"]),
+        )
+    except OSError as exc:
+        raise InstallerError("host capability probe failed") from exc
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    try:
+                        process.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        pass
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
 
 
 def probe_host(
@@ -235,14 +326,47 @@ def probe_host(
         type(key) is not str or type(value) is not str for key, value in env.items()
     ):
         raise ValueError("invalid host environment")
+    if "HOME" not in env:
+        raise ValueError("HOME is required")
+    home = Path(env["HOME"])
+    if not home.is_absolute() or ".." in home.parts:
+        raise ValueError("HOME must be an absolute lexical path")
+    _safe_directory_path(home)
     clean = {
         "PATH": _SYSTEM_PATH,
+        "HOME": str(home),
+        "BLENDER_MCP_HOST": "localhost",
+        "BLENDER_MCP_PORT": "9876",
         "PYTHONNOUSERSITE": "1",
         "PYTHONSAFEPATH": "1",
     }
-    for key in ("HOME", "CODEX_HOME"):
-        if key in env:
-            clean[key] = env[key]
+    if "CODEX_HOME" in env:
+        codex_home = Path(env["CODEX_HOME"])
+        if not codex_home.is_absolute() or ".." in codex_home.parts:
+            raise ValueError("CODEX_HOME must be an absolute lexical path")
+        _safe_directory_path(codex_home)
+        clean["CODEX_HOME"] = str(codex_home)
+    profile_names = (
+        "BLENDER_USER_RESOURCES",
+        "BLENDER_USER_CONFIG",
+        "BLENDER_USER_EXTENSIONS",
+    )
+    supplied = tuple(name in env for name in profile_names)
+    if any(supplied) and not all(supplied):
+        raise ValueError("isolated Blender profiles require all three user paths")
+    if all(supplied):
+        resources, config, extensions = (Path(env[name]) for name in profile_names)
+        if any(
+            not path.is_absolute() or ".." in path.parts for path in (resources, config, extensions)
+        ):
+            raise ValueError("Blender profile paths must be absolute lexical paths")
+        if not config.is_relative_to(resources) or not extensions.is_relative_to(resources):
+            raise ValueError("Blender profile paths must descend from resources")
+        for path in (resources, config, extensions):
+            _safe_directory_path(path)
+        clean.update(
+            dict(zip(profile_names, map(str, (resources, config, extensions)), strict=True))
+        )
     versions = tuple(
         _version(_run(runner, (str(path), "--version"), cwd=path.parent, env=clean)[1])
         for path in (codex_bin, uv_bin, blender_bin, python_bin)
@@ -361,13 +485,14 @@ def _snapshot(paths: Sequence[Path]) -> tuple[str, ...]:
     return tuple(result)
 
 
-def _managed_paths(roots: InstallRoots) -> tuple[Path, ...]:
+def _managed_paths(roots: InstallRoots, receipt_path: Path) -> tuple[Path, ...]:
     return (
         roots.runtime,
         roots.extension_target,
         roots.userpref_target,
         roots.codex_config,
         roots.active,
+        receipt_path,
     )
 
 
@@ -438,8 +563,10 @@ def _json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _read_json(path: Path) -> object:
+def _read_json(path: Path, *, private: bool = False) -> object:
     try:
+        if private and stat.S_IMODE(path.lstat().st_mode) != 0o600:
+            raise InstallerError("installation inspection failed")
         return json.loads(
             _read_regular(path).decode("utf-8"),
             object_pairs_hook=_json_object,
@@ -449,26 +576,22 @@ def _read_json(path: Path) -> object:
         raise InstallerError("installation inspection failed") from exc
 
 
-def _effective(host: HostCapabilities, desired) -> bool:
+def _active_receipt_path(roots: InstallRoots):
     try:
-        output = _run(
-            host.runner,
-            (str(host.codex_bin), "mcp", "get", "blender", "--json"),
-            cwd=host.codex_bin.parent,
-            env=host.env,
-        )[1]
-        value = json.loads(output, object_pairs_hook=_json_object)
-        effective_env = value["env"]
-        return (
-            value.get("command") == desired.command
-            and value.get("args") == list(desired.args)
-            and value.get("enabled_tools") == list(desired.enabled_tools)
-            and value.get("startup_timeout_sec") == desired.startup_timeout_sec
-            and value.get("tool_timeout_sec") == desired.tool_timeout_sec
-            and all(effective_env.get(key) == item for key, item in desired.env.items())
-        )
-    except (InstallerError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return False
+        active = ActiveSelector.from_dict(_read_json(roots.active, private=True))
+        receipt_path = roots.receipts / active.receipt_basename
+    except (OSError, ValueError, InstallerError) as exc:
+        raise InstallerError("active installation inspection failed") from exc
+    return active, receipt_path
+
+
+def _active_receipt(roots: InstallRoots):
+    active, receipt_path = _active_receipt_path(roots)
+    try:
+        receipt = parse_receipt(_read_json(receipt_path, private=True), roots)
+    except (OSError, ValueError, InstallerError) as exc:
+        raise InstallerError("active installation inspection failed") from exc
+    return active, receipt, receipt_path
 
 
 def _inspect(
@@ -477,74 +600,118 @@ def _inspect(
     blender_state: BlenderState,
     host: HostCapabilities,
     images: tuple[str, ...],
+    receipt_path: Path,
 ) -> InstallationInspection:
     manifest: ReleaseManifest = bundle.manifest
-    runtime_state = None
-    if roots.data_root.exists():
-        with SafeRoot.open(roots.data_root, os.getuid(), roots.data_root) as root:
-            runtime_state = inspect_runtime(
-                TargetRef(root, PurePath(roots.runtime.relative_to(roots.data_root))), manifest
-            )
-    expected_payload = load_extension_payload(bundle.extension_path)
-    runtime = runtime_state is not None and runtime_state.exact
-    extension_repository = blender_state.repository == manifest.extension["repository"]
-    extension_id = blender_state.manifest_id == manifest.extension["id"]
-    extension_version = blender_state.manifest_version == manifest.extension["version"]
-    extension_payload_digest = (
-        blender_state.canonical_payload_digest == expected_payload.canonical_digest
-    )
-    enablement = blender_state.enabled is True
-    preferences = (
-        blender_state.online_access is True
-        and blender_state.host == "localhost"
-        and blender_state.port == 9876
-        and blender_state.autostart is True
-    )
+    active, receipt, current_receipt_path = _active_receipt(roots)
+    if current_receipt_path != receipt_path:
+        raise InstallerError("active installation inspection failed")
+    try:
+        current_blender = inspect_blender(host.blender_bin, host.env, host.runner)
+    except (OSError, ValueError, InstallerError) as exc:
+        raise InstallerError("Blender inspection failed") from exc
     profile = ManagedProfile(
         roots.home,
-        blender_state.user_resources,
-        blender_state.config_root,
-        blender_state.extensions_root,
-        blender_state.executable,
+        current_blender.user_resources,
+        current_blender.config_root,
+        current_blender.extensions_root,
+        current_blender.executable,
+    )
+    profile_matches = (
+        roots.blender.executable == host.blender_bin == current_blender.executable
+        and roots.blender.user_resources == current_blender.user_resources
+        and roots.blender.user_config == current_blender.config_root
+        and roots.blender.user_extensions == current_blender.extensions_root
+        and roots.blender.architecture == current_blender.reported_architecture
+        and roots.blender.version == current_blender.version
+        and roots.home == current_blender.home
+        and host.env.get("HOME") == str(roots.home)
+        and host.env.get("CODEX_HOME") == str(roots.codex_home)
+        and host.env.get("BLENDER_USER_RESOURCES") == str(current_blender.user_resources)
+        and host.env.get("BLENDER_USER_CONFIG") == str(current_blender.config_root)
+        and host.env.get("BLENDER_USER_EXTENSIONS") == str(current_blender.extensions_root)
+    )
+    runtime_state = None
+    if roots.data_root.exists():
+        try:
+            with SafeRoot.open(roots.data_root, os.getuid(), roots.data_root) as root:
+                runtime_state = verify_runtime(
+                    TargetRef(root, PurePath(roots.runtime.relative_to(roots.data_root))),
+                    manifest,
+                    profile,
+                    host.runner,
+                )
+        except (OSError, ValueError, InstallerError):
+            runtime_state = None
+    expected_payload = load_extension_payload(bundle.extension_path)
+    try:
+        verify_blender_files(current_blender, expected_payload)
+        blender_files_exact = True
+    except (OSError, ValueError, InstallerError):
+        blender_files_exact = False
+    runtime = runtime_state is not None and runtime_state.exact and profile_matches
+    extension_repository = (
+        current_blender.repository == manifest.extension["repository"] and blender_files_exact
+    )
+    extension_id = current_blender.manifest_id == manifest.extension["id"] and blender_files_exact
+    extension_version = (
+        current_blender.manifest_version == manifest.extension["version"] and blender_files_exact
+    )
+    extension_payload_digest = (
+        current_blender.canonical_payload_digest == expected_payload.canonical_digest
+        and blender_files_exact
+    )
+    enablement = current_blender.enabled is True and blender_files_exact
+    preferences = (
+        current_blender.online_access is True
+        and current_blender.host == "localhost"
+        and current_blender.port == 9876
+        and current_blender.autostart is True
+        and blender_files_exact
     )
     launcher = None if runtime_state is None else runtime_state.launcher_path
     desired = None if launcher is None else desired_codex_values(launcher, profile, manifest.tools)
+    codex_policy = codex_namespace = parsed_verified = False
     try:
         raw = _read_regular(roots.codex_config)
-        codex_policy, codex_namespace = (
-            (False, False) if desired is None else _codex_checks(raw, desired)
-        )
+        if desired is None:
+            codex_policy = codex_namespace = False
+        else:
+            codex_policy, codex_namespace = _codex_checks(raw, desired)
+            verify_codex_toml(raw, desired)
+            parsed_verified = True
     except (FileNotFoundError, InstallerError):
-        codex_policy = codex_namespace = False
-    codex_effective = False
-    active_generation = False
-    manifest_hash = False
-    recorded_blender_executable = False
-    active_install_id = None
-    try:
-        if roots.active.exists():
-            active = ActiveSelector.from_dict(_read_json(roots.active))
-            receipt = parse_receipt(_read_json(roots.receipts / active.receipt_basename), roots)
-            active_generation = (
-                receipt.status is ReceiptStatus.INSTALLED
-                and receipt.install_id == active.install_id
-                and receipt.generation == active.generation
-            )
-            expected_manifest_hash = hashlib.sha256(_read_regular(bundle.manifest_path)).hexdigest()
-            manifest_hash = (
-                receipt.bundle["version"] == manifest.bundle_version
-                and receipt.bundle["manifest_sha256"] == expected_manifest_hash
-            )
-            recorded_blender_executable = (
-                receipt.host["blender_executable"] == str(blender_state.executable)
-                and receipt.host["blender_architecture"] == blender_state.reported_architecture
-                and receipt.host["blender_version"] == blender_state.version
-            )
-            active_install_id = str(active.install_id)
-    except (OSError, ValueError, InstallerError):
         pass
+    codex_policy = codex_policy and parsed_verified
+    codex_namespace = codex_namespace and parsed_verified
+    codex_effective = False
+    active_generation = (
+        receipt.status is ReceiptStatus.INSTALLED
+        and receipt.install_id == active.install_id
+        and receipt.generation == active.generation
+    )
+    expected_manifest_hash = hashlib.sha256(_read_regular(bundle.manifest_path)).hexdigest()
+    manifest_hash = (
+        receipt.bundle["version"] == manifest.bundle_version
+        and receipt.bundle["manifest_sha256"] == expected_manifest_hash
+    )
+    recorded_blender_executable = (
+        profile_matches
+        and blender_state.executable == current_blender.executable
+        and blender_state.reported_binary == current_blender.reported_binary
+        and receipt.host["blender_executable"] == str(current_blender.executable)
+        and receipt.host["blender_architecture"] == current_blender.reported_architecture
+        and receipt.host["blender_version"] == current_blender.version
+        and receipt.host["codex_version"] == host.codex_version
+        and receipt.host["uv_version"] == host.uv_version
+        and receipt.host["python_version"] == host.python_version
+    )
     if desired is not None and active_generation:
-        codex_effective = _effective(host, desired)
+        try:
+            verify_codex_effective(host.codex_bin, desired, host.env)
+            codex_effective = True
+        except (OSError, ValueError, InstallerError):
+            codex_effective = False
     command = () if desired is None else (desired.command, *desired.args)
     return InstallationInspection(
         runtime,
@@ -561,12 +728,15 @@ def _inspect(
         manifest_hash,
         recorded_blender_executable,
         host,
-        blender_state.executable,
+        current_blender.executable,
         command,
         manifest.tools,
-        _managed_paths(roots),
+        _managed_paths(roots, receipt_path),
         images,
-        active_install_id,
+        str(active.install_id),
+        roots,
+        current_blender,
+        receipt_path,
     )
 
 
@@ -576,12 +746,20 @@ def inspect_installation(
     blender_state: BlenderState,
     host: HostCapabilities,
 ) -> InstallationInspection:
-    paths = _managed_paths(roots)
+    if (
+        type(bundle) is not StagedBundle
+        or type(roots) is not InstallRoots
+        or type(blender_state) is not BlenderState
+        or type(host) is not HostCapabilities
+    ):
+        raise ValueError("invalid installation inspection input")
+    _, receipt_path = _active_receipt_path(roots)
+    paths = _managed_paths(roots, receipt_path)
     before = _snapshot(paths)
     inspection = None
     error = None
     try:
-        inspection = _inspect(bundle, roots, blender_state, host, before)
+        inspection = _inspect(bundle, roots, blender_state, host, before, receipt_path)
     except InstallerError as exc:
         error = exc
     except Exception:
@@ -598,6 +776,31 @@ def inspect_installation(
     return inspection
 
 
+def _valid_initialize(value: object, manifest: ReleaseManifest) -> bool:
+    if type(value) is not dict or set(value) != {
+        "protocolVersion",
+        "capabilities",
+        "serverInfo",
+    }:
+        return False
+    capabilities = value["capabilities"]
+    server = value["serverInfo"]
+    return (
+        type(value["protocolVersion"]) is str
+        and value["protocolVersion"] == "2025-06-18"
+        and type(capabilities) is dict
+        and set(capabilities) == {"tools"}
+        and type(capabilities["tools"]) is dict
+        and not capabilities["tools"]
+        and type(server) is dict
+        and set(server) == {"name", "version"}
+        and type(server["name"]) is str
+        and server["name"] == manifest.server["distribution"]
+        and type(server["version"]) is str
+        and server["version"] == manifest.server["version"]
+    )
+
+
 def verify_live(
     bundle: StagedBundle,
     inspection: InstallationInspection,
@@ -606,55 +809,72 @@ def verify_live(
     env: Mapping[str, str],
     mcp_probe: MCPProbe,
 ) -> VerificationResult:
-    before = _snapshot(inspection.managed_targets)
-    session: MCPSession | None = None
+    if type(bundle) is not StagedBundle or type(inspection) is not InstallationInspection:
+        raise ValueError("invalid live verification input")
+    if type(inspection.roots) is not InstallRoots:
+        raise InstallerError("invalid installation inspection")
+    _, receipt_path = _active_receipt_path(inspection.roots)
+    canonical_paths = _managed_paths(inspection.roots, receipt_path)
+    if (
+        inspection.managed_targets != canonical_paths
+        or inspection.receipt_path != receipt_path
+        or len(inspection.managed_images) != len(canonical_paths)
+    ):
+        raise InstallerError("invalid installation inspection")
+    before = _snapshot(canonical_paths)
+    if before != inspection.managed_images:
+        raise InstallerError("stale installation inspection")
+    handle: MCPHandle | None = None
+    client: MCPClient | None = None
     error: InstallerError | None = None
     tool_count = 0
     try:
+        fresh = inspect_installation(
+            bundle,
+            inspection.roots,
+            inspection.blender_state,
+            inspection.host,
+        )
+        if fresh.managed_targets != canonical_paths or fresh.managed_images != before:
+            raise InstallerError("stale installation inspection")
         command = tuple(runtime_command)
-        if (
-            command != inspection.runtime_command
-            or not command
-            or not Path(command[0]).is_absolute()
-        ):
+        if command != fresh.runtime_command or not command or not Path(command[0]).is_absolute():
             raise InstallerError("managed runtime command mismatch")
-        if codex_bin != inspection.host.codex_bin:
+        if codex_bin != fresh.host.codex_bin:
             raise InstallerError("Codex executable mismatch")
-        if not inspection.exact or tuple(bundle.manifest.tools) != inspection.expected_tools:
+        if not fresh.exact or tuple(bundle.manifest.tools) != fresh.expected_tools:
             raise InstallerError("installation inspection is not exact")
         try:
-            lifecycle = probe_blender_lifecycle(
-                inspection.blender_executable, inspection.host.runner
-            )
+            lifecycle = probe_blender_lifecycle(fresh.blender_executable, fresh.host.runner)
         except Exception as exc:
             raise InstallerError("selected Blender listener verification failed") from exc
         if (
             lifecycle.port_free
             or lifecycle.listener_pid is None
             or lifecycle.listener_pid not in lifecycle.matching_selected_pids
-            or lifecycle.listener_executable != inspection.blender_executable
+            or lifecycle.listener_executable != fresh.blender_executable
         ):
             raise InstallerError("selected Blender listener verification failed")
         try:
-            session = mcp_probe.start(command, env=dict(env))
-            initialized = session.initialize()
-            if (
-                type(initialized) is not dict
-                or type(initialized.get("protocolVersion")) is not str
-                or not initialized["protocolVersion"]
-            ):
+            handle = mcp_probe.spawn(command, env=dict(env))
+        except Exception as exc:
+            raise InstallerError("MCP spawn failed") from exc
+        try:
+            client = handle.open_client()
+            initialized = client.initialize()
+            if not _valid_initialize(initialized, bundle.manifest):
                 raise ValueError("invalid initialize result")
         except Exception as exc:
             raise InstallerError("MCP handshake failed") from exc
         try:
-            tools = tuple(session.list_tools())
+            tools = tuple(client.list_tools())
         except Exception as exc:
             raise InstallerError("MCP catalog verification failed") from exc
         tool_count = len(tools)
-        if tools != inspection.expected_tools:
+        if tools != fresh.expected_tools:
             raise InstallerError("MCP catalog verification failed")
         try:
-            result = session.call_tool("get_blendfile_summary_datablocks", {})
+            result = client.call_tool("get_blendfile_summary_datablocks", {})
             if type(result) is not dict or result.get("isError") is True or "error" in result:
                 raise ValueError("invalid tool result")
         except Exception as exc:
@@ -665,21 +885,21 @@ def verify_live(
         error = InstallerError("MCP verification failed")
     finally:
         cleanup_failed = False
-        if session is not None:
+        if handle is not None:
             try:
-                session.close()
+                handle.close()
             except Exception:
                 cleanup_failed = True
             try:
-                session.terminate()
+                handle.terminate()
             except Exception:
                 cleanup_failed = True
             try:
-                session.wait(_WAIT_TIMEOUT)
+                handle.wait(_WAIT_TIMEOUT)
             except Exception:
                 cleanup_failed = True
         try:
-            changed = _snapshot(inspection.managed_targets) != before
+            changed = _snapshot(canonical_paths) != before
         except InstallerError:
             changed = True
         if changed:
