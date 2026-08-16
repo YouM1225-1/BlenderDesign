@@ -29,6 +29,11 @@
 | 外部研究输入 | [report 2](research/deep-research-report-2.md) · [report 3](research/deep-research-report-3.md) | 正式归档但 non-normative；只能经独立审计后采纳 |
 | 验证工具 | [spikes](../spikes/README.md) | 兼容性/配置验证辅助，不是生产代码或 Plan 执行结果 |
 
+## 可分发安装器
+
+[Official Blender MCP distributable installer](distribute-official-blender-mcp.md)
+记录受审提交、Codex skill-only 插件、显式授权、验证与回滚流程。
+
 ## 历史审计保留策略
 
 以下报告已被后续裁决取代，但仍是 URS changelog、Plan 自审或 provenance 的来源，因此保留原路径，不物理去重：首轮 Plan 审计、Claude 修改复审、全仓复审、修复后审计、closeout v2、post-freeze 平台红队、handoff 融合审计与 r15/v8 独立核验。

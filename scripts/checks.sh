@@ -32,6 +32,11 @@ if ! (cd / && "$PWD_ROOT/.venv/bin/python" -c "import server" 2>/dev/null); then
 fi
 "$UV_BIN" run --frozen ruff check protocol bridge server tests scripts smoke
 "$UV_BIN" run --frozen mypy
+if test -n "${PLUGIN_CREATOR_ROOT:-}"; then
+  python3 "$PLUGIN_CREATOR_ROOT/scripts/validate_plugin.py" plugins/blender-mcp-installer
+else
+  echo "plugin validator: SKIP (set PLUGIN_CREATOR_ROOT to run)"
+fi
 # 检查 1：core 与 protocol 禁 bpy（行首匹配，避开注释/文案）
 if grep -rnE '^[[:space:]]*(import bpy|from bpy)' bridge/core protocol --include='*.py'; then
   echo "FAIL: bpy import in core/protocol"; exit 1

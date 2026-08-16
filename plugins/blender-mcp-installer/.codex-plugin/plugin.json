@@ -1,0 +1,26 @@
+{
+  "name": "blender-mcp-installer",
+  "version": "1.0.0",
+  "description": "Install and verify the reviewed official Blender MCP distribution on macOS.",
+  "author": {
+    "name": "Blender Lab"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Official Blender MCP Installer",
+    "shortDescription": "Install the reviewed official Blender MCP bundle.",
+    "longDescription": "Inspect, install, verify, or roll back the reviewed macOS Blender MCP distribution with explicit operator consent.",
+    "developerName": "Blender Lab",
+    "category": "Productivity",
+    "capabilities": [
+      "Local installation",
+      "Verification",
+      "Rollback"
+    ],
+    "defaultPrompt": [
+      "Inspect the official Blender MCP installer prerequisites.",
+      "Install the reviewed official Blender MCP distribution.",
+      "Verify or roll back my Blender MCP installation."
+    ]
+  }
+}
