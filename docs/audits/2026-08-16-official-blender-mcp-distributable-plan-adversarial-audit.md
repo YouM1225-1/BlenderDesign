@@ -4,7 +4,7 @@ Date: 2026-08-16
 
 Plan: `docs/superpowers/plans/2026-08-16-official-blender-mcp-distributable-codex-installer.md`
 
-Current plan SHA-256: `f36a7af17ecbde9547c1f42d529167421471038b7957814ba6c77f3edb6313b2`
+Current plan SHA-256: `dfdd316c0c52b182691a64ef3a18b600e2b5962e8e87ac7e27ed553404ca816b`
 
 Initial frozen plan SHA-256: `fb69e31ef0445d38c2caeed277c69519f95ed19c5f067eabcd7e7733dc767d72`
 
@@ -127,3 +127,28 @@ and specification, executability, and minimality/portability—each returned
 READY with 0 Critical, 0 Important, and 0 Minor findings. The security review
 mechanically matched all 17 valid fixture variants and 85 point mappings to the
 Task 8 matrix and confirmed the implementation at `e65d446` matches the plan.
+
+## Task 3 transaction-table amendment
+
+Task 3 implementation and repeated independent review tightened several stale
+transaction descriptions in the prior plan revision:
+
+- Every reverse path now quarantines the installer postimage at deterministic
+  recovery path `R`; present-preimage recovery includes the explicit `RS`
+  restore-staged row before completing the restore.
+- `RESTORING` accepts the postimage at either `S` or `R`, while terminal
+  rollback rows require absent recovery and keep the semantic state closed.
+- Cleanup is specified as a retryable deletion prefix, and every completed
+  crash prefix redrives the required parent-directory `fsync` operations.
+- Filesystem names reject embedded NUL bytes before reaching native rename
+  calls.
+- The present-preimage `S -> R` quarantine transition has the explicit
+  `after_KIND_restore_move` failpoint used by the closed Task 8 matrix.
+
+The amendment and its narrow fault-matrix regression test at `1ab52cde`
+produced the current SHA above. Three targeted fresh reviews—security and
+specification, executability, and minimality/portability—each returned READY
+with 0 Critical, 0 Important, and 0 Minor findings. The security review
+mechanically matched all 17 valid fixture variants and all 89 point mappings
+to the Task 8 matrix and confirmed there is no direct deletion of staged
+postimages during rollback.

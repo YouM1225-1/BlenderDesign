@@ -195,7 +195,7 @@ Each receipt action has exactly ordinal, kind, object_kind, state, target_role, 
 | Kind | Object | target/stage | recovery basename | Allowed states | Image nullability |
 | --- | --- | --- | --- | --- | --- |
 | bundle_stage | bundle | target_role=null; exact deterministic bundle path | null | planned -> staged -> cleaned | pre=absent TreeImage; intended_post required from staged; actual_post/recovery_image/rollback_intended/rollback_displaced null |
-| runtime_tree | tree | non-null matching target role/path | required | present pre: planned -> staged -> swapped -> parked -> completed -> restoring -> restored -> cleaned; absent pre uses published instead of swapped/parked | pre always required; intended_post required from staged; actual_post required from swapped/published; recovery_image required from parked for present pre and from restoring for absent pre; rollback fields null |
+| runtime_tree | tree | non-null matching target role/path | required | present pre: planned -> staged -> swapped -> parked -> completed -> restoring -> restored -> cleaned; absent pre uses published instead of swapped/parked | pre always required; intended_post required from staged; actual_post required from swapped/published. Present PARKED/COMPLETED has recovery_image=pre. Native present RESTORING has recovery_image=null while post is at S or recovery_image=actual_post once post is at R; absent RESTORING has recovery_image=actual_post at R. Native RESTORED/CLEANED has a closed absent recovery image. Rollback fields null. |
 | extension_tree | tree | non-null matching target role/path | required | same as runtime_tree | same as runtime_tree |
 | userpref_file | file | non-null matching target role/path | required | same transitions as runtime_tree | FileImage variants with the same null rules; rollback fields null |
 | codex_file | codex | target_role=codex_config; required path | required | same forward transitions; exact restore uses restoring/restored, semantic restore uses semantic_staged -> semantic_swapped -> restoring -> restored | FileImage variants; sole original preimage is recovery_image after parked; rollback_intended and rollback_displaced are null except the semantic states defined below |
@@ -209,10 +209,11 @@ For a present preimage, T=target, S=stage, and R=recovery have this native state
 | P0 staged | pre | post | absent | renameatx_np(T,S,RENAME_SWAP) |
 | P1 swapped | post | pre | absent | renameatx_np(S,R,RENAME_EXCL) |
 | P2 parked/installed | post | absent | pre | retain through installed lifetime |
+| RS restore-staged | pre | post | absent | renameatx_np(S,R,RENAME_EXCL) |
 | R1 restore-swapped | pre | absent | post | result of renameatx_np(T,R,RENAME_SWAP) |
 | R2 restored | pre | absent | absent | verify/remove installer post at R, fsync |
 
-Recovery from P0 removes only verified post S. Recovery from P1 swaps T/S back and removes verified post S. Recovery from P2 swaps T/R. A crash at R1 is idempotent: current==pre and recovery==post means already restored, so retry removes only verified post R and finishes.
+Recovery from P0 moves verified post S to R. Recovery from P1 swaps T/S back, records RESTORING with null recovery_image at RS, then the next journaled call moves verified post S to R. Recovery from P2 swaps T/R. All paths reach R1 with recovery_image=actual_post before cleanup. A crash at R1 is idempotent: current==pre and recovery==post means already restored, so retry removes only verified post R and finishes with a closed absent recovery image.
 
 For an absent preimage:
 
@@ -223,7 +224,9 @@ For an absent preimage:
 | AR1 restore-moved | absent | absent | post | renameatx_np(T,R,RENAME_EXCL) |
 | AR2 restored | absent | absent | absent | verify/remove installer post at R, fsync |
 
-A crash at AR1 is also already restored and retry-safe. EEXIST, ENOTSUP, and EXDEV always fail closed. filesystem.py contains the only ctypes wrapper for Darwin renameatx_np and constants RENAME_EXCL/RENAME_SWAP.
+A0 recovery moves verified post S to R with RENAME_EXCL; A1 recovery moves T to R. Both reach AR1 with recovery_image=actual_post before cleanup and finish with a closed absent recovery image. A crash at AR1 is already restored and retry-safe. EEXIST, ENOTSUP, and EXDEV always fail closed. filesystem.py contains the only ctypes wrapper for Darwin renameatx_np and constants RENAME_EXCL/RENAME_SWAP.
+
+Every recognized post-rename crash prefix re-fsyncs every affected target/stage/recovery parent and recaptures the exact tuple before the next transition or terminal return. Tree cleanup happens only from R in deterministic child-before-parent order. A retry may accept only an exact deletion prefix: the remaining entries are an exact suffix of that order with the original root dev/ino/uid/mode and original entry identities, with no extra or changed entry; every removal fsyncs its parent. A mismatch conflicts without deleting the changed or extra object.
 
 write_atomic_json(path, expected, payload, install_id, retain_old=None) uses a deterministic same-directory mode-0600 O_EXCL temp, complete write, file fsync, then RENAME_EXCL for absent path or RENAME_SWAP with the validated installer-owned prior inode, followed by parent fsync. After swap, the old JSON at the temp name is either moved with RENAME_EXCL to retain_old (the exact previous-active selector path above) or removed after validation, then both parents are fsynced. A crash leaves an old or new complete JSON, never torn; reconciliation recognizes the deterministic temp and retain path.
 
@@ -273,7 +276,7 @@ Codex semantic rollback uses T=live config, RS=the deterministic codex.rollback.
 
 A fresh process derives C/M again, validates every listed image, and advances only the matching row; unlisted combinations conflict without deletion. Hard-crash points are after_codex_semantic_stage_fsync, after_codex_semantic_swap, after_codex_semantic_receipt, after_codex_semantic_displaced_cleanup, and after_codex_semantic_recovery_cleanup.
 
-All names derive from install ID. There is no unjournaled random stage. Protected preimages for the active installed receipt remain until successful rollback; installed cleanup removes verified stages only. Retiring an installed generation's preimages is an explicit future retention operation outside V1.
+All names derive from install ID and every model/native basename rejects separators, dot segments, and embedded NUL before encoding or syscall use. There is no unjournaled random stage. Protected preimages for the active installed receipt remain until successful rollback; installed cleanup removes verified stages only. Retiring an installed generation's preimages is an explicit future retention operation outside V1.
 
 FaultInjector.hit(point: FailPoint) is explicit dependency injection. tests/distribution/fault_driver.py requires `--point`, `--fixture-kind`, and `--preimage` before the `--` command separator, validates that closed fixture descriptor against the applicable matrix in Task 8 before importing the CLI, calls run_cli(argv, fault=ExitFaultInjector(point,70)), and exits with a distinct test-contract error if the point was not hit; production main() always calls run_cli(argv, fault=NoOpFaultInjector()) and never reads failure controls from environment.
 
@@ -501,11 +504,11 @@ git commit -m "feat: add closed installer state primitives"
 
 The wrappers call renameatx_np only with RENAME_EXCL or RENAME_SWAP, use dirfds, fsync both affected parents, and map EEXIST/ENOTSUP/EXDEV to fixed fail-closed InstallerError values. Stage/recovery basenames are the deterministic values already recorded by Task 8; Task 3 never allocates random names and never reads/writes the receipt.
 
-forward/restore implement exactly P0-P2/R1-R2 and A0-A1/AR1-AR2 from Durable Transaction Contract. They classify the three present-preimage crash states and both absent-preimage crash states from closed images. Restore accepts current==pre plus recovery==post as already restored; any unlisted combination conflicts without a rename.
+forward/restore implement exactly P0-P2/RS/R1-R2 and A0-A1/AR1-AR2 from Durable Transaction Contract. They classify the present-preimage and absent-preimage crash states from closed images. Restore accepts current==pre plus recovery==post as already restored; any unlisted combination conflicts without a rename.
 
 - [ ] **Step 1: Write RED transaction tests**
 
-Cover absent/present file, empty/non-empty directory, deterministic stage collision, nested symlink/FIFO, cross-volume recovery, concurrent destination after snapshot, RENAME_EXCL EEXIST, RENAME_SWAP ENOTSUP/EXDEV, crash after present swap, crash after preimage park, crash after absent publish, crash after each reverse rename, retry from R1/AR1, conditional restore, and foreign postimage preservation. Assert exact T/S/R images; no Task 3 test expects journal writes.
+Cover absent/present file, empty/non-empty directory, deterministic stage collision, nested symlink/FIFO, cross-volume recovery, concurrent destination after snapshot, RENAME_EXCL EEXIST, RENAME_SWAP ENOTSUP/EXDEV, crash after present swap, crash after preimage park, crash after absent publish, crash after each reverse rename, present/absent quarantine-before-cleanup, both native RESTORING recovery-image variants, retry from exact deletion prefixes and R1/AR1, affected-parent fsync redrive, embedded-NUL rejection, conditional restore, and foreign postimage/remainder preservation. Assert exact T/S/R images and direct ReceiptAction construction for every reverse row; no Task 3 test expects journal writes.
 
 - [ ] **Step 2: Run RED**
 
@@ -833,7 +836,7 @@ Closed FAILPOINTS and their only applicable variants are below. Each action/sele
 | active selector forward | prior present | after_active_swap, after_active_park, after_active_parent_fsync |
 | active selector forward | prior absent | after_active_publish, after_active_parent_fsync |
 | bundle_stage | absent only | after_bundle_stage_planned, after_bundle_stage_stage, after_receipt_installed, after_bundle_stage_cleanup |
-| runtime_tree, extension_tree, userpref_file, codex_file exact | present | after_KIND_planned, after_KIND_stage, after_KIND_swap, after_KIND_park, after_KIND_completed, after_KIND_restore_swap, after_KIND_restore_cleanup |
+| runtime_tree, extension_tree, userpref_file, codex_file exact | present | after_KIND_planned, after_KIND_stage, after_KIND_swap, after_KIND_park, after_KIND_completed, after_KIND_restore_swap, after_KIND_restore_move, after_KIND_restore_cleanup |
 | runtime_tree, extension_tree, userpref_file, codex_file exact | absent | after_KIND_planned, after_KIND_stage, after_KIND_publish, after_KIND_completed, after_KIND_restore_move, after_KIND_restore_cleanup |
 | codex_file semantic rollback | present | after_codex_semantic_stage_fsync, after_codex_semantic_swap, after_codex_semantic_receipt, after_codex_semantic_displaced_cleanup, after_codex_semantic_recovery_cleanup |
 | active selector reverse | prior present | after_rollback_intent, after_active_restore_swap, after_active_restore_parent_fsync, after_rollback_status, after_active_restore_cleanup |
