@@ -4,7 +4,9 @@ Date: 2026-08-16
 
 Plan: `docs/superpowers/plans/2026-08-16-official-blender-mcp-distributable-codex-installer.md`
 
-Frozen plan SHA-256: `fb69e31ef0445d38c2caeed277c69519f95ed19c5f067eabcd7e7733dc767d72`
+Current plan SHA-256: `3f5c697fa91d7cf6fd612b6f6f0c6d37460b78a26f292e2b241e35a775a3b56a`
+
+Initial frozen plan SHA-256: `fb69e31ef0445d38c2caeed277c69519f95ed19c5f067eabcd7e7733dc767d72`
 
 Base commit: `c2b41f2f5af26eac59422fe321fe9e685a873ea9`
 
@@ -35,7 +37,7 @@ made private trust cleanup explicit, completed selector crash reconciliation,
 made Codex rollback fault injection executable, and fixed multi-record `lsof`
 identity parsing.
 
-The final reviewers verified the exact frozen SHA above and reported:
+The final reviewers verified the exact initial frozen SHA above and reported:
 
 | Final lens | Critical | Important | Minor | Verdict |
 | --- | ---: | ---: | ---: | --- |
@@ -85,3 +87,21 @@ The final reviewers verified the exact frozen SHA above and reported:
   verification are required before the final submission commit.
 
 This report records plan readiness only. It is not implementation evidence.
+
+## Task 1 executable-command amendment
+
+Task 1 implementation and independent review exposed two documentation-only
+command errors in the initially frozen plan:
+
+- uv 0.12.2 rejects the redundant combination of `--only-binary :all:` and
+  `--no-build`. The plan now uses `--require-hashes --only-binary :all:
+  --no-deps`; source distributions and dependency expansion remain forbidden.
+- The checksum file intentionally contains basenames, so `shasum -c` must run
+  from the artifact directory. The plan now uses an artifact-directory
+  subshell and still verifies the same commit-bound checksum bytes.
+
+The two-line amendment produced the current SHA above. Three targeted fresh
+reviews—security/specification, executability, and minimality/portability—each
+returned READY with 0 Critical, 0 Important, and 0 Minor findings. The
+amendment aligns the plan with the reviewed Task 1 implementation and does not
+broaden the locked-build or trust boundary.

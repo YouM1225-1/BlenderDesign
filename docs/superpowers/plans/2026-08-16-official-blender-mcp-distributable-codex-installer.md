@@ -345,7 +345,7 @@ cmp plugins/blender-mcp-installer/artifacts/runtime-requirements.lock \
   "$LOCK_CHECK_DIR/runtime-requirements.lock"
 ~~~
 
-Build from two separate git archive extractions of the pinned commit. Install the committed build lock with --require-hashes --only-binary :all: --no-build --no-deps, then run python -m build --wheel --no-isolation.
+Build from two separate git archive extractions of the pinned commit. Install the committed build lock with --require-hashes --only-binary :all: --no-deps, then run python -m build --wheel --no-isolation.
 
 Normalize both ZIP-format payloads using SOURCE_DATE_EPOCH, sorted entries, fixed permissions, and no absolute/traversal/symlink/special entries. Run Blender extension validate on the normalized ZIP. Discover the catalog from the normalized wheel in the locked runtime environment and require exact equality.
 
@@ -366,7 +366,7 @@ test -x "$UV_BIN"
 $UV_BIN run --frozen python scripts/build_official_blender_mcp_distribution.py \
   --source "$SOURCE_ROOT" --blender "$BLENDER_BIN" --uv "$UV_BIN" \
   --output plugins/blender-mcp-installer/artifacts
-shasum -a 256 -c plugins/blender-mcp-installer/artifacts/SHA256SUMS
+(cd plugins/blender-mcp-installer/artifacts && shasum -a 256 -c SHA256SUMS)
 ~~~
 
 Expected: tests pass; builder prints tools=26 and recorded tool versions; four checksum lines report OK; a deliberate final-validation failure leaves previous output byte-identical.
