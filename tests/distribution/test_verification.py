@@ -425,6 +425,33 @@ def _installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, runner=object
     return bundle, roots, blender, host, controls, calls, receipt, receipt_path
 
 
+def _absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    bundle, roots, blender, host, controls, calls, _, receipt_path = _installed(
+        tmp_path, monkeypatch
+    )
+    roots.active.unlink()
+    receipt_path.unlink()
+    for path in (roots.runtime / "content", roots.extension_target / "content"):
+        path.unlink()
+        path.parent.rmdir()
+    roots.userpref_target.unlink()
+    roots.codex_config.unlink()
+    controls["runtime"] = False
+    controls["blender_files"] = False
+    controls["blender"] = replace(
+        blender,
+        manifest_id=None,
+        manifest_version=None,
+        enabled=False,
+        online_access=False,
+        host=None,
+        port=None,
+        autostart=None,
+        canonical_payload_digest=None,
+    )
+    return bundle, roots, blender, host, controls, calls
+
+
 @pytest.mark.parametrize("field", FIELDS)
 def test_adapter_backed_inspection_independently_computes_every_exactness_field(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
@@ -492,10 +519,40 @@ def test_adapter_backed_exact_inspection_binds_receipt_and_all_authorities(
     assert controls["runtime_profile"].blender_path == roots.blender.executable
 
 
-def test_inspection_never_runs_effective_codex_before_active_publication(
+def test_clean_host_inspection_is_prepublication_safe_and_first_install_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    bundle, roots, blender, host, _, _, _, receipt_path = _installed(tmp_path, monkeypatch)
+    bundle, roots, blender, host, _, calls = _absent(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        verification,
+        "verify_codex_effective",
+        lambda *args: (_ for _ in ()).throw(AssertionError("prepublication query")),
+    )
+
+    inspected = inspect_installation(bundle, roots, blender, host)
+
+    assert not inspected.exact
+    assert inspected.active_install_id is None and inspected.receipt_path is None
+    assert inspected.managed_targets == (
+        roots.runtime,
+        roots.extension_target,
+        roots.userpref_target,
+        roots.codex_config,
+        roots.active,
+    )
+    assert len(inspected.managed_images) == 5
+    assert calls == ["runtime", "blender_files"]
+    assert {
+        "exact": inspected.exact,
+        "managed_target_count": len(inspected.managed_targets),
+        "active_install_id": inspected.active_install_id,
+    } == {"exact": False, "managed_target_count": 5, "active_install_id": None}
+
+
+def test_absent_active_checks_managed_remnants_without_effective_codex_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, _, calls, _, receipt_path = _installed(tmp_path, monkeypatch)
     roots.active.unlink()
     receipt_path.unlink()
     monkeypatch.setattr(
@@ -504,8 +561,97 @@ def test_inspection_never_runs_effective_codex_before_active_publication(
         lambda *args: (_ for _ in ()).throw(AssertionError("prepublication query")),
     )
 
+    inspected = inspect_installation(bundle, roots, blender, host)
+
+    assert not inspected.exact and inspected.active_install_id is None
+    assert calls == ["runtime", "blender_files", "codex_toml"]
+
+
+def test_absent_inspection_detects_managed_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, controls, _ = _absent(tmp_path, monkeypatch)
+
+    def mutate(*args):
+        roots.codex_config.write_text("appeared")
+        return controls["blender"]
+
+    monkeypatch.setattr(verification, "inspect_blender", mutate)
+    with pytest.raises(InstallerError, match="managed targets changed during inspection"):
+        inspect_installation(bundle, roots, blender, host)
+
+
+def test_absent_inspection_detects_active_appearance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, controls, _ = _absent(tmp_path, monkeypatch)
+
+    def mutate(*args):
+        roots.active.write_text(json.dumps(_active()))
+        roots.active.chmod(0o600)
+        return controls["blender"]
+
+    monkeypatch.setattr(verification, "inspect_blender", mutate)
+    with pytest.raises(InstallerError, match="managed targets changed during inspection"):
+        inspect_installation(bundle, roots, blender, host)
+
+
+def test_installed_inspection_detects_active_disappearing_during_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, _, _, _, _ = _installed(tmp_path, monkeypatch)
+    original = verification._active_receipt_path
+
+    def disappear(current_roots):
+        result = original(current_roots)
+        roots.active.unlink()
+        return result
+
+    monkeypatch.setattr(verification, "_active_receipt_path", disappear)
+    with pytest.raises(InstallerError, match="managed targets changed during inspection"):
+        inspect_installation(bundle, roots, blender, host)
+
+
+def test_malformed_active_fails_closed_after_before_and_after_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, _, _, _, _ = _installed(tmp_path, monkeypatch)
+    roots.active.write_text("{")
+    snapshots = 0
+    original = verification._snapshot
+
+    def counted(paths):
+        nonlocal snapshots
+        snapshots += 1
+        return original(paths)
+
+    monkeypatch.setattr(verification, "_snapshot", counted)
     with pytest.raises(InstallerError, match="active installation inspection failed"):
         inspect_installation(bundle, roots, blender, host)
+    assert snapshots == 2
+
+
+def test_absent_inspection_takes_after_snapshot_on_authoritative_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, _, _ = _absent(tmp_path, monkeypatch)
+    snapshots = 0
+    original = verification._snapshot
+
+    def counted(paths):
+        nonlocal snapshots
+        snapshots += 1
+        return original(paths)
+
+    monkeypatch.setattr(verification, "_snapshot", counted)
+    monkeypatch.setattr(
+        verification,
+        "inspect_blender",
+        lambda *args: (_ for _ in ()).throw(ValueError("secret")),
+    )
+    with pytest.raises(InstallerError, match="Blender inspection failed"):
+        inspect_installation(bundle, roots, blender, host)
+    assert snapshots == 2
 
 
 def test_inspection_always_takes_after_image_when_fresh_probe_fails(
@@ -514,10 +660,12 @@ def test_inspection_always_takes_after_image_when_fresh_probe_fails(
     bundle, roots, blender, host, _, _, _, _ = _installed(tmp_path, monkeypatch)
     original_snapshot = verification._snapshot
     snapshots = 0
+    target_counts = []
 
     def counted(paths):
         nonlocal snapshots
         snapshots += 1
+        target_counts.append(len(paths))
         return original_snapshot(paths)
 
     monkeypatch.setattr(verification, "_snapshot", counted)
@@ -529,7 +677,8 @@ def test_inspection_always_takes_after_image_when_fresh_probe_fails(
 
     with pytest.raises(InstallerError, match="Blender inspection failed") as caught:
         inspect_installation(bundle, roots, blender, host)
-    assert snapshots == 2 and "secret" not in str(caught.value)
+    assert snapshots == 3 and target_counts == [5, 6, 6]
+    assert "secret" not in str(caught.value)
 
 
 def test_current_profile_cross_bind_is_required_for_runtime_and_recorded_identity(

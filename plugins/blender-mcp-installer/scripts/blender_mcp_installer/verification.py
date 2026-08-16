@@ -136,7 +136,7 @@ class InstallationInspection:
     active_install_id: str | None
     roots: InstallRoots
     blender_state: BlenderState
-    receipt_path: Path
+    receipt_path: Path | None
 
     @property
     def exact(self) -> bool:
@@ -485,15 +485,15 @@ def _snapshot(paths: Sequence[Path]) -> tuple[str, ...]:
     return tuple(result)
 
 
-def _managed_paths(roots: InstallRoots, receipt_path: Path) -> tuple[Path, ...]:
-    return (
+def _managed_paths(roots: InstallRoots, receipt_path: Path | None) -> tuple[Path, ...]:
+    paths = (
         roots.runtime,
         roots.extension_target,
         roots.userpref_target,
         roots.codex_config,
         roots.active,
-        receipt_path,
     )
+    return paths if receipt_path is None else (*paths, receipt_path)
 
 
 def _read_regular(path: Path, maximum: int = 16 * 1024 * 1024) -> bytes:
@@ -600,12 +600,17 @@ def _inspect(
     blender_state: BlenderState,
     host: HostCapabilities,
     images: tuple[str, ...],
-    receipt_path: Path,
+    receipt_path: Path | None,
 ) -> InstallationInspection:
     manifest: ReleaseManifest = bundle.manifest
-    active, receipt, current_receipt_path = _active_receipt(roots)
-    if current_receipt_path != receipt_path:
-        raise InstallerError("active installation inspection failed")
+    active = receipt = None
+    if receipt_path is None:
+        if roots.active.exists() or roots.active.is_symlink():
+            raise InstallerError("active installation changed during inspection")
+    else:
+        active, receipt, current_receipt_path = _active_receipt(roots)
+        if current_receipt_path != receipt_path:
+            raise InstallerError("active installation inspection failed")
     try:
         current_blender = inspect_blender(host.blender_bin, host.env, host.runner)
     except (OSError, ValueError, InstallerError) as exc:
@@ -686,17 +691,22 @@ def _inspect(
     codex_namespace = codex_namespace and parsed_verified
     codex_effective = False
     active_generation = (
-        receipt.status is ReceiptStatus.INSTALLED
+        receipt is not None
+        and active is not None
+        and receipt.status is ReceiptStatus.INSTALLED
         and receipt.install_id == active.install_id
         and receipt.generation == active.generation
     )
-    expected_manifest_hash = hashlib.sha256(_read_regular(bundle.manifest_path)).hexdigest()
-    manifest_hash = (
-        receipt.bundle["version"] == manifest.bundle_version
-        and receipt.bundle["manifest_sha256"] == expected_manifest_hash
-    )
+    manifest_hash = False
+    if receipt is not None:
+        expected_manifest_hash = hashlib.sha256(_read_regular(bundle.manifest_path)).hexdigest()
+        manifest_hash = (
+            receipt.bundle["version"] == manifest.bundle_version
+            and receipt.bundle["manifest_sha256"] == expected_manifest_hash
+        )
     recorded_blender_executable = (
-        profile_matches
+        receipt is not None
+        and profile_matches
         and blender_state.executable == current_blender.executable
         and blender_state.reported_binary == current_blender.reported_binary
         and receipt.host["blender_executable"] == str(current_blender.executable)
@@ -733,7 +743,7 @@ def _inspect(
         manifest.tools,
         _managed_paths(roots, receipt_path),
         images,
-        str(active.install_id),
+        None if active is None else str(active.install_id),
         roots,
         current_blender,
         receipt_path,
@@ -753,17 +763,30 @@ def inspect_installation(
         or type(host) is not HostCapabilities
     ):
         raise ValueError("invalid installation inspection input")
-    _, receipt_path = _active_receipt_path(roots)
-    paths = _managed_paths(roots, receipt_path)
-    before = _snapshot(paths)
+    base_paths = _managed_paths(roots, None)
+    base_before = _snapshot(base_paths)
+    paths = base_paths
+    before = base_before
+    receipt_path = None
+    setup_error = None
+    if base_before[-1] != "absent":
+        try:
+            _, receipt_path = _active_receipt_path(roots)
+            paths = _managed_paths(roots, receipt_path)
+            before = _snapshot(paths)
+            if before[: len(base_paths)] != base_before:
+                raise InstallerError("managed targets changed during inspection")
+        except InstallerError as exc:
+            setup_error = exc
     inspection = None
-    error = None
-    try:
-        inspection = _inspect(bundle, roots, blender_state, host, before, receipt_path)
-    except InstallerError as exc:
-        error = exc
-    except Exception:
-        error = InstallerError("installation inspection failed")
+    error = setup_error
+    if error is None:
+        try:
+            inspection = _inspect(bundle, roots, blender_state, host, before, receipt_path)
+        except InstallerError as exc:
+            error = exc
+        except Exception:
+            error = InstallerError("installation inspection failed")
     try:
         changed = _snapshot(paths) != before
     except InstallerError:
