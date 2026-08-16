@@ -87,7 +87,23 @@ def test_empty_home_outer_python_inspect_does_not_rediscover_python(
     real_uv_raw = os.environ.get("UV") or shutil.which("uv")
     assert real_uv_raw is not None
     real_uv = Path(real_uv_raw).resolve()
-    python = Path(sys.executable).resolve()
+    found = subprocess.run(
+        [
+            real_uv,
+            "python",
+            "find",
+            "3.13",
+            "--no-project",
+            "--no-python-downloads",
+            "--no-config",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    python = Path(found.stdout.strip())
+    assert python.is_absolute() and python.is_symlink()
     bundle, commit = _checkout(tmp_path / "distribution")
     profile = tmp_path / "empty-home"
     codex_home = profile / ".codex"
@@ -186,22 +202,58 @@ def test_empty_home_outer_python_inspect_does_not_rediscover_python(
     assert command[1] == "run" and command[1:3] != ["python", "find"]
 
 
-@pytest.mark.parametrize("value", ["", "relative-python", "non-executable", "symlink"])
+@pytest.mark.parametrize("value", [None, "", "relative-python", "non-executable", "broken-symlink"])
 def test_current_python_must_be_an_absolute_executable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str | None
 ) -> None:
     if value == "non-executable":
         path = tmp_path / value
         path.write_bytes(b"python")
         value = str(path)
-    elif value == "symlink":
-        target = tmp_path / "python"
-        target.write_bytes(b"python")
-        target.chmod(0o700)
+    elif value == "broken-symlink":
         path = tmp_path / value
-        path.symlink_to(target)
+        path.symlink_to(tmp_path / "missing-python")
         value = str(path)
     monkeypatch.setattr(sys, "executable", value)
+
+    with pytest.raises(InstallerError, match="local Python 3.13 probe failed"):
+        cli._resolve_python()
+
+
+def test_current_python_resolves_a_valid_symlink_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "python3.13"
+    target.write_bytes(b"python")
+    target.chmod(0o700)
+    middle = tmp_path / "python"
+    middle.symlink_to(target.name)
+    entry = tmp_path / "python3"
+    entry.symlink_to(middle.name)
+    monkeypatch.setattr(sys, "executable", str(entry))
+
+    assert cli._resolve_python() == target
+
+
+def test_current_python_revalidates_the_resolved_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "python3.13"
+    target.write_bytes(b"python")
+    target.chmod(0o700)
+    entry = tmp_path / "python3"
+    entry.symlink_to(target.name)
+    monkeypatch.setattr(sys, "executable", str(entry))
+    original_resolve = Path.resolve
+
+    def swap_after_resolve(path: Path, *, strict: bool = False) -> Path:
+        resolved = original_resolve(path, strict=strict)
+        if path == entry:
+            target.unlink()
+            target.symlink_to(tmp_path / "replacement")
+        return resolved
+
+    monkeypatch.setattr(Path, "resolve", swap_after_resolve)
 
     with pytest.raises(InstallerError, match="local Python 3.13 probe failed"):
         cli._resolve_python()

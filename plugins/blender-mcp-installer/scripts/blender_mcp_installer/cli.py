@@ -274,7 +274,13 @@ def _environment() -> dict[str, str]:
 
 def _resolve_python() -> Path:
     try:
-        path = _executable(sys.executable)
+        value = sys.executable
+        if not isinstance(value, str):
+            raise ValueError
+        source = Path(value)
+        if not source.is_absolute() or ".." in source.parts:
+            raise ValueError
+        path = _executable(str(source.resolve(strict=True)))
         if path.lstat().st_uid != os.getuid():
             raise ValueError
         return path
