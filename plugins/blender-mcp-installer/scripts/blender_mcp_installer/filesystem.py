@@ -10,8 +10,9 @@ import stat
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path, PurePath, PurePosixPath
-from typing import Iterator, Mapping
+from typing import Iterator, Mapping, Protocol, TypeAlias
 from uuid import UUID
 
 from .model import (
@@ -195,6 +196,65 @@ class TargetRef:
     @property
     def path(self) -> Path:
         return self.root.path.joinpath(*self.relative.parts)
+
+
+class FaultInjector(Protocol):
+    def hit(self, point: str) -> None: ...
+
+
+class NoOpFaultInjector:
+    def hit(self, point: str) -> None:
+        pass
+
+
+class InstallerError(RuntimeError):
+    pass
+
+
+class NativeState(str, Enum):
+    SWAPPED = "swapped"
+    PARKED = "parked"
+    PUBLISHED = "published"
+    COMPLETED = "completed"
+
+
+class RestoreState(str, Enum):
+    RESTORING = "restoring"
+    RESTORED = "restored"
+
+
+@dataclass(frozen=True)
+class TreeRef(TargetRef):
+    def capture(self) -> TreeImage:
+        return capture_tree(self.root, self.relative)
+
+
+@dataclass(frozen=True)
+class StagedFile(TargetRef):
+    image: FileImage
+
+    def capture(self) -> FileImage:
+        return capture_file(self.root, self.relative)
+
+    def refresh(self) -> StagedFile:
+        return StagedFile(self.root, self.relative, self.capture())
+
+    def with_image(self, image: FileImage) -> StagedFile:
+        return StagedFile(self.root, self.relative, image)
+
+
+@dataclass(frozen=True)
+class StagedTree(TreeRef):
+    image: TreeImage
+
+    def refresh(self) -> StagedTree:
+        return StagedTree(self.root, self.relative, self.capture())
+
+    def with_image(self, image: TreeImage) -> StagedTree:
+        return StagedTree(self.root, self.relative, image)
+
+
+StagedObject: TypeAlias = StagedFile | StagedTree
 
 
 class InstallerLock:
@@ -448,6 +508,571 @@ def _rename_atomic(
     if renameatx_np(source_fd, os.fsencode(source), target_fd, os.fsencode(target), flags) != 0:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error), target)
+
+
+_RENAME_ERRORS = {
+    errno.EEXIST: "rename destination already exists",
+    errno.ENOTSUP: "native rename is not supported",
+    errno.EXDEV: "cross-device rename is not supported",
+}
+
+
+def _basename(value: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or PurePath(value).name != value
+        or "\\" in value
+        or value in {".", ".."}
+    ):
+        raise ValueError("invalid deterministic basename")
+    return value
+
+
+def _validate_parent(parent: SafeRoot) -> None:
+    if parent._closed:
+        raise ValueError("safe root is closed")
+    info = os.fstat(parent.fd)
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError("safe root is not a directory")
+    _require_owner(info, parent.owner_uid)
+
+
+def _native_rename(
+    source_parent: SafeRoot,
+    source: str,
+    target_parent: SafeRoot,
+    target: str,
+    fault: FaultInjector,
+    *,
+    swap: bool,
+) -> None:
+    _validate_parent(source_parent)
+    _validate_parent(target_parent)
+    source = _basename(source)
+    target = _basename(target)
+    try:
+        _rename_atomic(
+            source_parent.fd,
+            source,
+            target_parent.fd,
+            target,
+            swap=swap,
+        )
+    except OSError as exc:
+        message = _RENAME_ERRORS.get(exc.errno)
+        if message is not None:
+            raise InstallerError(message) from exc
+        raise InstallerError("native rename failed") from exc
+    fault.hit("after_native_rename")
+    os.fsync(source_parent.fd)
+    fault.hit("after_source_parent_fsync")
+    os.fsync(target_parent.fd)
+    fault.hit("after_destination_parent_fsync")
+
+
+def rename_excl(
+    src_parent: SafeRoot,
+    src_name: str,
+    dst_parent: SafeRoot,
+    dst_name: str,
+    fault: FaultInjector,
+) -> None:
+    _native_rename(src_parent, src_name, dst_parent, dst_name, fault, swap=False)
+
+
+def rename_swap(
+    left_parent: SafeRoot,
+    left_name: str,
+    right_parent: SafeRoot,
+    right_name: str,
+    fault: FaultInjector,
+) -> None:
+    _native_rename(left_parent, left_name, right_parent, right_name, fault, swap=True)
+
+
+def create_deterministic_stage(
+    parent: SafeRoot,
+    basename: str,
+    expected_absent: FileImage | TreeImage,
+    fault: FaultInjector,
+) -> StagedObject:
+    _validate_parent(parent)
+    basename = _basename(basename)
+    if expected_absent.state is not ImageState.ABSENT:
+        raise ValueError("deterministic stage requires an absent image")
+    try:
+        if isinstance(expected_absent, FileImage):
+            fd = os.open(
+                basename,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent.fd,
+            )
+            try:
+                os.fchmod(fd, 0o600)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            stage: StagedObject = StagedFile(
+                parent,
+                PurePosixPath(basename),
+                _capture_file_at(parent.fd, basename, parent.owner_uid),
+            )
+        elif isinstance(expected_absent, TreeImage):
+            os.mkdir(basename, mode=0o700, dir_fd=parent.fd)
+            os.chmod(basename, 0o700, dir_fd=parent.fd, follow_symlinks=False)
+            directory = _open_verified_directory(parent.fd, basename, parent.owner_uid)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+            stage = StagedTree(
+                parent,
+                PurePosixPath(basename),
+                capture_tree(parent, PurePosixPath(basename)),
+            )
+        else:
+            raise TypeError("unsupported stage image")
+    except FileExistsError as exc:
+        raise InstallerError("deterministic stage already exists") from exc
+    fault.hit("after_stage_create")
+    os.fsync(parent.fd)
+    fault.hit("after_stage_parent_fsync")
+    return stage
+
+
+def _copy_file(source_fd: int, name: str, target_fd: int, uid: int) -> None:
+    before = _capture_file_at(source_fd, name, uid)
+    if before.state is not ImageState.PRESENT:
+        raise ValueError("source file disappeared")
+    source = os.open(name, _FILE_FLAGS, dir_fd=source_fd)
+    target = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=target_fd,
+    )
+    try:
+        opened = os.fstat(source)
+        if _file_image(opened, _hash_fd(source)) != before:
+            raise ValueError("source file changed before copy")
+        os.lseek(source, 0, os.SEEK_SET)
+        while chunk := os.read(source, 1024 * 1024):
+            _write_all(target, chunk)
+        os.fchmod(target, before.mode)
+        os.fsync(target)
+    finally:
+        os.close(target)
+        os.close(source)
+    if _capture_file_at(source_fd, name, uid) != before:
+        raise ValueError("source file changed during copy")
+
+
+def _copy_directory(source_fd: int, target_fd: int, uid: int) -> None:
+    before = os.fstat(source_fd)
+    names = _listdir(source_fd)
+    for name in names:
+        info = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+        _require_owner(info, uid)
+        if stat.S_ISREG(info.st_mode):
+            _copy_file(source_fd, name, target_fd, uid)
+        elif stat.S_ISDIR(info.st_mode):
+            source_child = _open_verified_directory(source_fd, name, uid)
+            os.mkdir(name, mode=0o700, dir_fd=target_fd)
+            target_child = _open_verified_directory(target_fd, name, uid)
+            try:
+                _copy_directory(source_child, target_child, uid)
+                os.fchmod(target_child, stat.S_IMODE(info.st_mode))
+                os.fsync(target_child)
+            finally:
+                os.close(target_child)
+                os.close(source_child)
+        else:
+            raise ValueError("tree contains a symlink or special entry")
+    after = os.fstat(source_fd)
+    if not _stable(before, after, directory=True) or names != _listdir(source_fd):
+        raise ValueError("source tree changed during copy")
+    os.fsync(target_fd)
+
+
+def copy_tree(source: TreeRef, stage: StagedTree) -> TreeImage:
+    source_before = source.capture()
+    if source_before.state is not ImageState.PRESENT:
+        raise ValueError("source tree is absent")
+    stage_before = stage.capture()
+    if stage_before != stage.image or stage_before.entries:
+        raise InstallerError("transaction state conflict")
+    source_parent_fd, source_name = source.root.open_parent(source.relative)
+    stage_parent_fd, stage_name = stage.root.open_parent(stage.relative)
+    try:
+        source_fd = _open_verified_directory(source_parent_fd, source_name, source.root.owner_uid)
+        stage_fd = _open_verified_directory(stage_parent_fd, stage_name, stage.root.owner_uid)
+        try:
+            _copy_directory(source_fd, stage_fd, source.root.owner_uid)
+        finally:
+            os.close(stage_fd)
+            os.close(source_fd)
+        os.fsync(stage_parent_fd)
+    finally:
+        os.close(stage_parent_fd)
+        os.close(source_parent_fd)
+    if source.capture() != source_before:
+        raise ValueError("source tree changed during copy")
+    return stage.capture()
+
+
+@contextmanager
+def _parent_root(reference: TargetRef) -> Iterator[tuple[SafeRoot, str]]:
+    fd, name = reference.root.open_parent(reference.relative)
+    parent = SafeRoot(reference.path.parent, reference.root.owner_uid, fd)
+    try:
+        yield parent, name
+    finally:
+        parent.close()
+
+
+def _capture_reference(reference: TargetRef, *, tree: bool) -> FileImage | TreeImage:
+    try:
+        if tree:
+            return capture_tree(reference.root, reference.relative)
+        return capture_file(reference.root, reference.relative)
+    except (OSError, ValueError) as exc:
+        raise InstallerError("transaction state conflict") from exc
+
+
+def _images(
+    target: TargetRef,
+    stage: StagedObject,
+    recovery: TargetRef,
+    *,
+    tree: bool,
+) -> tuple[FileImage | TreeImage, FileImage | TreeImage, FileImage | TreeImage]:
+    return (
+        _capture_reference(target, tree=tree),
+        _capture_reference(stage, tree=tree),
+        _capture_reference(recovery, tree=tree),
+    )
+
+
+def _rename_refs(
+    source: TargetRef,
+    target: TargetRef,
+    fault: FaultInjector,
+    *,
+    swap: bool,
+) -> None:
+    with _parent_root(source) as (source_parent, source_name):
+        with _parent_root(target) as (target_parent, target_name):
+            if swap:
+                rename_swap(source_parent, source_name, target_parent, target_name, fault)
+            else:
+                rename_excl(source_parent, source_name, target_parent, target_name, fault)
+
+
+def _entry_matches(info: os.stat_result, entry: TreeEntry) -> bool:
+    return (
+        info.st_dev == entry.dev
+        and info.st_ino == entry.ino
+        and info.st_uid == entry.uid
+        and stat.S_IMODE(info.st_mode) == entry.mode
+        and info.st_size == entry.size
+        and info.st_mtime_ns == entry.mtime_ns
+    )
+
+
+def _remove_tree_entries(fd: int, prefix: str, expected: Mapping[str, TreeEntry]) -> None:
+    names = _listdir(fd)
+    depth = 0 if not prefix else len(PurePosixPath(prefix).parts)
+    expected_names = sorted(
+        {
+            PurePosixPath(path).parts[depth]
+            for path in expected
+            if not prefix or path.startswith(f"{prefix}/")
+        }
+    )
+    if names != expected_names:
+        raise InstallerError("transaction state conflict")
+    for name in names:
+        path = _entry_path(prefix, name)
+        entry = expected.get(path)
+        if entry is None:
+            raise InstallerError("transaction state conflict")
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if not _entry_matches(info, entry):
+            raise InstallerError("transaction state conflict")
+        if entry.kind == "file" and stat.S_ISREG(info.st_mode):
+            image = _capture_file_at(fd, name, entry.uid)
+            if image.sha256 != entry.sha256:
+                raise InstallerError("transaction state conflict")
+            os.unlink(name, dir_fd=fd)
+        elif entry.kind == "dir" and stat.S_ISDIR(info.st_mode):
+            child = _open_verified_directory(fd, name, entry.uid)
+            try:
+                _remove_tree_entries(child, path, expected)
+            finally:
+                os.close(child)
+            os.rmdir(name, dir_fd=fd)
+        else:
+            raise InstallerError("transaction state conflict")
+    os.fsync(fd)
+
+
+def _remove_verified(
+    reference: TargetRef,
+    expected: FileImage | TreeImage,
+    fault: FaultInjector,
+) -> None:
+    tree = isinstance(expected, TreeImage)
+    if _capture_reference(reference, tree=tree) != expected:
+        raise InstallerError("transaction state conflict")
+    with _parent_root(reference) as (parent, name):
+        if tree:
+            assert isinstance(expected, TreeImage)
+            directory = _open_verified_directory(parent.fd, name, parent.owner_uid)
+            try:
+                root = os.fstat(directory)
+                if (
+                    root.st_dev != expected.dev
+                    or root.st_ino != expected.ino
+                    or root.st_uid != expected.uid
+                    or stat.S_IMODE(root.st_mode) != expected.mode
+                    or root.st_mtime_ns != expected.mtime_ns
+                ):
+                    raise InstallerError("transaction state conflict")
+                _remove_tree_entries(
+                    directory,
+                    "",
+                    {entry.path: entry for entry in expected.entries},
+                )
+            finally:
+                os.close(directory)
+            os.rmdir(name, dir_fd=parent.fd)
+        else:
+            assert isinstance(expected, FileImage)
+            if _capture_file_at(parent.fd, name, parent.owner_uid) != expected:
+                raise InstallerError("transaction state conflict")
+            os.unlink(name, dir_fd=parent.fd)
+        os.fsync(parent.fd)
+    fault.hit("after_installer_cleanup")
+
+
+def _require_images(
+    actual: tuple[FileImage | TreeImage, FileImage | TreeImage, FileImage | TreeImage],
+    expected: tuple[FileImage | TreeImage, FileImage | TreeImage, FileImage | TreeImage],
+) -> None:
+    if actual != expected:
+        raise InstallerError("transaction state conflict")
+
+
+def _conditional_swap(
+    left: TargetRef,
+    right: TargetRef,
+    target: TargetRef,
+    stage: StagedObject,
+    recovery: TargetRef,
+    expected_left: FileImage | TreeImage,
+    expected_after: tuple[FileImage | TreeImage, FileImage | TreeImage, FileImage | TreeImage],
+    fault: FaultInjector,
+    *,
+    tree: bool,
+) -> None:
+    _rename_refs(left, right, fault, swap=True)
+    actual = _images(target, stage, recovery, tree=tree)
+    if actual == expected_after:
+        return
+    displaced = _capture_reference(right, tree=tree)
+    foreign = _capture_reference(left, tree=tree)
+    if displaced == expected_left and foreign.state is ImageState.PRESENT:
+        _rename_refs(left, right, NoOpFaultInjector(), swap=True)
+        if (
+            _capture_reference(left, tree=tree) != expected_left
+            or _capture_reference(right, tree=tree) != foreign
+        ):
+            raise InstallerError("transaction state conflict")
+    raise InstallerError("transaction state conflict")
+
+
+def _forward(
+    target: TargetRef,
+    expected_pre: FileImage | TreeImage,
+    staged_post: StagedObject,
+    recovery: TargetRef,
+    fault: FaultInjector,
+    *,
+    tree: bool,
+) -> NativeState:
+    post = staged_post.image
+    absent = TreeImage.absent() if tree else FileImage.absent()
+    if (
+        type(expected_pre) is not type(absent)
+        or type(post) is not type(absent)
+        or post.state is not ImageState.PRESENT
+    ):
+        raise ValueError("transaction image kind mismatch")
+    current = _images(target, staged_post, recovery, tree=tree)
+    if expected_pre.state is ImageState.PRESENT:
+        if current == (expected_pre, post, absent):
+            _conditional_swap(
+                target,
+                staged_post,
+                target,
+                staged_post,
+                recovery,
+                expected_pre,
+                (post, expected_pre, absent),
+                fault,
+                tree=tree,
+            )
+            return NativeState.SWAPPED
+        if current == (post, expected_pre, absent):
+            _rename_refs(staged_post, recovery, fault, swap=False)
+            _require_images(
+                _images(target, staged_post, recovery, tree=tree), (post, absent, expected_pre)
+            )
+            return NativeState.PARKED
+        if current == (post, absent, expected_pre):
+            return NativeState.COMPLETED
+    else:
+        if current == (absent, post, absent):
+            _rename_refs(staged_post, target, fault, swap=False)
+            _require_images(
+                _images(target, staged_post, recovery, tree=tree), (post, absent, absent)
+            )
+            return NativeState.PUBLISHED
+        if current == (post, absent, absent):
+            return NativeState.COMPLETED
+    raise InstallerError("transaction state conflict")
+
+
+def forward_file(
+    target: TargetRef,
+    expected_pre: FileImage,
+    staged_post: StagedFile,
+    recovery: TargetRef,
+    fault: FaultInjector,
+) -> NativeState:
+    return _forward(target, expected_pre, staged_post, recovery, fault, tree=False)
+
+
+def forward_tree(
+    target: TreeRef,
+    expected_pre: TreeImage,
+    staged_post: StagedTree,
+    recovery: TreeRef,
+    fault: FaultInjector,
+) -> NativeState:
+    return _forward(target, expected_pre, staged_post, recovery, fault, tree=True)
+
+
+def _restore(
+    target: TargetRef,
+    expected_pre: FileImage | TreeImage,
+    expected_post: FileImage | TreeImage,
+    stage: StagedObject,
+    recovery: TargetRef,
+    fault: FaultInjector,
+    *,
+    tree: bool,
+) -> RestoreState:
+    absent = TreeImage.absent() if tree else FileImage.absent()
+    if (
+        type(expected_pre) is not type(absent)
+        or type(expected_post) is not type(absent)
+        or expected_post.state is not ImageState.PRESENT
+    ):
+        raise ValueError("transaction image kind mismatch")
+    current = _images(target, stage, recovery, tree=tree)
+    if expected_pre.state is ImageState.PRESENT:
+        if current == (expected_pre, absent, absent):
+            return RestoreState.RESTORED
+        if current == (expected_pre, absent, expected_post):
+            _remove_verified(recovery, expected_post, fault)
+            return RestoreState.RESTORED
+        if current == (expected_pre, expected_post, absent):
+            _remove_verified(stage, expected_post, fault)
+            return RestoreState.RESTORED
+        if current == (expected_post, expected_pre, absent):
+            _conditional_swap(
+                target,
+                stage,
+                target,
+                stage,
+                recovery,
+                expected_post,
+                (expected_pre, expected_post, absent),
+                fault,
+                tree=tree,
+            )
+            return RestoreState.RESTORING
+        if current == (expected_post, absent, expected_pre):
+            _conditional_swap(
+                target,
+                recovery,
+                target,
+                stage,
+                recovery,
+                expected_post,
+                (expected_pre, absent, expected_post),
+                fault,
+                tree=tree,
+            )
+            return RestoreState.RESTORING
+    else:
+        if current == (absent, absent, absent):
+            return RestoreState.RESTORED
+        if current == (absent, expected_post, absent):
+            _remove_verified(stage, expected_post, fault)
+            return RestoreState.RESTORED
+        if current == (absent, absent, expected_post):
+            _remove_verified(recovery, expected_post, fault)
+            return RestoreState.RESTORED
+        if current == (expected_post, absent, absent):
+            _rename_refs(target, recovery, fault, swap=False)
+            _require_images(
+                _images(target, stage, recovery, tree=tree),
+                (absent, absent, expected_post),
+            )
+            return RestoreState.RESTORING
+    raise InstallerError("transaction state conflict")
+
+
+def restore_file(
+    target: TargetRef,
+    expected_pre: FileImage,
+    expected_post: FileImage,
+    stage: StagedFile,
+    recovery: TargetRef,
+    fault: FaultInjector,
+) -> RestoreState:
+    return _restore(
+        target,
+        expected_pre,
+        expected_post,
+        stage,
+        recovery,
+        fault,
+        tree=False,
+    )
+
+
+def restore_tree(
+    target: TreeRef,
+    expected_pre: TreeImage,
+    expected_post: TreeImage,
+    stage: StagedTree,
+    recovery: TreeRef,
+    fault: FaultInjector,
+) -> RestoreState:
+    return _restore(
+        target,
+        expected_pre,
+        expected_post,
+        stage,
+        recovery,
+        fault,
+        tree=True,
+    )
 
 
 def _write_all(fd: int, raw: bytes) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -20,14 +21,29 @@ sys.path.insert(0, str(ROOT / "plugins/blender-mcp-installer/scripts"))
 
 from blender_mcp_installer import filesystem  # noqa: E402
 from blender_mcp_installer.filesystem import (  # noqa: E402
+    InstallerError,
     InstallerLock,
+    NativeState,
+    NoOpFaultInjector,
+    RestoreState,
     SafeRoot,
+    StagedFile,
+    StagedTree,
     TargetRef,
+    TreeRef,
     capture_file,
     capture_tree,
+    copy_tree,
+    create_deterministic_stage,
+    forward_file,
+    forward_tree,
     load_active,
     load_pending,
     load_receipt,
+    rename_excl,
+    rename_swap,
+    restore_file,
+    restore_tree,
     write_atomic_json,
 )
 from blender_mcp_installer.model import (  # noqa: E402
@@ -1316,3 +1332,585 @@ def test_fault_driver_uses_closed_command_matrix_and_requires_hit(tmp_path: Path
     missed = invoke("after_extension_tree_publish", "install")
     assert missed.returncode == 2
     assert "requested fault point was not hit" in missed.stderr
+
+
+class _InjectedCrash(RuntimeError):
+    pass
+
+
+class _CrashAfterRename:
+    def hit(self, point: str) -> None:
+        if point == "after_native_rename":
+            raise _InjectedCrash
+
+
+def _write_private_bytes(path: Path, raw: bytes) -> None:
+    path.write_bytes(raw)
+    path.chmod(0o600)
+
+
+def _staged_file(root: SafeRoot, basename: str, raw: bytes) -> StagedFile:
+    stage = create_deterministic_stage(root, basename, FileImage.absent(), NoOpFaultInjector())
+    assert isinstance(stage, StagedFile)
+    _write_private_bytes(stage.path, raw)
+    return stage.refresh()
+
+
+def _installed_file(
+    root: SafeRoot, *, present: bool, fault: object | None = None
+) -> tuple[TargetRef, FileImage, StagedFile, TargetRef, FileImage]:
+    target = TargetRef(root, PurePath("target"))
+    recovery = TargetRef(root, PurePath("recovery"))
+    if present:
+        _write_private_bytes(target.path, b"pre")
+    pre = capture_file(root, target.relative)
+    stage = _staged_file(root, "stage", b"post")
+    post = stage.image
+    assert isinstance(post, FileImage)
+    while True:
+        state = forward_file(
+            target,
+            pre,
+            stage,
+            recovery,
+            fault or NoOpFaultInjector(),
+        )
+        if state is NativeState.COMPLETED:
+            return target, pre, stage, recovery, post
+
+
+def test_deterministic_stage_is_private_and_collisions_fail_closed(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    with _safe(tmp_path) as root:
+        file_stage = create_deterministic_stage(
+            root, "file.stage", FileImage.absent(), NoOpFaultInjector()
+        )
+        tree_stage = create_deterministic_stage(
+            root, "tree.stage", TreeImage.absent(), NoOpFaultInjector()
+        )
+        assert isinstance(file_stage, StagedFile)
+        assert isinstance(tree_stage, StagedTree)
+        assert stat.S_IMODE(file_stage.path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(tree_stage.path.stat().st_mode) == 0o700
+        with pytest.raises(InstallerError, match="deterministic stage already exists"):
+            create_deterministic_stage(root, "file.stage", FileImage.absent(), NoOpFaultInjector())
+        with pytest.raises(ValueError, match="absent"):
+            create_deterministic_stage(
+                root, "other", capture_file(root, PurePath("file.stage")), NoOpFaultInjector()
+            )
+        with pytest.raises(ValueError, match="basename"):
+            create_deterministic_stage(
+                root, "nested/stage", FileImage.absent(), NoOpFaultInjector()
+            )
+
+
+@pytest.mark.parametrize("nonempty", [False, True])
+def test_copy_tree_proves_stable_source_and_copies_closed_tree(
+    tmp_path: Path, nonempty: bool
+) -> None:
+    source_path = tmp_path / "source"
+    stage_parent = tmp_path / "staging"
+    source_path.mkdir()
+    stage_parent.mkdir()
+    if nonempty:
+        (source_path / "nested").mkdir()
+        _write_private_bytes(source_path / "nested/payload", b"payload")
+    with _safe(tmp_path) as root:
+        source = TreeRef(root, PurePath("source"))
+        stage_root = SafeRoot.open(stage_parent, os.getuid(), stage_parent)
+        try:
+            created = create_deterministic_stage(
+                stage_root, "tree", TreeImage.absent(), NoOpFaultInjector()
+            )
+            assert isinstance(created, StagedTree)
+            copied = copy_tree(source, created)
+            assert copied == capture_tree(stage_root, PurePath("tree"))
+            assert copied.state is ImageState.PRESENT
+            expected_paths = () if not nonempty else ("nested", "nested/payload")
+            assert tuple(entry.path for entry in copied.entries) == expected_paths
+            assert capture_tree(root, PurePath("source")) == source.capture()
+        finally:
+            stage_root.close()
+
+
+@pytest.mark.parametrize("entry_kind", ["symlink", "fifo"])
+def test_copy_tree_rejects_nested_links_and_special_files(tmp_path: Path, entry_kind: str) -> None:
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    if entry_kind == "symlink":
+        (source_path / "bad").symlink_to("missing")
+    else:
+        os.mkfifo(source_path / "bad")
+    with _safe(tmp_path) as root:
+        created = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
+        assert isinstance(created, StagedTree)
+        with pytest.raises(ValueError, match="symlink or special"):
+            copy_tree(TreeRef(root, PurePath("source")), created)
+        assert capture_tree(root, PurePath("stage")).entries == ()
+
+
+def test_copy_tree_rejects_foreign_owner_and_source_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    _write_private_bytes(source_path / "payload", b"payload")
+    payload_ino = (source_path / "payload").stat().st_ino
+    original_owner = filesystem._require_owner
+
+    def reject_payload(info: os.stat_result, uid: int) -> None:
+        if info.st_ino == payload_ino:
+            raise ValueError("foreign-owned path")
+        original_owner(info, uid)
+
+    with _safe(tmp_path) as root:
+        stage = create_deterministic_stage(
+            root, "foreign-stage", TreeImage.absent(), NoOpFaultInjector()
+        )
+        assert isinstance(stage, StagedTree)
+        monkeypatch.setattr(filesystem, "_require_owner", reject_payload)
+        with pytest.raises(ValueError, match="foreign-owned"):
+            copy_tree(TreeRef(root, PurePath("source")), stage)
+        monkeypatch.setattr(filesystem, "_require_owner", original_owner)
+
+        changing_stage = create_deterministic_stage(
+            root, "changing-stage", TreeImage.absent(), NoOpFaultInjector()
+        )
+        assert isinstance(changing_stage, StagedTree)
+        original_copy = filesystem._copy_file
+
+        def mutate_after_copy(source_fd: int, name: str, target_fd: int, uid: int) -> None:
+            original_copy(source_fd, name, target_fd, uid)
+            fd = os.open(name, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, dir_fd=source_fd)
+            try:
+                os.write(fd, b"changed")
+            finally:
+                os.close(fd)
+
+        monkeypatch.setattr(filesystem, "_copy_file", mutate_after_copy)
+        with pytest.raises(ValueError, match="source tree changed"):
+            copy_tree(TreeRef(root, PurePath("source")), changing_stage)
+
+
+def test_native_rename_wrappers_map_closed_errors_and_fsync_both_parents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    left_path = tmp_path / "left"
+    right_path = tmp_path / "right"
+    left_path.mkdir()
+    right_path.mkdir()
+    _write_private_bytes(left_path / "source", b"source")
+    _write_private_bytes(right_path / "destination", b"destination")
+    with _safe(left_path) as left, _safe(right_path) as right:
+        real_rename = filesystem._rename_atomic
+        with pytest.raises(InstallerError, match="rename destination already exists"):
+            rename_excl(left, "source", right, "destination", NoOpFaultInjector())
+
+        def unsupported(*args: object, **kwargs: object) -> None:
+            raise OSError(errno.ENOTSUP, "unsupported")
+
+        monkeypatch.setattr(filesystem, "_rename_atomic", unsupported)
+        with pytest.raises(InstallerError, match="native rename is not supported"):
+            rename_swap(left, "source", right, "destination", NoOpFaultInjector())
+
+        def cross_device(*args: object, **kwargs: object) -> None:
+            raise OSError(errno.EXDEV, "cross-device")
+
+        monkeypatch.setattr(filesystem, "_rename_atomic", cross_device)
+        with pytest.raises(InstallerError, match="cross-device rename is not supported"):
+            rename_swap(left, "source", right, "destination", NoOpFaultInjector())
+
+        monkeypatch.setattr(filesystem, "_rename_atomic", real_rename)
+        (right_path / "destination").unlink()
+        fsync_calls: list[int] = []
+        real_fsync = os.fsync
+
+        def record_fsync(fd: int) -> None:
+            fsync_calls.append(fd)
+            real_fsync(fd)
+
+        monkeypatch.setattr(filesystem.os, "fsync", record_fsync)
+        rename_excl(left, "source", right, "destination", NoOpFaultInjector())
+        assert fsync_calls == [left.fd, right.fd]
+
+
+def test_rename_excl_preserves_concurrent_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_parent = tmp_path / "source-parent"
+    target_parent = tmp_path / "target-parent"
+    source_parent.mkdir()
+    target_parent.mkdir()
+    _write_private_bytes(source_parent / "source", b"installer")
+    real = filesystem._rename_atomic
+
+    def race(source_fd: int, source: str, target_fd: int, target: str, *, swap: bool) -> None:
+        fd = os.open(
+            target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=target_fd,
+        )
+        os.write(fd, b"foreign")
+        os.close(fd)
+        real(source_fd, source, target_fd, target, swap=swap)
+
+    monkeypatch.setattr(filesystem, "_rename_atomic", race)
+    with _safe(source_parent) as source, _safe(target_parent) as target:
+        with pytest.raises(InstallerError, match="rename destination already exists"):
+            rename_excl(source, "source", target, "target", NoOpFaultInjector())
+    assert (source_parent / "source").read_bytes() == b"installer"
+    assert (target_parent / "target").read_bytes() == b"foreign"
+
+
+def test_swap_race_is_conditionally_reversed_and_preserves_foreign_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tmp_path.chmod(0o700)
+    with _safe(tmp_path) as root:
+        target = TargetRef(root, PurePath("target"))
+        recovery = TargetRef(root, PurePath("recovery"))
+        _write_private_bytes(target.path, b"pre")
+        pre = capture_file(root, target.relative)
+        stage = _staged_file(root, "stage", b"post")
+        real = filesystem._rename_atomic
+        raced = False
+
+        def race(source_fd: int, source: str, target_fd: int, name: str, *, swap: bool) -> None:
+            nonlocal raced
+            if not raced:
+                raced = True
+                os.unlink(name, dir_fd=target_fd)
+                fd = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=target_fd,
+                )
+                try:
+                    os.write(fd, b"foreign")
+                finally:
+                    os.close(fd)
+            real(source_fd, source, target_fd, name, swap=swap)
+
+        monkeypatch.setattr(filesystem, "_rename_atomic", race)
+        with pytest.raises(InstallerError, match="transaction state conflict"):
+            forward_file(target, pre, stage, recovery, NoOpFaultInjector())
+        assert capture_file(root, target.relative) == pre
+        assert stage.path.read_bytes() == b"foreign"
+        assert capture_file(root, recovery.relative).state is ImageState.ABSENT
+
+
+def test_present_file_forward_recovers_each_crash_prefix(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    with _safe(tmp_path) as root:
+        target = TargetRef(root, PurePath("target"))
+        recovery = TargetRef(root, PurePath("recovery"))
+        _write_private_bytes(target.path, b"pre")
+        pre = capture_file(root, target.relative)
+        stage = _staged_file(root, "stage", b"post")
+        post = stage.image
+        with pytest.raises(_InjectedCrash):
+            forward_file(target, pre, stage, recovery, _CrashAfterRename())
+        assert (
+            capture_file(root, target.relative),
+            stage.capture(),
+            capture_file(root, recovery.relative),
+        ) == (
+            post,
+            pre,
+            FileImage.absent(),
+        )
+        with pytest.raises(_InjectedCrash):
+            forward_file(target, pre, stage, recovery, _CrashAfterRename())
+        assert (
+            capture_file(root, target.relative),
+            stage.capture(),
+            capture_file(root, recovery.relative),
+        ) == (
+            post,
+            FileImage.absent(),
+            pre,
+        )
+        assert (
+            forward_file(target, pre, stage, recovery, NoOpFaultInjector()) is NativeState.COMPLETED
+        )
+
+
+def test_absent_file_forward_publish_crash_is_retry_safe(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    with _safe(tmp_path) as root:
+        target = TargetRef(root, PurePath("target"))
+        recovery = TargetRef(root, PurePath("recovery"))
+        pre = FileImage.absent()
+        stage = _staged_file(root, "stage", b"post")
+        post = stage.image
+        with pytest.raises(_InjectedCrash):
+            forward_file(target, pre, stage, recovery, _CrashAfterRename())
+        assert (
+            capture_file(root, target.relative),
+            stage.capture(),
+            capture_file(root, recovery.relative),
+        ) == (
+            post,
+            FileImage.absent(),
+            FileImage.absent(),
+        )
+        assert (
+            forward_file(target, pre, stage, recovery, NoOpFaultInjector()) is NativeState.COMPLETED
+        )
+
+
+def test_present_file_restore_retries_after_each_reverse_rename(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    with _safe(tmp_path) as root:
+        target, pre, stage, recovery, post = _installed_file(root, present=True)
+        with pytest.raises(_InjectedCrash):
+            restore_file(target, pre, post, stage, recovery, _CrashAfterRename())
+        assert (
+            capture_file(root, target.relative),
+            stage.capture(),
+            capture_file(root, recovery.relative),
+        ) == (
+            pre,
+            FileImage.absent(),
+            post,
+        )
+        assert (
+            restore_file(target, pre, post, stage, recovery, NoOpFaultInjector())
+            is RestoreState.RESTORED
+        )
+        assert capture_file(root, target.relative) == pre
+        assert capture_file(root, recovery.relative).state is ImageState.ABSENT
+
+        stage2 = _staged_file(root, "stage2", b"post-2")
+        post2 = stage2.image
+        assert (
+            forward_file(target, pre, stage2, recovery, NoOpFaultInjector()) is NativeState.SWAPPED
+        )
+        with pytest.raises(_InjectedCrash):
+            restore_file(target, pre, post2, stage2, recovery, _CrashAfterRename())
+        assert capture_file(root, target.relative) == pre
+        assert stage2.capture() == post2
+        assert (
+            restore_file(target, pre, post2, stage2, recovery, NoOpFaultInjector())
+            is RestoreState.RESTORED
+        )
+        assert stage2.capture().state is ImageState.ABSENT
+
+
+@pytest.mark.parametrize("present", [False, True])
+def test_file_restore_cleans_only_the_closed_p0_stage(tmp_path: Path, present: bool) -> None:
+    tmp_path.chmod(0o700)
+    with _safe(tmp_path) as root:
+        target = TargetRef(root, PurePath("target"))
+        recovery = TargetRef(root, PurePath("recovery"))
+        if present:
+            _write_private_bytes(target.path, b"pre")
+        pre = capture_file(root, target.relative)
+        stage = _staged_file(root, "stage", b"post")
+        assert (
+            restore_file(target, pre, stage.image, stage, recovery, NoOpFaultInjector())
+            is RestoreState.RESTORED
+        )
+        assert capture_file(root, target.relative) == pre
+        assert stage.capture().state is ImageState.ABSENT
+        assert capture_file(root, recovery.relative).state is ImageState.ABSENT
+
+
+def test_installed_preimage_survives_fresh_root_until_rollback(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    root = _safe(tmp_path)
+    target, pre, stage, recovery, post = _installed_file(root, present=True)
+    assert capture_file(root, recovery.relative) == pre
+    root.close()
+
+    with _safe(tmp_path) as reopened:
+        fresh_target = TargetRef(reopened, target.relative)
+        fresh_stage = StagedFile(reopened, stage.relative, post)
+        fresh_recovery = TargetRef(reopened, recovery.relative)
+        assert capture_file(reopened, fresh_recovery.relative) == pre
+        assert (
+            restore_file(
+                fresh_target,
+                pre,
+                post,
+                fresh_stage,
+                fresh_recovery,
+                NoOpFaultInjector(),
+            )
+            is RestoreState.RESTORING
+        )
+        assert (
+            restore_file(
+                fresh_target,
+                pre,
+                post,
+                fresh_stage,
+                fresh_recovery,
+                NoOpFaultInjector(),
+            )
+            is RestoreState.RESTORED
+        )
+        assert capture_file(reopened, fresh_target.relative) == pre
+
+
+def test_absent_file_restore_retry_and_foreign_postimage_preservation(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    with _safe(tmp_path) as root:
+        target, pre, stage, recovery, post = _installed_file(root, present=False)
+        with pytest.raises(_InjectedCrash):
+            restore_file(target, pre, post, stage, recovery, _CrashAfterRename())
+        assert (capture_file(root, target.relative), capture_file(root, recovery.relative)) == (
+            FileImage.absent(),
+            post,
+        )
+        assert (
+            restore_file(target, pre, post, stage, recovery, NoOpFaultInjector())
+            is RestoreState.RESTORED
+        )
+
+        target2, pre2, stage2, recovery2, post2 = _installed_file(root, present=False)
+        target2.path.unlink()
+        _write_private_bytes(target2.path, b"foreign")
+        foreign = capture_file(root, target2.relative)
+        with pytest.raises(InstallerError, match="transaction state conflict"):
+            restore_file(target2, pre2, post2, stage2, recovery2, NoOpFaultInjector())
+        assert capture_file(root, target2.relative) == foreign
+        assert capture_file(root, recovery2.relative).state is ImageState.ABSENT
+
+
+def test_present_file_cross_volume_recovery_fails_at_closed_p1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tmp_path.chmod(0o700)
+    with _safe(tmp_path) as root:
+        target = TargetRef(root, PurePath("target"))
+        recovery = TargetRef(root, PurePath("recovery"))
+        _write_private_bytes(target.path, b"pre")
+        pre = capture_file(root, target.relative)
+        stage = _staged_file(root, "stage", b"post")
+        post = stage.image
+        assert (
+            forward_file(target, pre, stage, recovery, NoOpFaultInjector()) is NativeState.SWAPPED
+        )
+        real = filesystem._rename_atomic
+
+        def cross_volume(
+            source_fd: int, source: str, target_fd: int, target_name: str, *, swap: bool
+        ) -> None:
+            if target_name == "recovery":
+                raise OSError(errno.EXDEV, "cross-device")
+            real(source_fd, source, target_fd, target_name, swap=swap)
+
+        monkeypatch.setattr(filesystem, "_rename_atomic", cross_volume)
+        with pytest.raises(InstallerError, match="cross-device rename is not supported"):
+            forward_file(target, pre, stage, recovery, NoOpFaultInjector())
+        assert (
+            capture_file(root, target.relative),
+            stage.capture(),
+            capture_file(root, recovery.relative),
+        ) == (
+            post,
+            pre,
+            FileImage.absent(),
+        )
+
+
+@pytest.mark.parametrize("nonempty", [False, True])
+def test_tree_forward_and_restore_are_byte_identical(tmp_path: Path, nonempty: bool) -> None:
+    tmp_path.chmod(0o700)
+    target_path = tmp_path / "target"
+    source_path = tmp_path / "source"
+    target_path.mkdir()
+    source_path.mkdir()
+    if nonempty:
+        (target_path / "old-dir").mkdir()
+        _write_private_bytes(target_path / "old-dir/old", b"old")
+        (source_path / "new-dir").mkdir()
+        _write_private_bytes(source_path / "new-dir/new", b"new")
+    with _safe(tmp_path) as root:
+        target = TreeRef(root, PurePath("target"))
+        recovery = TreeRef(root, PurePath("recovery"))
+        pre = target.capture()
+        created = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
+        assert isinstance(created, StagedTree)
+        stage = created.with_image(copy_tree(TreeRef(root, PurePath("source")), created))
+        post = stage.image
+        assert (
+            forward_tree(target, pre, stage, recovery, NoOpFaultInjector()) is NativeState.SWAPPED
+        )
+        assert forward_tree(target, pre, stage, recovery, NoOpFaultInjector()) is NativeState.PARKED
+        assert (
+            forward_tree(target, pre, stage, recovery, NoOpFaultInjector()) is NativeState.COMPLETED
+        )
+        assert target.capture() == post
+        assert recovery.capture() == pre
+        assert (
+            restore_tree(target, pre, post, stage, recovery, NoOpFaultInjector())
+            is RestoreState.RESTORING
+        )
+        assert (
+            restore_tree(target, pre, post, stage, recovery, NoOpFaultInjector())
+            is RestoreState.RESTORED
+        )
+        assert target.capture() == pre
+        assert recovery.capture().state is ImageState.ABSENT
+
+
+def test_absent_tree_publish_and_ar1_retry(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    (source_path / "nested").mkdir()
+    _write_private_bytes(source_path / "nested/payload", b"payload")
+    with _safe(tmp_path) as root:
+        target = TreeRef(root, PurePath("target"))
+        recovery = TreeRef(root, PurePath("recovery"))
+        created = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
+        assert isinstance(created, StagedTree)
+        stage = created.with_image(copy_tree(TreeRef(root, PurePath("source")), created))
+        post = stage.image
+        with pytest.raises(_InjectedCrash):
+            forward_tree(
+                target,
+                TreeImage.absent(),
+                stage,
+                recovery,
+                _CrashAfterRename(),
+            )
+        assert target.capture() == post
+        assert stage.capture().state is ImageState.ABSENT
+        assert (
+            forward_tree(
+                target,
+                TreeImage.absent(),
+                stage,
+                recovery,
+                NoOpFaultInjector(),
+            )
+            is NativeState.COMPLETED
+        )
+        with pytest.raises(_InjectedCrash):
+            restore_tree(
+                target,
+                TreeImage.absent(),
+                post,
+                stage,
+                recovery,
+                _CrashAfterRename(),
+            )
+        assert target.capture().state is ImageState.ABSENT
+        assert recovery.capture() == post
+        assert (
+            restore_tree(
+                target,
+                TreeImage.absent(),
+                post,
+                stage,
+                recovery,
+                NoOpFaultInjector(),
+            )
+            is RestoreState.RESTORED
+        )
+        assert recovery.capture().state is ImageState.ABSENT
