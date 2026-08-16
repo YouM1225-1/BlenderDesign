@@ -25,6 +25,7 @@ from blender_mcp_installer import verification
 from blender_mcp_installer.verification import (
     HostCapabilityError,
     HostCapabilities,
+    OfficialMCPProbe,
     inspect_installation,
     probe_host,
     verify_live,
@@ -806,6 +807,85 @@ class MCPProbe:
         if self.fail_spawn:
             raise ValueError("atomic spawn failure")
         return self.handle
+
+
+class _ProbeProcess:
+    def __init__(self, output: bytes, *, running: bool = False) -> None:
+        self.output = output
+        self.running = running
+        self.terminated = False
+        self.waited: float | None = None
+
+    def communicate(self, timeout: float):
+        self.waited = timeout
+        self.running = False
+        return self.output, b"secret helper stderr"
+
+    def poll(self):
+        return None if self.running else 0
+
+    def terminate(self):
+        self.terminated = True
+        self.running = False
+
+    def wait(self, timeout: float):
+        self.waited = timeout
+        self.running = False
+        return 0
+
+
+def test_official_probe_uses_runtime_python_and_returns_closed_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_python = _executable(tmp_path, "python")
+    server = _executable(tmp_path, "blender-mcp-managed")
+    payload = {
+        "initialize": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "blender-mcp", "version": "1.0.0"},
+        },
+        "tools": list(MANIFEST.tools),
+        "call": {"content": [{"type": "text", "text": "{}"}]},
+    }
+    process = _ProbeProcess(json.dumps(payload).encode())
+    seen: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def popen(argv, **kwargs):
+        seen.append((tuple(argv), dict(kwargs)))
+        return process
+
+    monkeypatch.setattr(verification.subprocess, "Popen", popen)
+    handle = OfficialMCPProbe(runtime_python).spawn(
+        (str(server),), env={"HOME": str(tmp_path), "SECRET": "not serialized"}
+    )
+    client = handle.open_client()
+    assert client.initialize() == payload["initialize"]
+    assert tuple(client.list_tools()) == MANIFEST.tools
+    assert client.call_tool("get_blendfile_summary_datablocks", {}) == payload["call"]
+    assert seen[0][0][:3] == (str(runtime_python), "-I", "-c")
+    assert seen[0][1]["stdin"] is subprocess.DEVNULL
+    assert "SECRET" not in seen[0][0][2]
+    handle.close()
+    handle.terminate()
+    assert handle.wait(2.0) == 0
+
+
+def test_official_probe_malformed_output_is_redacted_and_cleanup_is_owned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process = _ProbeProcess(b"not-json", running=True)
+    monkeypatch.setattr(verification.subprocess, "Popen", lambda *_a, **_k: process)
+    handle = OfficialMCPProbe(_executable(tmp_path, "python")).spawn(
+        (str(_executable(tmp_path, "server")),), env={"HOME": str(tmp_path)}
+    )
+    with pytest.raises(InstallerError, match="official MCP probe failed") as caught:
+        handle.open_client().initialize()
+    assert "not-json" not in str(caught.value)
+    handle.close()
+    handle.terminate()
+    handle.wait(2.0)
+    assert process.waited is not None
 
 
 def _live(

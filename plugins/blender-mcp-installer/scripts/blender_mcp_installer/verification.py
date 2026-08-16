@@ -39,7 +39,44 @@ _WAIT_TIMEOUT = 2.0
 _HOST_TIMEOUT = 5.0
 _MAX_STDOUT = 1024 * 1024
 _MAX_STDERR = 64 * 1024
+_MCP_TIMEOUT = 30.0
 _VERSION = re.compile(r"(?:codex-cli|uv|Blender|Python)\s+([0-9][A-Za-z0-9.+-]*)")
+_MCP_COMMAND_ENV = "_BLENDER_MCP_PROBE_COMMAND"
+_MCP_HELPER = r"""
+import asyncio
+import json
+import os
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+
+def dump(value):
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json", by_alias=True)
+    return value
+
+
+async def probe():
+    command = json.loads(os.environ.pop("_BLENDER_MCP_PROBE_COMMAND"))
+    params = StdioServerParameters(command=command[0], args=command[1:], env=dict(os.environ))
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            initialized = await session.initialize()
+            tools = await session.list_tools()
+            called = await session.call_tool("get_blendfile_summary_datablocks", arguments={})
+            return {
+                "initialize": dump(initialized),
+                "tools": [tool.name for tool in tools.tools],
+                "call": dump(called),
+            }
+
+
+raw = json.dumps(asyncio.run(asyncio.wait_for(probe(), 25.0)), separators=(",", ":"))
+if len(raw.encode("utf-8")) > 1024 * 1024:
+    raise RuntimeError("probe result is too large")
+print(raw)
+"""
 
 
 class Runner(Protocol):
@@ -67,6 +104,102 @@ class MCPHandle(Protocol):
 class MCPProbe(Protocol):
     # spawn is atomic: failure means no child or owned descriptor exists.
     def spawn(self, command: Sequence[str], *, env: Mapping[str, str]) -> MCPHandle: ...
+
+
+class _OfficialMCPClient:
+    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+        self.process = process
+        self.result: dict[str, object] | None = None
+
+    def _collect(self) -> dict[str, object]:
+        if self.result is not None:
+            return self.result
+        try:
+            stdout, _stderr = self.process.communicate(timeout=_MCP_TIMEOUT)
+            if self.process.poll() != 0 or len(stdout) > _MAX_STDOUT:
+                raise ValueError("probe process failed")
+            value = json.loads(stdout.decode("utf-8"))
+            if type(value) is not dict or set(value) != {"initialize", "tools", "call"}:
+                raise ValueError("invalid probe result")
+            if (
+                type(value["initialize"]) is not dict
+                or type(value["tools"]) is not list
+                or any(type(name) is not str or not name for name in value["tools"])
+                or type(value["call"]) is not dict
+            ):
+                raise ValueError("invalid probe result")
+        except Exception as exc:
+            try:
+                if self.process.poll() is None:
+                    self.process.terminate()
+                self.process.wait(timeout=_WAIT_TIMEOUT)
+            except Exception:
+                pass
+            raise InstallerError("official MCP probe failed") from exc
+        self.result = value
+        return value
+
+    def initialize(self) -> object:
+        return self._collect()["initialize"]
+
+    def list_tools(self) -> Sequence[str]:
+        return tuple(self._collect()["tools"])
+
+    def call_tool(self, name: str, arguments: Mapping[str, object]) -> object:
+        if name != "get_blendfile_summary_datablocks" or dict(arguments):
+            raise InstallerError("official MCP probe call mismatch")
+        return self._collect()["call"]
+
+
+class _OfficialMCPHandle:
+    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+        self.process = process
+        self.client = _OfficialMCPClient(process)
+
+    def open_client(self) -> MCPClient:
+        return self.client
+
+    def close(self) -> None:
+        pass
+
+    def terminate(self) -> None:
+        if self.process.poll() is None:
+            self.process.terminate()
+
+    def wait(self, timeout: float) -> object:
+        return self.process.wait(timeout=timeout)
+
+
+@dataclass(frozen=True)
+class OfficialMCPProbe:
+    runtime_python: Path
+
+    def __post_init__(self) -> None:
+        _absolute_executable(self.runtime_python, "runtime Python")
+
+    def spawn(self, command: Sequence[str], *, env: Mapping[str, str]) -> MCPHandle:
+        argv = tuple(command)
+        if (
+            not argv
+            or not Path(argv[0]).is_absolute()
+            or any(type(item) is not str for item in argv)
+            or any(type(key) is not str or type(value) is not str for key, value in env.items())
+        ):
+            raise ValueError("invalid official MCP probe input")
+        clean = dict(env)
+        clean[_MCP_COMMAND_ENV] = json.dumps(argv, separators=(",", ":"))
+        try:
+            process = subprocess.Popen(
+                (str(self.runtime_python), "-I", "-c", _MCP_HELPER),
+                cwd=Path(argv[0]).parent,
+                env=clean,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            raise InstallerError("official MCP probe failed") from exc
+        return _OfficialMCPHandle(process)
 
 
 @dataclass(frozen=True)

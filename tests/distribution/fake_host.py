@@ -185,8 +185,13 @@ def run_fake(tool: str, state_file: Path, commands: Path, argv: list[str]) -> in
     if tool == "codex":
         if argv == ["--version"]:
             print("codex-cli 0.148.0-alpha.9")
-        elif argv in (["mcp", "--help"], ["plugin", "--help"], ["plugin", "marketplace", "--help"]):
-            print("usage: codex " + " ".join(argv[:-1]))
+        elif argv in (
+            ["mcp", "get", "--help"],
+            ["plugin", "add", "--help"],
+            ["plugin", "marketplace", "add", "--help"],
+        ):
+            suffix = " --json" if argv[:2] == ["mcp", "get"] else ""
+            print("usage: codex " + " ".join(argv[:-1]) + suffix)
         elif argv == ["mcp", "get", "blender", "--json"]:
             config = Path(os.environ["CODEX_HOME"]) / "config.toml"
             parsed = tomllib.loads(config.read_text()) if config.exists() else {}
@@ -295,15 +300,14 @@ def run_fake(tool: str, state_file: Path, commands: Path, argv: list[str]) -> in
 def _valid_pip_install(argv: list[str]) -> bool:
     if len(argv) < 4 or not Path(argv[3]).is_absolute() or not Path(argv[-1]).is_absolute():
         return False
-    if len(argv) == 13:
+    if len(argv) == 12:
         return (
             argv[:3] == ["pip", "install", "--python"]
-            and argv[4:12]
+            and argv[4:11]
             == [
                 "--require-hashes",
                 "--only-binary",
                 ":all:",
-                "--no-build",
                 "--no-deps",
                 "--default-index",
                 "https://pypi.org/simple",

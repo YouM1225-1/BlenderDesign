@@ -1116,6 +1116,38 @@ def conditional_remove_file(
     fault.hit("after_installer_cleanup")
 
 
+def conditional_remove_tree(
+    reference: TreeRef,
+    expected: TreeImage,
+    guards: tuple[tuple[TargetRef, FileImage | TreeImage], ...],
+    fault: FaultInjector,
+) -> None:
+    if expected.state is not ImageState.PRESENT:
+        raise ValueError("conditional removal requires a present tree")
+
+    def guard_images() -> tuple[FileImage | TreeImage, ...]:
+        return tuple(
+            _capture_reference(guard, tree=isinstance(image, TreeImage)) for guard, image in guards
+        )
+
+    wanted = tuple(image for _, image in guards)
+    try:
+        if guard_images() != wanted:
+            raise InstallerError("transaction state conflict")
+        current = reference.capture()
+        if current.state is ImageState.PRESENT:
+            _remove_tree_prefix(reference, expected, fault)
+        elif current != TreeImage.absent():
+            raise InstallerError("transaction state conflict")
+        if reference.capture() != TreeImage.absent() or guard_images() != wanted:
+            raise InstallerError("transaction state conflict")
+    except InstallerError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise InstallerError("transaction state conflict") from exc
+    fault.hit("after_installer_cleanup")
+
+
 def conditional_swap_file(
     left: TargetRef,
     expected_left: FileImage,
@@ -1655,6 +1687,8 @@ def write_atomic_json(
     payload: Mapping[str, object],
     install_id: UUID,
     retain_old: TargetRef | None = None,
+    *,
+    fault: FaultInjector,
 ) -> FileImage:
     if install_id.version != 4:
         raise ValueError("install ID must be UUIDv4")
@@ -1698,6 +1732,7 @@ def write_atomic_json(
             if stat.S_IMODE(os.fstat(temp_fd).st_mode) != 0o600:
                 raise ValueError("JSON temp is not mode 0600")
             os.fsync(temp_fd)
+            fault.hit("after_json_file_fsync")
         finally:
             os.close(temp_fd)
         new_image = _capture_file_at(parent_fd, temp_name, path.root.owner_uid)
@@ -1712,7 +1747,9 @@ def write_atomic_json(
             target_name,
             swap=expected.state is ImageState.PRESENT,
         )
+        fault.hit("after_json_rename")
         os.fsync(parent_fd)
+        fault.hit("after_json_parent_fsync")
         if expected.state is ImageState.PRESENT:
             old = _capture_file_at(parent_fd, temp_name, path.root.owner_uid)
             if old != expected:

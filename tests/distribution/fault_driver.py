@@ -17,7 +17,7 @@ _PREIMAGES = {
     "extension_tree": frozenset({"present", "absent"}),
     "userpref_file": frozenset({"present", "absent"}),
     "codex_file": frozenset({"present", "absent"}),
-    "codex_semantic": frozenset({"present"}),
+    "codex_semantic": frozenset({"present", "absent"}),
 }
 
 

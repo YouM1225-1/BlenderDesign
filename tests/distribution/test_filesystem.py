@@ -33,6 +33,7 @@ from blender_mcp_installer.filesystem import (  # noqa: E402
     TreeRef,
     capture_file,
     capture_tree,
+    conditional_remove_tree,
     copy_tree,
     create_deterministic_stage,
     forward_file,
@@ -69,6 +70,15 @@ from tests.distribution.fake_host import HostHarness, SANITIZED_ENV  # noqa: E40
 INSTALL_ID = UUID("12345678-1234-4234-9234-123456789abc")
 PARENT_ID = UUID("87654321-4321-4321-8321-cba987654321")
 HASH = "a" * 64
+
+
+class _PointFault:
+    def __init__(self, point: str):
+        self.point = point
+
+    def hit(self, point: str) -> None:
+        if point == self.point:
+            raise _InjectedCrash(point)
 
 
 def _blender(root: Path) -> BlenderPaths:
@@ -332,9 +342,17 @@ def test_restrictive_umask_sets_only_new_private_objects(tmp_path: Path) -> None
             with InstallerLock.acquire(root):
                 assert stat.S_IMODE((owned / "state/installer.lock").stat().st_mode) == 0o600
             target = TargetRef(root, PurePath("value.json"))
-            first = write_atomic_json(target, FileImage.absent(), {"value": 1}, INSTALL_ID)
+            first = write_atomic_json(
+                target,
+                FileImage.absent(),
+                {"value": 1},
+                INSTALL_ID,
+                fault=NoOpFaultInjector(),
+            )
             assert first.mode == 0o600
-            second = write_atomic_json(target, first, {"value": 2}, INSTALL_ID)
+            second = write_atomic_json(
+                target, first, {"value": 2}, INSTALL_ID, fault=NoOpFaultInjector()
+            )
             assert second.mode == 0o600
     finally:
         os.umask(previous)
@@ -342,7 +360,7 @@ def test_restrictive_umask_sets_only_new_private_objects(tmp_path: Path) -> None
     with _safe(owned / "state") as root:
         target = TargetRef(root, PurePath("value.json"))
         current = capture_file(root, target.relative)
-        write_atomic_json(target, current, {"value": 3}, INSTALL_ID)
+        write_atomic_json(target, current, {"value": 3}, INSTALL_ID, fault=NoOpFaultInjector())
 
 
 def test_file_snapshot_detects_in_place_change(
@@ -829,19 +847,81 @@ def test_atomic_json_crash_is_old_or_new_complete_document(
 
         monkeypatch.setattr(filesystem, "_rename_atomic", crash)
         with pytest.raises(RuntimeError):
-            write_atomic_json(ref, old, {"value": "new"}, INSTALL_ID)
+            write_atomic_json(ref, old, {"value": "new"}, INSTALL_ID, fault=NoOpFaultInjector())
     assert json.loads(target.read_text()) in ({"value": "old"}, {"value": "new"})
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     monkeypatch.setattr(filesystem, "_rename_atomic", original)
     with _safe(owned) as root:
         fresh = TargetRef(root, PurePath("fresh.json"))
-        first = write_atomic_json(fresh, FileImage.absent(), {"value": 1}, INSTALL_ID)
+        first = write_atomic_json(
+            fresh,
+            FileImage.absent(),
+            {"value": 1},
+            INSTALL_ID,
+            fault=NoOpFaultInjector(),
+        )
         retained = TargetRef(root, PurePath("retained.json"))
-        second = write_atomic_json(fresh, first, {"value": 2}, INSTALL_ID, retained)
+        second = write_atomic_json(
+            fresh,
+            first,
+            {"value": 2},
+            INSTALL_ID,
+            retained,
+            fault=NoOpFaultInjector(),
+        )
         assert second.state is ImageState.PRESENT
         assert json.loads(fresh.path.read_text()) == {"value": 2}
         assert json.loads(retained.path.read_text()) == {"value": 1}
         assert stat.S_IMODE(retained.path.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    ("point", "live_value", "temp_value"),
+    [
+        ("after_json_file_fsync", "old", "new"),
+        ("after_json_rename", "new", "old"),
+        ("after_json_parent_fsync", "new", "old"),
+    ],
+)
+def test_atomic_json_exact_fault_boundary_and_retry(
+    tmp_path: Path, point: str, live_value: str, temp_value: str
+) -> None:
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    target = owned / "value.json"
+    target.write_text('{"value":"old"}\n')
+    target.chmod(0o600)
+    retained = owned / "retained.json"
+    with _safe(owned) as root:
+        ref = TargetRef(root, PurePath("value.json"))
+        retained_ref = TargetRef(root, PurePath("retained.json"))
+        expected = capture_file(root, ref.relative)
+        with pytest.raises(_InjectedCrash, match=point):
+            write_atomic_json(
+                ref,
+                expected,
+                {"value": "new"},
+                INSTALL_ID,
+                retained_ref,
+                fault=_PointFault(point),
+            )
+        assert json.loads(target.read_text()) == {"value": live_value}
+        temps = list(owned.glob(".blender-mcp-installer.*.tmp"))
+        assert len(temps) == 1
+        assert json.loads(temps[0].read_text()) == {"value": temp_value}
+
+        result = write_atomic_json(
+            ref,
+            expected,
+            {"value": "new"},
+            INSTALL_ID,
+            retained_ref,
+            fault=NoOpFaultInjector(),
+        )
+        assert result == capture_file(root, ref.relative)
+        assert json.loads(target.read_text()) == {"value": "new"}
+        assert json.loads(retained.read_text()) == {"value": "old"}
+        assert not list(owned.glob(".blender-mcp-installer.*.tmp"))
 
 
 def test_atomic_json_concurrent_swap_restores_foreign_document_and_retries(
@@ -868,12 +948,24 @@ def test_atomic_json_concurrent_swap_restores_foreign_document_and_retries(
         expected = capture_file(root, ref.relative)
         monkeypatch.setattr(filesystem, "_rename_atomic", race)
         with pytest.raises(ValueError, match="concurrent"):
-            write_atomic_json(ref, expected, {"value": "installer"}, INSTALL_ID)
+            write_atomic_json(
+                ref,
+                expected,
+                {"value": "installer"},
+                INSTALL_ID,
+                fault=NoOpFaultInjector(),
+            )
         assert json.loads(target.read_text()) == {"value": "concurrent"}
         assert not list(owned.glob(".blender-mcp-installer.*.tmp"))
         monkeypatch.setattr(filesystem, "_rename_atomic", original)
         concurrent = capture_file(root, ref.relative)
-        write_atomic_json(ref, concurrent, {"value": "retry"}, INSTALL_ID)
+        write_atomic_json(
+            ref,
+            concurrent,
+            {"value": "retry"},
+            INSTALL_ID,
+            fault=NoOpFaultInjector(),
+        )
         assert json.loads(target.read_text()) == {"value": "retry"}
 
 
@@ -903,12 +995,24 @@ def test_atomic_json_reverse_swap_crash_prefix_has_clean_retry(
         expected = capture_file(root, ref.relative)
         monkeypatch.setattr(filesystem, "_rename_atomic", crash_after_reverse)
         with pytest.raises(RuntimeError, match="reverse-swap crash"):
-            write_atomic_json(ref, expected, {"value": "installer"}, INSTALL_ID)
+            write_atomic_json(
+                ref,
+                expected,
+                {"value": "installer"},
+                INSTALL_ID,
+                fault=NoOpFaultInjector(),
+            )
         assert json.loads(target.read_text()) == {"value": "concurrent"}
         assert len(list(owned.glob(".blender-mcp-installer.*.tmp"))) == 1
         monkeypatch.setattr(filesystem, "_rename_atomic", original)
         concurrent = capture_file(root, ref.relative)
-        write_atomic_json(ref, concurrent, {"value": "installer"}, INSTALL_ID)
+        write_atomic_json(
+            ref,
+            concurrent,
+            {"value": "installer"},
+            INSTALL_ID,
+            fault=NoOpFaultInjector(),
+        )
         assert json.loads(target.read_text()) == {"value": "installer"}
         assert not list(owned.glob(".blender-mcp-installer.*.tmp"))
 
@@ -932,11 +1036,25 @@ def test_atomic_json_post_swap_crash_prefix_retains_old_on_retry(
         expected = capture_file(root, ref.relative)
         monkeypatch.setattr(filesystem, "_finish_old_json", crash_before_cleanup)
         with pytest.raises(RuntimeError, match="cleanup crash"):
-            write_atomic_json(ref, expected, {"value": "new"}, INSTALL_ID, retained)
+            write_atomic_json(
+                ref,
+                expected,
+                {"value": "new"},
+                INSTALL_ID,
+                retained,
+                fault=NoOpFaultInjector(),
+            )
         assert json.loads(target.read_text()) == {"value": "new"}
         assert len(list(owned.glob(".blender-mcp-installer.*.tmp"))) == 1
         monkeypatch.setattr(filesystem, "_finish_old_json", original)
-        result = write_atomic_json(ref, expected, {"value": "new"}, INSTALL_ID, retained)
+        result = write_atomic_json(
+            ref,
+            expected,
+            {"value": "new"},
+            INSTALL_ID,
+            retained,
+            fault=NoOpFaultInjector(),
+        )
         assert result == capture_file(root, ref.relative)
         assert json.loads(target.read_text()) == {"value": "new"}
         assert json.loads(retained.path.read_text()) == {"value": "old"}
@@ -958,7 +1076,13 @@ def test_atomic_json_absent_publish_crash_prefix_retries_as_complete(
         ref = TargetRef(root, PurePath("value.json"))
         monkeypatch.setattr(filesystem, "_rename_atomic", crash_after_rename)
         with pytest.raises(RuntimeError, match="publish crash"):
-            write_atomic_json(ref, FileImage.absent(), {"value": "new"}, INSTALL_ID)
+            write_atomic_json(
+                ref,
+                FileImage.absent(),
+                {"value": "new"},
+                INSTALL_ID,
+                fault=NoOpFaultInjector(),
+            )
         assert json.loads(ref.path.read_text()) == {"value": "new"}
         assert not list(owned.glob(".blender-mcp-installer.*.tmp"))
         monkeypatch.setattr(filesystem, "_rename_atomic", original_rename)
@@ -970,7 +1094,13 @@ def test_atomic_json_absent_publish_crash_prefix_retries_as_complete(
             original_fsync(fd)
 
         monkeypatch.setattr(filesystem.os, "fsync", record_fsync)
-        result = write_atomic_json(ref, FileImage.absent(), {"value": "new"}, INSTALL_ID)
+        result = write_atomic_json(
+            ref,
+            FileImage.absent(),
+            {"value": "new"},
+            INSTALL_ID,
+            fault=NoOpFaultInjector(),
+        )
         assert result == capture_file(root, ref.relative)
         assert owned.stat().st_ino in synced
 
@@ -994,7 +1124,13 @@ def test_atomic_json_old_unlink_crash_prefix_retries_as_complete(
         expected = capture_file(root, ref.relative)
         monkeypatch.setattr(filesystem.os, "unlink", crash_after_unlink)
         with pytest.raises(RuntimeError, match="unlink crash"):
-            write_atomic_json(ref, expected, {"value": "new"}, INSTALL_ID)
+            write_atomic_json(
+                ref,
+                expected,
+                {"value": "new"},
+                INSTALL_ID,
+                fault=NoOpFaultInjector(),
+            )
         assert json.loads(ref.path.read_text()) == {"value": "new"}
         assert not list(owned.glob(".blender-mcp-installer.*.tmp"))
         monkeypatch.setattr(filesystem.os, "unlink", original_unlink)
@@ -1006,7 +1142,13 @@ def test_atomic_json_old_unlink_crash_prefix_retries_as_complete(
             original_fsync(fd)
 
         monkeypatch.setattr(filesystem.os, "fsync", record_fsync)
-        result = write_atomic_json(ref, expected, {"value": "new"}, INSTALL_ID)
+        result = write_atomic_json(
+            ref,
+            expected,
+            {"value": "new"},
+            INSTALL_ID,
+            fault=NoOpFaultInjector(),
+        )
         assert result == capture_file(root, ref.relative)
         assert owned.stat().st_ino in synced
 
@@ -1038,7 +1180,14 @@ def test_atomic_json_retain_rename_crash_prefix_retries_as_complete(
         expected = capture_file(root, ref.relative)
         monkeypatch.setattr(filesystem, "_rename_atomic", crash_after_retain)
         with pytest.raises(RuntimeError, match="retain crash"):
-            write_atomic_json(ref, expected, {"value": "new"}, INSTALL_ID, retained)
+            write_atomic_json(
+                ref,
+                expected,
+                {"value": "new"},
+                INSTALL_ID,
+                retained,
+                fault=NoOpFaultInjector(),
+            )
         assert json.loads(ref.path.read_text()) == {"value": "new"}
         assert capture_file(root, retained.relative) == expected
         assert not list(target_parent.glob(".blender-mcp-installer.*.tmp"))
@@ -1051,7 +1200,14 @@ def test_atomic_json_retain_rename_crash_prefix_retries_as_complete(
             original_fsync(fd)
 
         monkeypatch.setattr(filesystem.os, "fsync", record_fsync)
-        result = write_atomic_json(ref, expected, {"value": "new"}, INSTALL_ID, retained)
+        result = write_atomic_json(
+            ref,
+            expected,
+            {"value": "new"},
+            INSTALL_ID,
+            retained,
+            fault=NoOpFaultInjector(),
+        )
         assert result == capture_file(root, ref.relative)
         assert {target_parent.stat().st_ino, retain_parent.stat().st_ino} <= set(synced)
 
@@ -1072,7 +1228,13 @@ def test_atomic_json_completed_prefix_mismatches_fail_untouched(tmp_path: Path) 
         foreign_ref = TargetRef(root, PurePath("foreign.json"))
         foreign_before = capture_file(root, foreign_ref.relative)
         with pytest.raises(ValueError, match="changed before write"):
-            write_atomic_json(foreign_ref, FileImage.absent(), {"value": "new"}, INSTALL_ID)
+            write_atomic_json(
+                foreign_ref,
+                FileImage.absent(),
+                {"value": "new"},
+                INSTALL_ID,
+                fault=NoOpFaultInjector(),
+            )
         assert capture_file(root, foreign_ref.relative) == foreign_before
 
         ref = TargetRef(root, PurePath("value.json"))
@@ -1083,7 +1245,14 @@ def test_atomic_json_completed_prefix_mismatches_fail_untouched(tmp_path: Path) 
         target_before = capture_file(root, ref.relative)
         retained_before = capture_file(root, retained_ref.relative)
         with pytest.raises(ValueError, match="changed before write"):
-            write_atomic_json(ref, expected, {"value": "new"}, INSTALL_ID, retained_ref)
+            write_atomic_json(
+                ref,
+                expected,
+                {"value": "new"},
+                INSTALL_ID,
+                retained_ref,
+                fault=NoOpFaultInjector(),
+            )
         assert capture_file(root, ref.relative) == target_before
         assert capture_file(root, retained_ref.relative) == retained_before
 
@@ -1238,7 +1407,6 @@ def test_fake_host_protocol_is_exact_and_read_only(host: HostHarness) -> None:
         "--require-hashes",
         "--only-binary",
         ":all:",
-        "--no-build",
         "--no-deps",
         "--default-index",
         "https://pypi.org/simple",
@@ -2703,6 +2871,79 @@ def test_tree_recovery_cleanup_preserves_foreign_remainder(tmp_path: Path, mutat
             assert (recovery.path / "z").read_bytes() == b"foreign"
         else:
             assert (recovery.path / "foreign").read_bytes() == b"foreign"
+
+
+def _bundle_cleanup_fixture(root: SafeRoot) -> tuple[TreeRef, TreeImage, TargetRef, FileImage]:
+    bundle = root.path / "bundle"
+    (bundle / "nested").mkdir(parents=True)
+    _write_private_bytes(bundle / "a", b"a")
+    _write_private_bytes(bundle / "nested/z", b"z")
+    guard_path = root.path / "guard.json"
+    _write_private_bytes(guard_path, b"guard")
+    reference = TreeRef(root, PurePath("bundle"))
+    guard = TargetRef(root, PurePath("guard.json"))
+    return reference, reference.capture(), guard, capture_file(root, guard.relative)
+
+
+def test_conditional_remove_tree_complete_and_absent_retry(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    with _safe(tmp_path) as root:
+        reference, expected, guard, guard_image = _bundle_cleanup_fixture(root)
+        conditional_remove_tree(reference, expected, ((guard, guard_image),), NoOpFaultInjector())
+        assert reference.capture() == TreeImage.absent()
+        conditional_remove_tree(reference, expected, ((guard, guard_image),), NoOpFaultInjector())
+
+
+def test_conditional_remove_tree_retries_exact_prefix_and_fault_boundary(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    with _safe(tmp_path) as root:
+        reference, expected, guard, guard_image = _bundle_cleanup_fixture(root)
+        with pytest.raises(_InjectedCrash):
+            conditional_remove_tree(
+                reference,
+                expected,
+                ((guard, guard_image),),
+                _CrashAt("after_cleanup_entry"),
+            )
+        remaining = reference.capture()
+        assert remaining.state is ImageState.PRESENT
+        assert len(remaining.entries) < len(expected.entries)
+        with pytest.raises(_InjectedCrash):
+            conditional_remove_tree(
+                reference,
+                expected,
+                ((guard, guard_image),),
+                _CrashAt("after_installer_cleanup"),
+            )
+        assert reference.capture() == TreeImage.absent()
+        conditional_remove_tree(reference, expected, ((guard, guard_image),), NoOpFaultInjector())
+
+
+@pytest.mark.parametrize("mutation", ["guard", "root", "entry"])
+def test_conditional_remove_tree_conflict_preserves_foreign_state(
+    tmp_path: Path, mutation: str
+) -> None:
+    tmp_path.chmod(0o700)
+    with _safe(tmp_path) as root:
+        reference, expected, guard, guard_image = _bundle_cleanup_fixture(root)
+        if mutation == "guard":
+            guard.path.write_bytes(b"foreign guard")
+        elif mutation == "root":
+            reference.path.rename(root.path / "original")
+            reference.path.mkdir()
+            _write_private_bytes(reference.path / "foreign", b"foreign")
+        else:
+            (reference.path / "nested/z").write_bytes(b"foreign")
+        before = tuple(sorted(path.relative_to(root.path) for path in root.path.rglob("*")))
+        with pytest.raises(InstallerError, match="transaction state conflict"):
+            conditional_remove_tree(
+                reference, expected, ((guard, guard_image),), NoOpFaultInjector()
+            )
+        assert tuple(sorted(path.relative_to(root.path) for path in root.path.rglob("*"))) == before
+        if mutation == "entry":
+            assert (reference.path / "nested/z").read_bytes() == b"foreign"
+        if mutation == "root":
+            assert (reference.path / "foreign").read_bytes() == b"foreign"
 
 
 def test_native_and_model_basenames_reject_embedded_nul(tmp_path: Path) -> None:
