@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import tomllib
 from dataclasses import replace
 from pathlib import Path, PurePath
@@ -13,6 +14,7 @@ import pytest
 ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(ROOT / "plugins/blender-mcp-installer/scripts"))
 
+from blender_mcp_installer import codex_adapter  # noqa: E402
 from blender_mcp_installer.codex_adapter import (  # noqa: E402
     CodexRollbackContext,
     ManagedProfile,
@@ -300,6 +302,25 @@ def test_stage_absent_config_and_exact_second_merge(tmp_path: Path) -> None:
     second_root.close()
 
 
+def test_parsed_verification_rejects_duplicate_managed_namespace(tmp_path: Path) -> None:
+    root = _open_root(tmp_path / "codex")
+    desired = _desired(tmp_path)
+    _, _, change = _stage_config(root, desired, None)
+    raw = change.stage.path.read_bytes()
+    owned = b'direct_only_tool_namespaces = ["mcp__blender"]'
+    assert owned in raw
+
+    with pytest.raises(InstallerError, match="Codex managed configuration mismatch"):
+        verify_codex_toml(
+            raw.replace(
+                owned,
+                b'direct_only_tool_namespaces = ["mcp__blender", "mcp__blender"]',
+            ),
+            desired,
+        )
+    root.close()
+
+
 @pytest.mark.parametrize(
     "raw",
     [b"\xff", b"[mcp_servers.blender\n", b"mcp_servers = 1\n"],
@@ -340,6 +361,71 @@ def test_stage_rejects_fd_image_mismatch_before_helper(tmp_path: Path) -> None:
             )
     finally:
         os.close(fd)
+    root.close()
+
+
+def test_fd_image_rejects_mutation_during_hash(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "value.toml"
+    _write_private(path, b'model = "before"\n')
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    original_hash = codex_adapter._hash_fd
+
+    def mutate(opened: int) -> str:
+        digest = original_hash(opened)
+        os.ftruncate(opened, os.fstat(opened).st_size + 1)
+        return digest
+
+    monkeypatch.setattr(codex_adapter, "_hash_fd", mutate)
+    try:
+        with pytest.raises(InstallerError, match="Codex configuration input changed"):
+            codex_adapter._fd_image(fd)
+    finally:
+        os.close(fd)
+
+
+def test_stage_revalidates_retained_live_fd_after_helper(monkeypatch, tmp_path: Path) -> None:
+    root = _open_root(tmp_path / "codex")
+    desired = _desired(tmp_path)
+    config = root.path / "config.toml"
+    _write_private(config, b'model = "before"\n')
+    current = capture_file(root, PurePath("config.toml"))
+    live_fd = os.open(config, os.O_RDONLY | os.O_NOFOLLOW)
+    original = codex_adapter._run_helper
+
+    def mutate(*args, **kwargs):
+        result = original(*args, **kwargs)
+        _write_private(config, b'model = "changed-during-helper"\n')
+        return result
+
+    monkeypatch.setattr(codex_adapter, "_run_helper", mutate)
+    try:
+        with pytest.raises(InstallerError, match="Codex configuration input changed"):
+            stage_codex_config(live_fd, current, desired, Path(sys.executable), _stage(root))
+    finally:
+        os.close(live_fd)
+    root.close()
+
+
+def test_stage_binds_retained_fd_to_published_path(monkeypatch, tmp_path: Path) -> None:
+    root = _open_root(tmp_path / "codex")
+    desired = _desired(tmp_path)
+    stage = _stage(root)
+    original = codex_adapter._invoke_helper
+
+    def replace_stage(anchor, request, runtime_python, inherited):
+        output = original(anchor, request, runtime_python, inherited)
+        stage_fd = request["stage_fd"]
+        os.lseek(stage_fd, 0, os.SEEK_SET)
+        raw = _read_fd(stage_fd)
+        os.rename(anchor.path, root.path / "displaced-stage")
+        _write_private(anchor.path, raw)
+        return output
+
+    monkeypatch.setattr(codex_adapter, "_invoke_helper", replace_stage)
+    with pytest.raises(InstallerError, match="Codex stage changed"):
+        stage_codex_config(None, FileImage.absent(), desired, Path(sys.executable), stage)
+    assert (root.path / "displaced-stage").exists()
+    assert stage.path.exists()
     root.close()
 
 
@@ -426,6 +512,45 @@ def test_effective_json_error_never_echoes_output(tmp_path: Path) -> None:
     assert SECRET not in str(caught.value)
 
 
+def _special_codex(path: Path, body: str) -> None:
+    path.write_text(f"#!{sys.executable}\n{body}\n")
+    path.chmod(0o700)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'import os\nos.write(1, b"x" * (17 * 1024 * 1024))',
+        'import os\nwhile True: os.write(2, b"x" * 65536)',
+    ],
+)
+def test_effective_verification_terminates_over_limit_output(tmp_path: Path, body: str) -> None:
+    desired = _desired(tmp_path)
+    codex = tmp_path / "codex"
+    _special_codex(codex, body)
+    started = time.monotonic()
+
+    with pytest.raises(InstallerError) as caught:
+        verify_codex_effective(codex, desired, {})
+
+    assert time.monotonic() - started < 5
+    assert str(caught.value) == "effective Codex verification failed"
+    assert SECRET not in str(caught.value)
+
+
+def test_effective_verification_has_fixed_timeout(tmp_path: Path) -> None:
+    desired = _desired(tmp_path)
+    codex = tmp_path / "codex"
+    _special_codex(codex, "import time\ntime.sleep(60)")
+    started = time.monotonic()
+
+    with pytest.raises(InstallerError) as caught:
+        verify_codex_effective(codex, desired, {})
+
+    assert time.monotonic() - started < 5
+    assert str(caught.value) == "effective Codex verification failed"
+
+
 def test_exact_rollback_uses_native_transaction_and_restores_preimage(tmp_path: Path) -> None:
     root = _open_root(tmp_path / "codex")
     desired = _desired(tmp_path)
@@ -492,6 +617,36 @@ def test_missing_preimage_semantic_rollback_preserves_foreign_addition(tmp_path:
 
     assert result.state is RollbackState.C4
     assert _parsed(target.path) == {"foreign_after": {"value": "keep"}}
+    assert not recovery.path.exists()
+    root.close()
+
+
+def test_current_original_bytes_are_durably_already_restored(tmp_path: Path) -> None:
+    root = _open_root(tmp_path / "codex")
+    desired = _desired(tmp_path)
+    pre_raw = b'# original\nmodel = "before"\n'
+    target, _, change, recovery = _installed(root, desired, pre_raw)
+    target.path.unlink()
+    os.link(recovery.path, target.path)
+    journal: list = []
+
+    result = rollback_codex(
+        _rollback_context(root, target, change.post, journal),
+        recovery,
+        change.post,
+        change.managed_keys,
+        Path(sys.executable),
+        NoOpFaultInjector(),
+    )
+
+    assert result.state is RollbackState.C4
+    assert target.path.read_bytes() == pre_raw
+    assert [item.state for item in journal] == [
+        RollbackState.C1,
+        RollbackState.C2,
+        RollbackState.C3,
+        RollbackState.C4,
+    ]
     assert not recovery.path.exists()
     root.close()
 
@@ -678,6 +833,60 @@ def test_every_semantic_crash_state_retries_in_fresh_process(tmp_path: Path, poi
     reopened.close()
 
 
+@pytest.mark.parametrize(
+    "point",
+    [
+        "after_codex_semantic_stage_fsync",
+        "after_codex_semantic_swap",
+        "after_codex_semantic_receipt",
+        "after_codex_semantic_displaced_cleanup",
+        "after_codex_semantic_recovery_cleanup",
+    ],
+)
+def test_absent_preimage_semantic_c0_c4_retries_in_fresh_process(
+    tmp_path: Path, point: str
+) -> None:
+    root = _open_root(tmp_path / "codex")
+    desired = _desired(tmp_path)
+    target, pre, change, recovery = _installed(root, desired, None)
+    assert pre == recovery.image == FileImage.absent()
+    with target.path.open("a") as stream:
+        stream.write('\n[foreign_after]\nvalue = "keep"\n')
+    target.path.chmod(0o600)
+    journal: list = []
+
+    with pytest.raises(RuntimeError, match="injected crash"):
+        rollback_codex(
+            _rollback_context(root, target, change.post, journal),
+            recovery,
+            change.post,
+            change.managed_keys,
+            Path(sys.executable),
+            CrashAt(point),
+        )
+    persisted = journal[-1] if journal else None
+    if persisted is not None:
+        persisted = type(persisted).from_dict(json.loads(json.dumps(persisted.to_dict())))
+
+    root.close()
+    reopened = _open_root(tmp_path / "codex")
+    fresh_target = TargetRef(reopened, PurePath("config.toml"))
+    result = rollback_codex(
+        _rollback_context(reopened, fresh_target, change.post, [], persisted),
+        StagedFile(reopened, PurePath("codex.recovery"), FileImage.absent()),
+        change.post,
+        change.managed_keys,
+        Path(sys.executable),
+        NoOpFaultInjector(),
+    )
+
+    assert result.state is RollbackState.C4
+    assert _parsed(fresh_target.path) == {"foreign_after": {"value": "keep"}}
+    assert not (reopened.path / "codex.recovery").exists()
+    assert not (reopened.path / "codex.rollback.stage").exists()
+    reopened.close()
+
+
 def test_unlisted_semantic_state_conflicts_without_deletion(tmp_path: Path) -> None:
     root, _, _, target, change, recovery = _semantic_fixture(tmp_path)
     journal: list = []
@@ -707,6 +916,89 @@ def test_unlisted_semantic_state_conflicts_without_deletion(tmp_path: Path) -> N
     assert {
         path.name: path.read_bytes() for path in root.path.iterdir() if path.is_file()
     } == before
+    root.close()
+
+
+def test_semantic_swap_rechecks_images_at_transition(monkeypatch, tmp_path: Path) -> None:
+    root, _, _, target, change, recovery = _semantic_fixture(tmp_path)
+    journal: list = []
+    with pytest.raises(RuntimeError, match="injected crash"):
+        rollback_codex(
+            _rollback_context(root, target, change.post, journal),
+            recovery,
+            change.post,
+            change.managed_keys,
+            Path(sys.executable),
+            CrashAt("after_codex_semantic_stage_fsync"),
+        )
+    stage_before = (root.path / "codex.rollback.stage").read_bytes()
+    recovery_before = recovery.path.read_bytes()
+    foreign = b'foreign = "changed-at-transition"\n'
+    original = codex_adapter.conditional_swap_file
+
+    def mutate(left, expected_left, right, expected_right, guards, fault):
+        _write_private(left.path, foreign)
+        return original(left, expected_left, right, expected_right, guards, fault)
+
+    monkeypatch.setattr(codex_adapter, "conditional_swap_file", mutate)
+    with pytest.raises(InstallerError, match="Codex rollback state conflict"):
+        rollback_codex(
+            _rollback_context(root, target, change.post, [], journal[-1]),
+            recovery,
+            change.post,
+            change.managed_keys,
+            Path(sys.executable),
+            NoOpFaultInjector(),
+        )
+
+    assert target.path.read_bytes() == foreign
+    assert (root.path / "codex.rollback.stage").read_bytes() == stage_before
+    assert recovery.path.read_bytes() == recovery_before
+    root.close()
+
+
+@pytest.mark.parametrize(
+    ("point", "mutated_name"),
+    [
+        ("after_codex_semantic_receipt", "codex.rollback.stage"),
+        ("after_codex_semantic_displaced_cleanup", "codex.recovery"),
+    ],
+)
+def test_semantic_cleanup_rechecks_images_at_transition(
+    monkeypatch, tmp_path: Path, point: str, mutated_name: str
+) -> None:
+    root, _, _, target, change, recovery = _semantic_fixture(tmp_path)
+    journal: list = []
+    with pytest.raises(RuntimeError, match="injected crash"):
+        rollback_codex(
+            _rollback_context(root, target, change.post, journal),
+            recovery,
+            change.post,
+            change.managed_keys,
+            Path(sys.executable),
+            CrashAt(point),
+        )
+    live_before = target.path.read_bytes()
+    foreign = b'foreign = "changed-at-transition"\n'
+    original = codex_adapter.conditional_remove_file
+
+    def mutate(reference, expected, guards, fault):
+        _write_private(reference.path, foreign)
+        return original(reference, expected, guards, fault)
+
+    monkeypatch.setattr(codex_adapter, "conditional_remove_file", mutate)
+    with pytest.raises(InstallerError, match="Codex rollback state conflict"):
+        rollback_codex(
+            _rollback_context(root, target, change.post, [], journal[-1]),
+            recovery,
+            change.post,
+            change.managed_keys,
+            Path(sys.executable),
+            NoOpFaultInjector(),
+        )
+
+    assert target.path.read_bytes() == live_before
+    assert (root.path / mutated_name).read_bytes() == foreign
     root.close()
 
 

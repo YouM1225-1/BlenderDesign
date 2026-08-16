@@ -503,6 +503,50 @@ def test_semantic_swapped_requires_two_present_file_images(changes: dict[str, ob
         ReceiptAction.from_dict({**base, **changes})
 
 
+def test_absent_preimage_codex_semantic_receipt_rows_are_closed_and_round_trip() -> None:
+    base = {
+        **_bundle_action(),
+        "kind": "codex_file",
+        "object_kind": "codex",
+        "target_role": "codex_config",
+        "target_path": "/tmp/config.toml",
+        "stage_basename": ".stage",
+        "recovery_basename": ".recovery",
+        "pre": _absent_file(),
+        "intended_post": _present_file(),
+        "actual_post": _present_file(),
+        "recovery_image": _absent_file(),
+        "rollback_intended": _present_file(),
+    }
+    rows = (
+        {**base, "state": "semantic_staged", "rollback_displaced": None},
+        {**base, "state": "semantic_swapped", "rollback_displaced": _present_file()},
+        {**base, "state": "restoring", "rollback_displaced": _present_file()},
+        {**base, "state": "restored", "rollback_displaced": _present_file()},
+    )
+
+    for row in rows:
+        action = ReceiptAction.from_dict(row)
+        assert replace(action) == action
+        assert ReceiptAction.from_dict(json.loads(json.dumps(action.to_dict()))) == action
+
+    for changes in (
+        {"kind": "userpref_file"},
+        {"recovery_image": _present_file()},
+        {"rollback_intended": None},
+    ):
+        with pytest.raises(ValueError):
+            ReceiptAction.from_dict({**rows[0], **changes})
+    staged = ReceiptAction.from_dict(rows[0])
+    for changes in (
+        {"kind": ActionKind.USERPREF_FILE},
+        {"recovery_image": FileImage.from_dict(_present_file())},
+        {"rollback_intended": None},
+    ):
+        with pytest.raises(ValueError):
+            replace(staged, **changes)
+
+
 @pytest.mark.parametrize(
     "changes",
     [

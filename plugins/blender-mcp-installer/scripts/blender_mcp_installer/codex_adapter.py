@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import selectors
 import stat
 import subprocess
+import time
 import tomllib
 from dataclasses import dataclass
 from enum import Enum
@@ -17,12 +19,12 @@ from .filesystem import (
     InstallerError,
     NoOpFaultInjector,
     RestoreState,
-    SafeRoot,
     StagedFile,
     TargetRef,
     capture_file,
+    conditional_remove_file,
+    conditional_swap_file,
     create_deterministic_stage,
-    rename_swap,
     restore_file,
 )
 from .model import FileImage, ImageState
@@ -51,6 +53,8 @@ _ENV_KEYS = (
 )
 _NAMESPACE = "mcp__blender"
 _MAX_CONFIG = 16 * 1024 * 1024
+_MAX_STDERR = 64 * 1024
+_EFFECTIVE_TIMEOUT = 2.0
 
 
 def _absolute(path: Path, label: str) -> Path:
@@ -581,19 +585,27 @@ def _hash_fd(fd: int) -> str:
     return digest.hexdigest()
 
 
-def _fd_image(fd: int) -> FileImage:
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
-        raise InstallerError("Codex configuration input changed")
+def _fd_image(fd: int, error: str = "Codex configuration input changed") -> FileImage:
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid():
+            raise InstallerError(error)
+        digest = _hash_fd(fd)
+        after = os.fstat(fd)
+    except OSError as exc:
+        raise InstallerError(error) from exc
+    fields = ("st_dev", "st_ino", "st_uid", "st_mode", "st_size", "st_mtime_ns")
+    if any(getattr(before, field) != getattr(after, field) for field in fields):
+        raise InstallerError(error)
     return FileImage(
         ImageState.PRESENT,
-        info.st_dev,
-        info.st_ino,
-        info.st_uid,
-        stat.S_IMODE(info.st_mode),
-        info.st_size,
-        info.st_mtime_ns,
-        _hash_fd(fd),
+        after.st_dev,
+        after.st_ino,
+        after.st_uid,
+        stat.S_IMODE(after.st_mode),
+        after.st_size,
+        after.st_mtime_ns,
+        digest,
     )
 
 
@@ -623,7 +635,7 @@ def _open_reference(reference: TargetRef, expected: FileImage) -> int | None:
     finally:
         os.close(parent_fd)
     try:
-        if _fd_image(fd) != expected:
+        if _fd_image(fd, "Codex rollback state conflict") != expected:
             raise InstallerError("Codex rollback state conflict")
         return fd
     except BaseException:
@@ -725,7 +737,7 @@ def _run_helper(
     finally:
         os.close(parent_fd)
     try:
-        if _fd_image(stage_fd) != stage.image:
+        if _fd_image(stage_fd, "Codex stage changed before merge") != stage.image:
             raise InstallerError("Codex stage changed before merge")
         request = {
             "mode": mode,
@@ -747,14 +759,21 @@ def _run_helper(
             or type(output["size"]) is not int
         ):
             raise InstallerError("Codex configuration merge failed")
-        refreshed = stage.refresh()
+        descriptor = _fd_image(stage_fd, "Codex stage changed")
+        try:
+            refreshed = stage.refresh()
+        except (OSError, ValueError) as exc:
+            raise InstallerError("Codex stage changed") from exc
         if (
             refreshed.image.state is not ImageState.PRESENT
             or refreshed.image.mode != 0o600
+            or refreshed.image != descriptor
+            or (descriptor.dev, descriptor.ino, descriptor.uid)
+            != (stage.image.dev, stage.image.ino, stage.image.uid)
             or refreshed.image.sha256 != output["sha256"]
             or refreshed.image.size != output["size"]
         ):
-            raise InstallerError("Codex configuration merge failed")
+            raise InstallerError("Codex stage changed")
         return refreshed, output["changed"]
     finally:
         os.close(stage_fd)
@@ -786,6 +805,11 @@ def _validate_semantic_merge(
             runtime_python,
             tuple(fd for fd in (source_fd, pre_fd) if fd is not None),
         )
+        if _fd_image(source_fd, "Codex rollback state conflict") != source_image or (
+            pre_fd is not None
+            and _fd_image(pre_fd, "Codex rollback state conflict") != recovery_image
+        ):
+            raise InstallerError("Codex rollback state conflict")
     finally:
         os.close(source_fd)
         if pre_fd is not None:
@@ -811,6 +835,8 @@ def stage_codex_config(
     current_fd = _open_validated_fd(live_config_fd, current)
     try:
         merged, changed = _run_helper("forward", current_fd, None, desired, runtime_python, stage)
+        if current_fd is not None and _fd_image(current_fd) != current:
+            raise InstallerError("Codex configuration input changed")
     finally:
         if current_fd is not None:
             os.close(current_fd)
@@ -880,7 +906,7 @@ def verify_codex_toml(raw: bytes, desired: ManagedCodexValues) -> None:
     if (
         type(namespaces) is not list
         or any(type(item) is not str for item in namespaces)
-        or desired.direct_only_namespace not in namespaces
+        or namespaces.count(desired.direct_only_namespace) != 1
     ):
         raise InstallerError("Codex managed configuration mismatch")
 
@@ -900,22 +926,70 @@ def verify_codex_effective(
     env: Mapping[str, str],
 ) -> EffectiveCodexState:
     codex_bin = _absolute(codex_bin, "Codex executable")
+    process: subprocess.Popen[bytes] | None = None
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             [str(codex_bin), "mcp", "get", "blender", "--json"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=dict(env),
-            check=False,
         )
+        assert process.stdout is not None and process.stderr is not None
+        output = bytearray()
+        stderr_size = 0
+        deadline = time.monotonic() + _EFFECTIVE_TIMEOUT
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise InstallerError("effective Codex verification failed")
+                events = selector.select(remaining)
+                if not events:
+                    raise InstallerError("effective Codex verification failed")
+                for key, _ in events:
+                    size = len(output) if key.data == "stdout" else stderr_size
+                    limit = _MAX_CONFIG if key.data == "stdout" else _MAX_STDERR
+                    chunk = os.read(key.fd, min(64 * 1024, limit - size + 1))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                    elif key.data == "stdout":
+                        output.extend(chunk)
+                        if len(output) > _MAX_CONFIG:
+                            raise InstallerError("effective Codex verification failed")
+                    else:
+                        stderr_size += len(chunk)
+                        if stderr_size > _MAX_STDERR:
+                            raise InstallerError("effective Codex verification failed")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise InstallerError("effective Codex verification failed")
+        try:
+            returncode = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            raise InstallerError("effective Codex verification failed") from exc
     except OSError as exc:
         raise InstallerError("effective Codex verification failed") from exc
-    if completed.returncode != 0 or len(completed.stdout) > _MAX_CONFIG:
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+    if returncode != 0:
         raise InstallerError("effective Codex verification failed")
     try:
         value = json.loads(
-            completed.stdout.decode("utf-8"),
+            output.decode("utf-8"),
             object_pairs_hook=_json_object,
             parse_constant=lambda item: (_ for _ in ()).throw(ValueError(item)),
         )
@@ -956,32 +1030,6 @@ def _capture(reference: TargetRef) -> FileImage:
         return capture_file(reference.root, reference.relative)
     except (OSError, ValueError) as exc:
         raise InstallerError("Codex rollback state conflict") from exc
-
-
-def _unlink(reference: TargetRef, expected: FileImage) -> None:
-    parent_fd, name = reference.root.open_parent(reference.relative)
-    try:
-        current = _capture(reference)
-        if current != expected or expected.state is not ImageState.PRESENT:
-            raise InstallerError("Codex rollback state conflict")
-        os.unlink(name, dir_fd=parent_fd)
-        os.fsync(parent_fd)
-        if _capture(reference) != FileImage.absent():
-            raise InstallerError("Codex rollback state conflict")
-    finally:
-        os.close(parent_fd)
-
-
-def _swap(left: TargetRef, right: TargetRef, fault: FaultInjector) -> None:
-    left_fd, left_name = left.root.open_parent(left.relative)
-    right_fd, right_name = right.root.open_parent(right.relative)
-    left_parent = SafeRoot(left.path.parent, left.root.owner_uid, left_fd)
-    right_parent = SafeRoot(right.path.parent, right.root.owner_uid, right_fd)
-    try:
-        rename_swap(left_parent, left_name, right_parent, right_name, fault)
-    finally:
-        right_parent.close()
-        left_parent.close()
 
 
 def _result(
@@ -1069,7 +1117,15 @@ def _semantic_c0(
             )
         except InstallerError:
             if stage.capture() == stage.image:
-                _unlink(stage, stage.image)
+                conditional_remove_file(
+                    stage,
+                    stage.image,
+                    (
+                        (context.target, current_image),
+                        (recovery, recovery_image),
+                    ),
+                    NoOpFaultInjector(),
+                )
             raise
     finally:
         if current_fd is not None:
@@ -1128,9 +1184,7 @@ def rollback_codex(
     if not allowed_recovery:
         raise InstallerError("Codex rollback state conflict")
     if not semantic and (
-        live == installer_post
-        or live == pre
-        or current.state in {RollbackState.RESTORING, RollbackState.RESTORED}
+        live == installer_post or current.state in {RollbackState.RESTORING, RollbackState.RESTORED}
     ):
         return _native_rollback(current, protected_recovery, pre, installer_post, fault)
     state = current.state
@@ -1189,7 +1243,17 @@ def rollback_codex(
                     current.rollback_stage,
                     intended,
                 )
-                _swap(current.target, current.rollback_stage, fault)
+                try:
+                    conditional_swap_file(
+                        current.target,
+                        live,
+                        current.rollback_stage,
+                        intended,
+                        ((protected_recovery, pre),),
+                        fault,
+                    )
+                except InstallerError as exc:
+                    raise InstallerError("Codex rollback state conflict") from exc
                 fault.hit("after_codex_semantic_swap")
                 displaced = live
             elif live == intended and stage.state is ImageState.PRESENT and recovery_image == pre:
@@ -1248,7 +1312,18 @@ def rollback_codex(
                 current.rollback_stage,
                 intended,
             )
-            _unlink(current.rollback_stage, displaced)
+            try:
+                conditional_remove_file(
+                    current.rollback_stage,
+                    displaced,
+                    (
+                        (current.target, intended),
+                        (protected_recovery, pre),
+                    ),
+                    NoOpFaultInjector(),
+                )
+            except InstallerError as exc:
+                raise InstallerError("Codex rollback state conflict") from exc
             result = _result(
                 RollbackState.C3,
                 current,
@@ -1281,7 +1356,18 @@ def rollback_codex(
             if (live, stage, recovery_image) != (intended, FileImage.absent(), pre):
                 raise InstallerError("Codex rollback state conflict")
             if recovery_image.state is ImageState.PRESENT:
-                _unlink(protected_recovery, recovery_image)
+                try:
+                    conditional_remove_file(
+                        protected_recovery,
+                        recovery_image,
+                        (
+                            (current.target, intended),
+                            (current.rollback_stage, FileImage.absent()),
+                        ),
+                        NoOpFaultInjector(),
+                    )
+                except InstallerError as exc:
+                    raise InstallerError("Codex rollback state conflict") from exc
             result = _result(
                 RollbackState.C4,
                 current,

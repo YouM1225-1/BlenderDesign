@@ -8,7 +8,7 @@ import json
 import os
 import stat
 import sys
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePath, PurePosixPath
@@ -1078,6 +1078,103 @@ def _remove_verified(
         os.unlink(name, dir_fd=parent.fd)
         os.fsync(parent.fd)
     fault.hit("after_installer_cleanup")
+
+
+def conditional_remove_file(
+    reference: TargetRef,
+    expected: FileImage,
+    guards: tuple[tuple[TargetRef, FileImage], ...],
+    fault: FaultInjector,
+) -> None:
+    if expected.state is not ImageState.PRESENT:
+        raise ValueError("conditional removal requires a present file")
+    with ExitStack() as stack:
+        parent, name = stack.enter_context(_parent_root(reference))
+        guard_entries = tuple(
+            (*stack.enter_context(_parent_root(guard)), image) for guard, image in guards
+        )
+
+        def capture() -> tuple[FileImage, tuple[FileImage, ...]]:
+            return (
+                _capture_file_at(parent.fd, name, parent.owner_uid),
+                tuple(
+                    _capture_file_at(item.fd, item_name, item.owner_uid)
+                    for item, item_name, _ in guard_entries
+                ),
+            )
+
+        wanted_guards = tuple(image for _, _, image in guard_entries)
+        try:
+            if capture() != (expected, wanted_guards):
+                raise InstallerError("transaction state conflict")
+            os.unlink(name, dir_fd=parent.fd)
+            os.fsync(parent.fd)
+            if capture() != (FileImage.absent(), wanted_guards):
+                raise InstallerError("transaction state conflict")
+        except (OSError, ValueError) as exc:
+            raise InstallerError("transaction state conflict") from exc
+    fault.hit("after_installer_cleanup")
+
+
+def conditional_swap_file(
+    left: TargetRef,
+    expected_left: FileImage,
+    right: TargetRef,
+    expected_right: FileImage,
+    guards: tuple[tuple[TargetRef, FileImage], ...],
+    fault: FaultInjector,
+) -> None:
+    if (
+        expected_left.state is not ImageState.PRESENT
+        or expected_right.state is not ImageState.PRESENT
+    ):
+        raise ValueError("conditional swap requires present files")
+    with ExitStack() as stack:
+        left_parent, left_name = stack.enter_context(_parent_root(left))
+        right_parent, right_name = stack.enter_context(_parent_root(right))
+        guard_entries = tuple(
+            (*stack.enter_context(_parent_root(guard)), image) for guard, image in guards
+        )
+
+        def capture() -> tuple[FileImage, FileImage, tuple[FileImage, ...]]:
+            return (
+                _capture_file_at(left_parent.fd, left_name, left_parent.owner_uid),
+                _capture_file_at(right_parent.fd, right_name, right_parent.owner_uid),
+                tuple(
+                    _capture_file_at(item.fd, item_name, item.owner_uid)
+                    for item, item_name, _ in guard_entries
+                ),
+            )
+
+        wanted_guards = tuple(image for _, _, image in guard_entries)
+        before = (expected_left, expected_right, wanted_guards)
+        after = (expected_right, expected_left, wanted_guards)
+        try:
+            if capture() != before:
+                raise InstallerError("transaction state conflict")
+            rename_swap(
+                left_parent,
+                left_name,
+                right_parent,
+                right_name,
+                fault,
+            )
+            if capture() == after:
+                return
+            current = capture()
+            if current[0].state is ImageState.PRESENT and current[1].state is ImageState.PRESENT:
+                rename_swap(
+                    left_parent,
+                    left_name,
+                    right_parent,
+                    right_name,
+                    NoOpFaultInjector(),
+                )
+                if capture() != current[1::-1] + (current[2],):
+                    raise InstallerError("transaction state conflict")
+            raise InstallerError("transaction state conflict")
+        except (OSError, ValueError) as exc:
+            raise InstallerError("transaction state conflict") from exc
 
 
 def _require_images(

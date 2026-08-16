@@ -660,6 +660,16 @@ class ReceiptAction:
             self.recovery_image is not None
             and self.recovery_image.state is not ImageState.PRESENT
             and self.state not in {ActionState.RESTORED, ActionState.CLEANED}
+            and not (
+                self.kind is ActionKind.CODEX_FILE
+                and self.pre.state is ImageState.ABSENT
+                and self.state
+                in {
+                    ActionState.SEMANTIC_STAGED,
+                    ActionState.SEMANTIC_SWAPPED,
+                    ActionState.RESTORING,
+                }
+            )
         ):
             raise ValueError("action post/recovery images must be present")
         if self.kind is ActionKind.BUNDLE_STAGE:
@@ -705,9 +715,7 @@ class ReceiptAction:
         semantic = {ActionState.SEMANTIC_STAGED, ActionState.SEMANTIC_SWAPPED}
         if self.kind is not ActionKind.CODEX_FILE and self.state in semantic:
             raise ValueError("semantic state is Codex-only")
-        if self.state not in forward | (
-            semantic if self.kind is ActionKind.CODEX_FILE and present else set()
-        ):
+        if self.state not in forward | (semantic if self.kind is ActionKind.CODEX_FILE else set()):
             raise ValueError("invalid action transition")
         required_intended = self.state is not ActionState.PLANNED
         required_actual = self.state not in {ActionState.PLANNED, ActionState.STAGED}
