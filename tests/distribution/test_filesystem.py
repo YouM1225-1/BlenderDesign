@@ -879,6 +879,151 @@ def test_atomic_json_post_swap_crash_prefix_retains_old_on_retry(
         assert not list(owned.glob(".blender-mcp-installer.*.tmp"))
 
 
+def test_atomic_json_absent_publish_crash_prefix_retries_as_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    original_rename = filesystem._rename_atomic
+
+    def crash_after_rename(*args: object, **kwargs: object) -> None:
+        original_rename(*args, **kwargs)
+        raise RuntimeError("publish crash")
+
+    with _safe(owned) as root:
+        ref = TargetRef(root, PurePath("value.json"))
+        monkeypatch.setattr(filesystem, "_rename_atomic", crash_after_rename)
+        with pytest.raises(RuntimeError, match="publish crash"):
+            write_atomic_json(ref, FileImage.absent(), {"value": "new"}, INSTALL_ID)
+        assert json.loads(ref.path.read_text()) == {"value": "new"}
+        assert not list(owned.glob(".blender-mcp-installer.*.tmp"))
+        monkeypatch.setattr(filesystem, "_rename_atomic", original_rename)
+        synced: list[int] = []
+        original_fsync = os.fsync
+
+        def record_fsync(fd: int) -> None:
+            synced.append(os.fstat(fd).st_ino)
+            original_fsync(fd)
+
+        monkeypatch.setattr(filesystem.os, "fsync", record_fsync)
+        result = write_atomic_json(ref, FileImage.absent(), {"value": "new"}, INSTALL_ID)
+        assert result == capture_file(root, ref.relative)
+        assert owned.stat().st_ino in synced
+
+
+def test_atomic_json_old_unlink_crash_prefix_retries_as_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    target = owned / "value.json"
+    target.write_text('{"value":"old"}\n')
+    target.chmod(0o600)
+    original_unlink = os.unlink
+
+    def crash_after_unlink(path: str, *, dir_fd: int | None = None) -> None:
+        original_unlink(path, dir_fd=dir_fd)
+        raise RuntimeError("unlink crash")
+
+    with _safe(owned) as root:
+        ref = TargetRef(root, PurePath("value.json"))
+        expected = capture_file(root, ref.relative)
+        monkeypatch.setattr(filesystem.os, "unlink", crash_after_unlink)
+        with pytest.raises(RuntimeError, match="unlink crash"):
+            write_atomic_json(ref, expected, {"value": "new"}, INSTALL_ID)
+        assert json.loads(ref.path.read_text()) == {"value": "new"}
+        assert not list(owned.glob(".blender-mcp-installer.*.tmp"))
+        monkeypatch.setattr(filesystem.os, "unlink", original_unlink)
+        synced: list[int] = []
+        original_fsync = os.fsync
+
+        def record_fsync(fd: int) -> None:
+            synced.append(os.fstat(fd).st_ino)
+            original_fsync(fd)
+
+        monkeypatch.setattr(filesystem.os, "fsync", record_fsync)
+        result = write_atomic_json(ref, expected, {"value": "new"}, INSTALL_ID)
+        assert result == capture_file(root, ref.relative)
+        assert owned.stat().st_ino in synced
+
+
+def test_atomic_json_retain_rename_crash_prefix_retries_as_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owned = tmp_path / "owned"
+    target_parent = owned / "state"
+    retain_parent = owned / "recovery"
+    target_parent.mkdir(parents=True)
+    retain_parent.mkdir()
+    target = target_parent / "value.json"
+    target.write_text('{"value":"old"}\n')
+    target.chmod(0o600)
+    original_rename = filesystem._rename_atomic
+    calls = 0
+
+    def crash_after_retain(*args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        original_rename(*args, **kwargs)
+        if calls == 2:
+            raise RuntimeError("retain crash")
+
+    with _safe(owned) as root:
+        ref = TargetRef(root, PurePath("state/value.json"))
+        retained = TargetRef(root, PurePath("recovery/old.json"))
+        expected = capture_file(root, ref.relative)
+        monkeypatch.setattr(filesystem, "_rename_atomic", crash_after_retain)
+        with pytest.raises(RuntimeError, match="retain crash"):
+            write_atomic_json(ref, expected, {"value": "new"}, INSTALL_ID, retained)
+        assert json.loads(ref.path.read_text()) == {"value": "new"}
+        assert capture_file(root, retained.relative) == expected
+        assert not list(target_parent.glob(".blender-mcp-installer.*.tmp"))
+        monkeypatch.setattr(filesystem, "_rename_atomic", original_rename)
+        synced: list[int] = []
+        original_fsync = os.fsync
+
+        def record_fsync(fd: int) -> None:
+            synced.append(os.fstat(fd).st_ino)
+            original_fsync(fd)
+
+        monkeypatch.setattr(filesystem.os, "fsync", record_fsync)
+        result = write_atomic_json(ref, expected, {"value": "new"}, INSTALL_ID, retained)
+        assert result == capture_file(root, ref.relative)
+        assert {target_parent.stat().st_ino, retain_parent.stat().st_ino} <= set(synced)
+
+
+def test_atomic_json_completed_prefix_mismatches_fail_untouched(tmp_path: Path) -> None:
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    foreign = owned / "foreign.json"
+    foreign.write_text('{"value":"foreign"}\n')
+    foreign.chmod(0o600)
+    target = owned / "value.json"
+    target.write_text('{"value":"old"}\n')
+    target.chmod(0o600)
+    retained = owned / "retained.json"
+    retained.write_text('{"value":"foreign-retained"}\n')
+    retained.chmod(0o600)
+    with _safe(owned) as root:
+        foreign_ref = TargetRef(root, PurePath("foreign.json"))
+        foreign_before = capture_file(root, foreign_ref.relative)
+        with pytest.raises(ValueError, match="changed before write"):
+            write_atomic_json(foreign_ref, FileImage.absent(), {"value": "new"}, INSTALL_ID)
+        assert capture_file(root, foreign_ref.relative) == foreign_before
+
+        ref = TargetRef(root, PurePath("value.json"))
+        retained_ref = TargetRef(root, PurePath("retained.json"))
+        expected = capture_file(root, ref.relative)
+        target.write_text('{"value":"new"}\n')
+        target.chmod(0o600)
+        target_before = capture_file(root, ref.relative)
+        retained_before = capture_file(root, retained_ref.relative)
+        with pytest.raises(ValueError, match="changed before write"):
+            write_atomic_json(ref, expected, {"value": "new"}, INSTALL_ID, retained_ref)
+        assert capture_file(root, ref.relative) == target_before
+        assert capture_file(root, retained_ref.relative) == retained_before
+
+
 def test_non_darwin_rename_is_always_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(filesystem.sys, "platform", "linux")
     for swap in (False, True):
@@ -1080,9 +1225,28 @@ def test_fault_driver_uses_closed_command_matrix_and_requires_hit(tmp_path: Path
     driver.parent.mkdir(parents=True)
     shutil.copy2(ROOT / "tests/distribution/fault_driver.py", driver)
 
-    def invoke(point: str, command: str, *extra: str) -> subprocess.CompletedProcess[str]:
+    def invoke(
+        point: str,
+        command: str,
+        *extra: str,
+        fixture_kind: str = "extension_tree",
+        preimage: str = "absent",
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, "-I", str(driver), "--point", point, "--", command, *extra],
+            [
+                sys.executable,
+                "-I",
+                str(driver),
+                "--point",
+                point,
+                "--fixture-kind",
+                fixture_kind,
+                "--preimage",
+                preimage,
+                "--",
+                command,
+                *extra,
+            ],
             text=True,
             capture_output=True,
             check=False,
@@ -1094,6 +1258,43 @@ def test_fault_driver_uses_closed_command_matrix_and_requires_hit(tmp_path: Path
     inapplicable = invoke("after_extension_tree_publish", "verify")
     assert inapplicable.returncode == 2
     assert "No module named" not in inapplicable.stderr
+    for result in (
+        invoke("after_extension_tree_publish", "install", fixture_kind="unknown"),
+        invoke(
+            "after_bundle_stage_stage", "install", fixture_kind="bundle_stage", preimage="present"
+        ),
+        invoke("after_json_rename", "install", fixture_kind="atomic_json", preimage="absent"),
+        invoke("after_extension_tree_publish", "install", preimage="present"),
+        invoke("after_extension_tree_restore_move", "rollback", preimage="present"),
+        invoke("after_extension_tree_swap", "install", preimage="absent"),
+        invoke("after_extension_tree_restore_swap", "rollback", preimage="absent"),
+        invoke(
+            "after_active_publish",
+            "install",
+            fixture_kind="active_selector",
+            preimage="present",
+        ),
+        invoke(
+            "after_active_restore_move",
+            "rollback",
+            fixture_kind="active_selector",
+            preimage="present",
+        ),
+        invoke(
+            "after_active_swap",
+            "install",
+            fixture_kind="active_selector",
+            preimage="absent",
+        ),
+        invoke(
+            "after_active_restore_swap",
+            "rollback",
+            fixture_kind="active_selector",
+            preimage="absent",
+        ),
+    ):
+        assert result.returncode == 2
+        assert "No module named" not in result.stderr
 
     package = distribution / "plugins/blender-mcp-installer/scripts/blender_mcp_installer"
     package.mkdir(parents=True)

@@ -496,6 +496,44 @@ def _finish_old_json(
         os.close(retain_fd)
 
 
+def _complete_json_retry(
+    parent_fd: int,
+    current: FileImage,
+    stale: FileImage,
+    expected: FileImage,
+    raw: bytes,
+    path: TargetRef,
+    temp_name: str,
+    retain_old: TargetRef | None,
+) -> bool:
+    if not _matches_json_payload(current, raw, path.root.owner_uid):
+        return False
+    if capture_file(path.root, path.relative) != current:
+        raise ValueError("JSON target changed during retry classification")
+    if stale == expected and expected.state is ImageState.PRESENT:
+        _finish_old_json(parent_fd, temp_name, stale, path.root, retain_old)
+    elif stale.state is ImageState.ABSENT:
+        if expected.state is ImageState.PRESENT and retain_old is not None:
+            retain_fd, retain_name = retain_old.root.open_parent(retain_old.relative)
+            try:
+                retained = _capture_file_at(retain_fd, retain_name, retain_old.root.owner_uid)
+                if retained != expected:
+                    return False
+                os.fsync(retain_fd)
+                os.fsync(parent_fd)
+                if _capture_file_at(retain_fd, retain_name, retain_old.root.owner_uid) != retained:
+                    raise ValueError("retained JSON changed during retry completion")
+            finally:
+                os.close(retain_fd)
+        else:
+            os.fsync(parent_fd)
+    else:
+        return False
+    if capture_file(path.root, path.relative) != current:
+        raise ValueError("JSON target changed during retry completion")
+    return True
+
+
 def write_atomic_json(
     path: TargetRef,
     expected: FileImage,
@@ -516,14 +554,16 @@ def write_atomic_json(
         current = capture_file(path.root, path.relative)
         stale = _capture_file_at(parent_fd, temp_name, path.root.owner_uid)
         if current != expected:
-            if (
-                stale == expected
-                and _matches_json_payload(current, raw, path.root.owner_uid)
-                and capture_file(path.root, path.relative) == current
+            if _complete_json_retry(
+                parent_fd,
+                current,
+                stale,
+                expected,
+                raw,
+                path,
+                temp_name,
+                retain_old,
             ):
-                _finish_old_json(parent_fd, temp_name, stale, path.root, retain_old)
-                if capture_file(path.root, path.relative) != current:
-                    raise ValueError("JSON target changed during retry cleanup")
                 return current
             raise ValueError("JSON target changed before write")
         if stale.state is ImageState.PRESENT:
