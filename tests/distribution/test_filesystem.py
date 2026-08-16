@@ -1943,7 +1943,7 @@ class _CrashAt:
     "point",
     ["after_native_rename", "after_source_parent_fsync", "after_destination_parent_fsync"],
 )
-@pytest.mark.parametrize("row", ["p1", "p2", "a1", "r1", "ar1"])
+@pytest.mark.parametrize("row", ["p0", "p1", "p2", "a0", "a1", "r1", "ar1"])
 def test_recognized_cross_parent_prefix_redrives_both_parent_fsyncs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1962,7 +1962,7 @@ def test_recognized_cross_parent_prefix_redrives_both_parent_fsyncs(
     ):
         target = TargetRef(target_root, PurePath("target"))
         recovery = TargetRef(recovery_root, PurePath("recovery"))
-        present = row in {"p1", "p2", "r1"}
+        present = row in {"p0", "p1", "p2", "r1"}
         if present:
             _write_private_bytes(target.path, b"pre")
         pre = capture_file(target_root, target.relative)
@@ -2008,7 +2008,11 @@ def test_recognized_cross_parent_prefix_redrives_both_parent_fsyncs(
             }[row]
         else:
             restore_file(target, pre, post, stage, recovery, NoOpFaultInjector())
-            expected = {target_root.fd, recovery_root.fd}
+            expected = (
+                {stage_root.fd, recovery_root.fd}
+                if row in {"p0", "a0"}
+                else {target_root.fd, recovery_root.fd}
+            )
         expected_inodes = {os.fstat(fd).st_ino for fd in expected}
         assert expected_inodes <= set(synced)
 
@@ -2239,6 +2243,69 @@ def test_copy_tree_never_adopts_or_cleans_foreign_destination_change(
         with pytest.raises((InstallerError, FileExistsError, ValueError)):
             copy_tree(TreeRef(root, PurePath("source")), stage)
         assert capture_tree(root, stage.relative).state is ImageState.PRESENT
+
+
+def test_copy_tree_rejects_replacement_before_final_file_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    _write_private_bytes(source_path / "payload", b"payload")
+    with _safe(tmp_path) as root:
+        stage = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
+        assert isinstance(stage, StagedTree)
+        original_capture = filesystem._capture_file_at
+        replaced = False
+
+        def replace_before_capture(parent_fd: int, name: str, uid: int) -> FileImage:
+            nonlocal replaced
+            if not replaced and name == "payload" and os.fstat(parent_fd).st_ino == stage.image.ino:
+                replaced = True
+                os.unlink(name, dir_fd=parent_fd)
+                _foreign_object(parent_fd, name, tree=False)
+            return original_capture(parent_fd, name, uid)
+
+        monkeypatch.setattr(filesystem, "_capture_file_at", replace_before_capture)
+        with pytest.raises(InstallerError, match="transaction state conflict"):
+            copy_tree(TreeRef(root, PurePath("source")), stage)
+        assert (stage.path / "payload").read_bytes() == b"foreign"
+
+
+def test_copy_file_closes_source_when_destination_open_collides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = tmp_path / "source"
+    target_path = tmp_path / "target"
+    source_path.mkdir()
+    target_path.mkdir()
+    _write_private_bytes(source_path / "payload", b"source")
+    _write_private_bytes(target_path / "payload", b"collision")
+    source_fd = os.open(source_path, os.O_RDONLY | os.O_DIRECTORY)
+    target_fd = os.open(target_path, os.O_RDONLY | os.O_DIRECTORY)
+    opened: list[int] = []
+    closed: list[int] = []
+    real_open = os.open
+    real_close = os.close
+
+    def record_open(*args: object, **kwargs: object) -> int:
+        fd = real_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def record_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(filesystem.os, "open", record_open)
+    monkeypatch.setattr(filesystem.os, "close", record_close)
+    try:
+        for _ in range(3):
+            with pytest.raises(FileExistsError):
+                filesystem._copy_file(source_fd, "payload", target_fd, os.getuid())
+        assert sorted(opened) == sorted(closed)
+    finally:
+        real_close(target_fd)
+        real_close(source_fd)
 
 
 def test_copy_tree_pure_partial_failure_removes_stage_for_clean_retry(
@@ -2472,6 +2539,35 @@ def test_receipt_action_encodes_every_native_reverse_row() -> None:
     ):
         with pytest.raises(ValueError):
             ReceiptAction.from_dict({**base, **invalid})
+
+
+@pytest.mark.parametrize("tree", [False, True])
+def test_receipt_action_rejects_shared_absent_post_and_recovery_images(tree: bool) -> None:
+    image = _present_tree() if tree else _present_file()
+    valid = ReceiptAction.from_dict(
+        {
+            **_bundle_action(),
+            "kind": "runtime_tree" if tree else "userpref_file",
+            "object_kind": "tree" if tree else "file",
+            "state": "restored",
+            "target_role": "runtime" if tree else "blender_userpref",
+            "target_path": "/tmp/runtime" if tree else "/tmp/userpref.blend",
+            "stage_basename": ".stage",
+            "recovery_basename": ".recovery",
+            "pre": image,
+            "intended_post": image,
+            "actual_post": image,
+            "recovery_image": _absent_tree() if tree else _absent_file(),
+        }
+    )
+    absent = TreeImage.absent() if tree else FileImage.absent()
+    with pytest.raises(ValueError, match="post/recovery images must be present"):
+        replace(
+            valid,
+            intended_post=absent,
+            actual_post=absent,
+            recovery_image=absent,
+        )
 
 
 def test_receipt_action_keeps_semantic_restore_images_closed() -> None:

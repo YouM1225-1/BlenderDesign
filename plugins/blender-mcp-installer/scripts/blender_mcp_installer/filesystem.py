@@ -655,14 +655,19 @@ def _copy_file(source_fd: int, name: str, target_fd: int, uid: int) -> FileImage
     if before.state is not ImageState.PRESENT:
         raise ValueError("source file disappeared")
     source = os.open(name, _FILE_FLAGS, dir_fd=source_fd)
-    target = os.open(
-        name,
-        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-        0o600,
-        dir_fd=target_fd,
-    )
+    try:
+        target = os.open(
+            name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=target_fd,
+        )
+    except BaseException:
+        os.close(source)
+        raise
     failure: BaseException | None = None
     partial: FileImage | None = None
+    created: FileImage | None = None
     try:
         opened = os.fstat(source)
         if _file_image(opened, _hash_fd(source)) != before:
@@ -672,6 +677,7 @@ def _copy_file(source_fd: int, name: str, target_fd: int, uid: int) -> FileImage
             _write_all(target, chunk)
         os.fchmod(target, before.mode)
         os.fsync(target)
+        created = _file_image(os.fstat(target), _hash_fd(target))
     except BaseException as exc:
         failure = exc
         try:
@@ -685,15 +691,14 @@ def _copy_file(source_fd: int, name: str, target_fd: int, uid: int) -> FileImage
         if partial is not None and _capture_file_at(target_fd, name, uid) == partial:
             raise _PartialCopyError(failure, partial) from failure
         raise failure
+    assert created is not None
+    if _capture_file_at(target_fd, name, uid) != created:
+        cause = InstallerError("transaction state conflict")
+        raise _PartialCopyError(cause, created) from cause
     if _capture_file_at(source_fd, name, uid) != before:
-        copied = _capture_file_at(target_fd, name, uid)
-        if copied.state is ImageState.PRESENT:
-            raise _PartialCopyError(ValueError("source file changed during copy"), copied)
-        raise ValueError("source file changed during copy")
-    copied = _capture_file_at(target_fd, name, uid)
-    if copied.state is not ImageState.PRESENT:
-        raise InstallerError("transaction state conflict")
-    return copied
+        cause = ValueError("source file changed during copy")
+        raise _PartialCopyError(cause, created) from cause
+    return created
 
 
 @dataclass(frozen=True)
@@ -1326,7 +1331,7 @@ def _restore(
             and _tree_prefix(current[2], expected_post) is not None
         )
         if current[0] == expected_pre and current[1] == absent and recovery_post:
-            _sync_parents((target, recovery))
+            _sync_parents((target, stage, recovery))
             refreshed = _images(target, stage, recovery, tree=tree)
             refreshed_post = refreshed[2] == expected_post or (
                 tree
@@ -1378,7 +1383,7 @@ def _restore(
             and _tree_prefix(current[2], expected_post) is not None
         )
         if current[0] == absent and current[1] == absent and recovery_post:
-            _sync_parents((target, recovery))
+            _sync_parents((target, stage, recovery))
             refreshed = _images(target, stage, recovery, tree=tree)
             refreshed_post = refreshed[2] == expected_post or (
                 tree

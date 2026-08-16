@@ -648,15 +648,20 @@ class ReceiptAction:
         ):
             if image is not None and type(image) is not image_type:
                 raise ValueError("invalid action image variant")
-            if (
-                image is not None
-                and image.state is not ImageState.PRESENT
-                and not (
-                    image is self.recovery_image
-                    and self.state in {ActionState.RESTORED, ActionState.CLEANED}
-                )
-            ):
+        for image in (
+            self.intended_post,
+            self.actual_post,
+            self.rollback_intended,
+            self.rollback_displaced,
+        ):
+            if image is not None and image.state is not ImageState.PRESENT:
                 raise ValueError("action post/recovery images must be present")
+        if (
+            self.recovery_image is not None
+            and self.recovery_image.state is not ImageState.PRESENT
+            and self.state not in {ActionState.RESTORED, ActionState.CLEANED}
+        ):
+            raise ValueError("action post/recovery images must be present")
         if self.kind is ActionKind.BUNDLE_STAGE:
             if (
                 self.object_kind is not ObjectKind.BUNDLE
