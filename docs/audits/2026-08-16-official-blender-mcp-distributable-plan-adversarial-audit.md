@@ -4,7 +4,7 @@ Date: 2026-08-16
 
 Plan: `docs/superpowers/plans/2026-08-16-official-blender-mcp-distributable-codex-installer.md`
 
-Current plan SHA-256: `9039302d463e2f81f5a775f99bc1fc7eebc9fa66ad983602680556ccff345c5f`
+Current plan SHA-256: `1d4ee2c51f0d41ac1eab7d01f898e2169280a5cb03a2c0b3625cfa7aec46a518`
 
 Initial frozen plan SHA-256: `fb69e31ef0445d38c2caeed277c69519f95ed19c5f067eabcd7e7733dc767d72`
 
@@ -175,3 +175,23 @@ The reviewed Task 4 implementation ends at `107b7d9`. The amendment produced
 the current SHA above. Three targeted reviews—security/specification,
 executability/testability, and minimality/portability—each returned READY with
 0 Critical, 0 Important, and 0 Minor findings.
+
+## Task 5 Darwin discovery and staging amendment
+
+Task 5's implementation and live disposable probes corrected stale assumptions
+about Darwin lifecycle evidence and made its staging boundary explicit:
+
+- Listener `lsof` evidence is exactly one `p/c/u` process header plus one
+  `f/n` socket record; device/inode identity comes from the PID's separate
+  strict `txt` query.
+- The first `txt` record identifies the process executable. Later nonmatching
+  images are allowed, while later exact selected identities remain ambiguous.
+- Staging requires a retained current-UID-owned parent, fd-relative/no-follow
+  installer writes, parent fsync, and recaptured Blender-produced outputs.
+- ZIP indexing rejects noncanonical aliases and accepts only normalized file
+  `0644` and directory `0755` entries before any runner call.
+
+The reviewed implementation ends at `7203316`. The amendment produced the
+current SHA above. Under the simplified process requested by the user, one
+combined adversarial security/specification/executability/minimality review
+returned READY with 0 Critical and 0 Important findings.
