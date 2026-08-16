@@ -35,6 +35,9 @@ installer command. Do not split it across shell sessions.
 <!-- TRUST_BOOTSTRAP_BEGIN -->
 ```bash
 set -euo pipefail
+OPERATOR_PATH="$PATH"
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
 : "${SOURCE_DISTRIBUTION_ROOT:?set source repository path}"
 : "${EXPECTED_DISTRIBUTION_COMMIT:?set reviewed 40-hex commit}"
 : "${BLENDER_BIN:?set absolute Blender executable}"
@@ -252,8 +255,8 @@ interpreter or package installation.
 run_uv_bootstrap() {
   if test -n "${UV_BIN:-}"; then
     CANDIDATE_UV="$UV_BIN"
-  elif command -v uv >/dev/null 2>&1; then
-    CANDIDATE_UV="$(command -v uv)"
+  elif CANDIDATE_UV="$(PATH="$OPERATOR_PATH" command -v uv 2>/dev/null)"; then
+    :
   elif test -x "$HOME/.local/bin/uv"; then
     CANDIDATE_UV="$HOME/.local/bin/uv"
   else
@@ -269,7 +272,15 @@ run_uv_bootstrap() {
     --no-python-downloads --no-config)"
   test -x "$PYTHON_BIN"
   "$PYTHON_BIN" -I -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 13))'
-  UV_BIN="$CANDIDATE_UV"
+  CANONICAL_UV="$("$PYTHON_BIN" -I -c \
+    'import sys; from pathlib import Path; print(Path(sys.argv[1]).resolve(strict=True))' \
+    "$CANDIDATE_UV")"
+  case "$CANONICAL_UV" in /*) ;; *) echo "canonical uv path must be absolute" >&2; return 1;; esac
+  test -f "$CANONICAL_UV" && test ! -L "$CANONICAL_UV" && test -x "$CANONICAL_UV"
+  test "$("$CANONICAL_UV" --version | awk '{print $2}')" = "0.12.2"
+  "$CANONICAL_UV" run --help | grep -q -- "--no-sync"
+  "$CANONICAL_UV" run --help | grep -q -- "--no-python-downloads"
+  UV_BIN="$CANONICAL_UV"
   ISOLATED_RUNNER='import runpy,sys; root=sys.argv[1]; script=sys.argv[2]; sys.argv=sys.argv[2:]; sys.path.insert(0,root); runpy.run_path(script,run_name="__main__")'
 }
 ```

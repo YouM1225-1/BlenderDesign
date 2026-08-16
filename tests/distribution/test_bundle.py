@@ -215,6 +215,22 @@ def test_checkout_supports_real_subprocess_runner_without_console_output(
     assert capfd.readouterr() == ("", "")
 
 
+def test_checkout_ignores_hostile_path_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, commit = _checkout(tmp_path)
+    hostile_bin = tmp_path / "hostile-bin"
+    hostile_bin.mkdir()
+    sentinel = tmp_path / "hostile-git-ran"
+    fake_git = hostile_bin / "git"
+    fake_git.write_text(f"#!/bin/sh\ntouch {sentinel}\nexit 97\n")
+    fake_git.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{hostile_bin}:{os.environ['PATH']}")
+
+    assert verify_distribution_checkout(bundle, commit, subprocess.run).expected_commit == commit
+    assert not sentinel.exists()
+
+
 def _rewrite_payload(bundle: Path, filename: str, content: bytes) -> None:
     (bundle / filename).write_bytes(content)
     data = json.loads((bundle / "manifest.json").read_bytes())
@@ -263,7 +279,7 @@ def test_checkout_clears_git_config_and_disables_external_status_hooks(
 
     verify_distribution_checkout(bundle, commit, recording_runner)
     for argv, env in calls:
-        assert argv[:2] == ["git", "--no-replace-objects"]
+        assert argv[:2] == ["/usr/bin/git", "--no-replace-objects"]
         assert "GIT_CONFIG_COUNT" not in env
         assert "GIT_CONFIG_KEY_0" not in env
         assert "GIT_CONFIG_VALUE_0" not in env

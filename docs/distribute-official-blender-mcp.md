@@ -22,7 +22,9 @@ bundle paths must come from that private worktree in the same fail-fast shell se
 Its private mode-0700 Git admin has empty config, hooks, templates, and info
 attributes, reads the validated source object database only by hash, and never loads
 source repository configuration. Replacement objects and system/global config remain
-disabled.
+disabled. Before any trust operation, the bootstrap saves the operator PATH and fixes
+the active PATH to macOS system directories; the saved PATH is consulted only to
+discover uv, which is then validated and replaced with its canonical regular target.
 
 The operator supplies:
 
@@ -30,8 +32,9 @@ The operator supplies:
 - `EXPECTED_DISTRIBUTION_COMMIT`: exactly 40 lowercase hexadecimal characters.
 - `BLENDER_BIN`: the absolute selected Blender executable.
 - `CODEX_BIN`: a validated absolute Codex executable.
-- optionally `UV_BIN`: an absolute uv executable; otherwise PATH and then
-  `$HOME/.local/bin/uv` are probed.
+- optionally `UV_BIN`: an absolute regular or symlinked uv executable; otherwise the
+  saved operator PATH and then `$HOME/.local/bin/uv` are probed. The resolved Python
+  canonicalizes uv before any installer command or host check.
 
 The skill gives the exact marketplace, inspect, install, verify, rollback, and private
 worktree cleanup commands. Its four installer launchers use Python `-B` so importing

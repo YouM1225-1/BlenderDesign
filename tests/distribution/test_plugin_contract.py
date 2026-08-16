@@ -100,6 +100,9 @@ def test_trust_bootstrap_is_fail_fast_commit_derived_and_hook_free() -> None:
     block = _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP")
     required_in_order = [
         "set -euo pipefail",
+        'OPERATOR_PATH="$PATH"',
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+        "export PATH",
         ': "${SOURCE_DISTRIBUTION_ROOT:?set source repository path}"',
         ': "${EXPECTED_DISTRIBUTION_COMMIT:?set reviewed 40-hex commit}"',
         "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY",
@@ -245,6 +248,26 @@ def test_trust_bootstrap_executes_without_source_hooks_or_redirected_environment
     assert not python_sentinel.exists()
 
 
+def test_trust_bootstrap_ignores_hostile_operator_path(tmp_path: Path) -> None:
+    repo, commit = _trust_fixture(tmp_path)
+    hostile_bin = tmp_path / "hostile-bin"
+    hostile_bin.mkdir()
+    sentinel = tmp_path / "hostile-tar-ran"
+    hostile_tar = hostile_bin / "tar"
+    hostile_tar.write_text(f"#!/bin/sh\ntouch {sentinel}\nexit 97\n")
+    hostile_tar.chmod(0o700)
+    env, _, _ = _trust_env(repo, commit, tmp_path)
+    env["PATH"] = f"{hostile_bin}:{env['PATH']}"
+    script = "\n".join(
+        (
+            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            _shell_block(SKILL.read_text(), "TRUST_CLEANUP"),
+        )
+    )
+    subprocess.run(["bash", "-c", script], env=env, check=True, capture_output=True, text=True)
+    assert not sentinel.exists()
+
+
 def test_documented_first_inspect_keeps_trusted_checkout_clean(tmp_path: Path) -> None:
     source = tmp_path / "source"
     real_uv = Path(shutil.which("uv") or Path.home() / ".local/bin/uv")
@@ -324,6 +347,8 @@ int main(int argc, char **argv) {
         f'exec {str(real_uv)!r} "$@"\n'
     )
     uv.chmod(0o700)
+    uv_link = tmp_path / "uv-link"
+    uv_link.symlink_to(uv)
     _git(ROOT, "worktree", "add", "--detach", str(source), "HEAD")
     try:
         commit = _git(source, "rev-parse", "HEAD")
@@ -360,7 +385,7 @@ int main(int argc, char **argv) {
             EXPECTED_DISTRIBUTION_COMMIT=commit,
             BLENDER_BIN=str(blender),
             CODEX_BIN=str(codex),
-            UV_BIN=str(uv),
+            UV_BIN=str(uv_link),
             HOME=str(profile),
             CODEX_HOME=str(profile / "codex"),
             BLENDER_USER_RESOURCES=str(resources),
@@ -370,7 +395,9 @@ int main(int argc, char **argv) {
         result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
         assert result.stdout.endswith("\n") and len(result.stdout.splitlines()) == 1
-        assert json.loads(result.stdout)["command"] == "inspect"
+        payload = json.loads(result.stdout)
+        assert payload["command"] == "inspect"
+        assert payload["host"]["uv_version"] == "0.12.2"
         assert not tuple(source.rglob("__pycache__"))
         assert not tuple(source.rglob("*.py[co]"))
         assert not _git(source, "status", "--porcelain=v1", "--untracked-files=all")
@@ -598,7 +625,7 @@ def test_uv_bootstrap_is_local_only_and_repeated_before_every_command() -> None:
     text = SKILL.read_text()
     block = _shell_block(text, "UV_BOOTSTRAP")
     assert 'if test -n "${UV_BIN:-}"' in block
-    assert "command -v uv" in block
+    assert 'PATH="$OPERATOR_PATH" command -v uv' in block
     assert 'test -x "$HOME/.local/bin/uv"' in block
     assert 'case "$CANDIDATE_UV" in /*)' in block
     assert 'test -x "$CANDIDATE_UV"' in block
@@ -608,6 +635,12 @@ def test_uv_bootstrap_is_local_only_and_repeated_before_every_command() -> None:
     assert '"$CANDIDATE_UV" python find 3.13 --no-project' in block
     assert "--no-python-downloads --no-config" in block
     assert '"$PYTHON_BIN" -I -c' in block
+    assert "resolve(strict=True)" in block
+    assert 'test -f "$CANONICAL_UV"' in block
+    assert 'test ! -L "$CANONICAL_UV"' in block
+    assert block.count('"$CANONICAL_UV" --version') == 1
+    assert block.count('"$CANONICAL_UV" run --help') == 2
+    assert 'UV_BIN="$CANONICAL_UV"' in block
     assert "curl " not in block and "brew " not in block and "pip " not in block
 
     commands = _marked(text, "INSTALLER_COMMANDS")

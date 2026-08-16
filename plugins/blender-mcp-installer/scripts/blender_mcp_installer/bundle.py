@@ -314,7 +314,7 @@ def _bytes(output: object) -> bytes:
 
 def _git(runner: _GitRunner, argv: list[str], root: Path, env: Mapping[str, str]) -> bytes:
     argv = [
-        "git",
+        "/usr/bin/git",
         "--no-replace-objects",
         "-c",
         "core.fsmonitor=false",
