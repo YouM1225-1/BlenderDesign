@@ -63,6 +63,7 @@ REMOVE_ENV = {
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_COMMON_DIR",
     "GIT_CEILING_DIRECTORIES",
+    "GIT_TEMPLATE_DIR",
 }
 
 
@@ -135,20 +136,97 @@ def _git_command(*arguments: str) -> list[str]:
     ]
 
 
-def _copy_object_store(source: Path, target: Path) -> None:
-    for entry in sorted(source.rglob("*")):
-        relative = entry.relative_to(source)
-        if relative.as_posix() in {"info/alternates", "info/http-alternates"}:
+def _source_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_uid,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+    )
+
+
+def _copy_object_directory(
+    source_fd: int, target: Path, relative: PurePosixPath = PurePosixPath()
+) -> None:
+    before = os.fstat(source_fd)
+    names = tuple(sorted(os.listdir(source_fd)))
+    entries = [
+        (name, os.stat(name, dir_fd=source_fd, follow_symlinks=False)) for name in names
+    ]
+    for name, metadata in entries:
+        child_relative = relative / name
+        if child_relative.as_posix() in {"info/alternates", "info/http-alternates"}:
             raise ValueError("upstream Git alternates are not allowed")
-        metadata = entry.lstat()
-        destination = target / relative
+        destination = target / name
         if stat.S_ISDIR(metadata.st_mode):
             destination.mkdir(exist_ok=True)
+            child_fd = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=source_fd,
+            )
+            try:
+                if _source_identity(os.fstat(child_fd)) != _source_identity(metadata):
+                    raise ValueError(f"source object store changed during copy: {child_relative}")
+                _copy_object_directory(child_fd, destination, child_relative)
+            finally:
+                os.close(child_fd)
+            after_child = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+            if _source_identity(after_child) != _source_identity(metadata):
+                raise ValueError(f"source object store changed during copy: {child_relative}")
         elif stat.S_ISREG(metadata.st_mode):
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(entry, destination)
+            source_file_fd = os.open(
+                name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=source_fd
+            )
+            target_fd = -1
+            try:
+                opened = os.fstat(source_file_fd)
+                if _source_identity(opened) != _source_identity(metadata):
+                    raise ValueError(f"source object store changed during copy: {child_relative}")
+                target_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                copied = 0
+                while chunk := os.read(source_file_fd, 1024 * 1024):
+                    view = memoryview(chunk)
+                    while view:
+                        view = view[os.write(target_fd, view) :]
+                    copied += len(chunk)
+                after_file = os.fstat(source_file_fd)
+                if (
+                    _source_identity(after_file) != _source_identity(opened)
+                    or copied != opened.st_size
+                ):
+                    raise ValueError(f"source object store changed during copy: {child_relative}")
+            finally:
+                if target_fd >= 0:
+                    os.close(target_fd)
+                os.close(source_file_fd)
         else:
-            raise ValueError(f"unsafe upstream Git object-store entry: {relative}")
+            raise ValueError(f"unsafe upstream Git object-store entry: {child_relative}")
+    after = os.fstat(source_fd)
+    if _source_identity(after) != _source_identity(before) or tuple(sorted(os.listdir(source_fd))) != names:
+        raise ValueError(f"source object store changed during copy: {relative or '.'}")
+
+
+def _copy_object_store(source: Path, target: Path) -> None:
+    try:
+        root_metadata = source.lstat()
+    except OSError as exc:
+        raise ValueError("upstream Git object store root is missing") from exc
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        raise ValueError("upstream Git object store root must be a real directory")
+    source_fd = os.open(
+        source, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        if _source_identity(os.fstat(source_fd)) != _source_identity(root_metadata):
+            raise ValueError("source object store changed during copy: root")
+        _copy_object_directory(source_fd, target)
+        if _source_identity(os.fstat(source_fd)) != _source_identity(root_metadata):
+            raise ValueError("source object store changed during copy: root")
+    finally:
+        os.close(source_fd)
 
 
 def _extract_two_archives(source: Path, workspace: Path) -> tuple[tuple[Path, Path], int]:
@@ -159,11 +237,17 @@ def _extract_two_archives(source: Path, workspace: Path) -> tuple[tuple[Path, Pa
     common_dir = _run(
         _git_command("rev-parse", "--git-common-dir"), cwd=source, env=env
     ).stdout.strip()
-    source_objects = (source / common_dir / "objects").resolve()
-    if not source_objects.is_dir():
-        raise ValueError("upstream Git object store is missing")
+    common_path = Path(common_dir)
+    if not common_path.is_absolute():
+        common_path = source / common_path
+    source_objects = common_path / "objects"
+    empty_template = workspace / "empty-template"
+    empty_template.mkdir(mode=0o700)
+    os.chmod(empty_template, 0o700)
     _run(
-        _git_command("init", "--bare", str(isolated)),
+        _git_command(
+            "init", "--bare", f"--template={empty_template}", str(isolated)
+        ),
         env=env,
     )
     _copy_object_store(source_objects, isolated / "objects")
@@ -533,6 +617,23 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _fsync_candidate(path: Path) -> None:
+    for entry in sorted(path.iterdir()):
+        metadata = entry.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"candidate entry is not a regular file: {entry.name}")
+        fd = os.open(entry, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            if _source_identity(os.fstat(fd)) != _source_identity(metadata):
+                raise ValueError(f"candidate changed before fsync: {entry.name}")
+            os.fsync(fd)
+            if _source_identity(os.fstat(fd)) != _source_identity(metadata):
+                raise ValueError(f"candidate changed during fsync: {entry.name}")
+        finally:
+            os.close(fd)
+    _fsync_directory(path)
+
+
 def build_distribution(
     source: Path, blender_bin: Path, uv_bin: Path, output_dir: Path
 ) -> ReleaseManifest:
@@ -549,6 +650,7 @@ def build_distribution(
             manifest = _build_candidate(
                 source_roots, blender_bin, uv_bin, candidate, workspace, epoch
             )
+        _fsync_candidate(candidate)
         recovery = output_dir.parent / f".{output_dir.name}.recovery.{uuid.uuid4().hex}"
         had_output = output_dir.exists()
         if had_output:

@@ -360,16 +360,90 @@ def test_builder_ignores_upstream_replacement_and_source_info_attributes(
     hostile_attributes = tmp_path / "hostile-attributes"
     hostile_attributes.write_text("payload export-ignore\n")
     _git(["git", "config", "core.attributesFile", str(hostile_attributes)], source)
+    clean_workspace = tmp_path / "clean-workspace"
+    clean_workspace.mkdir()
+    monkeypatch.setattr(builder, "UPSTREAM_COMMIT", reviewed)
+    clean_roots, _epoch = builder._extract_two_archives(source, clean_workspace)
+    clean_trees = [
+        {
+            path.relative_to(root): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+        for root in clean_roots
+    ]
+    hostile_template = tmp_path / "hostile-template"
+    (hostile_template / "info").mkdir(parents=True)
+    (hostile_template / "info/attributes").write_text("payload export-ignore\n")
+    monkeypatch.setenv("GIT_TEMPLATE_DIR", str(hostile_template))
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.attributesFile")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(hostile_attributes))
-    monkeypatch.setattr(builder, "UPSTREAM_COMMIT", reviewed)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     roots, _epoch = builder._extract_two_archives(source, workspace)
-    for root in roots:
+    hostile_trees = [
+        {
+            path.relative_to(root): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+        for root in roots
+    ]
+    assert hostile_trees == clean_trees
+    for root in (*clean_roots, *roots):
         assert (root / "payload").read_text() == "reviewed"
         assert not (root / "excluded").exists()
+
+
+def test_builder_rejects_symlinked_object_store_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(["git", "init", "-q"], source)
+    _git(["git", "config", "user.name", "Test"], source)
+    _git(["git", "config", "user.email", "test@example.invalid"], source)
+    (source / "payload").write_text("reviewed")
+    _git(["git", "add", "."], source)
+    _git(["git", "commit", "-qm", "fixture"], source)
+    commit = _git(["git", "rev-parse", "HEAD"], source).stdout.strip()
+    objects = source / ".git/objects"
+    actual_objects = source / ".git/actual-objects"
+    objects.rename(actual_objects)
+    objects.symlink_to(actual_objects)
+    monkeypatch.setattr(builder, "UPSTREAM_COMMIT", commit)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with pytest.raises(ValueError, match="object store root"):
+        builder._extract_two_archives(source, workspace)
+
+
+@pytest.mark.parametrize("mutation", ["entry", "file"])
+def test_object_store_copy_rejects_source_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    source = tmp_path / "objects"
+    (source / "a-dir").mkdir(parents=True)
+    (source / "z-file").write_bytes(b"before")
+    target = tmp_path / "target"
+    target.mkdir()
+    real_mkdir = Path.mkdir
+    mutated = False
+
+    def mutating_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+        nonlocal mutated
+        real_mkdir(path, *args, **kwargs)
+        if not mutated and path == target / "a-dir":
+            mutated = True
+            if mutation == "entry":
+                (source / "late-object").write_bytes(b"late")
+            else:
+                (source / "z-file").write_bytes(b"after!")
+
+    monkeypatch.setattr(Path, "mkdir", mutating_mkdir)
+    with pytest.raises(ValueError, match="changed during copy"):
+        builder._copy_object_store(source, target)
 
 
 def test_builder_sanitizes_probe_environment() -> None:
@@ -463,3 +537,43 @@ def test_tampered_manifest_cannot_replace_last_good_output(
         builder.build_distribution(Path("source"), Path("blender"), Path("uv"), output)
     after = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in output.iterdir()}
     assert after == before
+
+
+def test_candidate_is_fsynced_before_first_publication_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "artifacts"
+    output.mkdir()
+    (output / "last-good").write_text("old")
+    required: set[int] = set()
+    synced: set[int] = set()
+    candidate_root: list[Path] = []
+
+    def build_candidate(*args: object) -> object:
+        candidate = args[3]
+        assert isinstance(candidate, Path)
+        candidate.mkdir()
+        (candidate / "one").write_text("1")
+        (candidate / "two").write_text("2")
+        candidate_root.append(candidate)
+        required.update(path.stat().st_ino for path in candidate.iterdir())
+        required.add(candidate.stat().st_ino)
+        return object()
+
+    real_fsync = os.fsync
+    real_rename = os.rename
+
+    def record_fsync(fd: int) -> None:
+        synced.add(os.fstat(fd).st_ino)
+        real_fsync(fd)
+
+    def checked_rename(source: Path, target: Path) -> None:
+        assert candidate_root
+        assert required <= synced
+        real_rename(source, target)
+
+    monkeypatch.setattr(builder, "_extract_two_archives", lambda source, workspace: ((output, output), 1))
+    monkeypatch.setattr(builder, "_build_candidate", build_candidate)
+    monkeypatch.setattr(os, "fsync", record_fsync)
+    monkeypatch.setattr(os, "rename", checked_rename)
+    builder.build_distribution(Path("source"), Path("blender"), Path("uv"), output)
