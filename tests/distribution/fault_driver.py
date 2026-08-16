@@ -50,7 +50,7 @@ def _applicable_points(fixture_kind: str, preimage: str) -> dict[str, frozenset[
             )
         }
     if fixture_kind == "codex_semantic":
-        return {
+        points = {
             point: _MUTATING
             for point in (
                 "after_codex_semantic_stage_fsync",
@@ -60,6 +60,18 @@ def _applicable_points(fixture_kind: str, preimage: str) -> dict[str, frozenset[
                 "after_codex_semantic_recovery_cleanup",
             )
         }
+        if preimage == "absent":
+            points.update(
+                {
+                    point: _MUTATING
+                    for point in (
+                        "after_json_file_fsync",
+                        "after_json_rename",
+                        "after_json_parent_fsync",
+                    )
+                }
+            )
+        return points
     if fixture_kind == "active_selector":
         points = {
             "after_rollback_intent": _MUTATING,
@@ -261,7 +273,11 @@ def _patch_scenario(cli, root: Path, fixture_kind: str, preimage: str, point: st
             / f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
         )
         site.mkdir(parents=True)
-        shutil.copytree(Path(tomlkit.__file__).parent, site / "tomlkit")
+        shutil.copytree(
+            Path(tomlkit.__file__).parent,
+            site / "tomlkit",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
         (stage.path / "bin/blender-mcp-managed").write_bytes(b"launcher")
         return capture_tree(stage.root, stage.relative)
 

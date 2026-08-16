@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -31,10 +32,15 @@ from blender_mcp_installer.filesystem import (  # noqa: E402
 from blender_mcp_installer.model import (  # noqa: E402
     ActionKind,
     ActionState,
+    ActiveSelector,
     BlenderPaths,
     FileImage,
     InstallRoots,
     PendingSelector,
+    Receipt,
+    ReceiptAction,
+    ReceiptStatus,
+    TargetRole,
     TreeImage,
 )
 from blender_mcp_installer.verification import HostCapabilities  # noqa: E402
@@ -93,6 +99,106 @@ def test_python_resolution_is_bounded_and_redacted(tmp_path: Path, body: str) ->
     assert time.monotonic() - started < 5
     assert str(caught.value) == "local Python 3.13 probe failed"
     assert "SECRET-SENTINEL" not in str(caught.value)
+
+
+def test_absent_semantic_codex_restored_receipt_delta_is_exact(tmp_path: Path) -> None:
+    image_path = tmp_path / "image"
+    image_path.write_bytes(b"image")
+    with SafeRoot.open(tmp_path, os.getuid(), tmp_path) as root:
+        present = capture_file(root, Path("image"))
+    action = cli._action(
+        0,
+        ActionKind.CODEX_FILE,
+        ActionState.RESTORING,
+        tmp_path / "config.toml",
+        tmp_path / "stage",
+        tmp_path / "recovery",
+        FileImage.absent(),
+        intended=present,
+        actual=present,
+        recovery_image=FileImage.absent(),
+        rollback_intended=present,
+        rollback_displaced=present,
+    )
+    receipt = Receipt(
+        1,
+        UUID("12345678-1234-4234-9234-123456789abc"),
+        1,
+        None,
+        ReceiptStatus.ROLLBACK_PENDING,
+        "2026-01-01T00:00:00Z",
+        {},
+        {},
+        {},
+        (),
+        (action,),
+        {},
+    )
+
+    assert cli._receipt_transition(
+        receipt,
+        replace(receipt, actions=(replace(action, state=ActionState.RESTORED),)),
+    )
+
+
+def test_reversed_selector_rejects_cross_install_before_receipt_settle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requested = UUID("12345678-1234-4234-9234-123456789abc")
+    reversed_id = UUID("87654321-4321-4321-8321-cba987654321")
+    state_path = tmp_path / "state"
+    receipts = state_path / "receipts"
+    receipts.mkdir(parents=True)
+    receipt_file = receipts / f"{reversed_id}.json"
+    receipt_file.write_bytes(b"receipt")
+    temp = receipts / f".blender-mcp-installer.{reversed_id}.{reversed_id}.json.tmp"
+    temp.write_bytes(b"temp")
+    image_file = tmp_path / "image"
+    image_file.write_bytes(b"image")
+    with SafeRoot.open(tmp_path, os.getuid(), tmp_path) as boundary:
+        image = capture_file(boundary, Path("image"))
+    selector = ActiveSelector(1, 2, reversed_id, f"{reversed_id}.json")
+    candidate = SimpleNamespace(
+        install_id=reversed_id,
+        generation=2,
+        status=ReceiptStatus.ROLLBACK_PENDING,
+        targets=(
+            SimpleNamespace(
+                role=TargetRole.ACTIVE_SELECTOR,
+                pre=image,
+                install_post=image,
+            ),
+        ),
+    )
+    roots = SimpleNamespace(receipt=lambda install_id: receipts / f"{install_id}.json")
+    monkeypatch.setattr(cli, "load_receipt", lambda *_args: candidate)
+    monkeypatch.setattr(cli, "capture_file", lambda *_args: image)
+    monkeypatch.setattr(
+        cli,
+        "load_atomic_json_pair",
+        lambda *_args: (selector.to_dict(), None),
+    )
+    settled: list[UUID] = []
+    monkeypatch.setattr(
+        cli,
+        "_settle_known_receipt_atomic_json",
+        lambda _roots, _bundle, _manifest, install_id, _state, _fault: settled.append(install_id),
+    )
+    before = (receipt_file.read_bytes(), temp.read_bytes())
+
+    with SafeRoot.open(state_path, os.getuid(), state_path) as state:
+        with pytest.raises(InstallerError, match="active selector recovery conflict"):
+            cli._discover_reversed_selector_receipt(
+                roots,
+                object(),
+                "0" * 64,
+                state,
+                NoOpFaultInjector(),
+                requested,
+            )
+
+    assert settled == []
+    assert (receipt_file.read_bytes(), temp.read_bytes()) == before
 
 
 @pytest.mark.parametrize("command", ["inspect", "install", "verify", "rollback"])
@@ -714,6 +820,173 @@ _FAULT_CASES = tuple(
 )
 
 
+def _crash_receipt_path(state_root: Path, requested: Path | None) -> Path | None:
+    if requested is not None:
+        return requested
+    receipts = tuple((state_root / "receipts").glob("[0-9a-f]*.json"))
+    for candidate in sorted(receipts, key=lambda path: path.stat().st_mtime_ns, reverse=True):
+        if json.loads(candidate.read_text())["status"] in {"rollback_pending", "rolled_back"}:
+            return candidate
+    for selector_name in ("pending.json", "active.json"):
+        selector = state_root / selector_name
+        if selector.exists():
+            value = json.loads(selector.read_text())
+            return state_root / "receipts" / value["receipt_basename"]
+    return None if not receipts else max(receipts, key=lambda path: path.stat().st_mtime_ns)
+
+
+def _captured(path: Path, *, tree: bool):
+    if not path.parent.exists():
+        return TreeImage.absent() if tree else FileImage.absent()
+    with SafeRoot.open(path.parent, os.getuid(), path.parent) as safe:
+        return capture_tree(safe, Path(path.name)) if tree else capture_file(safe, Path(path.name))
+
+
+def _assert_exact_crash_prefix(
+    state_root: Path,
+    requested: Path | None,
+    fixture_kind: str,
+    preimage: str,
+    point: str,
+    command: str,
+) -> None:
+    temps = tuple(state_root.rglob(".blender-mcp-installer.*.tmp"))
+    semantic_atomic = (
+        fixture_kind == "codex_semantic"
+        and preimage == "absent"
+        and point.startswith("after_json_")
+    )
+    if semantic_atomic:
+        assert len(temps) == 1
+    elif point.startswith("after_json_"):
+        if command == "install":
+            pending = state_root / "pending.json"
+            if point == "after_json_file_fsync":
+                assert not pending.exists() and len(temps) == 1
+                assert json.loads(temps[0].read_text())["manifest_sha256"]
+            else:
+                assert pending.exists() and not temps
+        else:
+            assert requested is not None and len(temps) == 1
+            live_status = json.loads(requested.read_text())["status"]
+            temp_status = json.loads(temps[0].read_text())["status"]
+            if point == "after_json_file_fsync":
+                assert (live_status, temp_status) == ("installed", "rollback_pending")
+            else:
+                assert (live_status, temp_status) == ("rollback_pending", "installed")
+        return
+    elif point == "after_active_swap":
+        assert len(temps) == 1 and temps[0].name.endswith(".active.json.tmp")
+    else:
+        assert not temps
+    if point == "after_pending_publish":
+        assert (state_root / "pending.json").exists()
+        return
+    receipt_path = _crash_receipt_path(state_root, requested)
+    assert receipt_path is not None
+    receipt = json.loads(receipt_path.read_text())
+    if semantic_atomic:
+        temp_receipt = json.loads(temps[0].read_text())
+        live_state = receipt["actions"][-1]["state"]
+        temp_state = temp_receipt["actions"][-1]["state"]
+        if point == "after_json_file_fsync":
+            assert (live_state, temp_state) == ("restoring", "restored")
+        else:
+            assert (live_state, temp_state) == ("restored", "restoring")
+
+    expected_states = {
+        "planned": "planned",
+        "stage": "staged",
+        "swap": "swapped",
+        "park": "parked",
+        "publish": "published",
+        "completed": "completed",
+        "restore_swap": "restoring",
+        "restore_move": "restoring",
+        "restore_cleanup": "restored",
+    }
+    selected = next(
+        (action for action in receipt["actions"] if point.startswith(f"after_{action['kind']}_")),
+        None,
+    )
+    if selected is not None:
+        suffix = point.removeprefix(f"after_{selected['kind']}_")
+        if suffix in expected_states:
+            assert selected["state"] == expected_states[suffix]
+    semantic_states = {
+        "after_codex_semantic_stage_fsync": "semantic_staged",
+        "after_codex_semantic_swap": "semantic_staged",
+        "after_codex_semantic_receipt": "semantic_swapped",
+        "after_codex_semantic_displaced_cleanup": "restoring",
+        "after_codex_semantic_recovery_cleanup": "restored",
+    }
+    if point in semantic_states:
+        selected = next(action for action in receipt["actions"] if action["kind"] == "codex_file")
+        assert selected["state"] == semantic_states[point]
+    if selected is not None and selected["kind"] != "bundle_stage":
+        action = ReceiptAction.from_dict(selected)
+        target = Path(selected["target_path"])
+        tree = selected["kind"] in {"runtime_tree", "extension_tree"}
+        stage = target.parent / selected["stage_basename"]
+        recovery = target.parent / selected["recovery_basename"]
+        physical = (
+            _captured(target, tree=tree),
+            _captured(stage, tree=tree),
+            _captured(recovery, tree=tree),
+        )
+        if selected["rollback_intended"] is None:
+            assert cli._native_rollback_tuple_valid(action, *physical)
+        else:
+            rollback_stage = target.parent / (
+                f".blender-mcp-installer.{receipt['install_id']}.codex.rollback.stage"
+            )
+            rollback_image = _captured(rollback_stage, tree=False)
+            intended = FileImage.from_dict(selected["rollback_intended"])
+            absent = FileImage.absent()
+            semantic_rows = {
+                "semantic_staged": (
+                    physical[0].state.value == "present"
+                    and physical[1] == absent
+                    and physical[2] == action.pre
+                    and rollback_image.state.value == "present"
+                ),
+                "semantic_swapped": (
+                    physical == (intended, absent, action.pre)
+                    and rollback_image.state.value == "present"
+                ),
+                "restoring": (
+                    physical[0] == intended
+                    and physical[1] == absent
+                    and physical[2] in {action.pre, absent}
+                    and rollback_image == absent
+                ),
+                "restored": (physical == (intended, absent, absent) and rollback_image == absent),
+            }
+            assert semantic_rows[selected["state"]]
+
+    pending = state_root / "pending.json"
+    active = state_root / "active.json"
+    previous = state_root / "backups" / receipt["install_id"] / "previous-active.json"
+    if point == "after_pending_publish":
+        assert pending.exists()
+    if point == "after_pending_remove":
+        assert not pending.exists()
+    if point == "after_active_swap":
+        assert active.exists() and not previous.exists()
+    if point == "after_active_park":
+        assert active.exists() and previous.exists()
+    if point == "after_active_parent_fsync":
+        assert active.exists() and previous.exists() == (preimage == "present")
+    if point in {
+        "after_active_restore_swap",
+        "after_active_restore_parent_fsync",
+        "after_rollback_status",
+    }:
+        assert previous.exists()
+    if point == "after_active_restore_cleanup":
+        assert not previous.exists()
+
+
 @pytest.mark.parametrize(("fixture_kind", "preimage", "point", "command"), _FAULT_CASES)
 def test_closed_fault_matrix_exits_70_then_fresh_process_recovers_exactly(
     tmp_path: Path, fixture_kind: str, preimage: str, point: str, command: str
@@ -773,8 +1046,34 @@ def test_closed_fault_matrix_exits_70_then_fresh_process_recovers_exactly(
         or point.startswith("after_codex_semantic")
         or point == "after_active_restore_cleanup"
     )
+    semantic_atomic = (
+        fixture_kind == "codex_semantic"
+        and preimage == "absent"
+        and point.startswith("after_json_")
+    )
+    rollback_point = rollback_point or semantic_atomic
     receipt: Path | None = None
-    if command == "install" and rollback_point:
+    if semantic_atomic:
+        seeded = invoke("install", recover=True)
+        assert seeded.returncode == 0, seeded.stderr + seeded.stdout
+        active = json.loads(
+            (host_root / "home/.local/state/blender-mcp-installer/active.json").read_text()
+        )
+        semantic_receipt = (
+            host_root
+            / "home/.local/state/blender-mcp-installer/receipts"
+            / active["receipt_basename"]
+        )
+        prepared = invoke(
+            "rollback",
+            recover=False,
+            receipt=semantic_receipt,
+            selected_point="after_codex_semantic_displaced_cleanup",
+        )
+        assert prepared.returncode == 70, prepared.stderr + prepared.stdout
+        if command == "rollback":
+            receipt = semantic_receipt
+    elif command == "install" and rollback_point:
         seeded = invoke("install", recover=True)
         assert seeded.returncode == 0, seeded.stderr + seeded.stdout
         if fixture_kind == "active_selector" and preimage == "present":
@@ -818,7 +1117,7 @@ def test_closed_fault_matrix_exits_70_then_fresh_process_recovers_exactly(
         seeded = invoke("install", recover=True)
         assert seeded.returncode == 0, seeded.stderr + seeded.stdout
         (scenario / "force-change").write_text("1\n")
-    if command == "rollback":
+    if command == "rollback" and not semantic_atomic:
         staged_move = preimage == "present" and point.endswith("_restore_move")
         if staged_move and fixture_kind != "codex_file":
             prepared = invoke(
@@ -863,6 +1162,14 @@ def test_closed_fault_matrix_exits_70_then_fresh_process_recovers_exactly(
     crashed = invoke(command, recover=False, receipt=receipt)
     assert crashed.returncode == 70, crashed.stderr + crashed.stdout
     assert "SECRET-SENTINEL" not in crashed.stdout + crashed.stderr
+    _assert_exact_crash_prefix(
+        host_root / "home/.local/state/blender-mcp-installer",
+        receipt,
+        fixture_kind,
+        preimage,
+        point,
+        command,
+    )
     recovered = invoke(command, recover=True, receipt=receipt)
     assert recovered.returncode == 0, recovered.stderr + recovered.stdout
     assert "SECRET-SENTINEL" not in recovered.stdout + recovered.stderr

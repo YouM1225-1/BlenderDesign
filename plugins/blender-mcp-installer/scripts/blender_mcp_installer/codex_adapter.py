@@ -694,7 +694,7 @@ def _invoke_helper(
     try:
         try:
             completed = subprocess.run(
-                [str(runtime_python), "-I", "-c", _HELPER, str(request_fd)],
+                [str(runtime_python), "-I", "-B", "-c", _HELPER, str(request_fd)],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -702,6 +702,7 @@ def _invoke_helper(
                     "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                     "PYTHONNOUSERSITE": "1",
                     "PYTHONSAFEPATH": "1",
+                    "PYTHONDONTWRITEBYTECODE": "1",
                 },
                 pass_fds=(request_fd, *inherited),
                 check=False,
@@ -733,7 +734,7 @@ def _invoke_readonly_helper(
     process: subprocess.Popen[bytes] | None = None
     try:
         process = subprocess.Popen(
-            [str(runtime_python), "-I", "-c", _HELPER, str(request_fd)],
+            [str(runtime_python), "-I", "-B", "-c", _HELPER, str(request_fd)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -741,6 +742,7 @@ def _invoke_readonly_helper(
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                 "PYTHONNOUSERSITE": "1",
                 "PYTHONSAFEPATH": "1",
+                "PYTHONDONTWRITEBYTECODE": "1",
             },
             pass_fds=(request_fd, *inherited),
         )

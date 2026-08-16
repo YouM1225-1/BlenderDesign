@@ -723,6 +723,14 @@ def _receipt_transition(old: Receipt, new: Receipt) -> bool:
             (ActionState.STAGED, ActionState.CLEANED): {"state"},
         }
         if (
+            before.kind is ActionKind.CODEX_FILE
+            and before.state is ActionState.RESTORING
+            and after.state is ActionState.RESTORED
+            and before.rollback_intended is not None
+            and before.pre.state is ImageState.ABSENT
+        ):
+            exact_deltas[(ActionState.RESTORING, ActionState.RESTORED)] = {"state"}
+        if (
             after.state in {ActionState.RESTORING, ActionState.RESTORED}
             and (
                 before.state,
@@ -2050,6 +2058,7 @@ def _preflight_rollback(
     desired = desired_codex_values(
         roots.runtime / "bin/blender-mcp-managed", profile, bundle.manifest.tools
     )
+    runtime_evidence: tuple[ReceiptAction, tuple[Image, Image, Image]] | None = None
     for action in receipt.actions:
         if action.kind is ActionKind.BUNDLE_STAGE:
             bundle_image = capture_tree(
@@ -2077,6 +2086,8 @@ def _preflight_rollback(
             capture(stage_ref.root, stage_ref.relative),
             capture(recovery_ref.root, recovery_ref.relative),
         )
+        if action.kind is ActionKind.RUNTIME_TREE:
+            runtime_evidence = (action, physical)
         recorded = by_role[action.target_role]
         post = action.actual_post or action.intended_post
         if recorded.pre != action.pre or (
@@ -2126,6 +2137,17 @@ def _preflight_rollback(
                 raise InstallerError("rollback preflight conflict")
             continue
         elif not _native_rollback_tuple_valid(action, *physical):
+            raise InstallerError("rollback preflight conflict")
+    if runtime_evidence is not None:
+        runtime_action, before = runtime_evidence
+        target_ref, stage_ref, recovery_ref = _action_references(
+            runtime_action, roots, refs, receipt.install_id
+        )
+        after = tuple(
+            capture_tree(reference.root, reference.relative)
+            for reference in (target_ref, stage_ref, recovery_ref)
+        )
+        if after != before:
             raise InstallerError("rollback preflight conflict")
     selector = by_role[TargetRole.ACTIVE_SELECTOR]
     if not isinstance(selector.pre, FileImage):
@@ -2289,6 +2311,7 @@ def _discover_reversed_selector_receipt(
     manifest_sha256: str,
     state: SafeRoot,
     fault: FaultInjector,
+    expected_install_id: UUID | None = None,
 ) -> Receipt | None:
     try:
         receipts_fd = state.open_directory(PurePath("receipts"))
@@ -2340,6 +2363,8 @@ def _discover_reversed_selector_receipt(
     if not candidates:
         return None
     candidate = candidates[0]
+    if expected_install_id is not None and candidate.install_id != expected_install_id:
+        raise InstallerError("active selector recovery conflict")
     _settle_known_receipt_atomic_json(
         roots, bundle, manifest_sha256, candidate.install_id, state, fault
     )
@@ -2357,14 +2382,9 @@ def recover_active(
 ) -> dict[str, object]:
     with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
         reversed_receipt = _discover_reversed_selector_receipt(
-            roots, bundle, manifest_sha256, state, fault
+            roots, bundle, manifest_sha256, state, fault, expected_install_id
         )
         if reversed_receipt is not None:
-            if (
-                expected_install_id is not None
-                and reversed_receipt.install_id != expected_install_id
-            ):
-                raise InstallerError("active selector recovery conflict")
             if reversed_receipt.status is ReceiptStatus.ROLLED_BACK:
                 journal = _Journal(
                     state,

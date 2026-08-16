@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import time
 import tomllib
@@ -9,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path, PurePath
 
 import pytest
+import tomlkit
 
 
 ROOT = Path(__file__).parents[2]
@@ -33,6 +35,7 @@ from blender_mcp_installer.filesystem import (  # noqa: E402
     StagedFile,
     TargetRef,
     capture_file,
+    capture_tree,
     create_deterministic_stage,
     forward_file,
 )
@@ -122,6 +125,7 @@ def _stage_config(
     desired,
     raw: bytes | None,
     basename: str = "codex.stage",
+    runtime_python: Path | None = None,
 ):
     config = root.path / "config.toml"
     if raw is not None:
@@ -130,7 +134,9 @@ def _stage_config(
     stage = _stage(root, basename)
     live_fd = None if raw is None else os.open(config, os.O_RDONLY | os.O_NOFOLLOW)
     try:
-        change = stage_codex_config(live_fd, current, desired, Path(sys.executable), stage)
+        change = stage_codex_config(
+            live_fd, current, desired, runtime_python or Path(sys.executable), stage
+        )
     finally:
         if live_fd is not None:
             os.close(live_fd)
@@ -160,14 +166,34 @@ def _installed(
     root: SafeRoot,
     desired,
     pre_raw: bytes | None,
+    runtime_python: Path | None = None,
 ):
-    target, pre, change = _stage_config(root, desired, pre_raw)
+    target, pre, change = _stage_config(root, desired, pre_raw, runtime_python=runtime_python)
     recovery = StagedFile(root, PurePath("codex.recovery"), pre)
     while (
         forward_file(target, pre, change.stage, recovery, NoOpFaultInjector()).value != "completed"
     ):
         pass
     return target, pre, change, recovery
+
+
+def _source_only_runtime(root: Path) -> Path:
+    runtime = root / "runtime"
+    python = runtime / "bin/python"
+    python.parent.mkdir(parents=True)
+    shutil.copy2(Path(sys.executable).resolve(), python)
+    python.chmod(0o700)
+    (runtime / "pyvenv.cfg").write_text(
+        f"home = {Path(sys.base_prefix) / 'bin'}\ninclude-system-site-packages = false\n"
+    )
+    site = runtime / f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+    site.mkdir(parents=True)
+    shutil.copytree(
+        Path(tomlkit.__file__).parent,
+        site / "tomlkit",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    return python
 
 
 def _rollback_context(
@@ -682,6 +708,30 @@ def test_read_only_preflight_rejects_managed_conflict_without_writes(tmp_path: P
     } == before
     assert not (root.path / "codex.rollback.stage").exists()
     assert not list(root.path.glob("*.request"))
+    root.close()
+
+
+def test_all_helpers_leave_source_only_runtime_tree_exact(tmp_path: Path) -> None:
+    runtime_python = _source_only_runtime(tmp_path)
+    root = _open_root(tmp_path / "codex")
+    desired = _desired(tmp_path)
+    target, _, change, recovery = _installed(root, desired, b'foreign = "before"\n', runtime_python)
+    with target.path.open("a") as stream:
+        stream.write('\n[foreign_after]\nvalue = "keep"\n')
+    with SafeRoot.open(tmp_path, os.getuid(), tmp_path) as boundary:
+        before = capture_tree(boundary, PurePath("runtime"))
+
+        preflight_codex_rollback(
+            _rollback_context(root, target, change.post, []),
+            recovery,
+            change.post,
+            change.managed_keys,
+            runtime_python,
+        )
+
+        assert capture_tree(boundary, PurePath("runtime")) == before
+    assert not list((tmp_path / "runtime").rglob("__pycache__"))
+    assert not list((tmp_path / "runtime").rglob("*.pyc"))
     root.close()
 
 
