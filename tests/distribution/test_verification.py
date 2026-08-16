@@ -55,7 +55,7 @@ class HostRunner:
             values = {
                 "codex": "codex-cli 0.148.0-alpha.9\n",
                 "uv": "uv 0.12.2\n",
-                "Blender": "Blender 5.2.0\n",
+                "Blender": "Blender 5.2.0 LTS\n",
                 "python": "Python 3.13.13\n",
             }
             return SimpleNamespace(returncode=0, stdout=values[Path(args[0]).name], stderr="")
@@ -136,6 +136,24 @@ def test_probe_host_uses_help_without_querying_unpublished_entry(
     assert [record[0] for record in runner.records] == expected_argv
     assert [record[1] for record in runner.records] == [tmp_path] * len(expected_argv)
     assert all(record[2] == expected_env for record in runner.records)
+
+
+@pytest.mark.parametrize(
+    "output,product",
+    [
+        ("Blender 5.2.0 stable\n", "Blender"),
+        ("Blender 5.2.0 LTS extra\n", "Blender"),
+        ("NotBlender 5.2.0 LTS\n", "Blender"),
+        ("codex-cli 0.148.0-alpha.9 LTS\n", "codex-cli"),
+        ("uv 0.12.2 LTS\n", "uv"),
+        ("Python 3.13.13 LTS\n", "Python"),
+    ],
+)
+def test_version_parser_rejects_unapproved_suffixes_and_wrong_products(
+    output: str, product: str
+) -> None:
+    with pytest.raises(InstallerError, match="host capability probe failed"):
+        verification._version(output, product)
 
 
 @pytest.mark.parametrize(

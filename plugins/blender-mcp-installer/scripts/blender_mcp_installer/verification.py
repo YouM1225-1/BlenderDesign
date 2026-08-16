@@ -40,7 +40,7 @@ _HOST_TIMEOUT = 5.0
 _MAX_STDOUT = 1024 * 1024
 _MAX_STDERR = 64 * 1024
 _MCP_TIMEOUT = 30.0
-_VERSION = re.compile(r"(?:codex-cli|uv|Blender|Python)\s+([0-9][A-Za-z0-9.+-]*)")
+_VERSION = re.compile(r"[0-9][A-Za-z0-9.+-]*")
 _MCP_COMMAND_ENV = "_BLENDER_MCP_PROBE_COMMAND"
 _MCP_HELPER = r"""
 import asyncio
@@ -372,12 +372,17 @@ def _run(
     return code, output
 
 
-def _version(output: str) -> str:
+def _version(output: str, product: str) -> str:
     lines = output.splitlines()
-    match = None if not lines else _VERSION.fullmatch(lines[0].strip())
-    if match is None:
+    prefix = f"{product} "
+    if not lines or not lines[0].strip().startswith(prefix):
         raise InstallerError("host capability probe failed")
-    return match.group(1)
+    version = lines[0].strip()[len(prefix) :]
+    if product == "Blender" and version.endswith(" LTS"):
+        version = version.removesuffix(" LTS")
+    if _VERSION.fullmatch(version) is None:
+        raise InstallerError("host capability probe failed")
+    return version
 
 
 def _default_runner(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> object:
@@ -510,9 +515,15 @@ def probe_host(
         clean.update(
             dict(zip(profile_names, map(str, (resources, config, extensions)), strict=True))
         )
+    version_probes = (
+        (codex_bin, "codex-cli"),
+        (uv_bin, "uv"),
+        (blender_bin, "Blender"),
+        (python_bin, "Python"),
+    )
     versions = tuple(
-        _version(_run(runner, (str(path), "--version"), cwd=path.parent, env=clean)[1])
-        for path in (codex_bin, uv_bin, blender_bin, python_bin)
+        _version(_run(runner, (str(path), "--version"), cwd=path.parent, env=clean)[1], product)
+        for path, product in version_probes
     )
     arches = tuple(
         _run(
