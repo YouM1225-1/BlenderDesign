@@ -4,7 +4,7 @@ Date: 2026-08-16
 
 Plan: `docs/superpowers/plans/2026-08-16-official-blender-mcp-distributable-codex-installer.md`
 
-Current plan SHA-256: `dfdd316c0c52b182691a64ef3a18b600e2b5962e8e87ac7e27ed553404ca816b`
+Current plan SHA-256: `9039302d463e2f81f5a775f99bc1fc7eebc9fa66ad983602680556ccff345c5f`
 
 Initial frozen plan SHA-256: `fb69e31ef0445d38c2caeed277c69519f95ed19c5f067eabcd7e7733dc767d72`
 
@@ -152,3 +152,26 @@ with 0 Critical, 0 Important, and 0 Minor findings. The security review
 mechanically matched all 17 valid fixture variants and all 89 point mappings
 to the Task 8 matrix and confirmed there is no direct deletion of staged
 postimages during rollback.
+
+## Task 4 Codex semantic-rollback amendment
+
+Task 4 implementation and three independent review passes exposed a closed-
+schema mismatch for semantic rollback when the original Codex config was
+absent but the user later added foreign configuration:
+
+- `codex_file` now permits the same C1-C4 semantic receipt rows for present
+  and absent preimages, with C1-C3 `recovery_image=pre`, C4 recovery absent,
+  `rollback_intended` present throughout, and `rollback_displaced` present
+  from C2 onward.
+- Present and absent forward/recovery prose now distinguishes the protected
+  recovery object from an absent deterministic recovery reference.
+- Task 4 exposes `CodexRollbackContext`; Task 8 owns the synchronous complete-
+  receipt callback and the exact bidirectional mapping between C1-C4 and
+  receipt action states.
+- Task 8's closed semantic failpoint matrix covers present and absent
+  preimages and explicitly owns the corresponding `fault_driver.py` update.
+
+The reviewed Task 4 implementation ends at `107b7d9`. The amendment produced
+the current SHA above. Three targeted reviews—security/specification,
+executability/testability, and minimality/portability—each returned READY with
+0 Critical, 0 Important, and 0 Minor findings.

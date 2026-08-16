@@ -198,7 +198,7 @@ Each receipt action has exactly ordinal, kind, object_kind, state, target_role, 
 | runtime_tree | tree | non-null matching target role/path | required | present pre: planned -> staged -> swapped -> parked -> completed -> restoring -> restored -> cleaned; absent pre uses published instead of swapped/parked | pre always required; intended_post required from staged; actual_post required from swapped/published. Present PARKED/COMPLETED has recovery_image=pre. Native present RESTORING has recovery_image=null while post is at S or recovery_image=actual_post once post is at R; absent RESTORING has recovery_image=actual_post at R. Native RESTORED/CLEANED has a closed absent recovery image. Rollback fields null. |
 | extension_tree | tree | non-null matching target role/path | required | same as runtime_tree | same as runtime_tree |
 | userpref_file | file | non-null matching target role/path | required | same transitions as runtime_tree | FileImage variants with the same null rules; rollback fields null |
-| codex_file | codex | target_role=codex_config; required path | required | same forward transitions; exact restore uses restoring/restored, semantic restore uses semantic_staged -> semantic_swapped -> restoring -> restored | FileImage variants; sole original preimage is recovery_image after parked; rollback_intended and rollback_displaced are null except the semantic states defined below |
+| codex_file | codex | target_role=codex_config; required path | required | same forward transitions; exact restore uses restoring/restored, semantic restore uses semantic_staged -> semantic_swapped -> restoring -> restored | FileImage variants. Forward present-pre rows retain pre after parked. Semantic C1-C3 recovery_image=pre and C4 recovery_image=absent; rollback_intended is present C1-C4 and rollback_displaced C2-C4 only. pre may be present or absent. No other row permits rollback images. |
 
 Task 8 owns durable action-state updates. Task 3 never writes a journal. Before any stage is created, Task 8 writes the action with its deterministic basename and state planned. Each filesystem transition is followed by a complete receipt rewrite.
 
@@ -264,7 +264,7 @@ An absent prior selector uses:
 
 Failure recovery and explicit rollback first durably write the new receipt as rollback_pending, then restore managed actions, restore the active selector, durably write failed or rolled_back, validate/remove the displaced new selector, and fsync both parents. Reconciliation completes any prefix of that order idempotently. Common failpoints are after_rollback_intent, after_active_restore_parent_fsync, after_rollback_status, and after_active_restore_cleanup; present-prior restoration uses after_active_restore_swap and absent-prior restoration uses after_active_restore_move.
 
-Codex semantic rollback uses T=live config, RS=the deterministic codex.rollback.stage, and R=the sole protected original recovery. Let C be the validated current config with permitted foreign additions and M be the deterministic three-way merge restoring managed values while preserving those additions:
+Codex semantic rollback uses T=live config, RS=the deterministic codex.rollback.stage, R=the deterministic recovery path, and pre=R's expected FileImage (present or absent). Let C be the validated current config with permitted foreign additions and M be the deterministic three-way merge restoring managed values while preserving those additions:
 
 | State | T | RS | R | Receipt images and next operation |
 | --- | --- | --- | --- | --- |
@@ -272,7 +272,7 @@ Codex semantic rollback uses T=live config, RS=the deterministic codex.rollback.
 | C1 semantic_staged | C | M | pre | rollback_intended=M, rollback_displaced=null; fsync then RENAME_SWAP(T,RS) |
 | C2 semantic_swapped | M | C | pre | rollback_intended=M, rollback_displaced=C; rewrite receipt |
 | C3 restoring | M | absent | pre | after validating/removing C at RS and parent fsync |
-| C4 restored | M | absent | absent | after validating/removing protected pre R and parent fsync |
+| C4 restored | M | absent | absent | after removing present pre R and parent fsync, or validating absent R |
 
 A fresh process derives C/M again, validates every listed image, and advances only the matching row; unlisted combinations conflict without deletion. Hard-crash points are after_codex_semantic_stage_fsync, after_codex_semantic_swap, after_codex_semantic_receipt, after_codex_semantic_displaced_cleanup, and after_codex_semantic_recovery_cleanup.
 
@@ -553,13 +553,13 @@ git commit -m "feat: add conditional installer transactions"
 - stage_codex_config(live_config_fd: int|None, current: FileImage, desired: ManagedCodexValues, runtime_python: Path, stage: StagedFile) -> CodexChange.
 - verify_codex_toml(raw: bytes, desired: ManagedCodexValues) -> None.
 - verify_codex_effective(codex_bin: Path, desired: ManagedCodexValues, env: Mapping[str,str]) -> EffectiveCodexState.
-- rollback_codex(current, protected_recovery, installer_post, managed_keys, runtime_python, fault: FaultInjector) -> RollbackResult.
+- rollback_codex(current: CodexRollbackContext, protected_recovery: StagedFile, installer_post: FileImage, managed_keys: ManagedCodexKeys, runtime_python: Path, fault: FaultInjector) -> RollbackResult.
 
 Owned values are command=the verified runtime/bin/blender-mcp-managed launcher; args=[]; omit_tools_from=[]; startup_timeout_sec=20.0; tool_timeout_sec=60.0; default_tools_approval_mode=approve; enabled_tools=the exact catalog; env.HOME; env.BLENDER_USER_RESOURCES; env.BLENDER_USER_CONFIG; env.BLENDER_USER_EXTENSIONS; env.BLENDER_PATH; env.BLENDER_MCP_HOST=localhost; env.BLENDER_MCP_PORT=9876; env.PYTHONNOUSERSITE=1; env.PYTHONSAFEPATH=1; and membership mcp__blender in features.code_mode.direct_only_tool_namespaces.
 
-tomlkit runs only through the staged/active locked runtime; pyproject.toml and uv.lock do not change. The helper reads the still-live config through the inherited validated fd and writes only the deterministic mode-0600 merged stage. It creates no preimage copy. After RENAME_SWAP, the old config in the stage is parked at the deterministic Codex recovery path and becomes the sole protected preimage. Receipt stores only its re-derived path/hash and managed key metadata.
+tomlkit runs only through the staged/active locked runtime; pyproject.toml and uv.lock do not change. The helper reads the live config, when present, through the inherited validated fd and writes only the deterministic mode-0600 merged stage. It creates no preimage copy. Present-pre publication uses RENAME_SWAP, then parks the old config at the deterministic Codex recovery path as the sole protected preimage. Absent-pre publication uses RENAME_EXCL and the deterministic recovery reference remains absent. Receipt stores only the re-derived path/image and managed key metadata.
 
-Rollback reads pre values/nodes from that sole recovery object. For each owned scalar/list/env key: current==installer-post restores pre; current==pre is already restored; any other current value is a conflict. Foreign table/env keys and namespace additions are preserved. Exact current/post uses the generic native swap. A non-conflicting semantic merge follows C0-C4 in the central contract: journal and fsync codex.rollback.stage, call `fault.hit(after_codex_semantic_stage_fsync)`, swap it with current, call the matching swap hit, journal both semantic images and hit the receipt boundary, validate/remove the displaced current and hit its cleanup boundary, then validate/remove the protected preimage and hit its cleanup boundary. `run_cli(..., fault)` forwards its explicit injector to `rollback_codex`; production supplies only `NoOpFaultInjector`. Any managed-key or unlisted crash-state conflict stops before deletion/publication. Parsed TOML verifies every owned value; codex mcp get blender --json runs only after publication and verifies its exposed command, args, env, enabled tools, and timeouts.
+Semantic rollback reads pre values/nodes from the recovery object when pre is present; with absent pre, R supplies no pre nodes and remains absent. For each owned scalar/list/env key: current==installer-post restores pre; current==pre is already restored; any other current value is a conflict. Foreign table/env keys and namespace additions are preserved. Exact current/post uses the generic native swap. A non-conflicting semantic merge follows C0-C4 in the central contract: journal and fsync codex.rollback.stage, call `fault.hit(after_codex_semantic_stage_fsync)`, swap it with current, call the matching swap hit, journal both semantic images and hit the receipt boundary, validate/remove the displaced current and hit its cleanup boundary, then validate/remove the protected preimage when present and hit its cleanup boundary. Task 8 supplies the synchronous complete-receipt journal callback. `run_cli(..., fault)` forwards its explicit injector to `rollback_codex`; production supplies only `NoOpFaultInjector`. Any managed-key or unlisted crash-state conflict stops before deletion/publication. Parsed TOML verifies every owned value; codex mcp get blender --json runs only after publication and verifies its exposed command, args, env, enabled tools, and timeouts.
 
 - [ ] **Step 1: Write RED adapter tests**
 
@@ -780,6 +780,7 @@ git commit -m "feat: verify Blender MCP without managed writes"
 - Create: plugins/blender-mcp-installer/scripts/install.py
 - Create: plugins/blender-mcp-installer/scripts/blender_mcp_installer/cli.py
 - Create: tests/distribution/test_cli.py
+- Modify: tests/distribution/fault_driver.py
 
 **Interfaces:**
 
@@ -810,7 +811,7 @@ ARTIFACTS must be the exact artifacts directory in Derived Paths. Public functio
 8. For bundle_stage, write planned receipt before creating state stages, materialize VerifiedBundle from retained fds, write staged. For each runtime/extension/userpref/Codex action, write planned before stage creation, write staged after deterministic post snapshot, execute one Task 3 native transition at a time, and rewrite swapped/published, parked, and completed states.
 9. Re-inspect filesystem/config exactness, write status=installed, inject after_receipt_installed, validate/remove the bundle stage, fsync, rewrite bundle_stage=cleaned, retain every installed rollback preimage, and return changed=true, no_op=false, receipt, requires_blender_start=true, and redacted host/bundle facts. Do not live-verify.
 
-Normal injected failures reverse actions under the same lock. Recovery classifies only the exact selector and native states in Durable Transaction Contract; any other identity/hash/path conflicts without writing. It is retry-safe after every reverse transition. Codex uses Task 4 exact/semantic three-way protocol. All paths are re-derived from install ID/role; receipt strings are comparison evidence only.
+Normal injected failures reverse actions under the same lock. Recovery classifies only the exact selector and native states in Durable Transaction Contract; any other identity/hash/path conflicts without writing. It is retry-safe after every reverse transition. Codex uses Task 4 exact/semantic three-way protocol. For its journal callback, Task 8 maps RollbackResult C1/C2/C3/C4 to ReceiptAction semantic_staged/semantic_swapped/restoring/restored in a synchronous complete-receipt rewrite; fresh-process reconstruction uses the inverse mapping and distinguishes semantic restoring/restored by their non-null rollback images. All paths are re-derived from install ID/role; receipt strings are comparison evidence only.
 
 rollback accepts only active installed or prepared receipt below resolved receipts root. It revalidates owner/mode/schema/manifest/generation/selected Blender/profile/targets/recoveries, requires selected Blender closed and port free, and keeps the lock through rollback_pending, managed-action restore, exact active-selector restoration, final receipt status, and selector cleanup. Stale, copied, renamed, inactive, divergent, or secret-hash-mismatched receipts fail without mutation.
 
@@ -838,7 +839,7 @@ Closed FAILPOINTS and their only applicable variants are below. Each action/sele
 | bundle_stage | absent only | after_bundle_stage_planned, after_bundle_stage_stage, after_receipt_installed, after_bundle_stage_cleanup |
 | runtime_tree, extension_tree, userpref_file, codex_file exact | present | after_KIND_planned, after_KIND_stage, after_KIND_swap, after_KIND_park, after_KIND_completed, after_KIND_restore_swap, after_KIND_restore_move, after_KIND_restore_cleanup |
 | runtime_tree, extension_tree, userpref_file, codex_file exact | absent | after_KIND_planned, after_KIND_stage, after_KIND_publish, after_KIND_completed, after_KIND_restore_move, after_KIND_restore_cleanup |
-| codex_file semantic rollback | present | after_codex_semantic_stage_fsync, after_codex_semantic_swap, after_codex_semantic_receipt, after_codex_semantic_displaced_cleanup, after_codex_semantic_recovery_cleanup |
+| codex_file semantic rollback | present or absent | after_codex_semantic_stage_fsync, after_codex_semantic_swap, after_codex_semantic_receipt, after_codex_semantic_displaced_cleanup, after_codex_semantic_recovery_cleanup |
 | active selector reverse | prior present | after_rollback_intent, after_active_restore_swap, after_active_restore_parent_fsync, after_rollback_status, after_active_restore_cleanup |
 | active selector reverse | prior absent | after_rollback_intent, after_active_restore_move, after_active_restore_parent_fsync, after_rollback_status, after_active_restore_cleanup |
 
@@ -871,7 +872,7 @@ Expected: all tests pass; each failure/crash parameter has exact postconditions;
 ~~~bash
 git add plugins/blender-mcp-installer/scripts/install.py \
   plugins/blender-mcp-installer/scripts/blender_mcp_installer/cli.py \
-  tests/distribution/test_cli.py
+  tests/distribution/test_cli.py tests/distribution/fault_driver.py
 git commit -m "feat: orchestrate recoverable Blender MCP installation"
 ~~~
 
