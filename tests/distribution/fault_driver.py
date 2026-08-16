@@ -134,7 +134,7 @@ def _scenario_host(root: Path):
 def _patch_scenario(cli, root: Path, fixture_kind: str, preimage: str, point: str) -> None:
     from blender_mcp_installer.blender_adapter import BlenderChange, BlenderState
     from blender_mcp_installer.bundle import StagedBundle, parse_manifest
-    from blender_mcp_installer.filesystem import SafeRoot, StagedFile, capture_file, capture_tree
+    from blender_mcp_installer.filesystem import SafeRoot, capture_file, capture_tree
     from blender_mcp_installer.model import BlenderPaths, InstallRoots, ReceiptStatus
     from blender_mcp_installer.verification import HostCapabilities
 
@@ -200,7 +200,7 @@ def _patch_scenario(cli, root: Path, fixture_kind: str, preimage: str, point: st
         host.blender,
         host.codex,
         host.uv,
-        Path(sys.executable).resolve(),
+        Path(sys.executable),
         env,
         lambda *_args, **_kwargs: None,
     )
@@ -247,8 +247,21 @@ def _patch_scenario(cli, root: Path, fixture_kind: str, preimage: str, point: st
         )
 
     def fake_runtime(_bundle, _uv, _python, _profile, stage, _runner):
+        import tomlkit
+
         (stage.path / "bin").mkdir()
-        (stage.path / "bin/python").write_bytes(b"python")
+        runtime_python = stage.path / "bin/python"
+        shutil.copy2(Path(sys.executable).resolve(), runtime_python)
+        runtime_python.chmod(0o700)
+        (stage.path / "pyvenv.cfg").write_text(
+            f"home = {Path(sys.base_prefix) / 'bin'}\ninclude-system-site-packages = false\n"
+        )
+        site = (
+            stage.path
+            / f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+        )
+        site.mkdir(parents=True)
+        shutil.copytree(Path(tomlkit.__file__).parent, site / "tomlkit")
         (stage.path / "bin/blender-mcp-managed").write_bytes(b"launcher")
         return capture_tree(stage.root, stage.relative)
 
@@ -274,38 +287,24 @@ def _patch_scenario(cli, root: Path, fixture_kind: str, preimage: str, point: st
             (),
         )
 
-    def fake_codex(_fd, _current, _desired, _runtime_python, stage: StagedFile):
-        stage.path.write_bytes(b"[mcp_servers.blender]\n")
+    def fake_codex(_fd, _current, _desired, _runtime_python, stage):
+        stage.path.write_bytes(b'foreign = "keep"\n')
         refreshed = stage.refresh()
         return SimpleNamespace(post=refreshed.image, stage=refreshed)
-
-    def fake_restore_codex(
-        journal,
-        action,
-        target,
-        stage,
-        recovery,
-        _rollback_stage,
-        _desired,
-        _runtime_python,
-    ):
-        if point.startswith("after_codex_semantic_") and hasattr(journal.fault, "point"):
-            journal.fault.hit(point)
-        return cli._restore_action(journal, action, target, stage, recovery)
 
     cli._context = fake_context
     cli._inspection = inspection
     cli._lifecycle_closed = lambda _context: None
     cli.stage_runtime = fake_runtime
     cli.stage_blender_change = fake_blender
-    cli.stage_codex_config = fake_codex
+    if fixture_kind not in {"codex_file", "codex_semantic"}:
+        cli.stage_codex_config = fake_codex
     cli.verify_runtime = lambda *_args, **_kwargs: None
     cli.inspect_blender = lambda *_args, **_kwargs: blender
     cli.verify_blender_files = lambda *_args, **_kwargs: None
     cli.load_extension_payload = lambda *_args, **_kwargs: object()
     cli.verify_codex_toml = lambda *_args, **_kwargs: None
     cli.verify_codex_effective = lambda *_args, **_kwargs: None
-    cli._restore_codex = fake_restore_codex
 
     marker = root / ".preimage-seeded"
     if not marker.exists() and preimage == "present":
@@ -322,8 +321,18 @@ def _patch_scenario(cli, root: Path, fixture_kind: str, preimage: str, point: st
                 selected.mkdir()
                 (selected / "preimage").write_bytes(b"preimage")
             else:
-                selected.write_bytes(b"preimage")
+                selected.write_bytes(b'foreign = "SECRET-SENTINEL"\n')
         marker.write_text("seeded\n")
+    semantic_marker = root / ".semantic-seeded"
+    if (
+        fixture_kind == "codex_semantic"
+        and not semantic_marker.exists()
+        and roots.codex_config.exists()
+        and roots.active.exists()
+    ):
+        with roots.codex_config.open("a") as stream:
+            stream.write('\n[foreign_after]\nsecret = "SECRET-SENTINEL"\n')
+        semantic_marker.write_text("seeded\n")
 
 
 def main() -> int:

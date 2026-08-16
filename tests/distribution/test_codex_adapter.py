@@ -20,6 +20,7 @@ from blender_mcp_installer.codex_adapter import (  # noqa: E402
     ManagedProfile,
     RollbackState,
     desired_codex_values,
+    preflight_codex_rollback,
     rollback_codex,
     stage_codex_config,
     verify_codex_effective,
@@ -630,6 +631,57 @@ def test_missing_preimage_semantic_rollback_preserves_foreign_addition(tmp_path:
     assert result.state is RollbackState.C4
     assert _parsed(target.path) == {"foreign_after": {"value": "keep"}}
     assert not recovery.path.exists()
+    root.close()
+
+
+@pytest.mark.parametrize("pre_raw", [None, b'foreign = "before"\n'])
+def test_read_only_preflight_validates_semantic_c0_without_writes(
+    tmp_path: Path, pre_raw: bytes | None
+) -> None:
+    root = _open_root(tmp_path / "codex")
+    desired = _desired(tmp_path)
+    target, _, change, recovery = _installed(root, desired, pre_raw)
+    with target.path.open("a") as stream:
+        stream.write('\n[foreign_after]\nvalue = "keep"\n')
+    before = {path.name: path.read_bytes() for path in root.path.iterdir() if path.is_file()}
+
+    preflight_codex_rollback(
+        _rollback_context(root, target, change.post, []),
+        recovery,
+        change.post,
+        change.managed_keys,
+        Path(sys.executable),
+    )
+
+    assert {
+        path.name: path.read_bytes() for path in root.path.iterdir() if path.is_file()
+    } == before
+    assert not (root.path / "codex.rollback.stage").exists()
+    assert not list(root.path.glob("*.request"))
+    root.close()
+
+
+def test_read_only_preflight_rejects_managed_conflict_without_writes(tmp_path: Path) -> None:
+    root = _open_root(tmp_path / "codex")
+    desired = _desired(tmp_path)
+    target, _, change, recovery = _installed(root, desired, b'foreign = "before"\n')
+    target.path.write_text(target.path.read_text().replace(desired.command, "/foreign/command"))
+    before = {path.name: path.read_bytes() for path in root.path.iterdir() if path.is_file()}
+
+    with pytest.raises(InstallerError, match="managed key conflict"):
+        preflight_codex_rollback(
+            _rollback_context(root, target, change.post, []),
+            recovery,
+            change.post,
+            change.managed_keys,
+            Path(sys.executable),
+        )
+
+    assert {
+        path.name: path.read_bytes() for path in root.path.iterdir() if path.is_file()
+    } == before
+    assert not (root.path / "codex.rollback.stage").exists()
+    assert not list(root.path.glob("*.request"))
     root.close()
 
 

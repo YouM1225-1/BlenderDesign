@@ -4,9 +4,11 @@ import argparse
 import json
 import os
 import re
+import selectors
 import stat
 import subprocess
 import sys
+import time
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -37,6 +39,7 @@ from .codex_adapter import (
     RollbackResult,
     RollbackState,
     desired_codex_values,
+    preflight_codex_rollback,
     rollback_codex,
     stage_codex_config,
     verify_codex_effective,
@@ -247,10 +250,56 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _command_runner(
+def _bounded_command(
     argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]
 ) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(argv, cwd=cwd, env=dict(env), capture_output=True, check=False)
+    process = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        env=dict(env),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdout is not None and process.stderr is not None
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    deadline = time.monotonic() + 2.0
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, 2.0)
+                events = selector.select(remaining)
+                if not events:
+                    raise subprocess.TimeoutExpired(argv, 2.0)
+                for key, _ in events:
+                    chunk = os.read(key.fd, 8193 - len(output[key.data]))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    output[key.data].extend(chunk)
+                    if len(output[key.data]) > 8192:
+                        raise InstallerError("local Python 3.13 probe failed")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(argv, 2.0)
+        returncode = process.wait(timeout=remaining)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=0.25)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=0.25)
+        process.stdout.close()
+        process.stderr.close()
+    return subprocess.CompletedProcess(
+        argv, returncode, bytes(output["stdout"]), bytes(output["stderr"])
+    )
 
 
 def _environment() -> dict[str, str]:
@@ -279,7 +328,7 @@ def _environment() -> dict[str, str]:
 
 def _resolve_python(uv: Path, env: Mapping[str, str]) -> Path:
     try:
-        completed = _command_runner(
+        completed = _bounded_command(
             (
                 str(uv),
                 "python",
@@ -650,19 +699,70 @@ def _receipt_transition(old: Receipt, new: Receipt) -> bool:
                 ActionState.PLANNED: {ActionState.STAGED},
                 ActionState.STAGED: {ActionState.CLEANED},
             }
-        return before.ordinal == after.ordinal and after.state in allowed.get(before.state, set())
+        if after.state not in allowed.get(before.state, set()):
+            return False
+        delta = {key for key, value in before.to_dict().items() if value != after.to_dict()[key]}
+        exact_deltas = {
+            (ActionState.PLANNED, ActionState.STAGED): {"state", "intended_post"},
+            (ActionState.STAGED, ActionState.SWAPPED): {"state", "actual_post"},
+            (ActionState.STAGED, ActionState.PUBLISHED): {"state", "actual_post"},
+            (ActionState.SWAPPED, ActionState.PARKED): {"state", "recovery_image"},
+            (ActionState.PARKED, ActionState.COMPLETED): {"state"},
+            (ActionState.PUBLISHED, ActionState.COMPLETED): {"state"},
+            (ActionState.COMPLETED, ActionState.SEMANTIC_STAGED): {
+                "state",
+                "rollback_intended",
+            },
+            (ActionState.SEMANTIC_STAGED, ActionState.SEMANTIC_SWAPPED): {
+                "state",
+                "rollback_displaced",
+            },
+            (ActionState.SEMANTIC_SWAPPED, ActionState.RESTORING): {"state"},
+            (ActionState.RESTORING, ActionState.RESTORING): {"recovery_image"},
+            (ActionState.RESTORING, ActionState.RESTORED): {"state", "recovery_image"},
+            (ActionState.STAGED, ActionState.CLEANED): {"state"},
+        }
+        if (
+            after.state in {ActionState.RESTORING, ActionState.RESTORED}
+            and (
+                before.state,
+                after.state,
+            )
+            not in exact_deltas
+        ):
+            allowed_restore = (
+                ({"state", "actual_post"}, {"state", "actual_post", "recovery_image"})
+                if before.state is ActionState.STAGED
+                else ({"state"}, {"state", "recovery_image"})
+            )
+            return delta in allowed_restore
+        return delta == exact_deltas.get((before.state, after.state))
     if differences == {"targets"}:
         changed = [
             (before, after)
             for before, after in zip(old.targets, new.targets, strict=True)
             if before != after
         ]
-        return len(changed) == 1 and changed[0][0].install_post is None
+        if len(changed) != 1 or changed[0][0].install_post is not None:
+            return False
+        before, after = changed[0]
+        delta = {key for key, value in before.to_dict().items() if value != after.to_dict()[key]}
+        return (
+            after.install_post is not None
+            and delta in ({"install_post"}, {"install_post", "recovery_path", "recovery_hash"})
+            and (after.recovery_path is None) == (after.recovery_hash is None)
+        )
     if differences == {"status", "verification"}:
+        old_verification = dict(old.verification)
+        new_verification = dict(new.verification)
+        old_configured = old_verification.pop("configured", None)
+        new_configured = new_verification.pop("configured", None)
         return (
             old.status is ReceiptStatus.PREPARED
             and new.status is ReceiptStatus.INSTALLED
-            and new.verification.get("configured") is True
+            and old_configured is False
+            and new_configured is True
+            and old_verification == new_verification
         )
     if differences == {"status"}:
         return (old.status, new.status) in {
@@ -705,6 +805,8 @@ def _settle_receipt_atomic_json(
     else:
         raise InstallerError("atomic JSON reconciliation conflict")
     _validate_pending_receipt(new, pending, roots, bundle, manifest_sha256, state)
+    with _refs(roots, state) as refs:
+        _preflight_rollback(roots, bundle, manifest_sha256, new, state, refs)
     reconcile_atomic_json(
         reference,
         ((old_value, new.to_dict()),),
@@ -714,7 +816,12 @@ def _settle_receipt_atomic_json(
 
 
 def _settle_known_receipt_atomic_json(
-    roots: InstallRoots, install_id: UUID, state: SafeRoot, fault: FaultInjector
+    roots: InstallRoots,
+    bundle: StagedBundle,
+    manifest_sha256: str,
+    install_id: UUID,
+    state: SafeRoot,
+    fault: FaultInjector,
 ) -> None:
     reference = TargetRef(state, PurePath("receipts", f"{install_id}.json"))
     live_value, stale_value = load_atomic_json_pair(reference, install_id)
@@ -731,6 +838,8 @@ def _settle_known_receipt_atomic_json(
         old, new = live, stale
     else:
         raise InstallerError("atomic JSON reconciliation conflict")
+    with _refs(roots, state) as refs:
+        _preflight_rollback(roots, bundle, manifest_sha256, new, state, refs)
     reconcile_atomic_json(
         reference,
         ((old.to_dict(), new.to_dict()),),
@@ -816,6 +925,35 @@ def reconcile_selectors(
                 PurePath("backups", str(pending.install_id), "previous-active.json"),
             )
         )
+        if active == new:
+            _active_value, active_stale = load_atomic_json_pair(
+                TargetRef(state, PurePath("active.json")), pending.install_id
+            )
+            previous_image = (
+                FileImage.absent() if retain is None else capture_file(state, retain.relative)
+            )
+            if pending.previous_active is None:
+                valid_previous = (
+                    active_target.pre == FileImage.absent()
+                    and previous_image == FileImage.absent()
+                    and active_stale is None
+                )
+            else:
+                temp = TargetRef(
+                    state,
+                    PurePath(f".blender-mcp-installer.{pending.install_id}.active.json.tmp"),
+                )
+                temp_image = capture_file(state, temp.relative)
+                valid_previous = isinstance(active_target.pre, FileImage) and (
+                    previous_image == active_target.pre
+                    or (
+                        previous_image == FileImage.absent()
+                        and temp_image == active_target.pre
+                        and active_stale == pending.previous_active.to_dict()
+                    )
+                )
+            if not valid_previous:
+                raise InstallerError("selector reconciliation conflict")
         reconcile_atomic_json(
             TargetRef(state, PurePath("active.json")),
             (
@@ -1889,7 +2027,29 @@ def _preflight_rollback(
         or receipt.bundle.get("manifest_sha256") != manifest_sha256
     ):
         raise InstallerError("rollback preflight conflict")
+    kinds = [action.kind for action in receipt.actions]
+    ordered = [
+        ActionKind.BUNDLE_STAGE,
+        ActionKind.RUNTIME_TREE,
+        ActionKind.EXTENSION_TREE,
+        ActionKind.USERPREF_FILE,
+        ActionKind.CODEX_FILE,
+    ]
+    if kinds != ordered[: len(kinds)] or (
+        receipt.status is ReceiptStatus.INSTALLED and kinds != ordered
+    ):
+        raise InstallerError("rollback preflight conflict")
     by_role = {target.role: target for target in receipt.targets}
+    profile = ManagedProfile(
+        roots.home,
+        roots.blender.user_resources,
+        roots.blender.user_config,
+        roots.blender.user_extensions,
+        roots.blender.executable,
+    )
+    desired = desired_codex_values(
+        roots.runtime / "bin/blender-mcp-managed", profile, bundle.manifest.tools
+    )
     for action in receipt.actions:
         if action.kind is ActionKind.BUNDLE_STAGE:
             bundle_image = capture_tree(
@@ -1925,54 +2085,62 @@ def _preflight_rollback(
             raise InstallerError("rollback preflight conflict")
         if recorded.recovery_hash is not None and recorded.recovery_hash != _image_hash(action.pre):
             raise InstallerError("rollback preflight conflict")
-        if action.kind is ActionKind.CODEX_FILE and action.rollback_intended is not None:
+        semantic_codex = action.kind is ActionKind.CODEX_FILE and (
+            action.state is ActionState.COMPLETED or action.rollback_intended is not None
+        )
+        if semantic_codex:
+            if not isinstance(action.actual_post, FileImage):
+                raise InstallerError("rollback preflight conflict")
             rollback_stage = capture_file(
                 refs["codex"].root, PurePath(roots.codex_rollback_stage(receipt.install_id).name)
             )
-            intended = action.rollback_intended
-            displaced = action.rollback_displaced
-            semantic = {
-                ActionState.SEMANTIC_STAGED: (
-                    physical[0].state is ImageState.PRESENT
-                    and physical[1] == FileImage.absent()
-                    and rollback_stage == intended
-                    and physical[2] == action.pre
-                    and displaced is None
-                ),
-                ActionState.SEMANTIC_SWAPPED: (
-                    physical == (intended, FileImage.absent(), action.pre)
-                    and rollback_stage == displaced
-                ),
-                ActionState.RESTORING: (
-                    physical[0] == intended
-                    and rollback_stage == FileImage.absent()
-                    and physical[2] in {action.pre, FileImage.absent()}
-                ),
-                ActionState.RESTORED: (
-                    physical == (intended, FileImage.absent(), FileImage.absent())
-                    and rollback_stage == FileImage.absent()
-                ),
-            }
-            if not semantic.get(action.state, False):
+            try:
+                preflight_codex_rollback(
+                    CodexRollbackContext(
+                        refs["codex"],
+                        StagedFile(
+                            refs["codex"].root,
+                            PurePath(roots.codex_stage(receipt.install_id).name),
+                            action.actual_post,
+                        ),
+                        StagedFile(
+                            refs["codex"].root,
+                            PurePath(roots.codex_rollback_stage(receipt.install_id).name),
+                            rollback_stage,
+                        ),
+                        _codex_state(action),
+                        action.rollback_intended,
+                        action.rollback_displaced,
+                        lambda _result: None,
+                    ),
+                    StagedFile(
+                        refs["codex"].root,
+                        PurePath(roots.codex_recovery(receipt.install_id).name),
+                        action.pre,
+                    ),
+                    action.actual_post,
+                    ManagedCodexKeys(desired),
+                    roots.runtime / "bin/python",
+                )
+            except (InstallerError, ValueError):
                 raise InstallerError("rollback preflight conflict")
-        elif (
-            action.kind is ActionKind.CODEX_FILE
-            and action.state is ActionState.COMPLETED
-            and physical[0].state is ImageState.PRESENT
-            and physical[1] == FileImage.absent()
-            and physical[2] == action.pre
-        ):
-            pass
+            continue
         elif not _native_rollback_tuple_valid(action, *physical):
             raise InstallerError("rollback preflight conflict")
     selector = by_role[TargetRole.ACTIVE_SELECTOR]
-    if not isinstance(selector.pre, FileImage) or not isinstance(selector.install_post, FileImage):
+    if not isinstance(selector.pre, FileImage):
         raise InstallerError("rollback preflight conflict")
     active_image = capture_file(state, PurePath("active.json"))
     recovery_image = capture_file(
         state,
         PurePath("backups", str(receipt.install_id), "previous-active.json"),
     )
+    if selector.install_post is None:
+        if (active_image, recovery_image) != (selector.pre, FileImage.absent()):
+            raise InstallerError("rollback preflight conflict")
+        return
+    if not isinstance(selector.install_post, FileImage):
+        raise InstallerError("rollback preflight conflict")
     before = (
         selector.install_post,
         selector.pre if selector.pre.state is ImageState.PRESENT else FileImage.absent(),
@@ -2030,31 +2198,39 @@ def _rollback_receipt(
                     continue
                 install_id = receipt.install_id
                 if action.kind is ActionKind.CODEX_FILE:
-                    action = _restore_codex(
-                        journal,
-                        action,
-                        refs["codex"],
-                        StagedFile(
-                            refs["codex"].root,
-                            PurePath(roots.codex_stage(install_id).name),
-                            action.actual_post,
-                        ),
-                        StagedFile(
-                            refs["codex"].root,
-                            PurePath(roots.codex_recovery(install_id).name),
-                            action.pre,
-                        ),
-                        StagedFile(
-                            refs["codex"].root,
-                            PurePath(roots.codex_rollback_stage(install_id).name),
-                            capture_file(
+                    stage = StagedFile(
+                        refs["codex"].root,
+                        PurePath(roots.codex_stage(install_id).name),
+                        action.actual_post or action.intended_post or FileImage.absent(),
+                    )
+                    recovery = StagedFile(
+                        refs["codex"].root,
+                        PurePath(roots.codex_recovery(install_id).name),
+                        action.pre,
+                    )
+                    if (
+                        action.state is ActionState.COMPLETED
+                        or action.rollback_intended is not None
+                    ):
+                        action = _restore_codex(
+                            journal,
+                            action,
+                            refs["codex"],
+                            stage,
+                            recovery,
+                            StagedFile(
                                 refs["codex"].root,
                                 PurePath(roots.codex_rollback_stage(install_id).name),
+                                capture_file(
+                                    refs["codex"].root,
+                                    PurePath(roots.codex_rollback_stage(install_id).name),
+                                ),
                             ),
-                        ),
-                        desired,
-                        roots.runtime / "bin/python",
-                    )
+                            desired,
+                            roots.runtime / "bin/python",
+                        )
+                    else:
+                        action = _restore_action(journal, action, refs["codex"], stage, recovery)
                 elif action.kind is ActionKind.RUNTIME_TREE:
                     action = _restore_action(
                         journal,
@@ -2108,7 +2284,11 @@ def _rollback_receipt(
 
 
 def _discover_reversed_selector_receipt(
-    roots: InstallRoots, state: SafeRoot, fault: FaultInjector
+    roots: InstallRoots,
+    bundle: StagedBundle,
+    manifest_sha256: str,
+    state: SafeRoot,
+    fault: FaultInjector,
 ) -> Receipt | None:
     try:
         receipts_fd = state.open_directory(PurePath("receipts"))
@@ -2160,7 +2340,9 @@ def _discover_reversed_selector_receipt(
     if not candidates:
         return None
     candidate = candidates[0]
-    _settle_known_receipt_atomic_json(roots, candidate.install_id, state, fault)
+    _settle_known_receipt_atomic_json(
+        roots, bundle, manifest_sha256, candidate.install_id, state, fault
+    )
     return load_receipt(roots.receipt(candidate.install_id), roots)
 
 
@@ -2171,10 +2353,18 @@ def recover_active(
     fault: FaultInjector,
     *,
     manifest_sha256: str,
+    expected_install_id: UUID | None = None,
 ) -> dict[str, object]:
     with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
-        reversed_receipt = _discover_reversed_selector_receipt(roots, state, fault)
+        reversed_receipt = _discover_reversed_selector_receipt(
+            roots, bundle, manifest_sha256, state, fault
+        )
         if reversed_receipt is not None:
+            if (
+                expected_install_id is not None
+                and reversed_receipt.install_id != expected_install_id
+            ):
+                raise InstallerError("active selector recovery conflict")
             if reversed_receipt.status is ReceiptStatus.ROLLED_BACK:
                 journal = _Journal(
                     state,
@@ -2203,14 +2393,19 @@ def recover_active(
         active = None
     if active is None:
         return {"recovered": False}
+    if expected_install_id is not None and active.install_id != expected_install_id:
+        raise InstallerError("active selector recovery conflict")
     with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
-        _settle_known_receipt_atomic_json(roots, active.install_id, state, fault)
+        _settle_known_receipt_atomic_json(
+            roots, bundle, manifest_sha256, active.install_id, state, fault
+        )
     receipt = load_receipt(roots.receipt(active.install_id), roots)
     if receipt.status is ReceiptStatus.INSTALLED:
         bundle_actions = [
             action for action in receipt.actions if action.kind is ActionKind.BUNDLE_STAGE
         ]
-        if bundle_actions and bundle_actions[0].state is ActionState.STAGED:
+        if bundle_actions:
+            changed = bundle_actions[0].state is ActionState.STAGED
             with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
                 journal = _Journal(
                     state,
@@ -2220,7 +2415,7 @@ def recover_active(
                     capture_file(state, PurePath("receipts", f"{receipt.install_id}.json")),
                 )
                 _cleanup_bundle(journal, state)
-            return {"recovered": True, "status": "installed"}
+            return {"recovered": changed, "status": "installed"}
         return {"recovered": False, "status": "installed"}
     if receipt.status not in {ReceiptStatus.PREPARED, ReceiptStatus.ROLLBACK_PENDING}:
         return {"recovered": False, "status": receipt.status.value}
@@ -2267,6 +2462,68 @@ def rollback(args: argparse.Namespace) -> dict[str, object]:
         roots = context.roots
         with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
             with InstallerLock.acquire(state):
+                requested = load_receipt(args.receipt, roots)
+                if args.receipt != roots.receipt(requested.install_id):
+                    raise InstallerError("rollback receipt path is invalid")
+                if requested.status not in {
+                    ReceiptStatus.INSTALLED,
+                    ReceiptStatus.PREPARED,
+                    ReceiptStatus.ROLLBACK_PENDING,
+                    ReceiptStatus.ROLLED_BACK,
+                }:
+                    raise InstallerError("rollback receipt status is invalid")
+                active = load_active(roots.active, roots)
+                pending = load_pending(roots.pending, roots)
+                selector = next(
+                    target
+                    for target in requested.targets
+                    if target.role is TargetRole.ACTIVE_SELECTOR
+                )
+                active_image = capture_file(state, PurePath("active.json"))
+                previous_image = capture_file(
+                    state,
+                    PurePath("backups", str(requested.install_id), "previous-active.json"),
+                )
+                direct_authority = (
+                    active is not None
+                    and active.install_id == requested.install_id
+                    and active.receipt_basename == args.receipt.name
+                )
+                reversed_authority = (
+                    isinstance(selector.pre, FileImage)
+                    and isinstance(selector.install_post, FileImage)
+                    and (active_image, previous_image) == (selector.pre, selector.install_post)
+                )
+                if requested.status is not ReceiptStatus.ROLLED_BACK and (
+                    not (direct_authority or reversed_authority)
+                    or (pending is not None and pending.install_id != requested.install_id)
+                ):
+                    raise InstallerError("rollback receipt is not active")
+                _lifecycle_closed(context)
+                with _refs(roots, state) as refs:
+                    _preflight_rollback(
+                        roots,
+                        context.source_bundle,
+                        context.manifest_sha256,
+                        requested,
+                        state,
+                        refs,
+                    )
+                if (
+                    requested.status is ReceiptStatus.ROLLED_BACK
+                    and previous_image == FileImage.absent()
+                ):
+                    roles = [
+                        action.target_role.value
+                        for action in requested.actions
+                        if action.target_role is not None
+                    ]
+                    return {
+                        "command": "rollback",
+                        "receipt": str(args.receipt),
+                        "status": "rolled_back",
+                        "restored_roles": roles,
+                    }
                 reconcile_selectors(
                     roots,
                     context.source_bundle,
@@ -2280,6 +2537,7 @@ def rollback(args: argparse.Namespace) -> dict[str, object]:
                     context.blender,
                     fault,
                     manifest_sha256=context.manifest_sha256,
+                    expected_install_id=requested.install_id,
                 )
                 requested = load_receipt(args.receipt, roots)
                 if requested.status is ReceiptStatus.ROLLED_BACK:
@@ -2298,13 +2556,6 @@ def rollback(args: argparse.Namespace) -> dict[str, object]:
                 if active is None or args.receipt != roots.receipt(active.install_id):
                     raise InstallerError("rollback receipt is not active")
                 receipt = requested
-                if receipt.status not in {
-                    ReceiptStatus.INSTALLED,
-                    ReceiptStatus.PREPARED,
-                    ReceiptStatus.ROLLBACK_PENDING,
-                }:
-                    raise InstallerError("rollback receipt status is invalid")
-                _lifecycle_closed(context)
                 rolled = _rollback_receipt(
                     roots,
                     context.source_bundle,

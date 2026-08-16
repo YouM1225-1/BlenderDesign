@@ -375,7 +375,10 @@ MAX_CONFIG = 16 * 1024 * 1024
 
 
 def read_fd(fd):
-    os.lseek(fd, 0, os.SEEK_SET)
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+    except OSError:
+        pass
     chunks = []
     size = 0
     while True:
@@ -718,6 +721,60 @@ def _invoke_helper(
         os.close(request_fd)
 
 
+def _invoke_readonly_helper(
+    request: Mapping[str, object],
+    runtime_python: Path,
+    inherited: tuple[int, ...],
+) -> dict[str, object]:
+    runtime_python = _absolute(runtime_python, "runtime Python")
+    if not runtime_python.exists() or not os.access(runtime_python, os.X_OK):
+        raise InstallerError("locked runtime Python is unavailable")
+    request_fd, writer = os.pipe()
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        process = subprocess.Popen(
+            [str(runtime_python), "-I", "-c", _HELPER, str(request_fd)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "PYTHONNOUSERSITE": "1",
+                "PYTHONSAFEPATH": "1",
+            },
+            pass_fds=(request_fd, *inherited),
+        )
+        os.close(request_fd)
+        request_fd = -1
+        _write_all(writer, json.dumps(request, sort_keys=True, separators=(",", ":")).encode())
+        os.close(writer)
+        writer = -1
+        stdout, _stderr = process.communicate(timeout=_EFFECTIVE_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise InstallerError("Codex configuration merge failed") from exc
+    finally:
+        if request_fd >= 0:
+            os.close(request_fd)
+        if writer >= 0:
+            os.close(writer)
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=0.25)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=0.25)
+    try:
+        output = json.loads(stdout.decode("utf-8"))
+    except (UnboundLocalError, UnicodeDecodeError, json.JSONDecodeError):
+        output = None
+    if process is None or (process.returncode == 3 and output == {"error": "managed_conflict"}):
+        raise InstallerError("Codex managed key conflict")
+    if process.returncode != 0 or type(output) is not dict:
+        raise InstallerError("Codex configuration merge failed")
+    return output
+
+
 def _run_helper(
     mode: str,
     current_fd: int | None,
@@ -786,7 +843,7 @@ def _validate_semantic_merge(
     recovery_image: FileImage,
     desired: ManagedCodexValues,
     runtime_python: Path,
-    anchor: StagedFile,
+    _anchor: StagedFile,
     intended: FileImage,
 ) -> None:
     source_fd = _open_reference(source, source_image)
@@ -794,8 +851,7 @@ def _validate_semantic_merge(
     try:
         pre_fd = _open_reference(recovery, recovery_image)
         try:
-            output = _invoke_helper(
-                anchor,
+            output = _invoke_readonly_helper(
                 {
                     "mode": "validate",
                     "current_fd": source_fd,
@@ -818,6 +874,50 @@ def _validate_semantic_merge(
         or type(output["changed"]) is not bool
         or output["sha256"] != intended.sha256
         or output["size"] != intended.size
+        or _capture(source) != source_image
+        or _capture(recovery) != recovery_image
+    ):
+        raise InstallerError("Codex rollback state conflict")
+
+
+def _preflight_merge(
+    source: TargetRef,
+    source_image: FileImage,
+    recovery: TargetRef,
+    recovery_image: FileImage,
+    desired: ManagedCodexValues,
+    runtime_python: Path,
+    intended: FileImage | None,
+) -> None:
+    source_fd = _open_reference(source, source_image)
+    if source_fd is None:
+        raise InstallerError("Codex rollback state conflict")
+    try:
+        pre_fd = _open_reference(recovery, recovery_image)
+        try:
+            output = _invoke_readonly_helper(
+                {
+                    "mode": "validate",
+                    "current_fd": source_fd,
+                    "pre_fd": pre_fd,
+                    "stage_fd": None,
+                    "desired": desired.helper_dict(),
+                },
+                runtime_python,
+                tuple(fd for fd in (source_fd, pre_fd) if fd is not None),
+            )
+            _revalidate_reference(source, source_image, source_fd)
+            _revalidate_reference(recovery, recovery_image, pre_fd)
+        finally:
+            if pre_fd is not None:
+                os.close(pre_fd)
+    finally:
+        os.close(source_fd)
+    if (
+        set(output) != {"changed", "sha256", "size"}
+        or type(output["changed"]) is not bool
+        or (intended is not None and output["sha256"] != intended.sha256)
+        or (intended is not None and output["size"] != intended.size)
         or _capture(source) != source_image
         or _capture(recovery) != recovery_image
     ):
@@ -1156,6 +1256,121 @@ def _semantic_c0(
     _journal(context, result)
     fault.hit("after_codex_semantic_stage_fsync")
     return RollbackState.C1, merged.image, None
+
+
+def preflight_codex_rollback(
+    current: CodexRollbackContext,
+    protected_recovery: StagedFile,
+    installer_post: FileImage,
+    managed_keys: ManagedCodexKeys,
+    runtime_python: Path,
+) -> None:
+    """Validate the exact Task 4 rollback row without changing durable state."""
+    if (
+        type(current) is not CodexRollbackContext
+        or type(protected_recovery) is not StagedFile
+        or type(installer_post) is not FileImage
+        or installer_post.state is not ImageState.PRESENT
+        or type(managed_keys) is not ManagedCodexKeys
+    ):
+        raise ValueError("invalid Codex rollback input")
+    live = _capture(current.target)
+    forward = _capture(current.forward_stage)
+    rollback_stage = _capture(current.rollback_stage)
+    recovery = _capture(protected_recovery)
+    pre = protected_recovery.image
+    absent = FileImage.absent()
+    if forward != absent:
+        raise InstallerError("Codex rollback state conflict")
+    if current.state is None:
+        if rollback_stage != absent or recovery != pre:
+            raise InstallerError("Codex rollback state conflict")
+        if live in {installer_post, pre}:
+            return
+        if live.state is not ImageState.PRESENT:
+            raise InstallerError("Codex rollback state conflict")
+        _preflight_merge(
+            current.target,
+            live,
+            protected_recovery,
+            recovery,
+            managed_keys.desired,
+            runtime_python,
+            None,
+        )
+        return
+    intended = current.rollback_intended
+    displaced = current.rollback_displaced
+    if current.state is RollbackState.C1:
+        if intended is None or displaced is not None or recovery != pre:
+            raise InstallerError("Codex rollback state conflict")
+        if live.state is ImageState.PRESENT and rollback_stage == intended:
+            _preflight_merge(
+                current.target,
+                live,
+                protected_recovery,
+                recovery,
+                managed_keys.desired,
+                runtime_python,
+                intended,
+            )
+        elif live == intended and rollback_stage.state is ImageState.PRESENT:
+            _preflight_merge(
+                current.rollback_stage,
+                rollback_stage,
+                protected_recovery,
+                recovery,
+                managed_keys.desired,
+                runtime_python,
+                intended,
+            )
+        else:
+            raise InstallerError("Codex rollback state conflict")
+        return
+    if current.state is RollbackState.C2:
+        if (
+            intended is None
+            or displaced is None
+            or (live, rollback_stage, recovery) != (intended, displaced, pre)
+        ):
+            raise InstallerError("Codex rollback state conflict")
+        _preflight_merge(
+            current.rollback_stage,
+            displaced,
+            protected_recovery,
+            recovery,
+            managed_keys.desired,
+            runtime_python,
+            intended,
+        )
+        return
+    if current.state is RollbackState.C3:
+        if (
+            intended is None
+            or displaced is None
+            or live != intended
+            or rollback_stage != absent
+            or recovery not in {pre, absent}
+        ):
+            raise InstallerError("Codex rollback state conflict")
+        return
+    if current.state is RollbackState.C4:
+        if (
+            intended is None
+            or displaced is None
+            or (live, rollback_stage, recovery) != (intended, absent, absent)
+        ):
+            raise InstallerError("Codex rollback state conflict")
+        return
+    if current.state is RollbackState.RESTORING:
+        if rollback_stage != absent or recovery not in {pre, installer_post, absent}:
+            raise InstallerError("Codex rollback state conflict")
+        return
+    if current.state is RollbackState.RESTORED:
+        if (live, rollback_stage, recovery) != (pre, absent, absent):
+            raise InstallerError("Codex rollback state conflict")
+        return
+    raise InstallerError("Codex rollback state conflict")
 
 
 def rollback_codex(

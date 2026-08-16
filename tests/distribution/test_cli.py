@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -70,6 +71,28 @@ def _argv(host: HostHarness, command: str) -> list[str]:
         receipt = host.state_root / "receipts" / "12345678-1234-4234-9234-123456789abc.json"
         result += ["--receipt", str(receipt)]
     return result
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "import time; time.sleep(60)",
+        'import sys; sys.stdout.write("SECRET-SENTINEL" * 10000)',
+        'import sys; sys.stderr.write("SECRET-SENTINEL" * 10000)',
+    ],
+)
+def test_python_resolution_is_bounded_and_redacted(tmp_path: Path, body: str) -> None:
+    uv = tmp_path / "uv"
+    uv.write_text(f"#!{sys.executable}\n{body}\n")
+    uv.chmod(0o700)
+    started = time.monotonic()
+
+    with pytest.raises(InstallerError) as caught:
+        cli._resolve_python(uv, {"PATH": "/usr/bin:/bin"})
+
+    assert time.monotonic() - started < 5
+    assert str(caught.value) == "local Python 3.13 probe failed"
+    assert "SECRET-SENTINEL" not in str(caught.value)
 
 
 @pytest.mark.parametrize("command", ["inspect", "install", "verify", "rollback"])
@@ -455,7 +478,12 @@ def test_first_install_orchestrates_journaled_adapters(
     assert len(receipt_temps) == 1
     with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
         cli._settle_known_receipt_atomic_json(
-            roots, installed.install_id, state, NoOpFaultInjector()
+            roots,
+            context.source_bundle,
+            context.manifest_sha256,
+            installed.install_id,
+            state,
+            NoOpFaultInjector(),
         )
     assert not receipt_temps[0].exists()
     installed = cli.load_receipt(receipt, roots)
@@ -678,16 +706,17 @@ def test_reconcile_no_receipt_does_not_publish_or_delete_active_temp(
 
 
 _FAULT_CASES = tuple(
-    (kind, preimage, point)
+    (kind, preimage, point, command)
     for kind, preimages in _PREIMAGES.items()
     for preimage in preimages
-    for point in _applicable_points(kind, preimage)
+    for point, commands in _applicable_points(kind, preimage).items()
+    for command in sorted(commands)
 )
 
 
-@pytest.mark.parametrize(("fixture_kind", "preimage", "point"), _FAULT_CASES)
+@pytest.mark.parametrize(("fixture_kind", "preimage", "point", "command"), _FAULT_CASES)
 def test_closed_fault_matrix_exits_70_then_fresh_process_recovers_exactly(
-    tmp_path: Path, fixture_kind: str, preimage: str, point: str
+    tmp_path: Path, fixture_kind: str, preimage: str, point: str, command: str
 ) -> None:
     scenario = tmp_path / "scenario"
     driver = ROOT / "tests/distribution/fault_driver.py"
@@ -744,15 +773,54 @@ def test_closed_fault_matrix_exits_70_then_fresh_process_recovers_exactly(
         or point.startswith("after_codex_semantic")
         or point == "after_active_restore_cleanup"
     )
-    command = "rollback" if rollback_point else "install"
     receipt: Path | None = None
-    if command == "install" and fixture_kind == "active_selector" and preimage == "present":
+    if command == "install" and rollback_point:
+        seeded = invoke("install", recover=True)
+        assert seeded.returncode == 0, seeded.stderr + seeded.stdout
+        if fixture_kind == "active_selector" and preimage == "present":
+            (scenario / "force-change").write_text("1\n")
+            seeded = invoke("install", recover=True)
+            assert seeded.returncode == 0, seeded.stderr + seeded.stdout
+        active = json.loads(
+            (host_root / "home/.local/state/blender-mcp-installer/active.json").read_text()
+        )
+        prepared_path = (
+            host_root
+            / "home/.local/state/blender-mcp-installer/receipts"
+            / active["receipt_basename"]
+        )
+        prepared = json.loads(prepared_path.read_text())
+        prepared["status"] = "prepared"
+        prepared["verification"]["configured"] = False
+        selected_action = next(
+            (
+                action
+                for action in prepared["actions"]
+                if point.startswith(f"after_{action['kind']}_")
+            ),
+            None,
+        )
+        if fixture_kind == "codex_file" and selected_action is not None:
+            selected_action["state"] = "staged"
+            selected_action["actual_post"] = None
+            selected_action["recovery_image"] = None
+        if preimage == "present" and point.endswith("_restore_move"):
+            assert selected_action is not None
+            target = Path(selected_action["target_path"])
+            stage = target.parent / selected_action["stage_basename"]
+            recovery = target.parent / selected_action["recovery_basename"]
+            os.rename(recovery, stage)
+            selected_action["state"] = "staged"
+            selected_action["actual_post"] = None
+            selected_action["recovery_image"] = None
+        prepared_path.write_text(json.dumps(prepared, sort_keys=True, separators=(",", ":")) + "\n")
+    elif command == "install" and fixture_kind == "active_selector" and preimage == "present":
         seeded = invoke("install", recover=True)
         assert seeded.returncode == 0, seeded.stderr + seeded.stdout
         (scenario / "force-change").write_text("1\n")
     if command == "rollback":
         staged_move = preimage == "present" and point.endswith("_restore_move")
-        if staged_move:
+        if staged_move and fixture_kind != "codex_file":
             prepared = invoke(
                 "install",
                 recover=False,
@@ -774,6 +842,23 @@ def test_closed_fault_matrix_exits_70_then_fresh_process_recovers_exactly(
             / "home/.local/state/blender-mcp-installer/receipts"
             / active["receipt_basename"]
         )
+        if fixture_kind == "codex_file":
+            prepared = json.loads(receipt.read_text())
+            prepared["status"] = "prepared"
+            prepared["verification"]["configured"] = False
+            selected_action = next(
+                action for action in prepared["actions"] if action["kind"] == "codex_file"
+            )
+            selected_action["state"] = "staged"
+            selected_action["actual_post"] = None
+            selected_action["recovery_image"] = None
+            if staged_move:
+                target = Path(selected_action["target_path"])
+                os.rename(
+                    target.parent / selected_action["recovery_basename"],
+                    target.parent / selected_action["stage_basename"],
+                )
+            receipt.write_text(json.dumps(prepared, sort_keys=True, separators=(",", ":")) + "\n")
 
     crashed = invoke(command, recover=False, receipt=receipt)
     assert crashed.returncode == 70, crashed.stderr + crashed.stdout
@@ -781,9 +866,15 @@ def test_closed_fault_matrix_exits_70_then_fresh_process_recovers_exactly(
     recovered = invoke(command, recover=True, receipt=receipt)
     assert recovered.returncode == 0, recovered.stderr + recovered.stdout
     assert "SECRET-SENTINEL" not in recovered.stdout + recovered.stderr
+    recovered_again = invoke(command, recover=True, receipt=receipt)
+    assert recovered_again.returncode == 0, recovered_again.stderr + recovered_again.stdout
+    assert "SECRET-SENTINEL" not in recovered_again.stdout + recovered_again.stderr
 
     state_root = host_root / "home/.local/state/blender-mcp-installer"
     assert not list(state_root.rglob(".blender-mcp-installer.*.tmp"))
+    for owned_file in state_root.rglob("*"):
+        if owned_file.is_file():
+            assert b"SECRET-SENTINEL" not in owned_file.read_bytes()
     if command == "install":
         active = json.loads((state_root / "active.json").read_text())
         terminal = json.loads((state_root / "receipts" / active["receipt_basename"]).read_text())
@@ -823,7 +914,12 @@ def test_closed_fault_matrix_exits_70_then_fresh_process_recovers_exactly(
             )
             assert image_at(recovery_path, tree=tree) == expected_recovery
         else:
-            assert image_at(target, tree=tree) == image_type.from_dict(action["pre"])
+            expected_target = (
+                action["rollback_intended"]
+                if action["kind"] == "codex_file" and action["rollback_intended"] is not None
+                else action["pre"]
+            )
+            assert image_at(target, tree=tree) == image_type.from_dict(expected_target)
             assert image_at(recovery_path, tree=tree).state.value == "absent"
 
     selector = next(target for target in terminal["targets"] if target["role"] == "active_selector")
