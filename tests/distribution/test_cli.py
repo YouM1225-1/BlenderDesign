@@ -3,9 +3,10 @@ from __future__ import annotations
 import ast
 import json
 import os
+import shutil
 import subprocess
 import sys
-import time
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,6 +46,7 @@ from blender_mcp_installer.model import (  # noqa: E402
 )
 from blender_mcp_installer.verification import HostCapabilities  # noqa: E402
 from tests.distribution.fake_host import HostHarness  # noqa: E402
+from tests.distribution.test_bundle import _checkout  # noqa: E402
 from tests.distribution.fault_driver import _PREIMAGES, _applicable_points  # noqa: E402
 
 
@@ -79,26 +81,183 @@ def _argv(host: HostHarness, command: str) -> list[str]:
     return result
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        "import time; time.sleep(60)",
-        'import sys; sys.stdout.write("SECRET-SENTINEL" * 10000)',
-        'import sys; sys.stderr.write("SECRET-SENTINEL" * 10000)',
-    ],
-)
-def test_python_resolution_is_bounded_and_redacted(tmp_path: Path, body: str) -> None:
-    uv = tmp_path / "uv"
-    uv.write_text(f"#!{sys.executable}\n{body}\n")
-    uv.chmod(0o700)
-    started = time.monotonic()
+def test_empty_home_outer_python_inspect_does_not_rediscover_python(
+    tmp_path: Path, host: HostHarness
+) -> None:
+    real_uv_raw = os.environ.get("UV") or shutil.which("uv")
+    assert real_uv_raw is not None
+    real_uv = Path(real_uv_raw).resolve()
+    python = Path(sys.executable).resolve()
+    bundle, commit = _checkout(tmp_path / "distribution")
+    profile = tmp_path / "empty-home"
+    codex_home = profile / ".codex"
+    resources = profile / "blender-resources"
+    config = resources / "config"
+    extensions = resources / "extensions"
+    for path in (profile, codex_home, resources, config, extensions):
+        path.mkdir(exist_ok=True, parents=True, mode=0o700)
+        path.chmod(0o700)
+    state = json.loads(host.state_file.read_text())
+    state.update(
+        {
+            "resources": str(resources),
+            "config": str(config),
+            "extensions": str(extensions),
+        }
+    )
+    host.state_file.write_text(json.dumps(state, sort_keys=True) + "\n")
+    host.blender.write_text(
+        f"#!{sys.executable}\n"
+        "import json,sys\n"
+        f"state=json.load(open({str(host.state_file)!r}))\n"
+        "if sys.argv[1:]==['--version']:\n print('Blender '+state['version'])\n"
+        "elif '--background' in sys.argv and '--python-expr' in sys.argv:\n"
+        " value={'binary_path':sys.argv[0],'version':[5,2,0],"
+        "'architecture':state['architecture'],'user_resources':state['resources'],"
+        "'config_root':state['config'],'extensions_root':state['extensions'],"
+        "'repository':state['repository'],'enabled':False,'online_access':False,"
+        "'host':None,'port':None,'autostart':None}\n"
+        " print('__BLENDER_MCP_INSTALLER__'+json.dumps(value,sort_keys=True))\n"
+        "else:\n raise SystemExit(2)\n"
+    )
+    host.blender.chmod(0o700)
+    runner = (
+        "import runpy,subprocess,sys; from types import SimpleNamespace; "
+        "root=sys.argv[1]; script=sys.argv[2]; "
+        "sys.argv=sys.argv[2:]; sys.path.insert(0,root); "
+        "from blender_mcp_installer import cli,verification; probe=cli.probe_host; "
+        "host_run=lambda argv,**kw: subprocess.CompletedProcess(argv,0,b'arm64\\n',b'') "
+        "if argv[0]=='/usr/bin/lipo' else verification._default_runner(argv,**kw); "
+        "cli.probe_host=lambda *args: probe(*args,runner=host_run); "
+        "cli._inspection=lambda _context: SimpleNamespace("
+        "exact=False,managed_targets=(),active_install_id=None); "
+        'runpy.run_path(script,run_name="__main__")'
+    )
+    command = [
+        str(real_uv),
+        "run",
+        "--quiet",
+        "--no-project",
+        "--python",
+        str(python),
+        "--no-python-downloads",
+        "--no-sync",
+        "python",
+        "-I",
+        "-B",
+        "-c",
+        runner,
+        str(SCRIPTS),
+        str(SCRIPTS / "install.py"),
+        "inspect",
+        "--bundle-root",
+        str(bundle),
+        "--expected-distribution-commit",
+        commit,
+        "--blender",
+        str(host.blender),
+        "--codex",
+        str(host.codex),
+        "--uv",
+        str(host.uv),
+    ]
+    env = {
+        "HOME": str(profile),
+        "CODEX_HOME": str(codex_home),
+        "BLENDER_USER_RESOURCES": str(resources),
+        "BLENDER_USER_CONFIG": str(config),
+        "BLENDER_USER_EXTENSIONS": str(extensions),
+        "PATH": f"{real_uv.parent}:/usr/bin:/bin:/usr/sbin:/sbin",
+    }
 
-    with pytest.raises(InstallerError) as caught:
-        cli._resolve_python(uv, {"PATH": "/usr/bin:/bin"})
+    completed = subprocess.run(
+        command, cwd=bundle.parents[2], env=env, capture_output=True, text=True, check=False
+    )
 
-    assert time.monotonic() - started < 5
-    assert str(caught.value) == "local Python 3.13 probe failed"
-    assert "SECRET-SENTINEL" not in str(caught.value)
+    assert completed.returncode == 0, completed.stderr + completed.stdout
+    assert json.loads(completed.stdout)["command"] == "inspect"
+    assert not (profile / ".local/state/blender-mcp-installer").exists()
+    assert not (profile / ".local/share/blender-lab-mcp").exists()
+    assert not (codex_home / "config.toml").exists()
+    assert not (config / "userpref.blend").exists()
+    calls = [json.loads(line) for line in host.commands.read_text().splitlines()]
+    assert [call["argv"] for call in calls if call["tool"] == "uv"] == [["--version"]]
+    assert all(call["argv"][:2] != ["python", "find"] for call in calls)
+    assert command[1] == "run" and command[1:3] != ["python", "find"]
+
+
+@pytest.mark.parametrize("value", ["", "relative-python", "non-executable", "symlink"])
+def test_current_python_must_be_an_absolute_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    if value == "non-executable":
+        path = tmp_path / value
+        path.write_bytes(b"python")
+        value = str(path)
+    elif value == "symlink":
+        target = tmp_path / "python"
+        target.write_bytes(b"python")
+        target.chmod(0o700)
+        path = tmp_path / value
+        path.symlink_to(target)
+        value = str(path)
+    monkeypatch.setattr(sys, "executable", value)
+
+    with pytest.raises(InstallerError, match="local Python 3.13 probe failed"):
+        cli._resolve_python()
+
+
+def test_current_python_must_be_owned_by_current_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    python = tmp_path / "python"
+    python.write_bytes(b"python")
+    python.chmod(0o700)
+    monkeypatch.setattr(sys, "executable", str(python))
+    original_lstat = Path.lstat
+
+    def foreign_lstat(path: Path) -> os.stat_result:
+        info = original_lstat(path)
+        if path != python:
+            return info
+        values = list(info)
+        values[4] = os.getuid() + 1
+        return os.stat_result(values)
+
+    monkeypatch.setattr(Path, "lstat", foreign_lstat)
+
+    with pytest.raises(InstallerError, match="local Python 3.13 probe failed"):
+        cli._resolve_python()
+
+
+def test_current_python_wrong_version_remains_bound_to_host_probe(
+    tmp_path: Path, host: HostHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    python = tmp_path / "python-3.12"
+    python.write_text("#!/bin/sh\necho 'Python 3.12.0'\n")
+    python.chmod(0o700)
+    monkeypatch.setattr(sys, "executable", str(python))
+    monkeypatch.setattr(cli, "verify_distribution_checkout", lambda *_args: object())
+    monkeypatch.setattr(cli, "open_verified_bundle", lambda _checkout: nullcontext(object()))
+    for name, value in {
+        "HOME": host.home,
+        "CODEX_HOME": host.codex_home,
+        "BLENDER_USER_RESOURCES": host.resources,
+        "BLENDER_USER_CONFIG": host.config,
+        "BLENDER_USER_EXTENSIONS": host.extensions,
+    }.items():
+        monkeypatch.setenv(name, str(value))
+    args = SimpleNamespace(
+        bundle_root=host.bundle,
+        expected_distribution_commit="a" * 40,
+        blender=host.blender,
+        codex=host.codex,
+        uv=host.uv,
+    )
+
+    with pytest.raises(InstallerError, match="host capability probe failed"):
+        with cli._context(args):
+            raise AssertionError("wrong-version Python reached installer context")
 
 
 def test_absent_semantic_codex_restored_receipt_delta_is_exact(tmp_path: Path) -> None:

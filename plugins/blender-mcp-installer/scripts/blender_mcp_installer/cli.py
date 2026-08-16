@@ -4,11 +4,9 @@ import argparse
 import json
 import os
 import re
-import selectors
 import stat
 import subprocess
 import sys
-import time
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -250,58 +248,6 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _bounded_command(
-    argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]
-) -> subprocess.CompletedProcess[bytes]:
-    process = subprocess.Popen(
-        argv,
-        cwd=cwd,
-        env=dict(env),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert process.stdout is not None and process.stderr is not None
-    output = {"stdout": bytearray(), "stderr": bytearray()}
-    deadline = time.monotonic() + 2.0
-    try:
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
-            while selector.get_map():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired(argv, 2.0)
-                events = selector.select(remaining)
-                if not events:
-                    raise subprocess.TimeoutExpired(argv, 2.0)
-                for key, _ in events:
-                    chunk = os.read(key.fd, 8193 - len(output[key.data]))
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    output[key.data].extend(chunk)
-                    if len(output[key.data]) > 8192:
-                        raise InstallerError("local Python 3.13 probe failed")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise subprocess.TimeoutExpired(argv, 2.0)
-        returncode = process.wait(timeout=remaining)
-    finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=0.25)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=0.25)
-        process.stdout.close()
-        process.stderr.close()
-    return subprocess.CompletedProcess(
-        argv, returncode, bytes(output["stdout"]), bytes(output["stderr"])
-    )
-
-
 def _environment() -> dict[str, str]:
     required = (
         "HOME",
@@ -326,24 +272,10 @@ def _environment() -> dict[str, str]:
     return values
 
 
-def _resolve_python(uv: Path, env: Mapping[str, str]) -> Path:
+def _resolve_python() -> Path:
     try:
-        completed = _bounded_command(
-            (
-                str(uv),
-                "python",
-                "find",
-                "3.13",
-                "--no-project",
-                "--no-python-downloads",
-                "--no-config",
-            ),
-            cwd=uv.parent,
-            env=env,
-        )
-        raw = completed.stdout.decode("utf-8").strip()
-        path = Path(raw)
-        if completed.returncode != 0 or not raw or path != _executable(raw):
+        path = _executable(sys.executable)
+        if path.lstat().st_uid != os.getuid():
             raise ValueError
         return path
     except Exception as exc:
@@ -358,7 +290,7 @@ def _context(args: argparse.Namespace) -> Iterator[_Context]:
         )
         with open_verified_bundle(checkout) as verified:
             env = _environment()
-            python = _resolve_python(args.uv, env)
+            python = _resolve_python()
             host = probe_host(args.blender, args.codex, args.uv, python, env)
             blender = inspect_blender(args.blender, host.env, host.runner)
             paths = BlenderPaths(
