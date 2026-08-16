@@ -838,8 +838,159 @@ def _crash_receipt_path(state_root: Path, requested: Path | None) -> Path | None
 def _captured(path: Path, *, tree: bool):
     if not path.parent.exists():
         return TreeImage.absent() if tree else FileImage.absent()
-    with SafeRoot.open(path.parent, os.getuid(), path.parent) as safe:
+    parent_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    with SafeRoot(path.parent, os.getuid(), parent_fd) as safe:
         return capture_tree(safe, Path(path.name)) if tree else capture_file(safe, Path(path.name))
+
+
+def _native_point_tuple_matches(
+    action: ReceiptAction, suffix: str, physical: tuple[object, object, object]
+) -> bool:
+    absent = TreeImage.absent() if isinstance(action.pre, TreeImage) else FileImage.absent()
+    post = action.actual_post or action.intended_post
+    expected = {
+        "planned": (action.pre, absent, absent),
+        "stage": (action.pre, post, absent),
+        "swap": (post, action.pre, absent),
+        "park": (post, absent, action.pre),
+        "publish": (post, absent, absent),
+        "completed": (
+            post,
+            absent,
+            action.pre if action.pre.state.value == "present" else absent,
+        ),
+        "restore_swap": (action.pre, absent, post),
+        "restore_move": (action.pre, absent, post),
+        "restore_cleanup": (action.pre, absent, absent),
+    }[suffix]
+    return physical == expected
+
+
+def test_native_restoring_prefix_probe_rejects_pre_swap_orientation(tmp_path: Path) -> None:
+    root_path = tmp_path / "root"
+    root_path.mkdir()
+    (root_path / "pre").write_bytes(b"pre")
+    (root_path / "post").write_bytes(b"post")
+    with SafeRoot.open(root_path, os.getuid(), root_path) as root:
+        pre = capture_file(root, Path("pre"))
+        post = capture_file(root, Path("post"))
+    absent = FileImage.absent()
+    action = cli._action(
+        0,
+        ActionKind.USERPREF_FILE,
+        ActionState.RESTORING,
+        root_path / "target",
+        root_path / "stage",
+        root_path / "recovery",
+        pre,
+        intended=post,
+        actual=post,
+    )
+    pre_swap = (post, absent, pre)
+    post_restore_swap = (pre, absent, post)
+
+    assert cli._native_rollback_tuple_valid(action, *pre_swap)
+    assert cli._native_rollback_tuple_valid(action, *post_restore_swap)
+    assert not _native_point_tuple_matches(action, "restore_swap", pre_swap)
+    assert _native_point_tuple_matches(action, "restore_swap", post_restore_swap)
+
+
+def _json_document(path: Path) -> dict[str, object] | None:
+    return None if not path.exists() else json.loads(path.read_text())
+
+
+def _assert_atomic_json_prefix(
+    state_root: Path,
+    requested: Path | None,
+    fixture_kind: str,
+    point: str,
+    command: str,
+    before_receipt: dict[str, object] | None,
+) -> None:
+    receipt_path = _crash_receipt_path(state_root, requested)
+    if fixture_kind == "atomic_json" and command == "install":
+        path = state_root / "pending.json"
+        candidates = (path, *state_root.rglob("*.pending.json.tmp"))
+        document = next(_json_document(candidate) for candidate in candidates if candidate.exists())
+        pending = PendingSelector.from_dict(document)
+        assert pending.generation == 1
+        assert pending.previous_active is None
+        assert pending.manifest_sha256 == (
+            "2b799aff562693ce0b79e9df4737158b4b785e5c854e39673a289192adaf4a60"
+        )
+        old = None
+        new = pending.to_dict()
+        install_id = pending.install_id
+    else:
+        assert receipt_path is not None and before_receipt is not None
+        path = receipt_path
+        old = before_receipt
+        new = json.loads(json.dumps(old))
+        install_id = UUID(str(old["install_id"]))
+        if fixture_kind == "codex_semantic":
+            action = next(item for item in new["actions"] if item["kind"] == "codex_file")
+            assert action["state"] == "restoring"
+            assert action["pre"]["state"] == "absent"
+            action["state"] = "restored"
+        else:
+            assert command == "rollback"
+            assert new["status"] == "installed"
+            new["status"] = "rollback_pending"
+    temp = path.parent / f".blender-mcp-installer.{install_id}.{path.name}.tmp"
+    if point == "after_json_file_fsync":
+        assert _json_document(path) == old
+        assert _json_document(temp) == new
+    else:
+        assert _json_document(path) == new
+        assert _json_document(temp) == old
+    assert tuple(state_root.rglob(".blender-mcp-installer.*.tmp")) == (
+        () if old is None and point != "after_json_file_fsync" else (temp,)
+    )
+
+
+def _assert_pending_document(state_root: Path) -> PendingSelector:
+    document = _json_document(state_root / "pending.json")
+    assert document is not None
+    pending = PendingSelector.from_dict(document)
+    assert pending.to_dict() == document
+    assert pending.manifest_sha256 == (
+        "2b799aff562693ce0b79e9df4737158b4b785e5c854e39673a289192adaf4a60"
+    )
+    return pending
+
+
+def _assert_selector_prefix(state_root: Path, receipt: dict[str, object], point: str) -> None:
+    active_path = state_root / "active.json"
+    previous_path = state_root / "backups" / str(receipt["install_id"]) / "previous-active.json"
+    selector = next(item for item in receipt["targets"] if item["role"] == "active_selector")
+    pre = FileImage.from_dict(selector["pre"])
+    post = FileImage.from_dict(selector["install_post"])
+    absent = FileImage.absent()
+    if point == "after_rollback_intent":
+        expected = (post, pre if pre.state.value == "present" else absent)
+    elif point == "after_active_restore_cleanup":
+        expected = (pre, absent)
+    else:
+        expected = (pre, post)
+    assert (_captured(active_path, tree=False), _captured(previous_path, tree=False)) == expected
+
+
+def _assert_install_selector_prefix(state_root: Path, point: str) -> None:
+    pending = _assert_pending_document(state_root)
+    new = ActiveSelector(
+        1, pending.generation, pending.install_id, pending.receipt_basename
+    ).to_dict()
+    old = None if pending.previous_active is None else pending.previous_active.to_dict()
+    active = state_root / "active.json"
+    previous = state_root / "backups" / str(pending.install_id) / "previous-active.json"
+    temp = state_root / f".blender-mcp-installer.{pending.install_id}.active.json.tmp"
+    assert _json_document(active) == new
+    if point == "after_active_swap":
+        assert _json_document(temp) == old
+        assert _json_document(previous) is None
+    else:
+        assert _json_document(temp) is None
+        assert _json_document(previous) == old
 
 
 def _assert_exact_crash_prefix(
@@ -849,50 +1000,55 @@ def _assert_exact_crash_prefix(
     preimage: str,
     point: str,
     command: str,
+    before_receipt: dict[str, object] | None,
+    before_semantic_target: FileImage | None,
 ) -> None:
-    temps = tuple(state_root.rglob(".blender-mcp-installer.*.tmp"))
     semantic_atomic = (
         fixture_kind == "codex_semantic"
         and preimage == "absent"
         and point.startswith("after_json_")
     )
-    if semantic_atomic:
-        assert len(temps) == 1
-    elif point.startswith("after_json_"):
-        if command == "install":
-            pending = state_root / "pending.json"
-            if point == "after_json_file_fsync":
-                assert not pending.exists() and len(temps) == 1
-                assert json.loads(temps[0].read_text())["manifest_sha256"]
-            else:
-                assert pending.exists() and not temps
-        else:
-            assert requested is not None and len(temps) == 1
-            live_status = json.loads(requested.read_text())["status"]
-            temp_status = json.loads(temps[0].read_text())["status"]
-            if point == "after_json_file_fsync":
-                assert (live_status, temp_status) == ("installed", "rollback_pending")
-            else:
-                assert (live_status, temp_status) == ("rollback_pending", "installed")
-        return
-    elif point == "after_active_swap":
-        assert len(temps) == 1 and temps[0].name.endswith(".active.json.tmp")
+    if point.startswith("after_json_"):
+        _assert_atomic_json_prefix(
+            state_root, requested, fixture_kind, point, command, before_receipt
+        )
+        if not semantic_atomic:
+            return
+    elif point in {
+        "after_active_publish",
+        "after_active_swap",
+        "after_active_park",
+        "after_active_parent_fsync",
+    }:
+        _assert_install_selector_prefix(state_root, point)
     else:
-        assert not temps
+        assert not tuple(state_root.rglob(".blender-mcp-installer.*.tmp"))
     if point == "after_pending_publish":
-        assert (state_root / "pending.json").exists()
+        pending = _assert_pending_document(state_root)
+        assert _json_document(state_root / "receipts" / pending.receipt_basename) is None
+        assert _json_document(state_root / "active.json") == (
+            None if pending.previous_active is None else pending.previous_active.to_dict()
+        )
         return
     receipt_path = _crash_receipt_path(state_root, requested)
     assert receipt_path is not None
     receipt = json.loads(receipt_path.read_text())
-    if semantic_atomic:
-        temp_receipt = json.loads(temps[0].read_text())
-        live_state = receipt["actions"][-1]["state"]
-        temp_state = temp_receipt["actions"][-1]["state"]
-        if point == "after_json_file_fsync":
-            assert (live_state, temp_state) == ("restoring", "restored")
-        else:
-            assert (live_state, temp_state) == ("restored", "restoring")
+    rollback_prefix = (
+        "restore" in point
+        or point.startswith("after_rollback")
+        or point.startswith("after_codex_semantic")
+        or semantic_atomic
+    )
+    expected_status = (
+        "rolled_back"
+        if point in {"after_rollback_status", "after_active_restore_cleanup"}
+        else "installed"
+        if point in {"after_receipt_installed", "after_bundle_stage_cleanup"}
+        else "rollback_pending"
+        if rollback_prefix
+        else "prepared"
+    )
+    assert receipt["status"] == expected_status
 
     expected_states = {
         "planned": "planned",
@@ -935,56 +1091,86 @@ def _assert_exact_crash_prefix(
             _captured(recovery, tree=tree),
         )
         if selected["rollback_intended"] is None:
-            assert cli._native_rollback_tuple_valid(action, *physical)
+            suffix = point.removeprefix(f"after_{selected['kind']}_")
+            assert _native_point_tuple_matches(action, suffix, physical)
         else:
             rollback_stage = target.parent / (
                 f".blender-mcp-installer.{receipt['install_id']}.codex.rollback.stage"
             )
             rollback_image = _captured(rollback_stage, tree=False)
             intended = FileImage.from_dict(selected["rollback_intended"])
+            displaced = (
+                None
+                if selected["rollback_displaced"] is None
+                else FileImage.from_dict(selected["rollback_displaced"])
+            )
             absent = FileImage.absent()
+            assert before_semantic_target is not None
             semantic_rows = {
-                "semantic_staged": (
-                    physical[0].state.value == "present"
-                    and physical[1] == absent
-                    and physical[2] == action.pre
-                    and rollback_image.state.value == "present"
+                "after_codex_semantic_stage_fsync": (
+                    (before_semantic_target, absent, action.pre, intended),
+                    None,
                 ),
-                "semantic_swapped": (
-                    physical == (intended, absent, action.pre)
-                    and rollback_image.state.value == "present"
+                "after_codex_semantic_swap": (
+                    (intended, absent, action.pre, before_semantic_target),
+                    None,
                 ),
-                "restoring": (
-                    physical[0] == intended
-                    and physical[1] == absent
-                    and physical[2] in {action.pre, absent}
-                    and rollback_image == absent
+                "after_codex_semantic_receipt": (
+                    (intended, absent, action.pre, before_semantic_target),
+                    before_semantic_target,
                 ),
-                "restored": (physical == (intended, absent, absent) and rollback_image == absent),
+                "after_codex_semantic_displaced_cleanup": (
+                    (intended, absent, action.pre, absent),
+                    before_semantic_target,
+                ),
+                "after_codex_semantic_recovery_cleanup": (
+                    (intended, absent, absent, absent),
+                    before_semantic_target,
+                ),
             }
-            assert semantic_rows[selected["state"]]
+            if semantic_atomic:
+                expected_physical = (intended, absent, absent, absent)
+                expected_displaced = displaced
+            else:
+                expected_physical, expected_displaced = semantic_rows[point]
+            assert (*physical, rollback_image) == expected_physical
+            assert displaced == expected_displaced
 
-    pending = state_root / "pending.json"
-    active = state_root / "active.json"
-    previous = state_root / "backups" / receipt["install_id"] / "previous-active.json"
-    if point == "after_pending_publish":
-        assert pending.exists()
+    bundle_action = next(
+        (action for action in receipt["actions"] if action["kind"] == "bundle_stage"), None
+    )
+    if point.startswith("after_bundle_stage_") or point == "after_receipt_installed":
+        assert bundle_action is not None
+        expected = (
+            TreeImage.absent()
+            if point in {"after_bundle_stage_planned", "after_bundle_stage_cleanup"}
+            else TreeImage.from_dict(bundle_action["intended_post"])
+        )
+        assert _captured(Path(bundle_action["target_path"]), tree=True) == expected
+
     if point == "after_pending_remove":
-        assert not pending.exists()
-    if point == "after_active_swap":
-        assert active.exists() and not previous.exists()
-    if point == "after_active_park":
-        assert active.exists() and previous.exists()
-    if point == "after_active_parent_fsync":
-        assert active.exists() and previous.exists() == (preimage == "present")
-    if point in {
-        "after_active_restore_swap",
-        "after_active_restore_parent_fsync",
+        assert not (state_root / "pending.json").exists()
+        _assert_selector_prefix(state_root, receipt, "after_rollback_intent")
+    if point == "after_receipt_publish":
+        pending = _assert_pending_document(state_root)
+        selector = next(item for item in receipt["targets"] if item["role"] == "active_selector")
+        assert receipt["actions"] == []
+        assert pending.receipt_basename == receipt_path.name
+        assert _captured(state_root / "active.json", tree=False) == FileImage.from_dict(
+            selector["pre"]
+        )
+        assert (
+            _captured(
+                state_root / "backups" / receipt["install_id"] / "previous-active.json",
+                tree=False,
+            )
+            == FileImage.absent()
+        )
+    if point.startswith("after_active_restore") or point in {
+        "after_rollback_intent",
         "after_rollback_status",
     }:
-        assert previous.exists()
-    if point == "after_active_restore_cleanup":
-        assert not previous.exists()
+        _assert_selector_prefix(state_root, receipt, point)
 
 
 @pytest.mark.parametrize(("fixture_kind", "preimage", "point", "command"), _FAULT_CASES)
@@ -1159,6 +1345,23 @@ def test_closed_fault_matrix_exits_70_then_fresh_process_recovers_exactly(
                 )
             receipt.write_text(json.dumps(prepared, sort_keys=True, separators=(",", ":")) + "\n")
 
+    state_root = host_root / "home/.local/state/blender-mcp-installer"
+    before_receipt_path = _crash_receipt_path(state_root, receipt)
+    before_receipt = (
+        None if before_receipt_path is None else json.loads(before_receipt_path.read_text())
+    )
+    before_semantic_target = None
+    if fixture_kind == "codex_semantic" and before_receipt is not None:
+        codex_action = next(
+            action for action in before_receipt["actions"] if action["kind"] == "codex_file"
+        )
+        semantic_marker = scenario / ".semantic-seeded"
+        if not semantic_marker.exists():
+            with Path(codex_action["target_path"]).open("a") as stream:
+                stream.write('\n[foreign_after]\nsecret = "SECRET-SENTINEL"\n')
+            semantic_marker.write_text("seeded\n")
+        before_semantic_target = _captured(Path(codex_action["target_path"]), tree=False)
+
     crashed = invoke(command, recover=False, receipt=receipt)
     assert crashed.returncode == 70, crashed.stderr + crashed.stdout
     assert "SECRET-SENTINEL" not in crashed.stdout + crashed.stderr
@@ -1169,6 +1372,8 @@ def test_closed_fault_matrix_exits_70_then_fresh_process_recovers_exactly(
         preimage,
         point,
         command,
+        before_receipt,
+        before_semantic_target,
     )
     recovered = invoke(command, recover=True, receipt=receipt)
     assert recovered.returncode == 0, recovered.stderr + recovered.stdout
@@ -1177,7 +1382,6 @@ def test_closed_fault_matrix_exits_70_then_fresh_process_recovers_exactly(
     assert recovered_again.returncode == 0, recovered_again.stderr + recovered_again.stdout
     assert "SECRET-SENTINEL" not in recovered_again.stdout + recovered_again.stderr
 
-    state_root = host_root / "home/.local/state/blender-mcp-installer"
     assert not list(state_root.rglob(".blender-mcp-installer.*.tmp"))
     for owned_file in state_root.rglob("*"):
         if owned_file.is_file():
