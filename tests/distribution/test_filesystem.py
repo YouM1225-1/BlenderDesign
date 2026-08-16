@@ -43,6 +43,7 @@ from blender_mcp_installer.filesystem import (  # noqa: E402
     load_receipt,
     rename_excl,
     rename_swap,
+    reconcile_atomic_json,
     restore_file,
     restore_tree,
     write_atomic_json,
@@ -922,6 +923,69 @@ def test_atomic_json_exact_fault_boundary_and_retry(
         assert json.loads(target.read_text()) == {"value": "new"}
         assert json.loads(retained.read_text()) == {"value": "old"}
         assert not list(owned.glob(".blender-mcp-installer.*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "point", ("after_json_file_fsync", "after_json_rename", "after_json_parent_fsync")
+)
+def test_reconcile_atomic_json_uses_only_exact_declared_transition(
+    tmp_path: Path, point: str
+) -> None:
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    target = owned / "receipt.json"
+    target.write_text('{"state":"old"}\n')
+    target.chmod(0o600)
+    with _safe(owned) as root:
+        reference = TargetRef(root, PurePath("receipt.json"))
+        old = capture_file(root, reference.relative)
+        with pytest.raises(_InjectedCrash, match=point):
+            write_atomic_json(
+                reference,
+                old,
+                {"state": "new"},
+                INSTALL_ID,
+                fault=_PointFault(point),
+            )
+
+        result = reconcile_atomic_json(
+            reference,
+            (({"state": "old"}, {"state": "new"}),),
+            INSTALL_ID,
+            fault=NoOpFaultInjector(),
+        )
+
+        assert result == capture_file(root, reference.relative)
+        assert json.loads(target.read_text()) == {"state": "new"}
+        assert not list(owned.glob(".blender-mcp-installer.*.tmp"))
+
+
+def test_reconcile_atomic_json_preserves_unlisted_documents(tmp_path: Path) -> None:
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    target = owned / "receipt.json"
+    target.write_text('{"state":"old"}\n')
+    target.chmod(0o600)
+    with _safe(owned) as root:
+        reference = TargetRef(root, PurePath("receipt.json"))
+        old = capture_file(root, reference.relative)
+        with pytest.raises(_InjectedCrash):
+            write_atomic_json(
+                reference,
+                old,
+                {"state": "foreign"},
+                INSTALL_ID,
+                fault=_PointFault("after_json_file_fsync"),
+            )
+        before = tuple(path.read_bytes() for path in sorted(owned.iterdir()))
+        with pytest.raises(InstallerError, match="atomic JSON reconciliation conflict"):
+            reconcile_atomic_json(
+                reference,
+                (({"state": "old"}, {"state": "new"}),),
+                INSTALL_ID,
+                fault=NoOpFaultInjector(),
+            )
+        assert tuple(path.read_bytes() for path in sorted(owned.iterdir())) == before
 
 
 def test_atomic_json_concurrent_swap_restores_foreign_document_and_retries(

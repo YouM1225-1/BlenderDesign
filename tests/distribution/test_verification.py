@@ -6,6 +6,7 @@ import platform
 import subprocess
 import sys
 import hashlib
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -815,6 +816,8 @@ class _ProbeProcess:
         self.running = running
         self.terminated = False
         self.waited: float | None = None
+        self.stdout = None
+        self.stderr = None
 
     def communicate(self, timeout: float):
         self.waited = timeout
@@ -832,6 +835,9 @@ class _ProbeProcess:
         self.waited = timeout
         self.running = False
         return 0
+
+    def kill(self):
+        self.running = False
 
 
 def test_official_probe_uses_runtime_python_and_returns_closed_results(
@@ -886,6 +892,27 @@ def test_official_probe_malformed_output_is_redacted_and_cleanup_is_owned(
     handle.terminate()
     handle.wait(2.0)
     assert process.waited is not None
+
+
+def test_official_probe_closes_pipe_and_kills_real_stubborn_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = _executable(tmp_path, "server")
+    monkeypatch.setattr(verification, "_MCP_HELPER", "import time; time.sleep(60)")
+    monkeypatch.setattr(verification, "_WAIT_TIMEOUT", 0.05)
+    handle = OfficialMCPProbe(Path(sys.executable).resolve()).spawn(
+        (str(server),), env={"HOME": str(tmp_path)}
+    )
+    process = handle.process
+    assert process.stdout is not None and not process.stdout.closed
+
+    started = time.monotonic()
+    handle.terminate()
+    handle.close()
+
+    assert time.monotonic() - started < 2
+    assert process.poll() is not None
+    assert process.stdout.closed
 
 
 def _live(

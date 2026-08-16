@@ -12,7 +12,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePath, PurePosixPath
-from typing import Iterator, Mapping, Protocol, TypeAlias
+from typing import Iterator, Mapping, Protocol, Sequence, TypeAlias
 from uuid import UUID
 
 from .model import (
@@ -1148,6 +1148,10 @@ def conditional_remove_tree(
     fault.hit("after_installer_cleanup")
 
 
+def is_tree_cleanup_prefix(current: TreeImage, expected: TreeImage) -> bool:
+    return _tree_prefix(current, expected) is not None
+
+
 def conditional_swap_file(
     left: TargetRef,
     expected_left: FileImage,
@@ -1776,6 +1780,64 @@ def write_atomic_json(
         return result
     finally:
         os.close(parent_fd)
+
+
+def reconcile_atomic_json(
+    path: TargetRef,
+    transitions: Sequence[tuple[Mapping[str, object] | None, Mapping[str, object]]],
+    install_id: UUID,
+    retain_old: TargetRef | None = None,
+    *,
+    fault: FaultInjector,
+) -> FileImage:
+    parent_fd, target_name = path.root.open_parent(path.relative)
+    temp_name = f".blender-mcp-installer.{install_id}.{target_name}.tmp"
+    try:
+        current = capture_file(path.root, path.relative)
+        stale = _capture_file_at(parent_fd, temp_name, path.root.owner_uid)
+    finally:
+        os.close(parent_fd)
+    if stale.state is ImageState.ABSENT:
+        return current
+
+    def matches(image: FileImage, payload: Mapping[str, object] | None) -> bool:
+        if payload is None:
+            return image.state is ImageState.ABSENT
+        raw = (
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+            + b"\n"
+        )
+        return _matches_json_payload(image, raw, path.root.owner_uid)
+
+    candidates: list[tuple[FileImage, Mapping[str, object]]] = []
+    for old, new in transitions:
+        if matches(current, old) and matches(stale, new):
+            candidates.append((current, new))
+        if old is not None and matches(current, new) and matches(stale, old):
+            candidates.append((stale, new))
+    if len(candidates) != 1:
+        raise InstallerError("atomic JSON reconciliation conflict")
+    expected, payload = candidates[0]
+    try:
+        return write_atomic_json(
+            path,
+            expected,
+            payload,
+            install_id,
+            retain_old,
+            fault=fault,
+        )
+    except (OSError, ValueError) as exc:
+        raise InstallerError("atomic JSON reconciliation conflict") from exc
+
+
+def load_atomic_json_pair(path: TargetRef, install_id: UUID) -> tuple[object | None, object | None]:
+    parent_fd, target_name = path.root.open_parent(path.relative)
+    os.close(parent_fd)
+    temp_name = f".blender-mcp-installer.{install_id}.{target_name}.tmp"
+    live = _read_private_json(path.root, path.relative)
+    stale = _read_private_json(path.root, path.relative.with_name(temp_name))
+    return live, stale
 
 
 def _json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:

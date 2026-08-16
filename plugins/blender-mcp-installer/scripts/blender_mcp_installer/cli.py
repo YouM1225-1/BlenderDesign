@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -58,13 +57,17 @@ from .filesystem import (
     capture_tree,
     conditional_remove_file,
     conditional_remove_tree,
+    conditional_swap_file,
     create_deterministic_stage,
     forward_file,
     forward_tree,
+    is_tree_cleanup_prefix,
     load_active,
+    load_atomic_json_pair,
     load_pending,
     load_receipt,
     rename_excl,
+    reconcile_atomic_json,
     restore_file,
     restore_tree,
     write_atomic_json,
@@ -87,6 +90,7 @@ from .model import (
     ReceiptTarget,
     TargetRole,
     TreeImage,
+    parse_receipt,
 )
 from .runtime import stage_runtime, verify_runtime
 from .verification import (
@@ -102,6 +106,16 @@ from .verification import (
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _ARTIFACT_SUFFIX = ("plugins", "blender-mcp-installer", "artifacts")
 _SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+class _ArgumentError(Exception):
+    pass
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        del message
+        raise _ArgumentError
 
 
 class ExitFaultInjector:
@@ -138,6 +152,7 @@ class ReconcileResult:
 class _Context:
     verified: VerifiedBundle
     source_bundle: StagedBundle
+    manifest_sha256: str
     host: HostCapabilities
     blender: BlenderState
     roots: InstallRoots
@@ -210,7 +225,7 @@ def _receipt_path(value: str) -> Path:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="install.py")
+    parser = _Parser(prog="install.py")
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("inspect", "install", "verify", "rollback"):
         subparser = subparsers.add_parser(command)
@@ -317,6 +332,11 @@ def _context(args: argparse.Namespace) -> Iterator[_Context]:
             yield _Context(
                 verified,
                 StagedBundle(checkout.bundle_root, verified.manifest),
+                next(
+                    line[:64].decode("ascii")
+                    for line in checkout.trusted_checksums.splitlines()
+                    if line[66:] == b"manifest.json"
+                ),
                 host,
                 blender,
                 roots,
@@ -343,10 +363,6 @@ def _host_facts(host: HostCapabilities, roots: InstallRoots) -> Mapping[str, obj
             "python_version": host.python_version,
         }
     )
-
-
-def _manifest_hash(bundle: StagedBundle) -> str:
-    return hashlib.sha256(bundle.manifest_path.read_bytes()).hexdigest()
 
 
 def _image_hash(image: Image) -> str | None:
@@ -479,33 +495,343 @@ def _remove_pending(
     fault.hit("after_pending_remove")
 
 
+def _pending_stages_absent(roots: InstallRoots, state: SafeRoot, install_id: UUID) -> bool:
+    checks: tuple[tuple[SafeRoot, PurePath, bool], ...]
+    with _refs(roots, state) as refs:
+        checks = (
+            (state, PurePath("stages", str(install_id), "bundle"), True),
+            (refs["runtime"].root, PurePath(roots.runtime_stage(install_id).name), True),
+            (refs["runtime"].root, PurePath(roots.runtime_recovery(install_id).name), True),
+            (
+                refs["extension"].root,
+                PurePath("user_default", roots.extension_stage(install_id).name),
+                True,
+            ),
+            (
+                refs["extension"].root,
+                PurePath("user_default", roots.extension_recovery(install_id).name),
+                True,
+            ),
+            (refs["userpref"].root, PurePath(roots.userpref_stage(install_id).name), False),
+            (refs["userpref"].root, PurePath(roots.userpref_recovery(install_id).name), False),
+            (refs["codex"].root, PurePath(roots.codex_stage(install_id).name), False),
+            (refs["codex"].root, PurePath(roots.codex_recovery(install_id).name), False),
+            (refs["codex"].root, PurePath(roots.codex_rollback_stage(install_id).name), False),
+        )
+        return all(
+            (capture_tree(root, relative) if tree else capture_file(root, relative)).state
+            is ImageState.ABSENT
+            for root, relative, tree in checks
+        )
+
+
+def _validate_pending_receipt(
+    receipt: Receipt,
+    pending: PendingSelector,
+    roots: InstallRoots,
+    bundle: StagedBundle,
+    manifest_sha256: str,
+    state: SafeRoot,
+) -> None:
+    if (
+        receipt.status is not ReceiptStatus.PREPARED
+        or receipt.install_id != pending.install_id
+        or receipt.generation != pending.generation
+        or receipt.parent_install_id
+        != (None if pending.previous_active is None else pending.previous_active.install_id)
+        or receipt.bundle.get("version") != bundle.manifest.bundle_version
+        or receipt.bundle.get("manifest_sha256") != manifest_sha256
+        or pending.manifest_sha256 != manifest_sha256
+        or receipt.actions
+        or not _pending_stages_absent(roots, state, pending.install_id)
+    ):
+        raise InstallerError("selector reconciliation conflict")
+    with _refs(roots, state) as refs:
+        by_role = {target.role: target for target in receipt.targets}
+        physical: dict[TargetRole, Image] = {
+            TargetRole.RUNTIME: capture_tree(refs["runtime"].root, refs["runtime"].relative),
+            TargetRole.BLENDER_EXTENSION: capture_tree(
+                refs["extension"].root, refs["extension"].relative
+            ),
+            TargetRole.BLENDER_USERPREF: capture_file(
+                refs["userpref"].root, refs["userpref"].relative
+            ),
+            TargetRole.CODEX_CONFIG: capture_file(refs["codex"].root, refs["codex"].relative),
+        }
+    if any(
+        by_role[role].pre != image or by_role[role].install_post is not None
+        for role, image in physical.items()
+    ):
+        raise InstallerError("selector reconciliation conflict")
+
+
+def _settle_pending_atomic_json(
+    roots: InstallRoots, manifest_sha256: str, fault: FaultInjector
+) -> None:
+    with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
+        prefix = ".blender-mcp-installer."
+        suffix = ".pending.json.tmp"
+        names = tuple(
+            name
+            for name in os.listdir(state.fd)
+            if name.startswith(prefix) and name.endswith(suffix)
+        )
+        if not names:
+            return
+        if len(names) != 1:
+            raise InstallerError("atomic JSON reconciliation conflict")
+        try:
+            install_id = UUID(names[0][len(prefix) : -len(suffix)])
+        except ValueError as exc:
+            raise InstallerError("atomic JSON reconciliation conflict") from exc
+        if install_id.version != 4 or str(install_id) not in names[0]:
+            raise InstallerError("atomic JSON reconciliation conflict")
+        reference = TargetRef(state, PurePath("pending.json"))
+        live, stale = load_atomic_json_pair(reference, install_id)
+        try:
+            candidate = PendingSelector.from_dict(stale)
+        except (TypeError, ValueError) as exc:
+            raise InstallerError("atomic JSON reconciliation conflict") from exc
+        if (
+            live is not None
+            or candidate.install_id != install_id
+            or candidate.manifest_sha256 != manifest_sha256
+        ):
+            raise InstallerError("atomic JSON reconciliation conflict")
+        reconcile_atomic_json(
+            reference,
+            ((None, candidate.to_dict()),),
+            install_id,
+            fault=fault,
+        )
+
+
+def _receipt_transition(old: Receipt, new: Receipt) -> bool:
+    old_value = old.to_dict()
+    new_value = new.to_dict()
+    if old.install_id != new.install_id:
+        return False
+    differences = {key for key in old_value if old_value[key] != new_value[key]}
+    if differences == {"actions"}:
+        if len(new.actions) == len(old.actions) + 1:
+            return new.actions[:-1] == old.actions and new.actions[-1].state is ActionState.PLANNED
+        if len(new.actions) != len(old.actions):
+            return False
+        changed = [
+            (before, after)
+            for before, after in zip(old.actions, new.actions, strict=True)
+            if before != after
+        ]
+        if len(changed) != 1:
+            return False
+        before, after = changed[0]
+        allowed = {
+            ActionState.PLANNED: {ActionState.STAGED},
+            ActionState.STAGED: {
+                ActionState.SWAPPED,
+                ActionState.PUBLISHED,
+                ActionState.RESTORING,
+                ActionState.RESTORED,
+            },
+            ActionState.SWAPPED: {ActionState.PARKED, ActionState.RESTORING},
+            ActionState.PARKED: {ActionState.COMPLETED, ActionState.RESTORING},
+            ActionState.PUBLISHED: {ActionState.COMPLETED, ActionState.RESTORING},
+            ActionState.COMPLETED: {
+                ActionState.RESTORING,
+                ActionState.RESTORED,
+                ActionState.SEMANTIC_STAGED,
+            },
+            ActionState.SEMANTIC_STAGED: {ActionState.SEMANTIC_SWAPPED},
+            ActionState.SEMANTIC_SWAPPED: {ActionState.RESTORING},
+            ActionState.RESTORING: {ActionState.RESTORING, ActionState.RESTORED},
+        }
+        if before.kind is ActionKind.BUNDLE_STAGE:
+            allowed = {
+                ActionState.PLANNED: {ActionState.STAGED},
+                ActionState.STAGED: {ActionState.CLEANED},
+            }
+        return before.ordinal == after.ordinal and after.state in allowed.get(before.state, set())
+    if differences == {"targets"}:
+        changed = [
+            (before, after)
+            for before, after in zip(old.targets, new.targets, strict=True)
+            if before != after
+        ]
+        return len(changed) == 1 and changed[0][0].install_post is None
+    if differences == {"status", "verification"}:
+        return (
+            old.status is ReceiptStatus.PREPARED
+            and new.status is ReceiptStatus.INSTALLED
+            and new.verification.get("configured") is True
+        )
+    if differences == {"status"}:
+        return (old.status, new.status) in {
+            (ReceiptStatus.PREPARED, ReceiptStatus.ROLLBACK_PENDING),
+            (ReceiptStatus.INSTALLED, ReceiptStatus.ROLLBACK_PENDING),
+            (ReceiptStatus.ROLLBACK_PENDING, ReceiptStatus.ROLLED_BACK),
+        }
+    return False
+
+
+def _settle_receipt_atomic_json(
+    roots: InstallRoots,
+    pending: PendingSelector,
+    bundle: StagedBundle,
+    manifest_sha256: str,
+    state: SafeRoot,
+    fault: FaultInjector,
+) -> None:
+    reference = TargetRef(state, PurePath("receipts", pending.receipt_basename))
+    try:
+        live_value, stale_value = load_atomic_json_pair(reference, pending.install_id)
+    except (OSError, ValueError) as exc:
+        raise InstallerError("selector reconciliation conflict") from exc
+    if stale_value is None:
+        return
+    try:
+        live = None if live_value is None else parse_receipt(live_value, roots)
+        stale = parse_receipt(stale_value, roots)
+    except (TypeError, ValueError) as exc:
+        raise InstallerError("atomic JSON reconciliation conflict") from exc
+    if live is None:
+        old_value: Mapping[str, object] | None = None
+        new = stale
+    elif _receipt_transition(stale, live):
+        old_value = stale.to_dict()
+        new = live
+    elif _receipt_transition(live, stale):
+        old_value = live.to_dict()
+        new = stale
+    else:
+        raise InstallerError("atomic JSON reconciliation conflict")
+    _validate_pending_receipt(new, pending, roots, bundle, manifest_sha256, state)
+    reconcile_atomic_json(
+        reference,
+        ((old_value, new.to_dict()),),
+        pending.install_id,
+        fault=fault,
+    )
+
+
+def _settle_known_receipt_atomic_json(
+    roots: InstallRoots, install_id: UUID, state: SafeRoot, fault: FaultInjector
+) -> None:
+    reference = TargetRef(state, PurePath("receipts", f"{install_id}.json"))
+    live_value, stale_value = load_atomic_json_pair(reference, install_id)
+    if stale_value is None:
+        return
+    try:
+        live = parse_receipt(live_value, roots)
+        stale = parse_receipt(stale_value, roots)
+    except (TypeError, ValueError) as exc:
+        raise InstallerError("atomic JSON reconciliation conflict") from exc
+    if _receipt_transition(stale, live):
+        old, new = stale, live
+    elif _receipt_transition(live, stale):
+        old, new = live, stale
+    else:
+        raise InstallerError("atomic JSON reconciliation conflict")
+    reconcile_atomic_json(
+        reference,
+        ((old.to_dict(), new.to_dict()),),
+        install_id,
+        fault=fault,
+    )
+
+
 def reconcile_selectors(
     roots: InstallRoots,
     bundle: StagedBundle,
     blender: BlenderState,
     fault: FaultInjector,
+    *,
+    manifest_sha256: str,
 ) -> ReconcileResult:
-    del bundle, blender
+    del blender
+    _settle_pending_atomic_json(roots, manifest_sha256, fault)
     try:
         pending = load_pending(roots.pending, roots)
-        active = load_active(roots.active, roots)
     except Exception as exc:
         raise InstallerError("selector reconciliation conflict") from exc
     if pending is None:
+        try:
+            active = load_active(roots.active, roots)
+        except Exception as exc:
+            raise InstallerError("selector reconciliation conflict") from exc
         return ReconcileResult(None, active, False)
     new = ActiveSelector(1, pending.generation, pending.install_id, pending.receipt_basename)
+    with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
+        _settle_receipt_atomic_json(roots, pending, bundle, manifest_sha256, state, fault)
+        receipt_image = capture_file(state, PurePath("receipts", f"{pending.install_id}.json"))
+    if receipt_image.state is ImageState.ABSENT:
+        receipt = None
+    else:
+        try:
+            receipt = load_receipt(roots.receipt(pending.install_id), roots)
+        except Exception as exc:
+            raise InstallerError("selector reconciliation conflict") from exc
+    try:
+        active = load_active(roots.active, roots)
+    except Exception as exc:
+        raise InstallerError("selector reconciliation conflict") from exc
     if active not in {new, pending.previous_active}:
         raise InstallerError("selector reconciliation conflict")
-    try:
-        receipt = load_receipt(roots.receipt(pending.install_id), roots)
-    except Exception:
-        receipt = None
-    if active == pending.previous_active and receipt is None:
+    if receipt is None:
         with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
+            active_ref = TargetRef(state, PurePath("active.json"))
+            _live, stale = load_atomic_json_pair(active_ref, pending.install_id)
+            previous = TargetRef(
+                state,
+                PurePath("backups", str(pending.install_id), "previous-active.json"),
+            )
+            if (
+                active != pending.previous_active
+                or stale is not None
+                or capture_file(state, previous.relative) != FileImage.absent()
+                or pending.manifest_sha256 != manifest_sha256
+                or not _pending_stages_absent(roots, state, pending.install_id)
+            ):
+                raise InstallerError("selector reconciliation conflict")
             _remove_pending(state, roots, pending, fault)
         return ReconcileResult(None, active, True)
-    if receipt is None:
-        raise InstallerError("selector reconciliation conflict")
+    with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
+        _validate_pending_receipt(receipt, pending, roots, bundle, manifest_sha256, state)
+        active_target = next(
+            target for target in receipt.targets if target.role is TargetRole.ACTIVE_SELECTOR
+        )
+        active_image = capture_file(state, PurePath("active.json"))
+        if not isinstance(active_target.pre, FileImage) or (
+            active == pending.previous_active and active_image != active_target.pre
+        ):
+            raise InstallerError("selector reconciliation conflict")
+        if active == new and (
+            active_target.install_post is not None and active_target.install_post != active_image
+        ):
+            raise InstallerError("selector reconciliation conflict")
+        retain = (
+            None
+            if pending.previous_active is None
+            else TargetRef(
+                state,
+                PurePath("backups", str(pending.install_id), "previous-active.json"),
+            )
+        )
+        reconcile_atomic_json(
+            TargetRef(state, PurePath("active.json")),
+            (
+                (
+                    None if pending.previous_active is None else pending.previous_active.to_dict(),
+                    new.to_dict(),
+                ),
+            ),
+            pending.install_id,
+            retain,
+            fault=fault,
+        )
+    try:
+        active = load_active(roots.active, roots)
+    except Exception as exc:
+        raise InstallerError("selector reconciliation conflict") from exc
     if active == new:
         with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
             active_target = next(
@@ -676,7 +1002,12 @@ def _publish_action(
             recovery_image=recovery_image,
         )
         journal.action(action)
-        journal.fault.hit(f"after_{action.kind.value}_{state.value}")
+        suffix = {
+            ActionState.SWAPPED: "swap",
+            ActionState.PARKED: "park",
+            ActionState.PUBLISHED: "publish",
+        }.get(state, state.value)
+        journal.fault.hit(f"after_{action.kind.value}_{suffix}")
     return action
 
 
@@ -703,7 +1034,7 @@ def _install_receipt(
         MappingProxyType(
             {
                 "version": context.verified.manifest.bundle_version,
-                "manifest_sha256": _manifest_hash(context.source_bundle),
+                "manifest_sha256": context.manifest_sha256,
             }
         ),
         _host_facts(context.host, context.roots),
@@ -846,11 +1177,11 @@ def _stage_blender_actions(
         extension_action, state=ActionState.STAGED, intended_post=change.extension_image
     )
     journal.action(extension_action)
-    journal.fault.hit("after_extension_tree_stage")
     userpref_action = replace(
         userpref_action, state=ActionState.STAGED, intended_post=change.userpref_image
     )
     journal.action(userpref_action)
+    journal.fault.hit("after_extension_tree_stage")
     journal.fault.hit("after_userpref_file_stage")
     extension_action = _publish_action(
         journal,
@@ -881,6 +1212,9 @@ def _cleanup_bundle(journal: _Journal, state: SafeRoot) -> None:
         return
     action = actions[0]
     if action.state is ActionState.CLEANED:
+        reference = TreeRef(state, PurePath("stages", str(journal.receipt.install_id), "bundle"))
+        if reference.capture() != TreeImage.absent():
+            raise InstallerError("bundle stage recovery conflict")
         return
     if action.state is not ActionState.STAGED or not isinstance(action.intended_post, TreeImage):
         raise InstallerError("bundle stage recovery conflict")
@@ -895,8 +1229,20 @@ def _changed_install(context: _Context, fault: FaultInjector) -> dict[str, objec
     _ensure_mutation_roots(roots)
     with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
         with InstallerLock.acquire(state):
-            reconcile_selectors(roots, context.source_bundle, context.blender, fault)
-            recover_active(roots, context.source_bundle, context.blender, fault)
+            reconcile_selectors(
+                roots,
+                context.source_bundle,
+                context.blender,
+                fault,
+                manifest_sha256=context.manifest_sha256,
+            )
+            recover_active(
+                roots,
+                context.source_bundle,
+                context.blender,
+                fault,
+                manifest_sha256=context.manifest_sha256,
+            )
             inspection = _inspection(context)
             if inspection.exact:
                 assert inspection.receipt_path is not None
@@ -926,7 +1272,7 @@ def _changed_install(context: _Context, fault: FaultInjector) -> dict[str, objec
                     generation,
                     install_id,
                     f"{install_id}.json",
-                    _manifest_hash(context.source_bundle),
+                    context.manifest_sha256,
                     active,
                 )
                 pending_image = write_atomic_json(
@@ -1217,6 +1563,7 @@ def install(args: argparse.Namespace) -> dict[str, object]:
                             context.source_bundle,
                             context.blender,
                             NoOpFaultInjector(),
+                            manifest_sha256=context.manifest_sha256,
                         )
             except Exception as recovery_exc:
                 raise InstallerError("installation recovery failed") from recovery_exc
@@ -1232,18 +1579,27 @@ def _restore_action(
     stage: StagedFile | StagedTree,
     recovery: TargetRef,
 ) -> ReceiptAction:
-    if action.actual_post is None:
-        if action.state is ActionState.PLANNED:
-            return action
-        raise InstallerError("recovery action is incomplete")
     tree = isinstance(stage, StagedTree)
+    absent: Image = TreeImage.absent() if tree else FileImage.absent()
+    if action.state is ActionState.PLANNED:
+        capture = capture_tree if tree else capture_file
+        if (
+            capture(target.root, target.relative) == action.pre
+            and capture(stage.root, stage.relative) == absent
+            and capture(recovery.root, recovery.relative) == absent
+        ):
+            return action
+        raise InstallerError("recovery action state conflict")
+    post = action.actual_post or action.intended_post
+    if post is None:
+        raise InstallerError("recovery action is incomplete")
     restore = restore_tree if tree else restore_file
     while action.state is not ActionState.RESTORED:
         previous_state = action.state
         result = restore(
             target,
             action.pre,
-            action.actual_post,
+            post,
             stage,
             recovery,
             journal.fault,
@@ -1253,6 +1609,7 @@ def _restore_action(
             action = replace(
                 action,
                 state=ActionState.RESTORED,
+                actual_post=post,
                 recovery_image=recovery_image,
             )
             journal.action(action)
@@ -1271,6 +1628,7 @@ def _restore_action(
         action = replace(
             action,
             state=ActionState.RESTORING,
+            actual_post=post,
             recovery_image=recovery_image,
         )
         journal.action(action)
@@ -1368,29 +1726,264 @@ def _restore_selector(journal: _Journal, state: SafeRoot) -> None:
         state,
         PurePath("backups", str(journal.receipt.install_id), "previous-active.json"),
     )
-    stage = StagedFile(
-        state,
-        PurePath(f".blender-mcp-installer.{journal.receipt.install_id}.active.stage"),
-        target_data.install_post,
-    )
-    while True:
-        result = restore_file(
-            target,
+    active_image = capture_file(state, target.relative)
+    recovery_image = capture_file(state, recovery.relative)
+    if target_data.pre.state is ImageState.PRESENT:
+        if (active_image, recovery_image) == (
+            target_data.install_post,
+            target_data.pre,
+        ):
+            conditional_swap_file(
+                target,
+                target_data.install_post,
+                recovery,
+                target_data.pre,
+                (),
+                journal.fault,
+            )
+            journal.fault.hit("after_active_restore_swap")
+        elif (active_image, recovery_image) != (
             target_data.pre,
             target_data.install_post,
-            stage,
+        ):
+            raise InstallerError("active selector recovery conflict")
+    else:
+        if (active_image, recovery_image) == (
+            target_data.install_post,
+            FileImage.absent(),
+        ):
+            recovery_fd, recovery_name = state.open_parent(recovery.relative)
+            recovery_parent = SafeRoot(recovery.path.parent, state.owner_uid, recovery_fd)
+            try:
+                rename_excl(
+                    state,
+                    "active.json",
+                    recovery_parent,
+                    recovery_name,
+                    journal.fault,
+                )
+            finally:
+                recovery_parent.close()
+            journal.fault.hit("after_active_restore_move")
+        elif (active_image, recovery_image) != (
+            FileImage.absent(),
+            target_data.install_post,
+        ):
+            raise InstallerError("active selector recovery conflict")
+    journal.fault.hit("after_active_restore_parent_fsync")
+
+
+def _cleanup_restored_selector(journal: _Journal, state: SafeRoot) -> None:
+    target_data = next(
+        target for target in journal.receipt.targets if target.role is TargetRole.ACTIVE_SELECTOR
+    )
+    if not isinstance(target_data.pre, FileImage) or not isinstance(
+        target_data.install_post, FileImage
+    ):
+        raise InstallerError("active selector recovery conflict")
+    active = TargetRef(state, PurePath("active.json"))
+    recovery = TargetRef(
+        state,
+        PurePath("backups", str(journal.receipt.install_id), "previous-active.json"),
+    )
+    recovery_image = capture_file(state, recovery.relative)
+    if recovery_image == target_data.install_post:
+        conditional_remove_file(
             recovery,
+            target_data.install_post,
+            ((active, target_data.pre),),
             journal.fault,
         )
-        if result is RestoreState.RESTORED:
-            break
-        suffix = (
-            "after_active_restore_swap"
-            if target_data.pre.state is ImageState.PRESENT
-            else "after_active_restore_move"
+    elif recovery_image != FileImage.absent():
+        raise InstallerError("active selector recovery conflict")
+    journal.fault.hit("after_active_restore_cleanup")
+
+
+def _action_references(
+    action: ReceiptAction,
+    roots: InstallRoots,
+    refs: Mapping[str, TargetRef],
+    install_id: UUID,
+) -> tuple[TargetRef, TargetRef, TargetRef]:
+    if action.kind is ActionKind.RUNTIME_TREE:
+        return (
+            refs["runtime"],
+            TreeRef(refs["runtime"].root, PurePath(roots.runtime_stage(install_id).name)),
+            TreeRef(refs["runtime"].root, PurePath(roots.runtime_recovery(install_id).name)),
         )
-        journal.fault.hit(suffix)
-    journal.fault.hit("after_active_restore_parent_fsync")
+    if action.kind is ActionKind.EXTENSION_TREE:
+        return (
+            refs["extension"],
+            TreeRef(
+                refs["extension"].root,
+                PurePath("user_default", roots.extension_stage(install_id).name),
+            ),
+            TreeRef(
+                refs["extension"].root,
+                PurePath("user_default", roots.extension_recovery(install_id).name),
+            ),
+        )
+    key = "codex" if action.kind is ActionKind.CODEX_FILE else "userpref"
+    stage_path = (
+        roots.codex_stage(install_id)
+        if action.kind is ActionKind.CODEX_FILE
+        else roots.userpref_stage(install_id)
+    )
+    recovery_path = (
+        roots.codex_recovery(install_id)
+        if action.kind is ActionKind.CODEX_FILE
+        else roots.userpref_recovery(install_id)
+    )
+    return (
+        refs[key],
+        TargetRef(refs[key].root, PurePath(stage_path.name)),
+        TargetRef(refs[key].root, PurePath(recovery_path.name)),
+    )
+
+
+def _native_rollback_tuple_valid(
+    action: ReceiptAction, target: Image, stage: Image, recovery: Image
+) -> bool:
+    absent: Image = TreeImage.absent() if isinstance(action.pre, TreeImage) else FileImage.absent()
+    if action.state is ActionState.PLANNED:
+        return (target, stage, recovery) == (action.pre, absent, absent)
+    post = action.actual_post or action.intended_post
+    if post is None:
+        return False
+    if action.pre.state is ImageState.PRESENT:
+        exact = {
+            (action.pre, absent, absent),
+            (action.pre, post, absent),
+            (post, action.pre, absent),
+            (post, absent, action.pre),
+            (action.pre, absent, post),
+        }
+    else:
+        exact = {
+            (absent, absent, absent),
+            (absent, post, absent),
+            (post, absent, absent),
+            (absent, absent, post),
+        }
+    if (target, stage, recovery) in exact:
+        return True
+    return (
+        isinstance(recovery, TreeImage)
+        and isinstance(post, TreeImage)
+        and target == action.pre
+        and stage == absent
+        and is_tree_cleanup_prefix(recovery, post)
+    )
+
+
+def _preflight_rollback(
+    roots: InstallRoots,
+    bundle: StagedBundle,
+    manifest_sha256: str,
+    receipt: Receipt,
+    state: SafeRoot,
+    refs: Mapping[str, TargetRef],
+) -> None:
+    if (
+        receipt.bundle.get("version") != bundle.manifest.bundle_version
+        or receipt.bundle.get("manifest_sha256") != manifest_sha256
+    ):
+        raise InstallerError("rollback preflight conflict")
+    by_role = {target.role: target for target in receipt.targets}
+    for action in receipt.actions:
+        if action.kind is ActionKind.BUNDLE_STAGE:
+            bundle_image = capture_tree(
+                state, PurePath("stages", str(receipt.install_id), "bundle")
+            )
+            valid = (
+                (action.state is ActionState.PLANNED and bundle_image == TreeImage.absent())
+                or (
+                    action.state is ActionState.STAGED
+                    and isinstance(action.intended_post, TreeImage)
+                    and bundle_image in {action.intended_post, TreeImage.absent()}
+                )
+                or (action.state is ActionState.CLEANED and bundle_image == TreeImage.absent())
+            )
+            if not valid:
+                raise InstallerError("rollback preflight conflict")
+            continue
+        target_ref, stage_ref, recovery_ref = _action_references(
+            action, roots, refs, receipt.install_id
+        )
+        tree = action.kind in {ActionKind.RUNTIME_TREE, ActionKind.EXTENSION_TREE}
+        capture = capture_tree if tree else capture_file
+        physical = (
+            capture(target_ref.root, target_ref.relative),
+            capture(stage_ref.root, stage_ref.relative),
+            capture(recovery_ref.root, recovery_ref.relative),
+        )
+        recorded = by_role[action.target_role]
+        post = action.actual_post or action.intended_post
+        if recorded.pre != action.pre or (
+            recorded.install_post is not None and recorded.install_post != post
+        ):
+            raise InstallerError("rollback preflight conflict")
+        if recorded.recovery_hash is not None and recorded.recovery_hash != _image_hash(action.pre):
+            raise InstallerError("rollback preflight conflict")
+        if action.kind is ActionKind.CODEX_FILE and action.rollback_intended is not None:
+            rollback_stage = capture_file(
+                refs["codex"].root, PurePath(roots.codex_rollback_stage(receipt.install_id).name)
+            )
+            intended = action.rollback_intended
+            displaced = action.rollback_displaced
+            semantic = {
+                ActionState.SEMANTIC_STAGED: (
+                    physical[0].state is ImageState.PRESENT
+                    and physical[1] == FileImage.absent()
+                    and rollback_stage == intended
+                    and physical[2] == action.pre
+                    and displaced is None
+                ),
+                ActionState.SEMANTIC_SWAPPED: (
+                    physical == (intended, FileImage.absent(), action.pre)
+                    and rollback_stage == displaced
+                ),
+                ActionState.RESTORING: (
+                    physical[0] == intended
+                    and rollback_stage == FileImage.absent()
+                    and physical[2] in {action.pre, FileImage.absent()}
+                ),
+                ActionState.RESTORED: (
+                    physical == (intended, FileImage.absent(), FileImage.absent())
+                    and rollback_stage == FileImage.absent()
+                ),
+            }
+            if not semantic.get(action.state, False):
+                raise InstallerError("rollback preflight conflict")
+        elif (
+            action.kind is ActionKind.CODEX_FILE
+            and action.state is ActionState.COMPLETED
+            and physical[0].state is ImageState.PRESENT
+            and physical[1] == FileImage.absent()
+            and physical[2] == action.pre
+        ):
+            pass
+        elif not _native_rollback_tuple_valid(action, *physical):
+            raise InstallerError("rollback preflight conflict")
+    selector = by_role[TargetRole.ACTIVE_SELECTOR]
+    if not isinstance(selector.pre, FileImage) or not isinstance(selector.install_post, FileImage):
+        raise InstallerError("rollback preflight conflict")
+    active_image = capture_file(state, PurePath("active.json"))
+    recovery_image = capture_file(
+        state,
+        PurePath("backups", str(receipt.install_id), "previous-active.json"),
+    )
+    before = (
+        selector.install_post,
+        selector.pre if selector.pre.state is ImageState.PRESENT else FileImage.absent(),
+    )
+    reversed_row = (selector.pre, selector.install_post)
+    terminal = (selector.pre, FileImage.absent())
+    allowed = {before, reversed_row}
+    if receipt.status is ReceiptStatus.ROLLED_BACK:
+        allowed.add(terminal)
+    if (active_image, recovery_image) not in allowed:
+        raise InstallerError("rollback preflight conflict")
 
 
 def _rollback_receipt(
@@ -1399,9 +1992,12 @@ def _rollback_receipt(
     blender: BlenderState,
     receipt: Receipt,
     fault: FaultInjector,
+    *,
+    manifest_sha256: str,
 ) -> Receipt:
     with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
         with _refs(roots, state) as refs:
+            _preflight_rollback(roots, bundle, manifest_sha256, receipt, state, refs)
             journal = _Journal(
                 state,
                 roots,
@@ -1507,8 +2103,65 @@ def _rollback_receipt(
             _restore_selector(journal, state)
             journal.write(replace(journal.receipt, status=ReceiptStatus.ROLLED_BACK))
             fault.hit("after_rollback_status")
-            fault.hit("after_active_restore_cleanup")
+            _cleanup_restored_selector(journal, state)
             return journal.receipt
+
+
+def _discover_reversed_selector_receipt(
+    roots: InstallRoots, state: SafeRoot, fault: FaultInjector
+) -> Receipt | None:
+    try:
+        receipts_fd = state.open_directory(PurePath("receipts"))
+    except FileNotFoundError:
+        return None
+    try:
+        names = tuple(sorted(os.listdir(receipts_fd)))
+    finally:
+        os.close(receipts_fd)
+    candidates: list[Receipt] = []
+    active_image = capture_file(state, PurePath("active.json"))
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            install_id = UUID(name[:-5])
+        except ValueError:
+            continue
+        if install_id.version != 4 or name != f"{install_id}.json":
+            continue
+        receipt = load_receipt(roots.receipt(install_id), roots)
+        if receipt.status not in {
+            ReceiptStatus.ROLLBACK_PENDING,
+            ReceiptStatus.ROLLED_BACK,
+        }:
+            continue
+        target = next(item for item in receipt.targets if item.role is TargetRole.ACTIVE_SELECTOR)
+        if not isinstance(target.pre, FileImage) or not isinstance(target.install_post, FileImage):
+            raise InstallerError("active selector recovery conflict")
+        recovery = TargetRef(
+            state,
+            PurePath("backups", str(install_id), "previous-active.json"),
+        )
+        recovery_image = capture_file(state, recovery.relative)
+        if (active_image, recovery_image) != (target.pre, target.install_post):
+            continue
+        value, stale = load_atomic_json_pair(recovery, install_id)
+        if stale is not None:
+            raise InstallerError("active selector recovery conflict")
+        try:
+            selector = ActiveSelector.from_dict(value)
+        except (TypeError, ValueError) as exc:
+            raise InstallerError("active selector recovery conflict") from exc
+        if selector != ActiveSelector(1, receipt.generation, install_id, name):
+            raise InstallerError("active selector recovery conflict")
+        candidates.append(receipt)
+    if len(candidates) > 1:
+        raise InstallerError("active selector recovery conflict")
+    if not candidates:
+        return None
+    candidate = candidates[0]
+    _settle_known_receipt_atomic_json(roots, candidate.install_id, state, fault)
+    return load_receipt(roots.receipt(candidate.install_id), roots)
 
 
 def recover_active(
@@ -1516,13 +2169,42 @@ def recover_active(
     bundle: StagedBundle,
     blender: BlenderState,
     fault: FaultInjector,
+    *,
+    manifest_sha256: str,
 ) -> dict[str, object]:
+    with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
+        reversed_receipt = _discover_reversed_selector_receipt(roots, state, fault)
+        if reversed_receipt is not None:
+            if reversed_receipt.status is ReceiptStatus.ROLLED_BACK:
+                journal = _Journal(
+                    state,
+                    roots,
+                    fault,
+                    reversed_receipt,
+                    capture_file(
+                        state,
+                        PurePath("receipts", f"{reversed_receipt.install_id}.json"),
+                    ),
+                )
+                _cleanup_restored_selector(journal, state)
+                return {"recovered": True, "status": "rolled_back"}
+            rolled = _rollback_receipt(
+                roots,
+                bundle,
+                blender,
+                reversed_receipt,
+                fault,
+                manifest_sha256=manifest_sha256,
+            )
+            return {"recovered": True, "status": rolled.status.value}
     try:
         active = load_active(roots.active, roots)
     except FileNotFoundError:
         active = None
     if active is None:
         return {"recovered": False}
+    with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
+        _settle_known_receipt_atomic_json(roots, active.install_id, state, fault)
     receipt = load_receipt(roots.receipt(active.install_id), roots)
     if receipt.status is ReceiptStatus.INSTALLED:
         bundle_actions = [
@@ -1542,7 +2224,14 @@ def recover_active(
         return {"recovered": False, "status": "installed"}
     if receipt.status not in {ReceiptStatus.PREPARED, ReceiptStatus.ROLLBACK_PENDING}:
         return {"recovered": False, "status": receipt.status.value}
-    rolled = _rollback_receipt(roots, bundle, blender, receipt, fault)
+    rolled = _rollback_receipt(
+        roots,
+        bundle,
+        blender,
+        receipt,
+        fault,
+        manifest_sha256=manifest_sha256,
+    )
     return {"recovered": True, "status": rolled.status.value}
 
 
@@ -1578,11 +2267,37 @@ def rollback(args: argparse.Namespace) -> dict[str, object]:
         roots = context.roots
         with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
             with InstallerLock.acquire(state):
-                reconcile_selectors(roots, context.source_bundle, context.blender, fault)
+                reconcile_selectors(
+                    roots,
+                    context.source_bundle,
+                    context.blender,
+                    fault,
+                    manifest_sha256=context.manifest_sha256,
+                )
+                recover_active(
+                    roots,
+                    context.source_bundle,
+                    context.blender,
+                    fault,
+                    manifest_sha256=context.manifest_sha256,
+                )
+                requested = load_receipt(args.receipt, roots)
+                if requested.status is ReceiptStatus.ROLLED_BACK:
+                    roles = [
+                        action.target_role.value
+                        for action in requested.actions
+                        if action.target_role is not None
+                    ]
+                    return {
+                        "command": "rollback",
+                        "receipt": str(args.receipt),
+                        "status": "rolled_back",
+                        "restored_roles": roles,
+                    }
                 active = load_active(roots.active, roots)
                 if active is None or args.receipt != roots.receipt(active.install_id):
                     raise InstallerError("rollback receipt is not active")
-                receipt = load_receipt(args.receipt, roots)
+                receipt = requested
                 if receipt.status not in {
                     ReceiptStatus.INSTALLED,
                     ReceiptStatus.PREPARED,
@@ -1591,7 +2306,12 @@ def rollback(args: argparse.Namespace) -> dict[str, object]:
                     raise InstallerError("rollback receipt status is invalid")
                 _lifecycle_closed(context)
                 rolled = _rollback_receipt(
-                    roots, context.source_bundle, context.blender, receipt, fault
+                    roots,
+                    context.source_bundle,
+                    context.blender,
+                    receipt,
+                    fault,
+                    manifest_sha256=context.manifest_sha256,
                 )
                 roles = [
                     action.target_role.value
@@ -1609,6 +2329,9 @@ def rollback(args: argparse.Namespace) -> dict[str, object]:
 def run_cli(argv: Sequence[str], fault: FaultInjector) -> int:
     try:
         args = _parser().parse_args(tuple(argv))
+    except _ArgumentError:
+        print(json.dumps({"error": "invalid arguments"}, sort_keys=True, separators=(",", ":")))
+        return 2
     except SystemExit as exc:
         return int(exc.code)
     args._fault = fault

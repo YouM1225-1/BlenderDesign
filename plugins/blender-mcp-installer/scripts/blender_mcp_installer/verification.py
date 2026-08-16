@@ -101,6 +101,17 @@ class MCPHandle(Protocol):
     def wait(self, timeout: float) -> object: ...
 
 
+def _stop_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=_WAIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=_WAIT_TIMEOUT)
+
+
 class MCPProbe(Protocol):
     # spawn is atomic: failure means no child or owned descriptor exists.
     def spawn(self, command: Sequence[str], *, env: Mapping[str, str]) -> MCPHandle: ...
@@ -130,9 +141,7 @@ class _OfficialMCPClient:
                 raise ValueError("invalid probe result")
         except Exception as exc:
             try:
-                if self.process.poll() is None:
-                    self.process.terminate()
-                self.process.wait(timeout=_WAIT_TIMEOUT)
+                _stop_process(self.process)
             except Exception:
                 pass
             raise InstallerError("official MCP probe failed") from exc
@@ -160,11 +169,12 @@ class _OfficialMCPHandle:
         return self.client
 
     def close(self) -> None:
-        pass
+        for stream in (self.process.stdout, self.process.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
 
     def terminate(self) -> None:
-        if self.process.poll() is None:
-            self.process.terminate()
+        _stop_process(self.process)
 
     def wait(self, timeout: float) -> object:
         return self.process.wait(timeout=timeout)
