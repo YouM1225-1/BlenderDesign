@@ -607,19 +607,26 @@ def create_deterministic_stage(
         if isinstance(expected_absent, FileImage):
             fd = os.open(
                 basename,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                 0o600,
                 dir_fd=parent.fd,
             )
             try:
                 os.fchmod(fd, 0o600)
                 os.fsync(fd)
+                created_file = _file_image(os.fstat(fd), _hash_fd(fd))
             finally:
                 os.close(fd)
+            try:
+                captured_file = _capture_file_at(parent.fd, basename, parent.owner_uid)
+            except (OSError, ValueError) as exc:
+                raise InstallerError("transaction state conflict") from exc
+            if captured_file != created_file:
+                raise InstallerError("transaction state conflict")
             stage: StagedObject = StagedFile(
                 parent,
                 PurePosixPath(basename),
-                _capture_file_at(parent.fd, basename, parent.owner_uid),
+                created_file,
             )
         elif isinstance(expected_absent, TreeImage):
             os.mkdir(basename, mode=0o700, dir_fd=parent.fd)
@@ -627,12 +634,29 @@ def create_deterministic_stage(
             directory = _open_verified_directory(parent.fd, basename, parent.owner_uid)
             try:
                 os.fsync(directory)
+                info = os.fstat(directory)
+                created_tree = TreeImage(
+                    ImageState.PRESENT,
+                    info.st_dev,
+                    info.st_ino,
+                    info.st_uid,
+                    stat.S_IMODE(info.st_mode),
+                    info.st_mtime_ns,
+                    hashlib.sha256(b"[]").hexdigest(),
+                    (),
+                )
             finally:
                 os.close(directory)
+            try:
+                captured_tree = capture_tree(parent, PurePosixPath(basename))
+            except (OSError, ValueError) as exc:
+                raise InstallerError("transaction state conflict") from exc
+            if captured_tree != created_tree:
+                raise InstallerError("transaction state conflict")
             stage = StagedTree(
                 parent,
                 PurePosixPath(basename),
-                capture_tree(parent, PurePosixPath(basename)),
+                created_tree,
             )
         else:
             raise TypeError("unsupported stage image")
@@ -755,16 +779,18 @@ def _copy_directory(
                 raise InstallerError("transaction state conflict")
         elif stat.S_ISDIR(info.st_mode):
             source_child = _open_verified_directory(source_fd, name, uid)
-            os.mkdir(name, mode=0o700, dir_fd=target_fd)
-            target_child = _open_verified_directory(target_fd, name, uid)
-            created[path] = _created_entry(os.fstat(target_child), "dir")
             try:
-                _copy_directory(source_child, target_child, uid, created, path)
-                os.fchmod(target_child, stat.S_IMODE(info.st_mode))
-                created[path] = _created_entry(os.fstat(target_child), "dir")
-                os.fsync(target_child)
+                os.mkdir(name, mode=0o700, dir_fd=target_fd)
+                target_child = _open_verified_directory(target_fd, name, uid)
+                try:
+                    created[path] = _created_entry(os.fstat(target_child), "dir")
+                    _copy_directory(source_child, target_child, uid, created, path)
+                    os.fchmod(target_child, stat.S_IMODE(info.st_mode))
+                    created[path] = _created_entry(os.fstat(target_child), "dir")
+                    os.fsync(target_child)
+                finally:
+                    os.close(target_child)
             finally:
-                os.close(target_child)
                 os.close(source_child)
         else:
             raise ValueError("tree contains a symlink or special entry")
@@ -829,11 +855,13 @@ def copy_tree(source: TreeRef, stage: StagedTree) -> TreeImage:
     created: dict[str, _CreatedEntry] = {}
     try:
         source_fd = _open_verified_directory(source_parent_fd, source_name, source.root.owner_uid)
-        stage_fd = _open_verified_directory(stage_parent_fd, stage_name, stage.root.owner_uid)
         try:
-            _copy_directory(source_fd, stage_fd, source.root.owner_uid, created)
+            stage_fd = _open_verified_directory(stage_parent_fd, stage_name, stage.root.owner_uid)
+            try:
+                _copy_directory(source_fd, stage_fd, source.root.owner_uid, created)
+            finally:
+                os.close(stage_fd)
         finally:
-            os.close(stage_fd)
             os.close(source_fd)
         os.fsync(stage_parent_fd)
     except BaseException as exc:

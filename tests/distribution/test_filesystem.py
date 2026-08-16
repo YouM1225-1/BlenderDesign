@@ -1408,6 +1408,59 @@ def test_deterministic_stage_is_private_and_collisions_fail_closed(tmp_path: Pat
             )
 
 
+@pytest.mark.parametrize("tree", [False, True])
+def test_deterministic_stage_rejects_replacement_before_final_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tree: bool
+) -> None:
+    tmp_path.chmod(0o700)
+    with _safe(tmp_path) as root:
+        real_open = os.open
+        real_close = os.close
+        created_fd: int | None = None
+        created_ino: int | None = None
+        replacement_ino: int | None = None
+        replaced = False
+
+        def track_created_fd(*args: object, **kwargs: object) -> int:
+            nonlocal created_fd
+            fd = real_open(*args, **kwargs)
+            name = args[0] if args else kwargs.get("path")
+            flags = args[1] if len(args) > 1 else kwargs.get("flags", 0)
+            if (
+                name == "stage"
+                and kwargs.get("dir_fd") == root.fd
+                and ((tree and flags & os.O_DIRECTORY) or (not tree and flags & os.O_EXCL))
+            ):
+                created_fd = fd
+            return fd
+
+        def replace_after_created_fd_close(fd: int) -> None:
+            nonlocal created_ino, replacement_ino, replaced
+            if fd != created_fd or replaced:
+                real_close(fd)
+                return
+            created_ino = os.fstat(fd).st_ino
+            real_close(fd)
+            replaced = True
+            if tree:
+                os.rmdir("stage", dir_fd=root.fd)
+            else:
+                os.unlink("stage", dir_fd=root.fd)
+            _foreign_object(root.fd, "stage", tree=tree)
+            replacement_ino = os.stat("stage", dir_fd=root.fd, follow_symlinks=False).st_ino
+
+        monkeypatch.setattr(filesystem.os, "open", track_created_fd)
+        monkeypatch.setattr(filesystem.os, "close", replace_after_created_fd_close)
+        expected_absent = TreeImage.absent() if tree else FileImage.absent()
+        with pytest.raises(InstallerError, match="transaction state conflict"):
+            create_deterministic_stage(root, "stage", expected_absent, NoOpFaultInjector())
+        assert replaced and created_ino != replacement_ino
+        if tree:
+            assert (tmp_path / "stage/foreign").read_bytes() == b"foreign"
+        else:
+            assert (tmp_path / "stage").read_bytes() == b"foreign"
+
+
 @pytest.mark.parametrize("nonempty", [False, True])
 def test_copy_tree_proves_stable_source_and_copies_closed_tree(
     tmp_path: Path, nonempty: bool
@@ -2306,6 +2359,116 @@ def test_copy_file_closes_source_when_destination_open_collides(
     finally:
         real_close(target_fd)
         real_close(source_fd)
+
+
+@pytest.mark.parametrize("failure", ["collision", "open"])
+def test_copy_directory_closes_source_child_on_repeated_destination_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    source_path = tmp_path / "source"
+    target_path = tmp_path / "target"
+    (source_path / "nested").mkdir(parents=True)
+    target_path.mkdir()
+    source_fd = os.open(source_path, os.O_RDONLY | os.O_DIRECTORY)
+    target_fd = os.open(target_path, os.O_RDONLY | os.O_DIRECTORY)
+    real_open_directory = filesystem._open_verified_directory
+    real_close = os.close
+    active: dict[int, int] = {}
+
+    def track_open_directory(parent_fd: int, name: str, uid: int | None) -> int:
+        if failure == "open" and parent_fd == target_fd:
+            raise OSError(errno.EIO, "injected destination open failure")
+        fd = real_open_directory(parent_fd, name, uid)
+        active[fd] = active.get(fd, 0) + 1
+        return fd
+
+    def track_close(fd: int) -> None:
+        if active.get(fd, 0):
+            active[fd] -= 1
+            if active[fd] == 0:
+                del active[fd]
+        real_close(fd)
+
+    monkeypatch.setattr(filesystem, "_open_verified_directory", track_open_directory)
+    monkeypatch.setattr(filesystem.os, "close", track_close)
+    if failure == "collision":
+        real_mkdir = os.mkdir
+
+        def collide(name: str, *args: object, **kwargs: object) -> None:
+            if name == "nested" and kwargs.get("dir_fd") == target_fd:
+                raise FileExistsError(errno.EEXIST, "injected directory collision", name)
+            real_mkdir(name, *args, **kwargs)
+
+        monkeypatch.setattr(filesystem.os, "mkdir", collide)
+    try:
+        for _ in range(3):
+            with pytest.raises(
+                FileExistsError if failure == "collision" else OSError,
+                match="collision" if failure == "collision" else "open failure",
+            ):
+                filesystem._copy_directory(source_fd, target_fd, os.getuid())
+            if failure == "open":
+                os.rmdir("nested", dir_fd=target_fd)
+        assert active == {}
+    finally:
+        real_close(target_fd)
+        real_close(source_fd)
+
+
+def test_copy_tree_closes_source_root_on_repeated_destination_open_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    real_open_directory = filesystem._open_verified_directory
+    real_close = os.close
+    active: dict[int, int] = {}
+    source_opens = 0
+    failed_stages: set[str] = set()
+    in_copy = False
+
+    def track_open_directory(parent_fd: int, name: str, uid: int | None) -> int:
+        nonlocal source_opens
+        if in_copy and name == "source":
+            source_opens += 1
+        if (
+            in_copy
+            and name.startswith("stage-")
+            and source_opens % 2 == 0
+            and name not in failed_stages
+        ):
+            failed_stages.add(name)
+            raise OSError(errno.EIO, "injected stage open failure")
+        fd = real_open_directory(parent_fd, name, uid)
+        active[fd] = active.get(fd, 0) + 1
+        return fd
+
+    def track_close(fd: int) -> None:
+        if active.get(fd, 0):
+            active[fd] -= 1
+            if active[fd] == 0:
+                del active[fd]
+        real_close(fd)
+
+    monkeypatch.setattr(filesystem, "_open_verified_directory", track_open_directory)
+    monkeypatch.setattr(filesystem.os, "close", track_close)
+    with _safe(tmp_path) as root:
+        for index in range(3):
+            stage = create_deterministic_stage(
+                root,
+                f"stage-{index}",
+                TreeImage.absent(),
+                NoOpFaultInjector(),
+            )
+            assert isinstance(stage, StagedTree)
+            in_copy = True
+            try:
+                with pytest.raises(OSError, match="stage open failure"):
+                    copy_tree(TreeRef(root, PurePath("source")), stage)
+            finally:
+                in_copy = False
+    assert failed_stages == {"stage-0", "stage-1", "stage-2"}
+    assert active == {}
 
 
 def test_copy_tree_pure_partial_failure_removes_stage_for_clean_retry(
