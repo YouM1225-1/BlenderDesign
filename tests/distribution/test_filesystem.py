@@ -3,8 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
+import subprocess
 import sys
+import zipfile
+from dataclasses import replace
 from pathlib import Path, PurePath
 from uuid import UUID
 
@@ -43,6 +47,7 @@ from blender_mcp_installer.model import (  # noqa: E402
     TreeEntry,
     TreeImage,
 )
+from tests.distribution.fake_host import HostHarness, SANITIZED_ENV  # noqa: E402
 
 
 INSTALL_ID = UUID("12345678-1234-4234-9234-123456789abc")
@@ -63,7 +68,13 @@ def _blender(root: Path) -> BlenderPaths:
 
 
 def _roots(root: Path) -> InstallRoots:
-    return InstallRoots.discover(root / "home", root / "codex", _blender(root))
+    return InstallRoots.discover(
+        root / "home",
+        root / "codex",
+        _blender(root),
+        source_distribution_root=root / "source-distribution",
+        distribution_root=root / "distribution",
+    )
 
 
 def _absent_file() -> dict[str, object]:
@@ -172,58 +183,90 @@ def _safe(path: Path, owned_from: Path | None = None) -> SafeRoot:
 def test_exact_derived_path_table(tmp_path: Path) -> None:
     roots = _roots(tmp_path)
     install_id = INSTALL_ID
-    assert roots.codex_config == tmp_path / "codex/config.toml"
-    assert roots.data_root == tmp_path / "home/.local/share/blender-lab-mcp"
-    assert roots.runtime == roots.data_root / "runtime"
-    assert roots.state_root == tmp_path / "home/.local/state/blender-mcp-installer"
-    assert roots.lock == roots.state_root / "installer.lock"
-    assert roots.receipts == roots.state_root / "receipts"
-    assert roots.receipt(install_id) == roots.receipts / f"{install_id}.json"
-    assert roots.pending == roots.state_root / "pending.json"
-    assert roots.active == roots.state_root / "active.json"
-    assert roots.backups(install_id) == roots.state_root / "backups" / str(install_id)
-    assert roots.previous_active(install_id) == roots.backups(install_id) / "previous-active.json"
+    expected = {
+        "source_distribution_root": tmp_path / "source-distribution",
+        "distribution_root": tmp_path / "distribution",
+        "bundle_root": tmp_path / "distribution/plugins/blender-mcp-installer/artifacts",
+        "codex_config": tmp_path / "codex/config.toml",
+        "data_root": tmp_path / "home/.local/share/blender-lab-mcp",
+        "runtime": tmp_path / "home/.local/share/blender-lab-mcp/runtime",
+        "state_root": tmp_path / "home/.local/state/blender-mcp-installer",
+        "lock": tmp_path / "home/.local/state/blender-mcp-installer/installer.lock",
+        "receipts": tmp_path / "home/.local/state/blender-mcp-installer/receipts",
+        "receipt": tmp_path / f"home/.local/state/blender-mcp-installer/receipts/{install_id}.json",
+        "pending": tmp_path / "home/.local/state/blender-mcp-installer/pending.json",
+        "active": tmp_path / "home/.local/state/blender-mcp-installer/active.json",
+        "backups": tmp_path / f"home/.local/state/blender-mcp-installer/backups/{install_id}",
+        "previous_active": tmp_path
+        / f"home/.local/state/blender-mcp-installer/backups/{install_id}/previous-active.json",
+        "bundle_stage": tmp_path
+        / f"home/.local/state/blender-mcp-installer/stages/{install_id}/bundle",
+        "runtime_stage": tmp_path
+        / f"home/.local/share/blender-lab-mcp/.blender-mcp-installer.{install_id}.runtime.stage",
+        "runtime_recovery": tmp_path
+        / f"home/.local/share/blender-lab-mcp/.blender-mcp-installer.{install_id}.runtime.recovery",
+        "extension_target": roots.blender.user_extensions / "user_default/mcp",
+        "extension_stage": roots.blender.user_extensions
+        / f"user_default/.blender-mcp-installer.{install_id}.extension.stage",
+        "extension_recovery": roots.blender.user_extensions
+        / f"user_default/.blender-mcp-installer.{install_id}.extension.recovery",
+        "userpref_target": roots.blender.user_config / "userpref.blend",
+        "userpref_stage": roots.blender.user_config
+        / f".blender-mcp-installer.{install_id}.userpref.stage",
+        "userpref_recovery": roots.blender.user_config
+        / f".blender-mcp-installer.{install_id}.userpref.recovery",
+        "codex_stage": roots.codex_home / f".blender-mcp-installer.{install_id}.codex.stage",
+        "codex_recovery": roots.codex_home / f".blender-mcp-installer.{install_id}.codex.recovery",
+        "codex_rollback_stage": roots.codex_home
+        / f".blender-mcp-installer.{install_id}.codex.rollback.stage",
+    }
+    actual = {
+        "source_distribution_root": roots.source_distribution_root,
+        "distribution_root": roots.distribution_root,
+        "bundle_root": roots.bundle_root,
+        "codex_config": roots.codex_config,
+        "data_root": roots.data_root,
+        "runtime": roots.runtime,
+        "state_root": roots.state_root,
+        "lock": roots.lock,
+        "receipts": roots.receipts,
+        "receipt": roots.receipt(install_id),
+        "pending": roots.pending,
+        "active": roots.active,
+        "backups": roots.backups(install_id),
+        "previous_active": roots.previous_active(install_id),
+        "bundle_stage": roots.bundle_stage(install_id),
+        "runtime_stage": roots.runtime_stage(install_id),
+        "runtime_recovery": roots.runtime_recovery(install_id),
+        "extension_target": roots.extension_target,
+        "extension_stage": roots.extension_stage(install_id),
+        "extension_recovery": roots.extension_recovery(install_id),
+        "userpref_target": roots.userpref_target,
+        "userpref_stage": roots.userpref_stage(install_id),
+        "userpref_recovery": roots.userpref_recovery(install_id),
+        "codex_stage": roots.codex_stage(install_id),
+        "codex_recovery": roots.codex_recovery(install_id),
+        "codex_rollback_stage": roots.codex_rollback_stage(install_id),
+    }
+    assert actual == expected
     assert (
-        roots.bundle_stage(install_id) == roots.state_root / "stages" / str(install_id) / "bundle"
+        InstallRoots.discover(
+            roots.home,
+            None,
+            roots.blender,
+            source_distribution_root=roots.source_distribution_root,
+            distribution_root=roots.distribution_root,
+        ).codex_home
+        == roots.home / ".codex"
     )
-    assert (
-        roots.runtime_stage(install_id)
-        == roots.data_root / f".blender-mcp-installer.{install_id}.runtime.stage"
-    )
-    assert (
-        roots.runtime_recovery(install_id)
-        == roots.data_root / f".blender-mcp-installer.{install_id}.runtime.recovery"
-    )
-    assert roots.extension_target == roots.blender.user_extensions / "user_default/mcp"
-    assert (
-        roots.extension_stage(install_id).name
-        == f".blender-mcp-installer.{install_id}.extension.stage"
-    )
-    assert (
-        roots.extension_recovery(install_id).name
-        == f".blender-mcp-installer.{install_id}.extension.recovery"
-    )
-    assert roots.userpref_target == roots.blender.user_config / "userpref.blend"
-    assert (
-        roots.userpref_stage(install_id).name
-        == f".blender-mcp-installer.{install_id}.userpref.stage"
-    )
-    assert (
-        roots.userpref_recovery(install_id).name
-        == f".blender-mcp-installer.{install_id}.userpref.recovery"
-    )
-    assert roots.codex_stage(install_id).name == f".blender-mcp-installer.{install_id}.codex.stage"
-    assert (
-        roots.codex_recovery(install_id).name
-        == f".blender-mcp-installer.{install_id}.codex.recovery"
-    )
-    assert (
-        roots.codex_rollback_stage(install_id).name
-        == f".blender-mcp-installer.{install_id}.codex.rollback.stage"
-    )
-    assert (
-        InstallRoots.discover(roots.home, None, roots.blender).codex_home == roots.home / ".codex"
-    )
+    with pytest.raises(ValueError):
+        InstallRoots.discover(
+            roots.home,
+            roots.codex_home,
+            roots.blender,
+            source_distribution_root=Path("relative"),
+            distribution_root=roots.distribution_root,
+        )
 
 
 def test_ancestor_and_leaf_symlinks_rejected(tmp_path: Path) -> None:
@@ -260,6 +303,30 @@ def test_existing_parent_mode_never_changes(tmp_path: Path) -> None:
     assert stat.S_IMODE(owned.stat().st_mode) == 0o751
     assert stat.S_IMODE((owned / "new").stat().st_mode) == 0o700
     assert stat.S_IMODE((owned / "new/leaf").stat().st_mode) == 0o700
+
+
+def test_restrictive_umask_sets_only_new_private_objects(tmp_path: Path) -> None:
+    owned = tmp_path / "owned"
+    owned.mkdir(mode=0o751)
+    owned.chmod(0o751)
+    previous = os.umask(0o777)
+    try:
+        with SafeRoot.open(owned / "state", os.getuid(), owned) as root:
+            assert stat.S_IMODE((owned / "state").stat().st_mode) == 0o700
+            with InstallerLock.acquire(root):
+                assert stat.S_IMODE((owned / "state/installer.lock").stat().st_mode) == 0o600
+            target = TargetRef(root, PurePath("value.json"))
+            first = write_atomic_json(target, FileImage.absent(), {"value": 1}, INSTALL_ID)
+            assert first.mode == 0o600
+            second = write_atomic_json(target, first, {"value": 2}, INSTALL_ID)
+            assert second.mode == 0o600
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(owned.stat().st_mode) == 0o751
+    with _safe(owned / "state") as root:
+        target = TargetRef(root, PurePath("value.json"))
+        current = capture_file(root, target.relative)
+        write_atomic_json(target, current, {"value": 3}, INSTALL_ID)
 
 
 def test_file_snapshot_detects_in_place_change(
@@ -366,6 +433,124 @@ def test_image_variant_nullability() -> None:
     bad_entry["entries"][0]["sha256"] = None
     with pytest.raises(ValueError):
         TreeImage.from_dict(bad_entry)
+
+
+def _bundle_action() -> dict[str, object]:
+    return {
+        "ordinal": 0,
+        "kind": "bundle_stage",
+        "object_kind": "bundle",
+        "state": "planned",
+        "target_role": None,
+        "target_path": "/tmp/bundle",
+        "stage_basename": "bundle",
+        "recovery_basename": None,
+        "pre": _absent_tree(),
+        "intended_post": None,
+        "actual_post": None,
+        "recovery_image": None,
+        "rollback_intended": None,
+        "rollback_displaced": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"rollback_intended": None, "rollback_displaced": None},
+        {"rollback_intended": None},
+        {"rollback_displaced": None},
+        {"rollback_intended": _absent_file()},
+        {"rollback_displaced": _absent_file()},
+        {"rollback_intended": _present_tree()},
+        {"rollback_displaced": _present_tree()},
+    ],
+)
+def test_semantic_swapped_requires_two_present_file_images(changes: dict[str, object]) -> None:
+    base = {
+        **_bundle_action(),
+        "kind": "codex_file",
+        "object_kind": "codex",
+        "state": "semantic_swapped",
+        "target_role": "codex_config",
+        "target_path": "/tmp/config.toml",
+        "stage_basename": ".stage",
+        "recovery_basename": ".recovery",
+        "pre": _present_file(),
+        "intended_post": _present_file(),
+        "actual_post": _present_file(),
+        "recovery_image": _present_file(),
+        "rollback_intended": _present_file(),
+        "rollback_displaced": _present_file(),
+    }
+    with pytest.raises(ValueError):
+        ReceiptAction.from_dict({**base, **changes})
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"kind": ActionKind.RUNTIME_TREE},
+        {"object_kind": ObjectKind.TREE},
+        {"state": ActionState.PUBLISHED},
+        {"target_role": TargetRole.RUNTIME},
+        {"pre": FileImage.absent()},
+        {"recovery_basename": ".recovery"},
+        {"intended_post": _present_tree()},
+    ],
+)
+def test_receipt_action_direct_construction_is_closed(changes: dict[str, object]) -> None:
+    valid = ReceiptAction.from_dict(_bundle_action())
+    with pytest.raises(ValueError):
+        replace(valid, **changes)
+
+
+def test_receipt_action_direct_managed_matrix_is_closed() -> None:
+    runtime = {
+        **_bundle_action(),
+        "kind": "runtime_tree",
+        "object_kind": "tree",
+        "target_role": "runtime",
+        "target_path": "/tmp/runtime",
+        "stage_basename": ".runtime.stage",
+        "recovery_basename": ".runtime.recovery",
+    }
+    valid_runtime = ReceiptAction.from_dict(runtime)
+    for changes in (
+        {"object_kind": ObjectKind.FILE},
+        {"target_role": TargetRole.CODEX_CONFIG},
+        {"recovery_basename": None},
+        {"state": ActionState.SWAPPED},
+        {"intended_post": _present_tree()},
+        {"pre": FileImage.absent()},
+    ):
+        with pytest.raises(ValueError):
+            replace(valid_runtime, **changes)
+
+    semantic = ReceiptAction.from_dict(
+        {
+            **runtime,
+            "kind": "codex_file",
+            "object_kind": "codex",
+            "state": "semantic_swapped",
+            "target_role": "codex_config",
+            "target_path": "/tmp/config.toml",
+            "pre": _present_file(),
+            "intended_post": _present_file(),
+            "actual_post": _present_file(),
+            "recovery_image": _present_file(),
+            "rollback_intended": _present_file(),
+            "rollback_displaced": _present_file(),
+        }
+    )
+    for changes in (
+        {"rollback_intended": None},
+        {"rollback_displaced": None},
+        {"rollback_intended": FileImage.absent()},
+        {"rollback_displaced": TreeImage.absent()},
+    ):
+        with pytest.raises(ValueError):
+            replace(semantic, **changes)
 
 
 def test_receipt_action_enum_transition_and_nullability() -> None:
@@ -490,6 +675,29 @@ def test_receipt_action_enum_transition_and_nullability() -> None:
     assert ReceiptAction.from_dict(codex).state is ActionState.SEMANTIC_STAGED
     with pytest.raises(ValueError):
         ReceiptAction.from_dict({**codex, "kind": "userpref_file"})
+    semantic_swapped = {**codex, "state": "semantic_swapped", "rollback_displaced": _present_file()}
+    assert ReceiptAction.from_dict(semantic_swapped).state is ActionState.SEMANTIC_SWAPPED
+    for changes in (
+        {"rollback_intended": None, "rollback_displaced": None},
+        {"rollback_intended": None},
+        {"rollback_displaced": None},
+        {"rollback_intended": _absent_file()},
+        {"rollback_displaced": _absent_file()},
+        {"rollback_intended": _present_tree()},
+        {"rollback_displaced": _present_tree()},
+    ):
+        with pytest.raises(ValueError):
+            ReceiptAction.from_dict({**semantic_swapped, **changes})
+    valid = ReceiptAction.from_dict(bundle)
+    for changes in (
+        {"object_kind": ObjectKind.TREE},
+        {"state": ActionState.PUBLISHED},
+        {"target_role": TargetRole.RUNTIME},
+        {"pre": FileImage.absent()},
+        {"recovery_basename": ".recovery"},
+    ):
+        with pytest.raises(ValueError):
+            replace(valid, **changes)
 
 
 @pytest.mark.parametrize(
@@ -572,6 +780,113 @@ def test_atomic_json_crash_is_old_or_new_complete_document(
         assert stat.S_IMODE(retained.path.stat().st_mode) == 0o600
 
 
+def test_atomic_json_concurrent_swap_restores_foreign_document_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    target = owned / "value.json"
+    target.write_text('{"value":"old"}\n')
+    target.chmod(0o600)
+    original = filesystem._rename_atomic
+    calls = 0
+
+    def race(*args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            target.write_text('{"value":"concurrent"}\n')
+            target.chmod(0o600)
+        original(*args, **kwargs)
+
+    with _safe(owned) as root:
+        ref = TargetRef(root, PurePath("value.json"))
+        expected = capture_file(root, ref.relative)
+        monkeypatch.setattr(filesystem, "_rename_atomic", race)
+        with pytest.raises(ValueError, match="concurrent"):
+            write_atomic_json(ref, expected, {"value": "installer"}, INSTALL_ID)
+        assert json.loads(target.read_text()) == {"value": "concurrent"}
+        assert not list(owned.glob(".blender-mcp-installer.*.tmp"))
+        monkeypatch.setattr(filesystem, "_rename_atomic", original)
+        concurrent = capture_file(root, ref.relative)
+        write_atomic_json(ref, concurrent, {"value": "retry"}, INSTALL_ID)
+        assert json.loads(target.read_text()) == {"value": "retry"}
+
+
+def test_atomic_json_reverse_swap_crash_prefix_has_clean_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    target = owned / "value.json"
+    target.write_text('{"value":"old"}\n')
+    target.chmod(0o600)
+    original = filesystem._rename_atomic
+    calls = 0
+
+    def crash_after_reverse(*args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            target.write_text('{"value":"concurrent"}\n')
+            target.chmod(0o600)
+        original(*args, **kwargs)
+        if calls == 2:
+            raise RuntimeError("reverse-swap crash")
+
+    with _safe(owned) as root:
+        ref = TargetRef(root, PurePath("value.json"))
+        expected = capture_file(root, ref.relative)
+        monkeypatch.setattr(filesystem, "_rename_atomic", crash_after_reverse)
+        with pytest.raises(RuntimeError, match="reverse-swap crash"):
+            write_atomic_json(ref, expected, {"value": "installer"}, INSTALL_ID)
+        assert json.loads(target.read_text()) == {"value": "concurrent"}
+        assert len(list(owned.glob(".blender-mcp-installer.*.tmp"))) == 1
+        monkeypatch.setattr(filesystem, "_rename_atomic", original)
+        concurrent = capture_file(root, ref.relative)
+        write_atomic_json(ref, concurrent, {"value": "installer"}, INSTALL_ID)
+        assert json.loads(target.read_text()) == {"value": "installer"}
+        assert not list(owned.glob(".blender-mcp-installer.*.tmp"))
+
+
+def test_atomic_json_post_swap_crash_prefix_retains_old_on_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    target = owned / "value.json"
+    target.write_text('{"value":"old"}\n')
+    target.chmod(0o600)
+    original = filesystem._finish_old_json
+
+    def crash_before_cleanup(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("cleanup crash")
+
+    with _safe(owned) as root:
+        ref = TargetRef(root, PurePath("value.json"))
+        retained = TargetRef(root, PurePath("retained.json"))
+        expected = capture_file(root, ref.relative)
+        monkeypatch.setattr(filesystem, "_finish_old_json", crash_before_cleanup)
+        with pytest.raises(RuntimeError, match="cleanup crash"):
+            write_atomic_json(ref, expected, {"value": "new"}, INSTALL_ID, retained)
+        assert json.loads(target.read_text()) == {"value": "new"}
+        assert len(list(owned.glob(".blender-mcp-installer.*.tmp"))) == 1
+        monkeypatch.setattr(filesystem, "_finish_old_json", original)
+        result = write_atomic_json(ref, expected, {"value": "new"}, INSTALL_ID, retained)
+        assert result == capture_file(root, ref.relative)
+        assert json.loads(target.read_text()) == {"value": "new"}
+        assert json.loads(retained.path.read_text()) == {"value": "old"}
+        assert not list(owned.glob(".blender-mcp-installer.*.tmp"))
+
+
+def test_non_darwin_rename_is_always_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(filesystem.sys, "platform", "linux")
+    for swap in (False, True):
+        with pytest.raises(OSError) as caught:
+            filesystem._rename_atomic(-1, "source", -1, "target", swap=swap)
+        assert caught.value.errno == __import__("errno").ENOTSUP
+
+
 def _prepare_state_roots(tmp_path: Path) -> InstallRoots:
     roots = _roots(tmp_path)
     for path in (
@@ -646,3 +961,157 @@ def test_second_installer_cannot_acquire_lock(tmp_path: Path) -> None:
             with pytest.raises(BlockingIOError):
                 with InstallerLock.acquire(root):
                     pass
+
+
+def test_fake_host_protocol_is_exact_and_read_only(host: HostHarness) -> None:
+    env = {
+        "HOME": str(host.home),
+        "CODEX_HOME": str(host.codex_home),
+        "BLENDER_USER_RESOURCES": str(host.resources),
+        "BLENDER_USER_CONFIG": str(host.config),
+        "BLENDER_USER_EXTENSIONS": str(host.extensions),
+        "BLENDER_MCP_HOST": "localhost",
+        "BLENDER_MCP_PORT": "9876",
+    }
+
+    def run(executable: Path, argv: list[object]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(executable), *(str(value) for value in argv)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    assert run(host.codex, ["--version"]).returncode == 0
+    assert run(host.codex, ["mcp", "get", "blender"]).returncode == 2
+    assert run(host.blender, ["--background", "prefix", "--python-expr", "x"]).returncode == 2
+    archive = host.root / "extension.zip"
+    with zipfile.ZipFile(archive, "w") as output:
+        output.writestr("blender_manifest.toml", 'id = "mcp"\nversion = "1.0.0"\n')
+    assert run(host.blender, ["--command", "extension", "validate", archive]).returncode == 0
+    assert (
+        run(
+            host.blender,
+            [
+                "--command",
+                "extension",
+                "install-file",
+                "--repo",
+                "user_default",
+                "--enable",
+                archive,
+            ],
+        ).returncode
+        == 0
+    )
+    assert run(host.blender, ["extension", "validate", archive, "extra"]).returncode == 2
+    assert run(host.uv, ["python", "find", "3.13"]).returncode == 2
+    assert (
+        run(
+            host.uv,
+            ["python", "find", "3.13", "--no-project", "--no-python-downloads", "--no-config"],
+        ).returncode
+        == 0
+    )
+    runtime = host.root / "runtime"
+    assert (
+        run(host.uv, ["venv", "--relocatable", "--python", sys.executable, runtime]).returncode == 0
+    )
+    python = runtime / "bin/python"
+    lock = host.bundle / "runtime-requirements.lock"
+    wheel = host.bundle / "blender_mcp-1.0.0-py3-none-any.whl"
+    lock_argv = [
+        "pip",
+        "install",
+        "--python",
+        python,
+        "--require-hashes",
+        "--only-binary",
+        ":all:",
+        "--no-build",
+        "--no-deps",
+        "--default-index",
+        "https://pypi.org/simple",
+        "-r",
+        lock,
+    ]
+    wheel_argv = ["pip", "install", "--python", python, "--no-deps", "--no-build", wheel]
+    assert run(host.uv, lock_argv).returncode == 0
+    assert run(host.uv, wheel_argv).returncode == 0
+    assert run(host.uv, ["pip", "install", "--python", python, "UNHASHED"]).returncode == 2
+    before = len(host.commands.read_text().splitlines())
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "execute_blender_code", "arguments": {}},
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {"name": "get_blendfile_summary_datablocks", "arguments": {}},
+        },
+    ]
+    result = subprocess.run(
+        [str(runtime / "bin/blender-mcp")],
+        env=env,
+        input="".join(json.dumps(request) + "\n" for request in requests),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    responses = [json.loads(line) for line in result.stdout.splitlines()]
+    assert "error" in responses[2] and "result" not in responses[2]
+    assert "result" in responses[3] and "error" not in responses[3]
+    records = [json.loads(line) for line in host.commands.read_text().splitlines()]
+    assert len(records) == before + len(requests)
+    assert all(record["tool"] == "blender-mcp" for record in records[-len(requests) :])
+    assert all(set(record["env"]) <= set(SANITIZED_ENV) for record in records)
+
+
+def test_fault_driver_uses_closed_command_matrix_and_requires_hit(tmp_path: Path) -> None:
+    distribution = tmp_path / "distribution"
+    driver = distribution / "tests/distribution/fault_driver.py"
+    driver.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / "tests/distribution/fault_driver.py", driver)
+
+    def invoke(point: str, command: str, *extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-I", str(driver), "--point", point, "--", command, *extra],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    unknown = invoke("not_a_real_point", "install")
+    assert unknown.returncode == 2
+    assert "No module named" not in unknown.stderr
+    inapplicable = invoke("after_extension_tree_publish", "verify")
+    assert inapplicable.returncode == 2
+    assert "No module named" not in inapplicable.stderr
+
+    package = distribution / "plugins/blender-mcp-installer/scripts/blender_mcp_installer"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "cli.py").write_text(
+        "class ExitFaultInjector:\n"
+        "    def __init__(self, point, code):\n"
+        "        self.point, self.code, self.hit_requested = point, code, False\n"
+        "    def hit(self, point):\n"
+        "        if point == self.point:\n"
+        "            self.hit_requested = True\n"
+        "            raise SystemExit(self.code)\n"
+        "def run_cli(argv, fault):\n"
+        "    if '--exercise-fault' in argv:\n"
+        "        fault.hit('after_extension_tree_publish')\n"
+        "    return 0\n"
+    )
+    assert invoke("after_extension_tree_publish", "install", "--exercise-fault").returncode == 70
+    missed = invoke("after_extension_tree_publish", "install")
+    assert missed.returncode == 2
+    assert "requested fault point was not hit" in missed.stderr

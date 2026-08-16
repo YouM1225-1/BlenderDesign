@@ -75,6 +75,11 @@ def _open_verified_directory(parent_fd: int, name: str, uid: int | None) -> int:
     return child_fd
 
 
+def _mkdir_private(parent_fd: int, name: str) -> None:
+    os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+    os.chmod(name, 0o700, dir_fd=parent_fd, follow_symlinks=False)
+
+
 @dataclass
 class SafeRoot:
     path: Path
@@ -108,7 +113,7 @@ class SafeRoot:
                     if not owned_open:
                         raise ValueError("cannot create the owned boundary") from None
                     try:
-                        os.mkdir(part, mode=0o700, dir_fd=current_fd)
+                        _mkdir_private(current_fd, part)
                     except OSError as exc:
                         raise ValueError("cannot create safe path component") from exc
                     child_fd = _open_verified_directory(current_fd, part, owner_uid)
@@ -158,7 +163,7 @@ class SafeRoot:
                 except FileNotFoundError:
                     if not create:
                         raise
-                    os.mkdir(part, mode=0o700, dir_fd=current_fd)
+                    _mkdir_private(current_fd, part)
                     child_fd = _open_verified_directory(current_fd, part, self.owner_uid)
                     if stat.S_IMODE(os.fstat(child_fd).st_mode) != 0o700:
                         os.close(child_fd)
@@ -209,10 +214,25 @@ class InstallerLock:
             _require_owner(before, state_root.owner_uid)
             if stat.S_IMODE(before.st_mode) != 0o600:
                 raise ValueError("installer lock is not mode 0600")
-        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
-        fd = os.open("installer.lock", flags, 0o600, dir_fd=state_root.fd)
+        created = False
+        if before is None:
+            try:
+                fd = os.open(
+                    "installer.lock",
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=state_root.fd,
+                )
+                created = True
+            except FileExistsError:
+                before = os.stat("installer.lock", dir_fd=state_root.fd, follow_symlinks=False)
+                fd = os.open("installer.lock", os.O_RDWR | os.O_NOFOLLOW, dir_fd=state_root.fd)
+        else:
+            fd = os.open("installer.lock", os.O_RDWR | os.O_NOFOLLOW, dir_fd=state_root.fd)
         locked = False
         try:
+            if created:
+                os.fchmod(fd, 0o600)
             opened = os.fstat(fd)
             if not stat.S_ISREG(opened.st_mode):
                 raise ValueError("installer lock is not a regular file")
@@ -413,16 +433,7 @@ def _rename_atomic(
     swap: bool,
 ) -> None:
     if sys.platform != "darwin":
-        if swap:
-            raise OSError(errno.ENOTSUP, "atomic swap requires Darwin renameatx_np")
-        try:
-            os.link(
-                source, target, src_dir_fd=source_fd, dst_dir_fd=target_fd, follow_symlinks=False
-            )
-        except FileExistsError:
-            raise
-        os.unlink(source, dir_fd=source_fd)
-        return
+        raise OSError(errno.ENOTSUP, "native rename requires Darwin renameatx_np")
     libc = ctypes.CDLL(None, use_errno=True)
     renameatx_np = libc.renameatx_np
     renameatx_np.argtypes = (
@@ -445,6 +456,46 @@ def _write_all(fd: int, raw: bytes) -> None:
         offset += os.write(fd, raw[offset:])
 
 
+def _matches_json_payload(image: FileImage, raw: bytes, uid: int) -> bool:
+    return (
+        image.state is ImageState.PRESENT
+        and image.uid == uid
+        and image.mode == 0o600
+        and image.size == len(raw)
+        and image.sha256 == hashlib.sha256(raw).hexdigest()
+    )
+
+
+def _unlink_stable_file(parent_fd: int, name: str, expected: FileImage, uid: int) -> None:
+    if _capture_file_at(parent_fd, name, uid) != expected:
+        raise ValueError("installer JSON temp changed before cleanup")
+    os.unlink(name, dir_fd=parent_fd)
+    os.fsync(parent_fd)
+
+
+def _finish_old_json(
+    parent_fd: int,
+    temp_name: str,
+    expected: FileImage,
+    root: SafeRoot,
+    retain_old: TargetRef | None,
+) -> None:
+    if _capture_file_at(parent_fd, temp_name, root.owner_uid) != expected:
+        raise ValueError("JSON preimage changed before cleanup")
+    if retain_old is None:
+        _unlink_stable_file(parent_fd, temp_name, expected, root.owner_uid)
+        return
+    retain_fd, retain_name = retain_old.root.open_parent(retain_old.relative)
+    try:
+        if capture_file(retain_old.root, retain_old.relative).state is not ImageState.ABSENT:
+            raise ValueError("JSON retention target already exists")
+        _rename_atomic(parent_fd, temp_name, retain_fd, retain_name, swap=False)
+        os.fsync(retain_fd)
+        os.fsync(parent_fd)
+    finally:
+        os.close(retain_fd)
+
+
 def write_atomic_json(
     path: TargetRef,
     expected: FileImage,
@@ -462,8 +513,24 @@ def write_atomic_json(
     parent_fd, target_name = path.root.open_parent(path.relative)
     temp_name = f".blender-mcp-installer.{install_id}.{target_name}.tmp"
     try:
-        if capture_file(path.root, path.relative) != expected:
+        current = capture_file(path.root, path.relative)
+        stale = _capture_file_at(parent_fd, temp_name, path.root.owner_uid)
+        if current != expected:
+            if (
+                stale == expected
+                and _matches_json_payload(current, raw, path.root.owner_uid)
+                and capture_file(path.root, path.relative) == current
+            ):
+                _finish_old_json(parent_fd, temp_name, stale, path.root, retain_old)
+                if capture_file(path.root, path.relative) != current:
+                    raise ValueError("JSON target changed during retry cleanup")
+                return current
             raise ValueError("JSON target changed before write")
+        if stale.state is ImageState.PRESENT:
+            if _matches_json_payload(stale, raw, path.root.owner_uid):
+                _unlink_stable_file(parent_fd, temp_name, stale, path.root.owner_uid)
+            else:
+                raise FileExistsError(errno.EEXIST, "unrecognized JSON temp", temp_name)
         temp_fd = os.open(
             temp_name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -471,12 +538,16 @@ def write_atomic_json(
             dir_fd=parent_fd,
         )
         try:
+            os.fchmod(temp_fd, 0o600)
             _write_all(temp_fd, raw)
             if stat.S_IMODE(os.fstat(temp_fd).st_mode) != 0o600:
                 raise ValueError("JSON temp is not mode 0600")
             os.fsync(temp_fd)
         finally:
             os.close(temp_fd)
+        new_image = _capture_file_at(parent_fd, temp_name, path.root.owner_uid)
+        if not _matches_json_payload(new_image, raw, path.root.owner_uid):
+            raise ValueError("JSON temp does not match the complete payload")
         if capture_file(path.root, path.relative) != expected:
             raise ValueError("JSON target changed before publication")
         _rename_atomic(
@@ -490,22 +561,23 @@ def write_atomic_json(
         if expected.state is ImageState.PRESENT:
             old = _capture_file_at(parent_fd, temp_name, path.root.owner_uid)
             if old != expected:
-                raise ValueError("swapped JSON preimage does not match")
-            if retain_old is None:
-                os.unlink(temp_name, dir_fd=parent_fd)
-            else:
-                retain_fd, retain_name = retain_old.root.open_parent(retain_old.relative)
-                try:
-                    if (
-                        capture_file(retain_old.root, retain_old.relative).state
-                        is not ImageState.ABSENT
-                    ):
-                        raise ValueError("JSON retention target already exists")
-                    _rename_atomic(parent_fd, temp_name, retain_fd, retain_name, swap=False)
-                    os.fsync(retain_fd)
-                finally:
-                    os.close(retain_fd)
-            os.fsync(parent_fd)
+                live = capture_file(path.root, path.relative)
+                parked = _capture_file_at(parent_fd, temp_name, path.root.owner_uid)
+                if live == new_image and parked == old:
+                    _rename_atomic(
+                        parent_fd,
+                        target_name,
+                        parent_fd,
+                        temp_name,
+                        swap=True,
+                    )
+                    os.fsync(parent_fd)
+                    restored = capture_file(path.root, path.relative)
+                    displaced = _capture_file_at(parent_fd, temp_name, path.root.owner_uid)
+                    if restored == old and displaced == new_image:
+                        _unlink_stable_file(parent_fd, temp_name, new_image, path.root.owner_uid)
+                raise ValueError("concurrent JSON change detected")
+            _finish_old_json(parent_fd, temp_name, old, path.root, retain_old)
         result = capture_file(path.root, path.relative)
         if result.state is not ImageState.PRESENT or result.mode != 0o600:
             raise ValueError("published JSON is not a private regular file")

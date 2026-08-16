@@ -355,6 +355,9 @@ class BlenderPaths:
 
 @dataclass(frozen=True)
 class InstallRoots:
+    source_distribution_root: Path
+    distribution_root: Path
+    bundle_root: Path
     home: Path
     codex_home: Path
     blender: BlenderPaths
@@ -370,20 +373,27 @@ class InstallRoots:
     userpref_target: Path
 
     @classmethod
-    def discover(cls, home: Path, codex_home: Path | None, blender: BlenderPaths) -> InstallRoots:
-        if (
-            not home.is_absolute()
-            or ".." in home.parts
-            or (
-                codex_home is not None
-                and (not codex_home.is_absolute() or ".." in codex_home.parts)
-            )
-        ):
+    def discover(
+        cls,
+        home: Path,
+        codex_home: Path | None,
+        blender: BlenderPaths,
+        *,
+        source_distribution_root: Path,
+        distribution_root: Path,
+    ) -> InstallRoots:
+        paths = (home, source_distribution_root, distribution_root)
+        if codex_home is not None:
+            paths += (codex_home,)
+        if any(not path.is_absolute() or ".." in path.parts for path in paths):
             raise ValueError("install roots must be absolute")
         selected_codex_home = codex_home or home / ".codex"
         data_root = home / ".local/share/blender-lab-mcp"
         state_root = home / ".local/state/blender-mcp-installer"
         return cls(
+            source_distribution_root,
+            distribution_root,
+            distribution_root / "plugins/blender-mcp-installer/artifacts",
             home,
             selected_codex_home,
             blender,
@@ -598,6 +608,131 @@ class ReceiptAction:
     rollback_intended: Image | None
     rollback_displaced: Image | None
 
+    def __post_init__(self) -> None:
+        _integer(self.ordinal, "action ordinal")
+        if type(self.kind) is not ActionKind or type(self.object_kind) is not ObjectKind:
+            raise ValueError("invalid action kind")
+        if type(self.state) is not ActionState:
+            raise ValueError("invalid action state")
+        if self.target_role is not None and type(self.target_role) is not TargetRole:
+            raise ValueError("invalid action target role")
+        if (
+            not isinstance(self.target_path, Path)
+            or not self.target_path.is_absolute()
+            or ".." in self.target_path.parts
+        ):
+            raise ValueError("invalid action target path")
+        _basename(self.stage_basename, "action stage basename")
+        if self.recovery_basename is not None:
+            _basename(self.recovery_basename, "action recovery basename")
+        tree = self.kind in {
+            ActionKind.BUNDLE_STAGE,
+            ActionKind.RUNTIME_TREE,
+            ActionKind.EXTENSION_TREE,
+        }
+        image_type = TreeImage if tree else FileImage
+        if type(self.pre) is not image_type:
+            raise ValueError("invalid action preimage variant")
+        for image in (
+            self.intended_post,
+            self.actual_post,
+            self.recovery_image,
+            self.rollback_intended,
+            self.rollback_displaced,
+        ):
+            if image is not None and type(image) is not image_type:
+                raise ValueError("invalid action image variant")
+            if image is not None and image.state is not ImageState.PRESENT:
+                raise ValueError("action post/recovery images must be present")
+        if self.kind is ActionKind.BUNDLE_STAGE:
+            if (
+                self.object_kind is not ObjectKind.BUNDLE
+                or self.target_role is not None
+                or self.recovery_basename is not None
+                or self.pre.state is not ImageState.ABSENT
+            ):
+                raise ValueError("invalid bundle action identity")
+            if self.state not in {
+                ActionState.PLANNED,
+                ActionState.STAGED,
+                ActionState.CLEANED,
+            }:
+                raise ValueError("invalid bundle action state")
+            required = self.state in {ActionState.STAGED, ActionState.CLEANED}
+            if (self.intended_post is not None) != required or any(
+                value is not None
+                for value in (
+                    self.actual_post,
+                    self.recovery_image,
+                    self.rollback_intended,
+                    self.rollback_displaced,
+                )
+            ):
+                raise ValueError("invalid bundle action images")
+            return
+        if self.object_kind is not _OBJECTS[self.kind]:
+            raise ValueError("action object kind mismatch")
+        if self.target_role is not _ROLES[self.kind] or self.recovery_basename is None:
+            raise ValueError("invalid managed action identity")
+        present = self.pre.state is ImageState.PRESENT
+        forward = {
+            ActionState.PLANNED,
+            ActionState.STAGED,
+            ActionState.COMPLETED,
+            ActionState.RESTORING,
+            ActionState.RESTORED,
+            ActionState.CLEANED,
+            *((ActionState.SWAPPED, ActionState.PARKED) if present else (ActionState.PUBLISHED,)),
+        }
+        semantic = {ActionState.SEMANTIC_STAGED, ActionState.SEMANTIC_SWAPPED}
+        if self.kind is not ActionKind.CODEX_FILE and self.state in semantic:
+            raise ValueError("semantic state is Codex-only")
+        if self.state not in forward | (
+            semantic if self.kind is ActionKind.CODEX_FILE and present else set()
+        ):
+            raise ValueError("invalid action transition")
+        required_intended = self.state is not ActionState.PLANNED
+        required_actual = self.state not in {ActionState.PLANNED, ActionState.STAGED}
+        required_recovery = (
+            present
+            and self.state
+            in {
+                ActionState.PARKED,
+                ActionState.COMPLETED,
+                ActionState.RESTORING,
+                ActionState.RESTORED,
+                ActionState.CLEANED,
+                *semantic,
+            }
+        ) or (
+            not present
+            and self.state in {ActionState.RESTORING, ActionState.RESTORED, ActionState.CLEANED}
+        )
+        if (
+            (self.intended_post is not None) != required_intended
+            or (self.actual_post is not None) != required_actual
+            or (self.recovery_image is not None) != required_recovery
+        ):
+            raise ValueError("invalid managed action image nullability")
+        if self.actual_post is not None and self.intended_post != self.actual_post:
+            raise ValueError("actual postimage does not match intended postimage")
+        if present and self.recovery_image is not None and self.recovery_image != self.pre:
+            raise ValueError("protected recovery does not match the preimage")
+        if self.state is ActionState.SEMANTIC_STAGED:
+            if self.rollback_intended is None or self.rollback_displaced is not None:
+                raise ValueError("invalid semantic staged images")
+        elif self.state is ActionState.SEMANTIC_SWAPPED:
+            if self.rollback_intended is None or self.rollback_displaced is None:
+                raise ValueError("invalid semantic swapped images")
+        elif self.kind is ActionKind.CODEX_FILE and self.state in {
+            ActionState.RESTORING,
+            ActionState.RESTORED,
+        }:
+            if (self.rollback_intended is None) != (self.rollback_displaced is None):
+                raise ValueError("incomplete semantic rollback images")
+        elif self.rollback_intended is not None or self.rollback_displaced is not None:
+            raise ValueError("rollback images are semantic-only")
+
     def to_dict(self) -> dict[str, object]:
         def image(value: Image | None) -> object:
             return None if value is None else value.to_dict()
@@ -630,8 +765,6 @@ class ReceiptAction:
             target_role = None if item["target_role"] is None else TargetRole(item["target_role"])
         except (TypeError, ValueError) as exc:
             raise ValueError("invalid action enum") from exc
-        if object_kind is not _OBJECTS[kind]:
-            raise ValueError("action object kind mismatch")
         target_path = Path(_string(item["target_path"], "action target path"))
         stage_basename = _basename(item["stage_basename"], "action stage basename")
         recovery_basename = item["recovery_basename"]
@@ -646,31 +779,6 @@ class ReceiptAction:
         recovery = _parse_image(item["recovery_image"], tree)
         rollback_intended = _parse_image(item["rollback_intended"], False)
         rollback_displaced = _parse_image(item["rollback_displaced"], False)
-        for image in (intended, actual, recovery, rollback_intended, rollback_displaced):
-            if image is not None and image.state is not ImageState.PRESENT:
-                raise ValueError("action post/recovery images must be present")
-        if kind is ActionKind.BUNDLE_STAGE:
-            if (
-                target_role is not None
-                or recovery_basename is not None
-                or not isinstance(pre, TreeImage)
-                or pre.state is not ImageState.ABSENT
-            ):
-                raise ValueError("invalid bundle action identity")
-            if state not in {ActionState.PLANNED, ActionState.STAGED, ActionState.CLEANED}:
-                raise ValueError("invalid bundle action state")
-            required = state in {ActionState.STAGED, ActionState.CLEANED}
-            if (intended is None) is required or any(
-                value is not None
-                for value in (actual, recovery, rollback_intended, rollback_displaced)
-            ):
-                raise ValueError("invalid bundle action images")
-        else:
-            if target_role is not _ROLES[kind] or recovery_basename is None:
-                raise ValueError("invalid managed action identity")
-            cls._validate_managed(
-                kind, state, pre, intended, actual, recovery, rollback_intended, rollback_displaced
-            )
         return cls(
             ordinal,
             kind,
@@ -687,77 +795,6 @@ class ReceiptAction:
             rollback_intended,
             rollback_displaced,
         )
-
-    @staticmethod
-    def _validate_managed(
-        kind: ActionKind,
-        state: ActionState,
-        pre: Image,
-        intended: Image | None,
-        actual: Image | None,
-        recovery: Image | None,
-        rollback_intended: Image | None,
-        rollback_displaced: Image | None,
-    ) -> None:
-        present = pre.state is ImageState.PRESENT
-        forward = {
-            ActionState.PLANNED,
-            ActionState.STAGED,
-            ActionState.COMPLETED,
-            ActionState.RESTORING,
-            ActionState.RESTORED,
-            ActionState.CLEANED,
-            *((ActionState.SWAPPED, ActionState.PARKED) if present else (ActionState.PUBLISHED,)),
-        }
-        semantic = {ActionState.SEMANTIC_STAGED, ActionState.SEMANTIC_SWAPPED}
-        if kind is not ActionKind.CODEX_FILE and state in semantic:
-            raise ValueError("semantic state is Codex-only")
-        if state not in forward | (
-            semantic if kind is ActionKind.CODEX_FILE and present else set()
-        ):
-            raise ValueError("invalid action transition")
-        if state is ActionState.PLANNED:
-            required_intended = required_actual = required_recovery = False
-        else:
-            required_intended = True
-            required_actual = state not in {ActionState.STAGED}
-            required_recovery = (
-                present
-                and state
-                in {
-                    ActionState.PARKED,
-                    ActionState.COMPLETED,
-                    ActionState.RESTORING,
-                    ActionState.RESTORED,
-                    ActionState.CLEANED,
-                    *semantic,
-                }
-            ) or (
-                not present
-                and state in {ActionState.RESTORING, ActionState.RESTORED, ActionState.CLEANED}
-            )
-        if (
-            (intended is not None) != required_intended
-            or (actual is not None) != required_actual
-            or (recovery is not None) != required_recovery
-        ):
-            raise ValueError("invalid managed action image nullability")
-        if actual is not None and intended != actual:
-            raise ValueError("actual postimage does not match intended postimage")
-        if present and recovery is not None and recovery != pre:
-            raise ValueError("protected recovery does not match the preimage")
-        if state is ActionState.SEMANTIC_STAGED:
-            if rollback_intended is None or rollback_displaced is not None:
-                raise ValueError("invalid semantic staged images")
-        elif (
-            state in {ActionState.SEMANTIC_SWAPPED, ActionState.RESTORING, ActionState.RESTORED}
-            and kind is ActionKind.CODEX_FILE
-            and rollback_intended is not None
-        ):
-            if rollback_displaced is None:
-                raise ValueError("invalid semantic rollback images")
-        elif rollback_intended is not None or rollback_displaced is not None:
-            raise ValueError("rollback images are semantic-only")
 
 
 @dataclass(frozen=True)

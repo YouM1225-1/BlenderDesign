@@ -146,10 +146,14 @@ def _record(tool: str, argv: list[str], commands: Path, mutated: list[str]) -> N
         stream.write(json.dumps(record, sort_keys=True) + "\n")
 
 
-def _mcp_server(catalog: list[str]) -> int:
+def _mcp_server(catalog: list[str], commands: Path) -> int:
     for line in sys.stdin:
         request = json.loads(line)
         method = request.get("method")
+        argv = [str(method)]
+        if method == "tools/call":
+            argv.append(str(request.get("params", {}).get("name")))
+        _record("blender-mcp", argv, commands, [])
         if method == "initialize":
             result: object = {
                 "protocolVersion": "2025-06-18",
@@ -158,7 +162,10 @@ def _mcp_server(catalog: list[str]) -> int:
             }
         elif method == "tools/list":
             result = {"tools": [{"name": name} for name in catalog]}
-        elif method == "tools/call" and request.get("params", {}).get("name") in catalog:
+        elif (
+            method == "tools/call"
+            and request.get("params", {}).get("name") == "get_blendfile_summary_datablocks"
+        ):
             result = {"content": [{"type": "text", "text": "{}"}]}
         else:
             response = {
@@ -190,7 +197,9 @@ def run_fake(tool: str, state_file: Path, commands: Path, argv: list[str]) -> in
     elif tool == "blender":
         if argv == ["--version"]:
             print(f"Blender {state['version']}")
-        elif "--background" in argv and "--python-expr" in argv:
+        elif (len(argv) == 3 and argv[:2] == ["--background", "--python-expr"]) or (
+            len(argv) == 4 and argv[:3] == ["--background", "--factory-startup", "--python-expr"]
+        ):
             expression = argv[argv.index("--python-expr") + 1]
             if "save_userpref" in expression:
                 target = Path(os.environ["BLENDER_USER_CONFIG"]) / "userpref.blend"
@@ -198,9 +207,25 @@ def run_fake(tool: str, state_file: Path, commands: Path, argv: list[str]) -> in
                 target.write_text(json.dumps(state["preferences"], sort_keys=True) + "\n")
                 mutated.append(str(target))
             print(json.dumps(state, sort_keys=True))
-        elif "extension" in argv and "validate" in argv:
+        elif (
+            len(argv) == 4
+            and argv[:3] == ["--command", "extension", "validate"]
+            and Path(argv[-1]).is_absolute()
+        ):
             print("valid")
-        elif "extension" in argv and "install-file" in argv:
+        elif (
+            len(argv) == 7
+            and argv[:6]
+            == [
+                "--command",
+                "extension",
+                "install-file",
+                "--repo",
+                state["repository"],
+                "--enable",
+            ]
+            and Path(argv[-1]).is_absolute()
+        ):
             archive = Path(argv[-1])
             extensions = Path(os.environ.get("BLENDER_USER_EXTENSIONS", state["extensions"]))
             target = extensions / state["repository"] / "mcp"
@@ -216,9 +241,21 @@ def run_fake(tool: str, state_file: Path, commands: Path, argv: list[str]) -> in
     elif tool == "uv":
         if argv == ["--version"]:
             print("uv 0.12.2")
-        elif argv[:2] == ["python", "find"]:
+        elif argv == [
+            "python",
+            "find",
+            "3.13",
+            "--no-project",
+            "--no-python-downloads",
+            "--no-config",
+        ]:
             print(state["python"])
-        elif argv[:2] == ["venv", "--relocatable"]:
+        elif (
+            len(argv) == 5
+            and argv[:3] == ["venv", "--relocatable", "--python"]
+            and Path(argv[3]).is_absolute()
+            and Path(argv[4]).is_absolute()
+        ):
             runtime = Path(argv[-1])
             (runtime / "bin").mkdir(parents=True)
             python = runtime / "bin/python"
@@ -228,12 +265,8 @@ def run_fake(tool: str, state_file: Path, commands: Path, argv: list[str]) -> in
             )
             python.chmod(stat.S_IRWXU)
             mutated.append(str(runtime))
-        elif argv[:2] == ["pip", "install"] and "--python" in argv:
-            try:
-                stage_python = Path(argv[argv.index("--python") + 1])
-            except (IndexError, ValueError):
-                _record(tool, argv, commands, mutated)
-                return 2
+        elif _valid_pip_install(argv):
+            stage_python = Path(argv[3])
             runtime = stage_python.parent.parent
             runtime.mkdir(parents=True, exist_ok=True)
             (runtime / "fake-installed.json").write_text(
@@ -244,7 +277,8 @@ def run_fake(tool: str, state_file: Path, commands: Path, argv: list[str]) -> in
             server.write_text(
                 f"#!{sys.executable}\nimport sys\nsys.path.insert(0, {str(Path(__file__).parents[2])!r})\n"
                 "from tests.distribution.fake_host import _mcp_server\n"
-                f"raise SystemExit(_mcp_server({state['tools']!r}))\n"
+                f"from pathlib import Path\nraise SystemExit(_mcp_server({state['tools']!r}, "
+                f"Path({str(commands)!r})))\n"
             )
             server.chmod(stat.S_IRWXU)
             mutated.append(str(runtime))
@@ -256,6 +290,33 @@ def run_fake(tool: str, state_file: Path, commands: Path, argv: list[str]) -> in
         return 2
     _record(tool, argv, commands, mutated)
     return 0
+
+
+def _valid_pip_install(argv: list[str]) -> bool:
+    if len(argv) < 4 or not Path(argv[3]).is_absolute() or not Path(argv[-1]).is_absolute():
+        return False
+    if len(argv) == 13:
+        return (
+            argv[:3] == ["pip", "install", "--python"]
+            and argv[4:12]
+            == [
+                "--require-hashes",
+                "--only-binary",
+                ":all:",
+                "--no-build",
+                "--no-deps",
+                "--default-index",
+                "https://pypi.org/simple",
+                "-r",
+            ]
+            and Path(argv[-1]).name == "runtime-requirements.lock"
+        )
+    return (
+        len(argv) == 7
+        and argv[:3] == ["pip", "install", "--python"]
+        and argv[4:6] == ["--no-deps", "--no-build"]
+        and Path(argv[-1]).name == "blender_mcp-1.0.0-py3-none-any.whl"
+    )
 
 
 if __name__ == "__main__":
