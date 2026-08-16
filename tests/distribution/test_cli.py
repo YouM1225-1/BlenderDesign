@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import zipfile
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
@@ -35,6 +36,7 @@ from blender_mcp_installer.model import (  # noqa: E402
     ActionState,
     ActiveSelector,
     BlenderPaths,
+    BoundaryRole,
     FileImage,
     InstallRoots,
     PendingSelector,
@@ -835,6 +837,296 @@ def test_first_install_orchestrates_journaled_adapters(
     assert not roots.extension_target.exists()
     assert not roots.userpref_target.exists()
     assert not roots.codex_config.exists()
+
+
+def _extension_rollback_fixture(
+    host: HostHarness,
+) -> tuple[InstallRoots, StagedBundle, Receipt, Path, TreeImage]:
+    manifest = parse_manifest((ARTIFACTS / "manifest.json").read_bytes())
+    bundle = StagedBundle(ARTIFACTS, manifest)
+    roots = InstallRoots.discover(
+        host.home,
+        host.codex_home,
+        BlenderPaths(
+            host.blender,
+            "arm64",
+            "5.2.0",
+            host.resources,
+            host.config,
+            host.extensions,
+        ),
+        source_distribution_root=ROOT,
+        distribution_root=ROOT,
+    )
+    cli._ensure_mutation_roots(roots)
+    roots.receipts.mkdir(mode=0o700)
+    install_id = UUID("12345678-1234-4234-9234-123456789abc")
+    roots.previous_active(install_id).parent.mkdir(parents=True, mode=0o700)
+    roots.extension_target.mkdir(parents=True)
+    with zipfile.ZipFile(bundle.extension_path) as archive:
+        archive.extractall(roots.extension_target)
+    for path in roots.extension_target.rglob("*"):
+        if path.is_file():
+            path.chmod(0o644)
+    with SafeRoot.open(host.extensions, os.getuid(), host.resources) as extensions:
+        extension_post = capture_tree(extensions, Path("user_default/mcp"))
+    selector = cli._selector(None, install_id, 1)
+    roots.active.write_text(json.dumps(selector.to_dict(), sort_keys=True) + "\n")
+    roots.active.chmod(0o600)
+    with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
+        active_post = capture_file(state, Path("active.json"))
+    absent_tree = TreeImage.absent()
+    absent_file = FileImage.absent()
+    actions = (
+        cli._action(
+            0,
+            ActionKind.BUNDLE_STAGE,
+            ActionState.CLEANED,
+            roots.bundle_stage(install_id),
+            roots.bundle_stage(install_id),
+            None,
+            absent_tree,
+            intended=extension_post,
+        ),
+        cli._action(
+            1,
+            ActionKind.RUNTIME_TREE,
+            ActionState.PLANNED,
+            roots.runtime,
+            roots.runtime_stage(install_id),
+            roots.runtime_recovery(install_id),
+            absent_tree,
+        ),
+        cli._action(
+            2,
+            ActionKind.EXTENSION_TREE,
+            ActionState.COMPLETED,
+            roots.extension_target,
+            roots.extension_stage(install_id),
+            roots.extension_recovery(install_id),
+            absent_tree,
+            intended=extension_post,
+            actual=extension_post,
+        ),
+        cli._action(
+            3,
+            ActionKind.USERPREF_FILE,
+            ActionState.PLANNED,
+            roots.userpref_target,
+            roots.userpref_stage(install_id),
+            roots.userpref_recovery(install_id),
+            absent_file,
+        ),
+        cli._action(
+            4,
+            ActionKind.CODEX_FILE,
+            ActionState.PLANNED,
+            roots.codex_config,
+            roots.codex_stage(install_id),
+            roots.codex_recovery(install_id),
+            absent_file,
+        ),
+    )
+    receipt = Receipt(
+        1,
+        install_id,
+        1,
+        None,
+        ReceiptStatus.INSTALLED,
+        "2026-01-01T00:00:00Z",
+        {"version": manifest.bundle_version, "manifest_sha256": "0" * 64},
+        {
+            "home": str(roots.home),
+            "codex_home": str(roots.codex_home),
+            "blender_executable": str(roots.blender.executable),
+            "blender_architecture": roots.blender.architecture,
+            "blender_version": roots.blender.version,
+            "blender_user_resources": str(roots.blender.user_resources),
+            "blender_user_config": str(roots.blender.user_config),
+            "blender_user_extensions": str(roots.blender.user_extensions),
+            "codex_version": "0.148.0-alpha.9",
+            "uv_version": "0.12.2",
+            "python_version": "3.13.13",
+        },
+        {"all_four_collected_for_this_workflow": True},
+        (
+            cli._target(TargetRole.RUNTIME, roots.runtime, BoundaryRole.DATA_ROOT, absent_tree),
+            cli._target(
+                TargetRole.BLENDER_EXTENSION,
+                roots.extension_target,
+                BoundaryRole.BLENDER_EXTENSIONS,
+                absent_tree,
+                post=extension_post,
+            ),
+            cli._target(
+                TargetRole.BLENDER_USERPREF,
+                roots.userpref_target,
+                BoundaryRole.BLENDER_CONFIG,
+                absent_file,
+            ),
+            cli._target(
+                TargetRole.CODEX_CONFIG,
+                roots.codex_config,
+                BoundaryRole.CODEX_HOME,
+                absent_file,
+            ),
+            cli._target(
+                TargetRole.ACTIVE_SELECTOR,
+                roots.active,
+                BoundaryRole.STATE_ROOT,
+                absent_file,
+                post=active_post,
+            ),
+        ),
+        actions,
+        {"configured": True, "live": "not_run"},
+    )
+    receipt_path = roots.receipt(install_id)
+    receipt_path.write_text(json.dumps(receipt.to_dict(), sort_keys=True) + "\n")
+    receipt_path.chmod(0o600)
+    return roots, bundle, receipt, receipt_path, extension_post
+
+
+def _compile_live_extension(roots: InstallRoots) -> Path:
+    subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            "import py_compile;"
+            "py_compile.compile('__init__.py',doraise=True);"
+            "py_compile.compile('capture_output.py',doraise=True)",
+        ],
+        cwd=roots.extension_target,
+        check=True,
+    )
+    cache = roots.extension_target / "__pycache__"
+    assert len(tuple(cache.glob("*.pyc"))) == 2
+    return cache
+
+
+def test_extension_rollback_cleans_live_pyc_after_intent_before_native_restore(
+    host: HostHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roots, bundle, receipt, receipt_path, extension_post = _extension_rollback_fixture(host)
+    cache = _compile_live_extension(roots)
+    prepare = cli.prepare_extension_for_restore
+    compare = cli.compare_extension_tree
+    observed: list[ReceiptStatus] = []
+    comparisons = 0
+
+    def tracked_compare(payload, current):
+        nonlocal comparisons
+        comparisons += 1
+        return compare(payload, current)
+
+    def tracked_prepare(comparison, expected):
+        observed.append(cli.load_receipt(receipt_path, roots).status)
+        image = prepare(comparison, expected)
+        assert image == extension_post
+        assert not cache.exists()
+        return image
+
+    monkeypatch.setattr(cli, "compare_extension_tree", tracked_compare)
+    monkeypatch.setattr(cli, "prepare_extension_for_restore", tracked_prepare)
+
+    rolled = cli._rollback_receipt(
+        roots,
+        bundle,
+        object(),
+        receipt,
+        NoOpFaultInjector(),
+        manifest_sha256="0" * 64,
+    )
+
+    assert observed == [ReceiptStatus.ROLLBACK_PENDING]
+    assert comparisons == 2
+    assert rolled.status is ReceiptStatus.ROLLED_BACK
+    assert not roots.extension_target.exists()
+
+
+def test_extension_rollback_cleanup_is_retryable_at_native_restore_fault(
+    host: HostHarness,
+) -> None:
+    roots, bundle, receipt, receipt_path, _ = _extension_rollback_fixture(host)
+    _compile_live_extension(roots)
+
+    with pytest.raises(SystemExit, match="70"):
+        cli._rollback_receipt(
+            roots,
+            bundle,
+            object(),
+            receipt,
+            cli.ExitFaultInjector("after_extension_tree_restore_move", 70),
+            manifest_sha256="0" * 64,
+        )
+
+    assert not any(path.name == "__pycache__" for path in host.root.rglob("__pycache__"))
+    pending = cli.load_receipt(receipt_path, roots)
+    rolled = cli._rollback_receipt(
+        roots,
+        bundle,
+        object(),
+        pending,
+        NoOpFaultInjector(),
+        manifest_sha256="0" * 64,
+    )
+    assert rolled.status is ReceiptStatus.ROLLED_BACK
+    assert not roots.extension_target.exists()
+
+
+@pytest.mark.parametrize(
+    "conflict",
+    ["foreign-pyc", "unmapped", "nested", "wrong-uid", "source-modified"],
+)
+def test_extension_cache_conflicts_fail_before_rollback_intent(
+    host: HostHarness, monkeypatch: pytest.MonkeyPatch, conflict: str
+) -> None:
+    roots, bundle, receipt, receipt_path, _ = _extension_rollback_fixture(host)
+    if conflict == "foreign-pyc":
+        (roots.extension_target / "foreign.pyc").write_bytes(b"foreign")
+    elif conflict == "unmapped":
+        cache = roots.extension_target / "__pycache__"
+        cache.mkdir()
+        (cache / "foreign.cpython-313.pyc").write_bytes(b"foreign")
+    elif conflict == "nested":
+        cache = roots.extension_target / "nested/__pycache__"
+        cache.mkdir(parents=True)
+        (cache / "capture_output.cpython-313.pyc").write_bytes(b"foreign")
+    else:
+        _compile_live_extension(roots)
+        if conflict == "source-modified":
+            (roots.extension_target / "capture_output.py").write_bytes(b"modified")
+        else:
+            compare = cli.compare_extension_tree
+            real_uid = os.getuid()
+
+            def compare_as_foreign_owner(payload, current):
+                with monkeypatch.context() as scoped:
+                    scoped.setattr(os, "getuid", lambda: real_uid + 1)
+                    return compare(payload, current)
+
+            monkeypatch.setattr(cli, "compare_extension_tree", compare_as_foreign_owner)
+    receipt_before = receipt_path.read_bytes()
+    active_before = roots.active.read_bytes()
+    with SafeRoot.open(host.extensions, os.getuid(), host.resources) as extensions:
+        extension_before = capture_tree(extensions, Path("user_default/mcp"))
+
+    with pytest.raises(InstallerError, match="rollback preflight conflict"):
+        cli._rollback_receipt(
+            roots,
+            bundle,
+            object(),
+            receipt,
+            NoOpFaultInjector(),
+            manifest_sha256="0" * 64,
+        )
+
+    assert receipt_path.read_bytes() == receipt_before
+    assert roots.active.read_bytes() == active_before
+    with SafeRoot.open(host.extensions, os.getuid(), host.resources) as extensions:
+        assert capture_tree(extensions, Path("user_default/mcp")) == extension_before
 
 
 def test_staged_action_restores_with_intended_post(tmp_path: Path) -> None:

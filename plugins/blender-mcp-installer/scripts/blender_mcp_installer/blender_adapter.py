@@ -810,8 +810,14 @@ def _entry_matches(info: os.stat_result, entry: TreeEntry, digest: str | None = 
     )
 
 
-def prepare_extension_for_restore(comparison: ExtensionComparison) -> TreeImage:
-    if type(comparison) is not ExtensionComparison or not comparison.exact:
+def prepare_extension_for_restore(
+    comparison: ExtensionComparison, expected_image: TreeImage | None = None
+) -> TreeImage:
+    if (
+        type(comparison) is not ExtensionComparison
+        or not comparison.exact
+        or (expected_image is not None and type(expected_image) is not TreeImage)
+    ):
         raise InstallerError("extension payload conflict")
     reference = comparison.current
     if reference.capture() != comparison.current_image:
@@ -864,6 +870,48 @@ def prepare_extension_for_restore(comparison: ExtensionComparison) -> TreeImage:
         finally:
             os.close(parent_fd)
     result = reference.capture()
+    if expected_image is not None and result != expected_image:
+        if (
+            expected_image.state is not ImageState.PRESENT
+            or expected_image.mtime_ns is None
+            or (
+                result.state,
+                result.dev,
+                result.ino,
+                result.uid,
+                result.mode,
+                result.digest,
+                result.entries,
+            )
+            != (
+                expected_image.state,
+                expected_image.dev,
+                expected_image.ino,
+                expected_image.uid,
+                expected_image.mode,
+                expected_image.digest,
+                expected_image.entries,
+            )
+        ):
+            raise InstallerError("extension payload conflict after cleanup")
+        fd = reference.root.open_directory(reference.relative)
+        try:
+            info = os.fstat(fd)
+            if (
+                info.st_dev,
+                info.st_ino,
+                info.st_uid,
+                stat.S_IMODE(info.st_mode),
+                info.st_mtime_ns,
+            ) != (result.dev, result.ino, result.uid, result.mode, result.mtime_ns):
+                raise InstallerError("extension payload changed before metadata restore")
+            os.utime(fd, ns=(info.st_atime_ns, expected_image.mtime_ns))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        result = reference.capture()
+        if result != expected_image:
+            raise InstallerError("extension payload conflict after metadata restore")
     if not compare_extension_tree(comparison.expected, reference).exact:
         raise InstallerError("extension payload conflict after cleanup")
     return result

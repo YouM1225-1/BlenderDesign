@@ -467,6 +467,11 @@ def test_only_source_mapped_current_uid_pyc_is_disposable_and_removed_fd_relativ
     for file in target.rglob("*"):
         if file.is_file():
             file.chmod(0o644)
+    root, reference = _tree_ref(target)
+    try:
+        expected_image = reference.capture()
+    finally:
+        root.close()
     subprocess.run(
         [sys.executable, "-I", "-c", "import sys;sys.path.insert(0,'.');import capture_output"],
         cwd=target,
@@ -479,9 +484,9 @@ def test_only_source_mapped_current_uid_pyc_is_disposable_and_removed_fd_relativ
         comparison = compare_extension_tree(expected, reference)
         assert comparison.exact
         assert comparison.disposable_pyc == (f"__pycache__/{pyc.name}",)
-        image = prepare_extension_for_restore(comparison)
+        image = prepare_extension_for_restore(comparison, expected_image)
         assert not cache.exists()
-        assert image.state.value == "present"
+        assert image == expected_image
         assert compare_extension_tree(expected, reference).exact
     finally:
         root.close()

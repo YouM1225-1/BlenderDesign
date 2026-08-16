@@ -18,8 +18,11 @@ from uuid import UUID, uuid4
 from .blender_adapter import (
     BlenderAuthorizations,
     BlenderState,
+    ExtensionComparison,
+    compare_extension_tree,
     inspect_blender,
     load_extension_payload,
+    prepare_extension_for_restore,
     probe_blender_lifecycle,
     stage_blender_change,
     verify_blender_files,
@@ -1960,6 +1963,42 @@ def _native_rollback_tuple_valid(
     )
 
 
+def _extension_restore_comparison(
+    action: ReceiptAction,
+    target: TreeRef,
+    stage: TreeRef,
+    recovery: TreeRef,
+    bundle: StagedBundle,
+) -> ExtensionComparison:
+    post = action.actual_post or action.intended_post
+    absent = TreeImage.absent()
+    expected_recovery = action.pre if action.pre.state is ImageState.PRESENT else absent
+    comparison = compare_extension_tree(load_extension_payload(bundle.extension_path), target)
+    disposable = set(comparison.disposable_pyc) | set(comparison.disposable_dirs)
+    current = comparison.current_image
+    cleaned_entries = tuple(entry for entry in current.entries if entry.path not in disposable)
+    if (
+        action.kind is not ActionKind.EXTENSION_TREE
+        or action.state is not ActionState.COMPLETED
+        or not isinstance(post, TreeImage)
+        or capture_tree(stage.root, stage.relative) != absent
+        or capture_tree(recovery.root, recovery.relative) != expected_recovery
+        or not comparison.exact
+        or not comparison.disposable_pyc
+        or (
+            current.state,
+            current.dev,
+            current.ino,
+            current.uid,
+            current.mode,
+            cleaned_entries,
+        )
+        != (post.state, post.dev, post.ino, post.uid, post.mode, post.entries)
+    ):
+        raise InstallerError("rollback preflight conflict")
+    return comparison
+
+
 def _preflight_rollback(
     roots: InstallRoots,
     bundle: StagedBundle,
@@ -2075,7 +2114,21 @@ def _preflight_rollback(
                 raise InstallerError("rollback preflight conflict")
             continue
         elif not _native_rollback_tuple_valid(action, *physical):
-            raise InstallerError("rollback preflight conflict")
+            if action.kind is not ActionKind.EXTENSION_TREE or not all(
+                isinstance(reference, TreeRef)
+                for reference in (target_ref, stage_ref, recovery_ref)
+            ):
+                raise InstallerError("rollback preflight conflict")
+            try:
+                _extension_restore_comparison(
+                    action,
+                    target_ref,
+                    stage_ref,
+                    recovery_ref,
+                    bundle,
+                )
+            except (InstallerError, OSError, ValueError):
+                raise InstallerError("rollback preflight conflict")
     if runtime_evidence is not None:
         runtime_action, before = runtime_evidence
         target_ref, stage_ref, recovery_ref = _action_references(
@@ -2207,19 +2260,36 @@ def _rollback_receipt(
                         ),
                     )
                 elif action.kind is ActionKind.EXTENSION_TREE:
+                    stage = StagedTree(
+                        refs["extension"].root,
+                        PurePath("user_default", roots.extension_stage(install_id).name),
+                        action.actual_post,
+                    )
+                    recovery = TreeRef(
+                        refs["extension"].root,
+                        PurePath("user_default", roots.extension_recovery(install_id).name),
+                    )
+                    post = action.actual_post or action.intended_post
+                    if (
+                        action.state is ActionState.COMPLETED
+                        and isinstance(post, TreeImage)
+                        and capture_tree(refs["extension"].root, refs["extension"].relative) != post
+                    ):
+                        comparison = _extension_restore_comparison(
+                            action,
+                            refs["extension"],
+                            stage,
+                            recovery,
+                            bundle,
+                        )
+                        if prepare_extension_for_restore(comparison, post) != post:
+                            raise InstallerError("extension payload conflict after cleanup")
                     action = _restore_action(
                         journal,
                         action,
                         refs["extension"],
-                        StagedTree(
-                            refs["extension"].root,
-                            PurePath("user_default", roots.extension_stage(install_id).name),
-                            action.actual_post,
-                        ),
-                        TreeRef(
-                            refs["extension"].root,
-                            PurePath("user_default", roots.extension_recovery(install_id).name),
-                        ),
+                        stage,
+                        recovery,
                     )
                 else:
                     action = _restore_action(
