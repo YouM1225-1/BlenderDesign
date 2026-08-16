@@ -70,6 +70,17 @@ class Runner(Protocol):
     ) -> object: ...
 
 
+class _GitRunner(Protocol):
+    def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        capture_output: bool,
+    ) -> object: ...
+
+
 @dataclass(frozen=True)
 class Artifact:
     role: str
@@ -301,7 +312,7 @@ def _bytes(output: object) -> bytes:
     raise ValueError("runner returned invalid output")
 
 
-def _git(runner: Runner, argv: list[str], root: Path, env: Mapping[str, str]) -> bytes:
+def _git(runner: _GitRunner, argv: list[str], root: Path, env: Mapping[str, str]) -> bytes:
     argv = [
         "git",
         "--no-replace-objects",
@@ -314,7 +325,7 @@ def _git(runner: Runner, argv: list[str], root: Path, env: Mapping[str, str]) ->
         *argv[1:],
     ]
     try:
-        completed = runner(argv, cwd=root, env=env)
+        completed = runner(argv, cwd=root, env=env, capture_output=True)
     except Exception as exc:
         raise ValueError(f"git command failed: {' '.join(argv)}") from exc
     if getattr(completed, "returncode", 0) != 0:
@@ -375,7 +386,7 @@ def _parse_checksums(raw: bytes) -> dict[str, str]:
 
 
 def verify_distribution_checkout(
-    bundle_root: Path, expected_commit: str, runner: Runner
+    bundle_root: Path, expected_commit: str, runner: _GitRunner
 ) -> TrustedCheckout:
     bundle_root = bundle_root.resolve()
     if not _COMMIT.fullmatch(expected_commit):

@@ -122,8 +122,15 @@ def test_manifest_requires_fixed_versions_and_catalog(mutation: str) -> None:
         parse_manifest(raw(data))
 
 
-def _git(args: list[str], cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, cwd=cwd, env=env, check=True, capture_output=True, text=True)
+def _git(
+    args: list[str],
+    cwd: Path,
+    env: dict[str, str] | None = None,
+    capture_output: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args, cwd=cwd, env=env, check=True, capture_output=capture_output, text=True
+    )
 
 
 def _checkout(tmp_path: Path) -> tuple[Path, str]:
@@ -199,6 +206,15 @@ def test_checkout_ignores_redirected_git_environment(tmp_path: Path, monkeypatch
     assert verify_distribution_checkout(bundle, commit, _git).expected_commit == commit
 
 
+def test_checkout_supports_real_subprocess_runner_without_console_output(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    bundle, commit = _checkout(tmp_path)
+
+    assert verify_distribution_checkout(bundle, commit, subprocess.run).expected_commit == commit
+    assert capfd.readouterr() == ("", "")
+
+
 def _rewrite_payload(bundle: Path, filename: str, content: bytes) -> None:
     (bundle / filename).write_bytes(content)
     data = json.loads((bundle / "manifest.json").read_bytes())
@@ -240,10 +256,10 @@ def test_checkout_clears_git_config_and_disables_external_status_hooks(
     calls: list[tuple[list[str], dict[str, str]]] = []
 
     def recording_runner(
-        argv: list[str], *, cwd: Path, env: dict[str, str]
+        argv: list[str], *, cwd: Path, env: dict[str, str], capture_output: bool
     ) -> subprocess.CompletedProcess[str]:
         calls.append((argv, env))
-        return _git(argv, cwd, env)
+        return _git(argv, cwd, env, capture_output)
 
     verify_distribution_checkout(bundle, commit, recording_runner)
     for argv, env in calls:
