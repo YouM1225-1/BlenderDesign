@@ -1278,6 +1278,15 @@ def test_fault_driver_uses_closed_command_matrix_and_requires_hit(tmp_path: Path
     inapplicable = invoke("after_extension_tree_publish", "verify")
     assert inapplicable.returncode == 2
     assert "No module named" not in inapplicable.stderr
+    for fixture_kind in ("runtime_tree", "extension_tree", "userpref_file", "codex_file"):
+        accepted = invoke(
+            f"after_{fixture_kind}_restore_move",
+            "rollback",
+            fixture_kind=fixture_kind,
+            preimage="present",
+        )
+        assert accepted.returncode == 1
+        assert "No module named" in accepted.stderr
     for result in (
         invoke("after_extension_tree_publish", "install", fixture_kind="unknown"),
         invoke(
@@ -1285,7 +1294,19 @@ def test_fault_driver_uses_closed_command_matrix_and_requires_hit(tmp_path: Path
         ),
         invoke("after_json_rename", "install", fixture_kind="atomic_json", preimage="absent"),
         invoke("after_extension_tree_publish", "install", preimage="present"),
-        invoke("after_extension_tree_restore_move", "rollback", preimage="present"),
+        invoke(
+            "after_extension_tree_restore_move",
+            "rollback",
+            fixture_kind="runtime_tree",
+            preimage="present",
+        ),
+        invoke("after_extension_tree_restore_move", "rollback", preimage="any"),
+        invoke(
+            "after_codex_file_restore_move",
+            "rollback",
+            fixture_kind="codex_semantic",
+            preimage="present",
+        ),
         invoke("after_extension_tree_swap", "install", preimage="absent"),
         invoke("after_extension_tree_restore_swap", "rollback", preimage="absent"),
         invoke(

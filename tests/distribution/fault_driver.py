@@ -88,6 +88,7 @@ def _applicable_points(fixture_kind: str, preimage: str) -> dict[str, frozenset[
                 f"after_{fixture_kind}_swap": _INSTALL,
                 f"after_{fixture_kind}_park": _INSTALL,
                 f"after_{fixture_kind}_restore_swap": _MUTATING,
+                f"after_{fixture_kind}_restore_move": _MUTATING,
             }
         )
     else:
