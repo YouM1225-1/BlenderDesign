@@ -119,8 +119,10 @@ def _launcher_source(environment: Mapping[str, str]) -> bytes:
         "import sys\n"
         "from pathlib import Path\n\n"
         f"environment = {clean!r}\n"
+        "runtime_python = Path(__file__).with_name('python')\n"
         "entry_point = Path(__file__).with_name('blender-mcp')\n"
-        "os.execve(str(entry_point), [str(entry_point), *sys.argv[1:]], environment)\n"
+        'os.execve(str(runtime_python), [str(runtime_python), "-B", str(entry_point), '
+        "*sys.argv[1:]], environment)\n"
     ).encode()
 
 

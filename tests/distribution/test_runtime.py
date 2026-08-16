@@ -101,8 +101,9 @@ class RuntimeRunner:
             stage = Path(args[5])
             (stage / "bin").mkdir(exist_ok=True)
             python = stage / "bin/python"
-            python.write_text(f'#!/bin/sh\nexec {sys.executable!s} "$@"\n')
-            python.chmod(0o700)
+            resolved_python = Path(sys.executable).resolve(strict=True)
+            python.symlink_to(resolved_python)
+            (stage / "pyvenv.cfg").write_text(f"home = {resolved_python.parent}\n")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[1:4] == ("pip", "install", "--python"):
             if Path(args[-1]).name == self.bundle.wheel_path.name:
@@ -125,10 +126,13 @@ class RuntimeRunner:
                     "'entrypoint': sys.argv[1]}, sort_keys=True))\n"
                 )
                 server.write_text(
-                    "#!/bin/sh\n"
-                    "exec_dir=${0%/*}\n"
-                    '/usr/bin/env -0 > "$exec_dir/observed-env"\n'
-                    f'exec {sys.executable!s} "$exec_dir/server-probe.py" "$0" "$@"\n'
+                    "import os, pathlib, sys\n"
+                    "exec_dir = pathlib.Path(__file__).parent\n"
+                    "raw = b'\\0'.join(f'{key}={value}'.encode() "
+                    "for key, value in os.environ.items())\n"
+                    "(exec_dir / 'observed-env').write_bytes(raw)\n"
+                    f"os.execv({str(sys.executable)!r}, [{str(sys.executable)!r}, "
+                    "str(exec_dir / 'server-probe.py'), __file__, *sys.argv[1:]])\n"
                 )
                 server.chmod(0o700)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -363,16 +367,20 @@ def test_actual_launcher_discards_hostile_parent_and_selects_managed_identity(
             env=hostile,
             text=True,
             capture_output=True,
-            check=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert (
+            'os.execve(str(runtime_python), [str(runtime_python), "-B", str(entry_point), '
+            "*sys.argv[1:]], environment)" in (stage.path / "bin/blender-mcp-managed").read_text()
         )
         payload = json.loads(completed.stdout)
         profile = _profile(tmp_path)
         assert payload["argv"] == ["one", "two"]
         assert payload["entrypoint"] == str(stage.path / "bin/blender-mcp")
         shell_env = payload["env"]
-        assert shell_env.pop("SHLVL") == "1"
-        assert shell_env.pop("_") == "/usr/bin/env"
-        assert Path(shell_env.pop("PWD")).is_absolute()
+        assert shell_env.pop("LC_CTYPE") == "C.UTF-8"
+        assert shell_env.pop("__CF_USER_TEXT_ENCODING").startswith("0x")
         assert shell_env == {
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "HOME": str(profile.home),
@@ -387,6 +395,88 @@ def test_actual_launcher_discards_hostile_parent_and_selects_managed_identity(
         }
     finally:
         root.close()
+
+
+def test_real_launcher_keeps_verified_runtime_bytecode_free(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    with SafeRoot.open(data, os.getuid(), data) as root:
+        created = create_deterministic_stage(
+            root, "runtime.stage", TreeImage.absent(), NoOpFaultInjector()
+        )
+        assert isinstance(created, StagedTree)
+
+        def run(argv, *, cwd: Path, env):
+            return subprocess.run(argv, cwd=cwd, env=env, text=True, capture_output=True)
+
+        image = stage_runtime(
+            bundle,
+            Path(os.environ["UV"]).resolve(strict=True),
+            Path(sys.executable).resolve(strict=True),
+            _profile(tmp_path),
+            created,
+            run,
+        )
+        stage = created.with_image(image)
+        marker = stage.path / ".blender-mcp-runtime.json"
+        marker_raw = marker.read_bytes()
+
+        def bytecode_paths():
+            return tuple(
+                path.relative_to(stage.path)
+                for path in stage.path.rglob("*")
+                if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}
+            )
+
+        bytecode_before = bytecode_paths()
+        messages = (
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "runtime-test", "version": "1"},
+                },
+            },
+            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        )
+        hostile = {
+            **os.environ,
+            "HOME": "/hostile/home",
+            "PATH": str(tmp_path / "hostile/bin"),
+            "PYTHONPATH": "/hostile/python",
+            "PYTHONDONTWRITEBYTECODE": "0",
+            "BLENDER_MCP_HOST": "hostile.invalid",
+            "BLENDER_MCP_PORT": "1",
+        }
+        completed = subprocess.run(
+            [stage.path / "bin/blender-mcp-managed"],
+            input="".join(json.dumps(message) + "\n" for message in messages),
+            env=hostile,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=True,
+        )
+        responses = {value["id"]: value for value in map(json.loads, completed.stdout.splitlines())}
+        assert responses[1]["result"]["protocolVersion"] == "2025-06-18"
+        assert tuple(tool["name"] for tool in responses[2]["result"]["tools"]) == (
+            bundle.manifest.tools
+        )
+        assert stage.capture() == image
+        assert marker.read_bytes() == marker_raw
+        assert inspect_runtime(TreeRef(root, stage.relative), bundle.manifest).exact
+        assert (
+            verify_runtime(
+                TreeRef(root, stage.relative), bundle.manifest, _profile(tmp_path), run
+            ).tree
+            == image
+        )
+        assert bytecode_paths() == bytecode_before
 
 
 def test_absent_and_altered_runtime_are_not_exact(tmp_path: Path) -> None:
