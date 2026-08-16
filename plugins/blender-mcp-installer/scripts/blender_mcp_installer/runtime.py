@@ -187,6 +187,38 @@ def _identity(info: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _directory_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_mode)
+
+
+def _validate_stage_root(
+    stage: StagedTree,
+    parent_fd: int,
+    name: str,
+    root_fd: int,
+    parent_identity: tuple[int, ...],
+    root_identity: tuple[int, ...],
+) -> None:
+    try:
+        parent = os.fstat(parent_fd)
+        root = os.fstat(root_fd)
+        linked_parent = os.stat(stage.path.parent, follow_symlinks=False)
+        linked_root = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        absolute_root = os.stat(stage.path, follow_symlinks=False)
+    except OSError as exc:
+        raise InstallerError("runtime stage identity changed") from exc
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or not stat.S_ISDIR(root.st_mode)
+        or _directory_identity(parent) != parent_identity
+        or _directory_identity(linked_parent) != parent_identity
+        or _directory_identity(root) != root_identity
+        or _directory_identity(linked_root) != root_identity
+        or _directory_identity(absolute_root) != root_identity
+    ):
+        raise InstallerError("runtime stage identity changed")
+
+
 def _read_fd_stable(fd: int, *, maximum: int | None = None) -> bytes:
     before = os.fstat(fd)
     if not stat.S_ISREG(before.st_mode) or before.st_nlink < 1:
@@ -531,115 +563,185 @@ def stage_runtime(
     ):
         raise InstallerError("runtime stage state conflict")
     runtime = stage.path
-    with _verified_bundle_inputs(bundle) as (bundle_inputs, lock_raw, expected):
-        sources = tuple(bundle_inputs.values())
-        env = _install_env(profile)
-        wheel_env = dict(env)
-        del wheel_env["UV_REQUIRE_HASHES"]
-        _run_with_inputs(
-            runner,
-            (str(uv_bin), "venv", "--relocatable", "--python", str(python_bin), str(runtime)),
-            cwd=runtime.parent,
-            env=env,
-            label="runtime virtual environment creation",
-            inputs=sources,
+    parent_fd, stage_name = stage.root.open_parent(stage.relative)
+    try:
+        stage_fd = os.open(
+            stage_name,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
         )
-        stage_fd = stage.root.open_directory(stage.relative)
-        private_inputs: list[_RetainedInput] = []
         try:
-            for role in ("runtime_lock", "server_wheel"):
-                private_inputs.append(_copy_retained_input(bundle_inputs[role], stage_fd))
-            os.fsync(stage_fd)
-            bound = (*sources, *private_inputs)
-            _run_with_inputs(
-                runner,
-                (
-                    str(uv_bin),
-                    "pip",
-                    "install",
-                    "--python",
-                    str(runtime / "bin/python"),
-                    "--require-hashes",
-                    "--only-binary",
-                    ":all:",
-                    "--no-deps",
-                    "--default-index",
-                    _INDEX,
-                    "-r",
-                    str(runtime / bundle.runtime_lock_path.name),
-                ),
-                cwd=runtime.parent,
-                env=env,
-                label="locked runtime installation",
-                inputs=bound,
-            )
-            _run_with_inputs(
-                runner,
-                (
-                    str(uv_bin),
-                    "pip",
-                    "install",
-                    "--python",
-                    str(runtime / "bin/python"),
-                    "--no-deps",
-                    "--no-build",
-                    str(runtime / bundle.wheel_path.name),
-                ),
-                cwd=runtime.parent,
-                env=wheel_env,
-                label="official server installation",
-                inputs=bound,
-            )
-            _remove_private_inputs(stage_fd, private_inputs)
-        except BaseException:
-            try:
-                if private_inputs:
+            parent_identity = _directory_identity(os.fstat(parent_fd))
+            root_identity = _directory_identity(os.fstat(stage_fd))
+
+            def check_stage() -> None:
+                _validate_stage_root(
+                    stage,
+                    parent_fd,
+                    stage_name,
+                    stage_fd,
+                    parent_identity,
+                    root_identity,
+                )
+
+            check_stage()
+            with _verified_bundle_inputs(bundle) as (bundle_inputs, lock_raw, expected):
+                sources = tuple(bundle_inputs.values())
+                env = _install_env(profile)
+                wheel_env = dict(env)
+                del wheel_env["UV_REQUIRE_HASHES"]
+                _run_with_inputs(
+                    runner,
+                    (
+                        str(uv_bin),
+                        "venv",
+                        "--relocatable",
+                        "--python",
+                        str(python_bin),
+                        str(runtime),
+                    ),
+                    cwd=runtime.parent,
+                    env=env,
+                    label="runtime virtual environment creation",
+                    inputs=sources,
+                )
+                check_stage()
+                private_inputs: list[_RetainedInput] = []
+                try:
+                    for role in ("runtime_lock", "server_wheel"):
+                        private_inputs.append(_copy_retained_input(bundle_inputs[role], stage_fd))
+                    os.fsync(stage_fd)
+                    bound = (*sources, *private_inputs)
+                    check_stage()
+                    _run_with_inputs(
+                        runner,
+                        (
+                            str(uv_bin),
+                            "pip",
+                            "install",
+                            "--python",
+                            str(runtime / "bin/python"),
+                            "--require-hashes",
+                            "--only-binary",
+                            ":all:",
+                            "--no-deps",
+                            "--default-index",
+                            _INDEX,
+                            "-r",
+                            str(runtime / bundle.runtime_lock_path.name),
+                        ),
+                        cwd=runtime.parent,
+                        env=env,
+                        label="locked runtime installation",
+                        inputs=bound,
+                    )
+                    check_stage()
+                    _run_with_inputs(
+                        runner,
+                        (
+                            str(uv_bin),
+                            "pip",
+                            "install",
+                            "--python",
+                            str(runtime / "bin/python"),
+                            "--no-deps",
+                            "--no-build",
+                            str(runtime / bundle.wheel_path.name),
+                        ),
+                        cwd=runtime.parent,
+                        env=wheel_env,
+                        label="official server installation",
+                        inputs=bound,
+                    )
+                    check_stage()
                     _remove_private_inputs(stage_fd, private_inputs)
-            except InstallerError:
-                pass
-            raise
+                    check_stage()
+                except BaseException:
+                    try:
+                        if private_inputs:
+                            _remove_private_inputs(stage_fd, private_inputs)
+                    except InstallerError:
+                        pass
+                    raise
+                finally:
+                    for item in private_inputs:
+                        item.close()
+            check_stage()
+            _materialize_links(runtime)
+            check_stage()
+            metadata = _probe_runtime(runtime, expected, bundle.manifest.tools, profile, runner)
+            check_stage()
+            launcher_environment = _profile_env(profile)
+            launcher = runtime / _LAUNCHER
+            _write_exclusive(launcher, _launcher_source(launcher_environment), 0o700)
+            _write_exclusive(runtime / _LOCK_COPY, lock_raw, 0o600)
+            entry_point_raw = _read_stable(runtime / PurePath(metadata["entry_point_relative"]))
+            module_raw = _read_stable(runtime / PurePath(metadata["module_relative"]))
+            _sync_tree(runtime)
+            check_stage()
+            content_count, content_sha256 = _content_summary(stage.capture())
+            check_stage()
+            marker = {
+                "schema_version": 1,
+                **metadata,
+                "content_count": content_count,
+                "content_sha256": content_sha256,
+                "entry_point_sha256": hashlib.sha256(entry_point_raw).hexdigest(),
+                "module_sha256": hashlib.sha256(module_raw).hexdigest(),
+                "launcher_relative": _LAUNCHER,
+                "launcher_sha256": hashlib.sha256(
+                    _launcher_source(launcher_environment)
+                ).hexdigest(),
+                "launcher_environment": launcher_environment,
+                "tools": list(bundle.manifest.tools),
+            }
+            _write_exclusive(
+                runtime / _MARKER,
+                (json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+                0o600,
+            )
+            _sync_tree(runtime)
+            check_stage()
+            image = stage.capture()
+            check_stage()
+            if image.state is not ImageState.PRESENT:
+                raise InstallerError("staged runtime is absent")
+            return image
         finally:
-            for item in private_inputs:
-                item.close()
             os.close(stage_fd)
-    _materialize_links(runtime)
-    metadata = _probe_runtime(runtime, expected, bundle.manifest.tools, profile, runner)
-    launcher_environment = _profile_env(profile)
-    launcher = runtime / _LAUNCHER
-    _write_exclusive(launcher, _launcher_source(launcher_environment), 0o700)
-    _write_exclusive(runtime / _LOCK_COPY, lock_raw, 0o600)
-    entry_point_raw = _read_stable(runtime / PurePath(metadata["entry_point_relative"]))
-    module_raw = _read_stable(runtime / PurePath(metadata["module_relative"]))
-    _sync_tree(runtime)
-    content_count, content_sha256 = _content_summary(stage.capture())
-    marker = {
-        "schema_version": 1,
-        **metadata,
-        "content_count": content_count,
-        "content_sha256": content_sha256,
-        "entry_point_sha256": hashlib.sha256(entry_point_raw).hexdigest(),
-        "module_sha256": hashlib.sha256(module_raw).hexdigest(),
-        "launcher_relative": _LAUNCHER,
-        "launcher_sha256": hashlib.sha256(_launcher_source(launcher_environment)).hexdigest(),
-        "launcher_environment": launcher_environment,
-        "tools": list(bundle.manifest.tools),
-    }
-    _write_exclusive(
-        runtime / _MARKER,
-        (json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n").encode(),
-        0o600,
-    )
-    _sync_tree(runtime)
-    image = stage.capture()
-    if image.state is not ImageState.PRESENT:
-        raise InstallerError("staged runtime is absent")
-    return image
+    finally:
+        os.close(parent_fd)
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key")
+        value[key] = item
+    return value
 
 
 def _load_marker(runtime: Path) -> dict[str, object]:
+    path = runtime / _MARKER
     try:
-        value = json.loads(_read_stable(runtime / _MARKER, maximum=_MAX_MARKER))
-    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError, InstallerError) as exc:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            info = os.fstat(fd)
+            raw = _read_fd_stable(fd, maximum=_MAX_MARKER)
+            linked = os.stat(path, follow_symlinks=False)
+        finally:
+            os.close(fd)
+        value = json.loads(raw, object_pairs_hook=_unique_object)
+        canonical = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or _identity(linked) != _identity(info)
+            or raw != canonical
+        ):
+            raise InstallerError("invalid runtime metadata")
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError, InstallerError) as exc:
         raise InstallerError("invalid runtime metadata") from exc
     keys = {
         "schema_version",

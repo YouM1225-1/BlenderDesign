@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path, PurePath
@@ -20,6 +21,7 @@ from blender_mcp_installer.bundle import (  # noqa: E402
     parse_manifest,
 )
 from blender_mcp_installer.codex_adapter import ManagedProfile  # noqa: E402
+from blender_mcp_installer import runtime as runtime_module  # noqa: E402
 from blender_mcp_installer.filesystem import (  # noqa: E402
     InstallerError,
     NativeState,
@@ -162,6 +164,38 @@ class BundleSwapRunner(RuntimeRunner):
             path.write_bytes(b"replacement-with-expected-fake-metadata")
             path.chmod(0o600)
             self.swapped = True
+        return result
+
+
+class StageRootSwapRunner(RuntimeRunner):
+    def __init__(self, bundle: StagedBundle, after_call: int | None):
+        super().__init__(bundle)
+        self.after_call = after_call
+        self.replacement: Path | None = None
+
+    def replace(self, runtime: Path) -> None:
+        displaced = runtime.with_name(runtime.name + ".opened-original")
+        runtime.rename(displaced)
+        shutil.copytree(displaced, runtime)
+        sentinel = runtime / "replacement-sentinel"
+        sentinel.write_bytes(b"preserve-replacement")
+        sentinel.chmod(0o600)
+        for name in (
+            self.bundle.runtime_lock_path.name,
+            self.bundle.wheel_path.name,
+        ):
+            path = runtime / name
+            if path.exists():
+                path.write_bytes(b"replacement-private-input")
+                path.chmod(0o600)
+        self.replacement = runtime
+
+    def __call__(self, argv, *, cwd: Path, env):
+        result = super().__call__(argv, cwd=cwd, env=env)
+        if len(self.calls) - 1 == self.after_call:
+            args = self.calls[-1][0]
+            runtime = Path(args[5]) if self.after_call == 0 else Path(args[4]).parent.parent
+            self.replace(runtime)
         return result
 
 
@@ -399,6 +433,78 @@ def test_complete_runtime_content_is_bound_before_execution(
         assert len(runner.calls) == before
     finally:
         root.close()
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "trailing", "reformatted", "mode"])
+def test_marker_requires_exact_canonical_private_bytes_before_execution(
+    tmp_path: Path, mutation: str
+) -> None:
+    bundle = _bundle(tmp_path)
+    root, stage, runner = _stage(tmp_path, bundle)
+    try:
+        marker = stage.path / ".blender-mcp-runtime.json"
+        raw = marker.read_bytes()
+        if mutation == "duplicate":
+            marker.write_bytes(raw.replace(b"{", b'{"schema_version":1,', 1))
+        elif mutation == "trailing":
+            marker.write_bytes(raw + b" ")
+        elif mutation == "reformatted":
+            marker.write_text(json.dumps(json.loads(raw), indent=2) + "\n")
+        else:
+            marker.chmod(0o666)
+        before = len(runner.calls)
+        assert not inspect_runtime(TreeRef(root, stage.relative), bundle.manifest).exact
+        with pytest.raises(InstallerError, match="runtime verification failed"):
+            verify_runtime(
+                TreeRef(root, stage.relative), bundle.manifest, _profile(tmp_path), runner
+            )
+        assert len(runner.calls) == before
+    finally:
+        root.close()
+
+
+@pytest.mark.parametrize("boundary", ["venv", "lock", "wheel", "cleanup"])
+def test_stage_root_remains_fd_bound_at_every_consumption_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    bundle = _bundle(tmp_path)
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    with SafeRoot.open(data, os.getuid(), data) as root:
+        created = create_deterministic_stage(
+            root, "runtime.stage", TreeImage.absent(), NoOpFaultInjector()
+        )
+        assert isinstance(created, StagedTree)
+        after_call = {"venv": 0, "lock": 1, "wheel": 2, "cleanup": None}[boundary]
+        runner = StageRootSwapRunner(bundle, after_call)
+        if boundary == "cleanup":
+            remove = runtime_module._remove_private_inputs
+
+            def replace_before_cleanup(stage_fd, inputs):
+                if runner.replacement is None:
+                    runner.replace(created.path)
+                remove(stage_fd, inputs)
+
+            monkeypatch.setattr(runtime_module, "_remove_private_inputs", replace_before_cleanup)
+        with pytest.raises(InstallerError, match="runtime stage identity changed"):
+            stage_runtime(
+                bundle,
+                Path("/opt/uv").absolute(),
+                Path(sys.executable),
+                _profile(tmp_path),
+                created,
+                runner,
+            )
+        assert runner.replacement is not None
+        assert (runner.replacement / "replacement-sentinel").read_bytes() == (
+            b"preserve-replacement"
+        )
+        if boundary != "venv":
+            assert (runner.replacement / bundle.runtime_lock_path.name).exists()
+            assert (runner.replacement / bundle.wheel_path.name).exists()
+        assert not any(
+            len(argv) == 4 and argv[1:3] == ("-I", "-c") for argv, _cwd, _env in runner.calls
+        )
 
 
 @pytest.mark.parametrize("role", ["lock", "wheel"])
