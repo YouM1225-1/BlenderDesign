@@ -4,7 +4,7 @@ Date: 2026-08-16
 
 Plan: `docs/superpowers/plans/2026-08-16-official-blender-mcp-distributable-codex-installer.md`
 
-Current plan SHA-256: `25643502672caea41606e740b9db172bbca3a641c8b93f1d419f811a680bdacf`
+Current plan SHA-256: `979d8b38a16848e55948c3471aa284dada89cbe49c90aa738c566c5018738be2`
 
 Initial frozen plan SHA-256: `fb69e31ef0445d38c2caeed277c69519f95ed19c5f067eabcd7e7733dc767d72`
 
@@ -206,3 +206,21 @@ wheel-only, no-dependency form with `UV_NO_BUILD=1` and no redundant
 owns the matching fake-host argv update. The reviewed Task 6 implementation
 ends at `e9d9880`, with independent review APPROVED at 0 Critical / 0
 Important / 0 Minor.
+
+## Task 8 composition-interface amendment
+
+Task 8 implementation exposed four missing composition interfaces without
+changing the frozen architecture: atomic JSON accepts the explicit fault
+injector at its three durable boundaries; Task 3 exports verified conditional
+tree cleanup; Task 4 exports a read-only Codex rollback preflight; and Task 7
+exports the locked-runtime `OfficialMCPProbe`. The Task 8 file list now names
+the corresponding implementation and test files. Its 143-case crash matrix
+binds every concrete failpoint to one exact pre-recovery filesystem, selector,
+JSON, receipt, and action-state snapshot before two fresh recovery attempts.
+
+The reviewed Task 8 implementation ends at `675267f`. Final independent
+review returned APPROVED with 0 Critical, 0 Important, and 0 Minor findings;
+the pinned distribution suite passed 617/617 and the exact crash matrix plus
+negative oracle probe passed 144/144. This direct documentation alignment is
+the simplified amendment process requested by the user and introduces no new
+runtime behavior.

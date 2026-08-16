@@ -228,7 +228,7 @@ A0 recovery moves verified post S to R with RENAME_EXCL; A1 recovery moves T to 
 
 Every recognized post-rename crash prefix re-fsyncs every affected target/stage/recovery parent and recaptures the exact tuple before the next transition or terminal return. Tree cleanup happens only from R in deterministic child-before-parent order. A retry may accept only an exact deletion prefix: the remaining entries are an exact suffix of that order with the original root dev/ino/uid/mode and original entry identities, with no extra or changed entry; every removal fsyncs its parent. A mismatch conflicts without deleting the changed or extra object.
 
-write_atomic_json(path, expected, payload, install_id, retain_old=None) uses a deterministic same-directory mode-0600 O_EXCL temp, complete write, file fsync, then RENAME_EXCL for absent path or RENAME_SWAP with the validated installer-owned prior inode, followed by parent fsync. After swap, the old JSON at the temp name is either moved with RENAME_EXCL to retain_old (the exact previous-active selector path above) or removed after validation, then both parents are fsynced. A crash leaves an old or new complete JSON, never torn; reconciliation recognizes the deterministic temp and retain path.
+write_atomic_json(path, expected, payload, install_id, retain_old=None, *, fault) uses a deterministic same-directory mode-0600 O_EXCL temp, complete write, file fsync, then RENAME_EXCL for absent path or RENAME_SWAP with the validated installer-owned prior inode, followed by parent fsync. It hits the injected fault boundary after the temp file fsync, native rename, and parent fsync. After swap, the old JSON at the temp name is either moved with RENAME_EXCL to retain_old (the exact previous-active selector path above) or removed after validation, then both parents are fsynced. A crash leaves an old or new complete JSON, never torn; reconciliation recognizes the deterministic temp and retain path.
 
 PendingSelector has exactly schema_version=1, generation (positive non-bool integer), install_id (canonical UUIDv4), receipt_basename (exactly `<install_id>.json`), manifest_sha256 (64 lowercase hex), and previous_active (`ActiveSelector|null`). ActiveSelector has exactly schema_version=1, generation (positive non-bool integer), install_id (canonical UUIDv4), and receipt_basename (exactly `<install_id>.json`). Unknown fields and mismatched IDs/generations/basenames fail closed. Selector order under lock is: durable pending -> durable prepared receipt -> durable active switch -> durable pending removal. Reconciliation is exact:
 
@@ -415,7 +415,7 @@ git commit -m "build: publish locked official Blender MCP bundle"
 - InstallerLock.acquire(state_root: SafeRoot) -> context manager using flock(LOCK_EX|LOCK_NB).
 - capture_file(root: SafeRoot, relative: PurePath) -> FileImage.
 - capture_tree(root: SafeRoot, relative: PurePath) -> TreeImage.
-- write_atomic_json(path: TargetRef, expected: FileImage, payload: Mapping[str,object], install_id: UUID, retain_old: TargetRef|None = None) -> FileImage.
+- write_atomic_json(path: TargetRef, expected: FileImage, payload: Mapping[str,object], install_id: UUID, retain_old: TargetRef|None = None, *, fault: FaultInjector) -> FileImage.
 - load_receipt(path: Path, roots: InstallRoots) -> Receipt; accepts only roots.receipts/install_id.json.
 - load_pending/load_active(path: Path, roots: InstallRoots) -> PendingSelector|ActiveSelector|None.
 
@@ -501,6 +501,7 @@ git commit -m "feat: add closed installer state primitives"
 - copy_tree(source: TreeRef, stage: StagedTree) -> TreeImage; rejects nested symlinks/special files.
 - forward_file/forward_tree(target, expected_pre, staged_post, recovery, fault) -> NativeState.
 - restore_file/restore_tree(target, expected_pre, expected_post, stage, recovery, fault) -> RestoreState.
+- conditional_remove_tree(reference: TreeRef, expected: TreeImage, guards, fault: FaultInjector) -> None; verifies the exact tree and guards before prefix-safe cleanup.
 
 The wrappers call renameatx_np only with RENAME_EXCL or RENAME_SWAP, use dirfds, fsync both affected parents, and map EEXIST/ENOTSUP/EXDEV to fixed fail-closed InstallerError values. Stage/recovery basenames are the deterministic values already recorded by Task 8; Task 3 never allocates random names and never reads/writes the receipt.
 
@@ -554,6 +555,7 @@ git commit -m "feat: add conditional installer transactions"
 - verify_codex_toml(raw: bytes, desired: ManagedCodexValues) -> None.
 - verify_codex_effective(codex_bin: Path, desired: ManagedCodexValues, env: Mapping[str,str]) -> EffectiveCodexState.
 - rollback_codex(current: CodexRollbackContext, protected_recovery: StagedFile, installer_post: FileImage, managed_keys: ManagedCodexKeys, runtime_python: Path, fault: FaultInjector) -> RollbackResult.
+- preflight_codex_rollback(current: CodexRollbackContext, protected_recovery: StagedFile, installer_post: FileImage, managed_keys: ManagedCodexKeys, runtime_python: Path) -> None; validates the exact native/semantic row without durable writes.
 
 Owned values are command=the verified runtime/bin/blender-mcp-managed launcher; args=[]; omit_tools_from=[]; startup_timeout_sec=20.0; tool_timeout_sec=60.0; default_tools_approval_mode=approve; enabled_tools=the exact catalog; env.HOME; env.BLENDER_USER_RESOURCES; env.BLENDER_USER_CONFIG; env.BLENDER_USER_EXTENSIONS; env.BLENDER_PATH; env.BLENDER_MCP_HOST=localhost; env.BLENDER_MCP_PORT=9876; env.PYTHONNOUSERSITE=1; env.PYTHONSAFEPATH=1; and membership mcp__blender in features.code_mode.direct_only_tool_namespaces.
 
@@ -732,6 +734,7 @@ git commit -m "feat: add locked Blender MCP runtime transaction"
 - probe_host(blender_bin: Path, codex_bin: Path, uv_bin: Path, python_bin: Path, env) -> HostCapabilities.
 - inspect_installation(bundle, roots, blender_state, host) -> InstallationInspection.
 - verify_live(bundle, inspection, runtime_command, codex_bin, env, mcp_probe) -> VerificationResult.
+- OfficialMCPProbe(runtime_python: Path) is the production MCPProbe backed by the locked runtime's official MCP client; Task 8 supplies it to verify_live without duplicating protocol code.
 
 HostCapabilities records actual platform, Codex/uv/Blender/Python versions, arm64 evidence, and exact capability probes. codex mcp get --help must exit 0 and contain --json; codex plugin marketplace add --help and codex plugin add --help must exit 0. codex mcp get blender --json is forbidden before Codex publication and runs only in post-publication inspection/verification. Unsupported/missing capability fails before mutation and actual versions remain in redacted evidence.
 
@@ -782,6 +785,12 @@ git commit -m "feat: verify Blender MCP without managed writes"
 - Create: tests/distribution/test_cli.py
 - Modify: tests/distribution/fault_driver.py
 - Modify: tests/distribution/fake_host.py
+- Modify: plugins/blender-mcp-installer/scripts/blender_mcp_installer/filesystem.py
+- Modify: tests/distribution/test_filesystem.py
+- Modify: plugins/blender-mcp-installer/scripts/blender_mcp_installer/codex_adapter.py
+- Modify: tests/distribution/test_codex_adapter.py
+- Modify: plugins/blender-mcp-installer/scripts/blender_mcp_installer/verification.py
+- Modify: tests/distribution/test_verification.py
 
 **Interfaces:**
 
@@ -844,7 +853,7 @@ Closed FAILPOINTS and their only applicable variants are below. Each action/sele
 | active selector reverse | prior present | after_rollback_intent, after_active_restore_swap, after_active_restore_parent_fsync, after_rollback_status, after_active_restore_cleanup |
 | active selector reverse | prior absent | after_rollback_intent, after_active_restore_move, after_active_restore_parent_fsync, after_rollback_status, after_active_restore_cleanup |
 
-fault_driver.py requires `--point POINT --fixture-kind KIND --preimage present|absent|any -- COMMAND ...`, rejects a point not applicable to that closed fixture/action/preimage state before CLI import, and proves the requested point was hit; an injected hit exits exactly 70. The exhaustive subprocess matrix reruns normal recovery to completion and asserts exact T/S/R/selector/receipt states, retry behavior, retained installed preimages, cleaned installed bundle stage, and no secret sentinel in receipts, errors, duplicate backups, or orphan stages.
+fault_driver.py requires `--point POINT --fixture-kind KIND --preimage present|absent|any -- COMMAND ...`, rejects a point not applicable to that closed fixture/action/preimage state before CLI import, and proves the requested point was hit; an injected hit exits exactly 70. The exhaustive subprocess matrix binds each concrete point to its exact pre-recovery T/S/R, semantic-stage, selector, complete JSON live/temp, receipt, and action-state snapshot; it then reruns normal recovery twice to completion and asserts retry behavior, retained installed preimages, cleaned installed bundle stage, and no secret sentinel in receipts, errors, duplicate backups, or orphan stages.
 
 - [ ] **Step 2: Run RED**
 
