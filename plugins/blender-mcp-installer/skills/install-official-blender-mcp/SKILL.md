@@ -53,64 +53,159 @@ case "$BLENDER_BIN" in /*) ;; *) echo "BLENDER_BIN must be absolute" >&2; exit 1
 case "$CODEX_BIN" in /*) ;; *) echo "CODEX_BIN must be absolute" >&2; exit 1;; esac
 test -x "$BLENDER_BIN"
 test -x "$CODEX_BIN"
+case "$SOURCE_DISTRIBUTION_ROOT" in /*) ;; *) echo "source repository path must be absolute" >&2; exit 1;; esac
+SOURCE_DISTRIBUTION_ROOT="$(cd "$SOURCE_DISTRIBUTION_ROOT" && pwd -P)"
+OWNER_UID="$(id -u)"
+test "$(/usr/bin/stat -f %u "$SOURCE_DISTRIBUTION_ROOT")" = "$OWNER_UID"
+SOURCE_GIT_MARKER="$SOURCE_DISTRIBUTION_ROOT/.git"
+if test -d "$SOURCE_GIT_MARKER" && test ! -L "$SOURCE_GIT_MARKER"; then
+  SOURCE_GIT_DIR="$(cd "$SOURCE_GIT_MARKER" && pwd -P)"
+elif test -f "$SOURCE_GIT_MARKER" && test ! -L "$SOURCE_GIT_MARKER"; then
+  IFS= read -r SOURCE_GIT_LINE < "$SOURCE_GIT_MARKER"
+  case "$SOURCE_GIT_LINE" in
+    'gitdir: '*) SOURCE_GIT_CANDIDATE="${SOURCE_GIT_LINE#gitdir: }" ;;
+    *) echo "source .git file is invalid" >&2; exit 1 ;;
+  esac
+  case "$SOURCE_GIT_CANDIDATE" in
+    /*) ;;
+    *) SOURCE_GIT_CANDIDATE="$SOURCE_DISTRIBUTION_ROOT/$SOURCE_GIT_CANDIDATE" ;;
+  esac
+  SOURCE_GIT_DIR="$(cd "$SOURCE_GIT_CANDIDATE" && pwd -P)"
+else
+  echo "source repository Git admin is invalid" >&2
+  exit 1
+fi
+test ! -L "$SOURCE_GIT_DIR"
+test "$(/usr/bin/stat -f %u "$SOURCE_GIT_DIR")" = "$OWNER_UID"
+if test -f "$SOURCE_GIT_DIR/commondir" && test ! -L "$SOURCE_GIT_DIR/commondir"; then
+  IFS= read -r SOURCE_COMMON_CANDIDATE < "$SOURCE_GIT_DIR/commondir"
+  case "$SOURCE_COMMON_CANDIDATE" in
+    /*) ;;
+    *) SOURCE_COMMON_CANDIDATE="$SOURCE_GIT_DIR/$SOURCE_COMMON_CANDIDATE" ;;
+  esac
+  SOURCE_COMMON_GIT_DIR="$(cd "$SOURCE_COMMON_CANDIDATE" && pwd -P)"
+else
+  SOURCE_COMMON_GIT_DIR="$SOURCE_GIT_DIR"
+fi
+test ! -L "$SOURCE_COMMON_GIT_DIR"
+test "$(/usr/bin/stat -f %u "$SOURCE_COMMON_GIT_DIR")" = "$OWNER_UID"
+SOURCE_OBJECTS_ROOT="$(cd "$SOURCE_COMMON_GIT_DIR/objects" && pwd -P)"
+test -d "$SOURCE_OBJECTS_ROOT" && test ! -L "$SOURCE_OBJECTS_ROOT"
+test "$(/usr/bin/stat -f %u "$SOURCE_OBJECTS_ROOT")" = "$OWNER_UID"
+SOURCE_INDEX="$SOURCE_GIT_DIR/index"
+SOURCE_HEAD_FILE="$SOURCE_GIT_DIR/HEAD"
+test -f "$SOURCE_INDEX" && test ! -L "$SOURCE_INDEX"
+test -f "$SOURCE_HEAD_FILE" && test ! -L "$SOURCE_HEAD_FILE"
+test "$(/usr/bin/stat -f %u "$SOURCE_INDEX")" = "$OWNER_UID"
+test "$(/usr/bin/stat -f %u "$SOURCE_HEAD_FILE")" = "$OWNER_UID"
+IFS= read -r SOURCE_HEAD_VALUE < "$SOURCE_HEAD_FILE"
+case "$SOURCE_HEAD_VALUE" in
+  'ref: refs/'*)
+    SOURCE_HEAD_REF="${SOURCE_HEAD_VALUE#ref: }"
+    case "$SOURCE_HEAD_REF" in *..*|*//*|*\\*) echo "source HEAD ref is invalid" >&2; exit 1;; esac
+    SOURCE_HEAD_COMMIT=""
+    for SOURCE_REF_ROOT in "$SOURCE_GIT_DIR" "$SOURCE_COMMON_GIT_DIR"; do
+      SOURCE_REF_FILE="$SOURCE_REF_ROOT/$SOURCE_HEAD_REF"
+      if test -f "$SOURCE_REF_FILE" && test ! -L "$SOURCE_REF_FILE"; then
+        IFS= read -r SOURCE_HEAD_COMMIT < "$SOURCE_REF_FILE"
+        break
+      fi
+    done
+    if test -z "$SOURCE_HEAD_COMMIT"; then
+      SOURCE_PACKED_REFS="$SOURCE_COMMON_GIT_DIR/packed-refs"
+      test -f "$SOURCE_PACKED_REFS" && test ! -L "$SOURCE_PACKED_REFS"
+      SOURCE_HEAD_COMMIT="$(/usr/bin/awk -v ref="$SOURCE_HEAD_REF" '$2 == ref { print $1 }' "$SOURCE_PACKED_REFS")"
+    fi
+    ;;
+  *) SOURCE_HEAD_COMMIT="$SOURCE_HEAD_VALUE" ;;
+esac
+case "$SOURCE_HEAD_COMMIT" in ''|*[!0-9a-f]*) echo "source HEAD commit is invalid" >&2; exit 1;; esac
+test "${#SOURCE_HEAD_COMMIT}" -eq 40
+test "$SOURCE_HEAD_COMMIT" = "$EXPECTED_DISTRIBUTION_COMMIT"
 TRUST_PARENT="$(mktemp -d /private/tmp/blender-mcp-trust.XXXXXX)"
 chmod 700 "$TRUST_PARENT"
 TRUSTED_DISTRIBUTION_ROOT="$TRUST_PARENT/distribution"
-EMPTY_HOOKS="$TRUST_PARENT/empty-hooks"
+PRIVATE_GIT_DIR="$TRUST_PARENT/private.git"
+EMPTY_TEMPLATE="$TRUST_PARENT/empty-template"
 GIT_SAFE_HOME="$TRUST_PARENT/git-home"
-mkdir "$EMPTY_HOOKS" "$GIT_SAFE_HOME"
-chmod 700 "$EMPTY_HOOKS" "$GIT_SAFE_HOME"
+mkdir "$EMPTY_TEMPLATE" "$GIT_SAFE_HOME"
+chmod 700 "$EMPTY_TEMPLATE" "$GIT_SAFE_HOME"
 TRUSTED_CHECKSUMS=""
 GIT_SAFE_ENV=(/usr/bin/env -i
   HOME="$GIT_SAFE_HOME" PATH=/usr/bin:/bin LC_ALL=C
   GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1)
-GIT_SAFE=("${GIT_SAFE_ENV[@]}" /usr/bin/git --no-pager --no-replace-objects
-  -c core.fsmonitor=false -c core.hooksPath="$EMPTY_HOOKS"
+"${GIT_SAFE_ENV[@]}" /usr/bin/git --no-replace-objects \
+  init --bare --template="$EMPTY_TEMPLATE" "$PRIVATE_GIT_DIR" >/dev/null 2>&1
+mkdir "$PRIVATE_GIT_DIR/info" "$PRIVATE_GIT_DIR/hooks"
+: > "$PRIVATE_GIT_DIR/config"
+: > "$PRIVATE_GIT_DIR/info/attributes"
+printf '%s\n' "$EXPECTED_DISTRIBUTION_COMMIT" > "$PRIVATE_GIT_DIR/HEAD"
+printf '%s\n' "$SOURCE_OBJECTS_ROOT" > "$PRIVATE_GIT_DIR/objects/info/alternates"
+/bin/cp "$SOURCE_INDEX" "$PRIVATE_GIT_DIR/index"
+chmod 600 "$PRIVATE_GIT_DIR/config" "$PRIVATE_GIT_DIR/info/attributes" \
+  "$PRIVATE_GIT_DIR/HEAD" "$PRIVATE_GIT_DIR/objects/info/alternates" \
+  "$PRIVATE_GIT_DIR/index"
+test ! -s "$PRIVATE_GIT_DIR/config"
+test ! -s "$PRIVATE_GIT_DIR/info/attributes"
+test -z "$(find "$PRIVATE_GIT_DIR/hooks" "$EMPTY_TEMPLATE" -mindepth 1 -print -quit)"
+GIT_PRIVATE=("${GIT_SAFE_ENV[@]}" /usr/bin/git --no-pager --no-replace-objects
+  --git-dir="$PRIVATE_GIT_DIR"
+  -c core.fsmonitor=false -c core.hooksPath="$PRIVATE_GIT_DIR/hooks"
   -c core.attributesFile=/dev/null -c diff.external=)
+GIT_SOURCE_VIEW=("${GIT_PRIVATE[@]}" --work-tree="$SOURCE_DISTRIBUTION_ROOT")
 cleanup_trust_on_exit() {
   cleanup_rc=$?
   trap - EXIT
   if test -e "$TRUSTED_DISTRIBUTION_ROOT/.git"; then
-    "${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" worktree remove --force \
+    "${GIT_PRIVATE[@]}" worktree remove --force \
       "$TRUSTED_DISTRIBUTION_ROOT" >/dev/null 2>&1 || true
   else
     rmdir "$TRUSTED_DISTRIBUTION_ROOT" >/dev/null 2>&1 || true
   fi
   test -z "$TRUSTED_CHECKSUMS" || rm -f "$TRUSTED_CHECKSUMS"
-  rmdir "$EMPTY_HOOKS" "$GIT_SAFE_HOME" "$TRUST_PARENT" >/dev/null 2>&1 || true
+  test "$PRIVATE_GIT_DIR" = "$TRUST_PARENT/private.git" || exit 1
+  rm -R "$PRIVATE_GIT_DIR" "$EMPTY_TEMPLATE" "$GIT_SAFE_HOME" >/dev/null 2>&1 || true
+  rmdir "$TRUST_PARENT" >/dev/null 2>&1 || true
   exit "$cleanup_rc"
 }
 trap cleanup_trust_on_exit EXIT
-test "$("${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" rev-parse HEAD)" = \
+"${GIT_PRIVATE[@]}" cat-file -e "$EXPECTED_DISTRIBUTION_COMMIT^{commit}"
+"${GIT_SOURCE_VIEW[@]}" diff --no-ext-diff --quiet
+"${GIT_SOURCE_VIEW[@]}" diff --no-ext-diff --cached --quiet \
   "$EXPECTED_DISTRIBUTION_COMMIT"
-"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" diff --no-ext-diff --quiet
-"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" diff --no-ext-diff --cached --quiet
-test -z "$("${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" status --porcelain=v1 \
+test -z "$("${GIT_SOURCE_VIEW[@]}" status --porcelain=v1 \
   --untracked-files=all -- .agents plugins/blender-mcp-installer \
   docs/distribute-official-blender-mcp.md \
   docs/audits/2026-08-16-official-blender-mcp-distribution-acceptance.md \
   scripts/build_official_blender_mcp_distribution.py scripts/requirements)"
-"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" \
+"${GIT_PRIVATE[@]}" read-tree "$EXPECTED_DISTRIBUTION_COMMIT"
+"${GIT_PRIVATE[@]}" \
   worktree add --detach --no-checkout \
   "$TRUSTED_DISTRIBUTION_ROOT" "$EXPECTED_DISTRIBUTION_COMMIT"
 chmod 700 "$TRUSTED_DISTRIBUTION_ROOT"
-"${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" \
-  read-tree "$EXPECTED_DISTRIBUTION_COMMIT"
-"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" \
+test ! -s "$PRIVATE_GIT_DIR/config"
+test ! -s "$PRIVATE_GIT_DIR/info/attributes"
+test -z "$(find "$PRIVATE_GIT_DIR/hooks" "$EMPTY_TEMPLATE" -mindepth 1 -print -quit)"
+GIT_TRUSTED=("${GIT_SAFE_ENV[@]}" /usr/bin/git --no-pager --no-replace-objects
+  -c core.fsmonitor=false -c core.hooksPath="$PRIVATE_GIT_DIR/hooks"
+  -c core.attributesFile=/dev/null -c diff.external=
+  -C "$TRUSTED_DISTRIBUTION_ROOT")
+"${GIT_TRUSTED[@]}" read-tree "$EXPECTED_DISTRIBUTION_COMMIT"
+"${GIT_PRIVATE[@]}" \
   archive --format=tar "$EXPECTED_DISTRIBUTION_COMMIT" | \
   tar -x -C "$TRUSTED_DISTRIBUTION_ROOT"
-test -z "$("${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" symbolic-ref -q HEAD || true)"
-test "$("${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" rev-parse HEAD)" = \
+test -z "$("${GIT_TRUSTED[@]}" symbolic-ref -q HEAD || true)"
+test "$("${GIT_TRUSTED[@]}" rev-parse HEAD)" = \
   "$EXPECTED_DISTRIBUTION_COMMIT"
-"${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" diff --no-ext-diff --quiet
-"${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" diff --no-ext-diff --cached --quiet
-test -z "$("${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" status --porcelain=v1 \
+"${GIT_TRUSTED[@]}" diff --no-ext-diff --quiet
+"${GIT_TRUSTED[@]}" diff --no-ext-diff --cached --quiet
+test -z "$("${GIT_TRUSTED[@]}" status --porcelain=v1 \
   --untracked-files=all -- .agents plugins/blender-mcp-installer)"
 test -d "$TRUSTED_DISTRIBUTION_ROOT/.agents"
 test -d "$TRUSTED_DISTRIBUTION_ROOT/plugins/blender-mcp-installer"
 TRUSTED_CHECKSUMS="$(mktemp "$TRUST_PARENT/SHA256SUMS.XXXXXX")"
 chmod 600 "$TRUSTED_CHECKSUMS"
-"${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" show \
+"${GIT_PRIVATE[@]}" cat-file blob \
   "$EXPECTED_DISTRIBUTION_COMMIT:plugins/blender-mcp-installer/artifacts/SHA256SUMS" \
   > "$TRUSTED_CHECKSUMS"
 DISTRIBUTION_ROOT="$TRUSTED_DISTRIBUTION_ROOT"
@@ -123,10 +218,10 @@ cmp "$TRUSTED_CHECKSUMS" "$BUNDLE_ROOT/SHA256SUMS"
 
 This `--no-checkout` worktree is materialized with `read-tree` plus built-in
 `git archive`, so source checkout hooks and working-tree filters do not execute.
-Every Git call uses absolute `/usr/bin/git` in an allowlisted environment, disables
-replacement objects, ignores system/global config, and overrides repository-local
-fsmonitor, hooks, pager, and external-diff execution surfaces while isolating global
-attributes.
+Every Git object, index, worktree, and archive operation uses a private mode-0700 Git
+admin with empty config, hooks, templates, and info attributes. It reads only the
+validated source object database by hash. Source repository config/info metadata is
+never loaded; system/global config and replacement objects are disabled.
 Keep the private worktree and checksum file until the workflow is complete; they
 are evidence and all later paths derive from them. Never reset `DISTRIBUTION_ROOT`
 to the source checkout.
@@ -343,10 +438,10 @@ only the private trust objects in this order:
 <!-- TRUST_CLEANUP_BEGIN -->
 ```bash
 trap - EXIT
-"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" \
-  worktree remove "$TRUSTED_DISTRIBUTION_ROOT"
+"${GIT_PRIVATE[@]}" worktree remove "$TRUSTED_DISTRIBUTION_ROOT"
 rm "$TRUSTED_CHECKSUMS"
-rmdir "$EMPTY_HOOKS" "$GIT_SAFE_HOME"
+test "$PRIVATE_GIT_DIR" = "$TRUST_PARENT/private.git"
+rm -R "$PRIVATE_GIT_DIR" "$EMPTY_TEMPLATE" "$GIT_SAFE_HOME"
 rmdir "$TRUST_PARENT"
 ```
 <!-- TRUST_CLEANUP_END -->

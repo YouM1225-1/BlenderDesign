@@ -104,25 +104,43 @@ def test_trust_bootstrap_is_fail_fast_commit_derived_and_hook_free() -> None:
         "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY",
         "unset PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT",
         "export PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1",
+        'SOURCE_GIT_MARKER="$SOURCE_DISTRIBUTION_ROOT/.git"',
+        'SOURCE_OBJECTS_ROOT="$(cd "$SOURCE_COMMON_GIT_DIR/objects" && pwd -P)"',
+        'SOURCE_INDEX="$SOURCE_GIT_DIR/index"',
+        'SOURCE_HEAD_FILE="$SOURCE_GIT_DIR/HEAD"',
+        'test "$SOURCE_HEAD_COMMIT" = "$EXPECTED_DISTRIBUTION_COMMIT"',
         'TRUST_PARENT="$(mktemp -d /private/tmp/blender-mcp-trust.XXXXXX)"',
         'chmod 700 "$TRUST_PARENT"',
+        'PRIVATE_GIT_DIR="$TRUST_PARENT/private.git"',
+        'EMPTY_TEMPLATE="$TRUST_PARENT/empty-template"',
         'GIT_SAFE_HOME="$TRUST_PARENT/git-home"',
         "GIT_SAFE_ENV=(/usr/bin/env -i",
         "GIT_CONFIG_NOSYSTEM=1",
         "GIT_CONFIG_GLOBAL=/dev/null",
         "GIT_NO_REPLACE_OBJECTS=1",
-        'GIT_SAFE=("${GIT_SAFE_ENV[@]}" /usr/bin/git --no-pager --no-replace-objects',
+        'init --bare --template="$EMPTY_TEMPLATE" "$PRIVATE_GIT_DIR"',
+        ': > "$PRIVATE_GIT_DIR/config"',
+        ': > "$PRIVATE_GIT_DIR/info/attributes"',
+        'printf \'%s\\n\' "$SOURCE_OBJECTS_ROOT" > "$PRIVATE_GIT_DIR/objects/info/alternates"',
+        '/bin/cp "$SOURCE_INDEX" "$PRIVATE_GIT_DIR/index"',
+        'test ! -s "$PRIVATE_GIT_DIR/config"',
+        'test ! -s "$PRIVATE_GIT_DIR/info/attributes"',
+        'GIT_PRIVATE=("${GIT_SAFE_ENV[@]}" /usr/bin/git --no-pager --no-replace-objects',
+        '--git-dir="$PRIVATE_GIT_DIR"',
         "-c core.fsmonitor=false",
-        '-c core.hooksPath="$EMPTY_HOOKS"',
-        'test "$("${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" rev-parse HEAD)" =',
-        '"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" diff --no-ext-diff --quiet',
-        '"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT" diff --no-ext-diff --cached --quiet',
+        '-c core.hooksPath="$PRIVATE_GIT_DIR/hooks"',
+        'GIT_SOURCE_VIEW=("${GIT_PRIVATE[@]}" --work-tree="$SOURCE_DISTRIBUTION_ROOT")',
+        '"${GIT_PRIVATE[@]}" cat-file -e "$EXPECTED_DISTRIBUTION_COMMIT^{commit}"',
+        '"${GIT_SOURCE_VIEW[@]}" diff --no-ext-diff --quiet',
+        '"${GIT_SOURCE_VIEW[@]}" diff --no-ext-diff --cached --quiet',
         "--untracked-files=all -- .agents plugins/blender-mcp-installer",
+        '"${GIT_PRIVATE[@]}" read-tree "$EXPECTED_DISTRIBUTION_COMMIT"',
         "worktree add --detach --no-checkout",
-        'read-tree "$EXPECTED_DISTRIBUTION_COMMIT"',
+        'GIT_TRUSTED=("${GIT_SAFE_ENV[@]}" /usr/bin/git --no-pager --no-replace-objects',
+        '-C "$TRUSTED_DISTRIBUTION_ROOT")',
         'archive --format=tar "$EXPECTED_DISTRIBUTION_COMMIT"',
-        'test -z "$("${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" symbolic-ref -q HEAD || true)"',
-        '"${GIT_SAFE[@]}" -C "$TRUSTED_DISTRIBUTION_ROOT" show',
+        'test -z "$("${GIT_TRUSTED[@]}" symbolic-ref -q HEAD || true)"',
+        '"${GIT_PRIVATE[@]}" cat-file blob',
         'DISTRIBUTION_ROOT="$TRUSTED_DISTRIBUTION_ROOT"',
         'PLUGIN_ROOT="$DISTRIBUTION_ROOT/plugins/blender-mcp-installer"',
         'BUNDLE_ROOT="$PLUGIN_ROOT/artifacts"',
@@ -131,14 +149,18 @@ def test_trust_bootstrap_is_fail_fast_commit_derived_and_hook_free() -> None:
     ]
     positions = [block.index(fragment) for fragment in required_in_order]
     assert positions == sorted(positions)
-    assert block.count('core.hooksPath="$EMPTY_HOOKS"') == 1
-    assert block.count('"${GIT_SAFE[@]}"') >= 12
+    assert block.count('core.hooksPath="$PRIVATE_GIT_DIR/hooks"') == 2
+    assert block.count('"${GIT_PRIVATE[@]}"') >= 5
+    assert block.count('"${GIT_SOURCE_VIEW[@]}"') == 3
+    assert block.count('"${GIT_TRUSTED[@]}"') >= 5
     assert "GIT_CONFIG_COUNT" not in block
     assert "GIT_REPLACE_REF_BASE" not in block
     assert "$(git " not in block and "\ngit " not in block
+    assert '--git-dir="$SOURCE_GIT_DIR"' not in block
+    assert '-C "$SOURCE_DISTRIBUTION_ROOT"' not in block
     cleanup = _shell_block(SKILL.read_text(), "TRUST_CLEANUP")
     assert "trap - EXIT" in cleanup
-    assert '"${GIT_SAFE[@]}" -C "$SOURCE_DISTRIBUTION_ROOT"' in cleanup
+    assert '"${GIT_PRIVATE[@]}" worktree remove' in cleanup
     assert "\ngit " not in cleanup
     assert "git checkout" not in block
     assert "python" not in block.lower().replace("pythonpath", "").replace(
@@ -251,6 +273,33 @@ def test_trust_bootstrap_never_executes_git_fsmonitor_config(tmp_path: Path, sou
         )
     )
     env["CONFIG_SENTINEL"] = str(sentinel)
+    subprocess.run(["bash", "-c", script], env=env, check=True, capture_output=True, text=True)
+    assert not sentinel.exists()
+
+
+def test_trust_bootstrap_ignores_source_filter_and_info_attributes(tmp_path: Path) -> None:
+    repo, commit = _trust_fixture(tmp_path)
+    helper, sentinel = _executable_sentinel(tmp_path, "source-filter")
+    helper.write_text(f"#!/bin/sh\ntouch {sentinel}\ncat\n")
+    helper.chmod(0o700)
+    _git(repo, "config", "filter.evil.clean", str(helper))
+    _git(repo, "config", "filter.evil.smudge", str(helper))
+    _git(repo, "config", "filter.evil.required", "true")
+    (repo / ".git/info/attributes").write_text(
+        "plugins/blender-mcp-installer/scripts/install.py filter=evil\n"
+    )
+    install = repo / "plugins/blender-mcp-installer/scripts/install.py"
+    stat = install.stat()
+    os.utime(install, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    env, _, _ = _trust_env(repo, commit, tmp_path)
+    env["CONFIG_SENTINEL"] = str(sentinel)
+    script = "\n".join(
+        (
+            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            'test ! -e "$CONFIG_SENTINEL"',
+            _shell_block(SKILL.read_text(), "TRUST_CLEANUP"),
+        )
+    )
     subprocess.run(["bash", "-c", script], env=env, check=True, capture_output=True, text=True)
     assert not sentinel.exists()
 
