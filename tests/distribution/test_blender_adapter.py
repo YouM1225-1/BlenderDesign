@@ -640,6 +640,137 @@ def test_stage_ancestor_swap_is_rejected_before_writes_escape(tmp_path: Path) ->
     assert [call[0][3] for call in runner.calls] == ["validate"]
 
 
+def test_foreign_owned_stage_parent_fails_before_creation_or_runner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    blender = _executable(tmp_path / "Blender")
+    _, env = _profile(tmp_path)
+    runner = BlenderRunner(blender)
+    state = inspect_blender(blender, env, runner)
+    runner.calls.clear()
+    parent = _private(tmp_path / "foreign-parent")
+    stage = parent / "stage"
+    real_open_directory = blender_adapter._open_directory_fd
+    real_fstat = os.fstat
+    created = False
+
+    def open_directory(path: Path, *, create_private: bool = False) -> int:
+        if path == parent:
+            return os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+        return real_open_directory(path, create_private=create_private)
+
+    def foreign_fstat(fd: int):
+        info = real_fstat(fd)
+        if (info.st_dev, info.st_ino) == (parent.stat().st_dev, parent.stat().st_ino):
+            values = list(info)
+            values[4] = os.getuid() + 1
+            return os.stat_result(values)
+        return info
+
+    def reject_create(parent_fd: int, name: str) -> int:
+        nonlocal created
+        created = True
+        raise AssertionError((parent_fd, name))
+
+    monkeypatch.setattr(blender_adapter, "_open_directory_fd", open_directory)
+    monkeypatch.setattr(blender_adapter.os, "fstat", foreign_fstat)
+    monkeypatch.setattr(blender_adapter, "_create_private_directory", reject_create)
+    with pytest.raises((ValueError, InstallerError)):
+        stage_blender_change(
+            state,
+            EXTENSION_ZIP,
+            stage,
+            BlenderAuthorizations(True, True, True, True),
+            runner,
+        )
+    assert not created
+    assert not stage.exists()
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("parent_kind", ["existing", "created"])
+def test_current_owned_existing_or_created_stage_parent_succeeds(
+    tmp_path: Path, parent_kind: str
+) -> None:
+    blender = _executable(tmp_path / "Blender")
+    _, env = _profile(tmp_path)
+    runner = BlenderRunner(blender)
+    state = inspect_blender(blender, env, runner)
+    parent = tmp_path / "owned" / "nested"
+    if parent_kind == "existing":
+        _private(parent)
+    else:
+        _private(parent.parent)
+    change = stage_blender_change(
+        state,
+        EXTENSION_ZIP,
+        parent / "stage",
+        BlenderAuthorizations(True, True, True, True),
+        runner,
+    )
+    assert change.changed
+    assert change.stage_root == parent / "stage"
+
+
+@pytest.mark.parametrize("failure", ["fstat", "child_fsync", "parent_fsync"])
+def test_open_directory_closes_new_child_fd_on_validation_or_fsync_failure(
+    tmp_path: Path, monkeypatch, failure: str
+) -> None:
+    parent = _private(tmp_path / "fd-parent")
+    target = parent / ("existing" if failure == "fstat" else "created")
+    if failure == "fstat":
+        _private(target)
+    before = len(os.listdir("/dev/fd"))
+    real_open = os.open
+    real_close = os.close
+    real_fstat = os.fstat
+    real_fsync = os.fsync
+    tracked: set[int] = set()
+    target_child: int | None = None
+    child_synced = False
+
+    def tracking_open(*args, **kwargs) -> int:
+        nonlocal target_child
+        fd = real_open(*args, **kwargs)
+        tracked.add(fd)
+        if args[0] == target.name and kwargs.get("dir_fd") is not None:
+            target_child = fd
+        return fd
+
+    def tracking_close(fd: int) -> None:
+        tracked.discard(fd)
+        real_close(fd)
+
+    def failing_fstat(fd: int):
+        if failure == "fstat" and fd == target_child:
+            raise OSError("injected child fstat failure")
+        return real_fstat(fd)
+
+    def failing_fsync(fd: int) -> None:
+        nonlocal child_synced
+        if failure == "child_fsync" and fd == target_child:
+            raise OSError("injected child fsync failure")
+        if failure == "parent_fsync" and child_synced and fd != target_child:
+            raise OSError("injected parent fsync failure")
+        real_fsync(fd)
+        if fd == target_child:
+            child_synced = True
+
+    monkeypatch.setattr(blender_adapter.os, "open", tracking_open)
+    monkeypatch.setattr(blender_adapter.os, "close", tracking_close)
+    monkeypatch.setattr(blender_adapter.os, "fstat", failing_fstat)
+    monkeypatch.setattr(blender_adapter.os, "fsync", failing_fsync)
+    try:
+        with pytest.raises(OSError):
+            blender_adapter._open_directory_fd(target, create_private=failure != "fstat")
+        assert tracked == set()
+        assert len(os.listdir("/dev/fd")) == before
+    finally:
+        for fd in tuple(tracked):
+            real_close(fd)
+            tracked.discard(fd)
+
+
 def test_staged_blender_outputs_and_created_parents_are_fsynced(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -813,7 +944,7 @@ def test_lifecycle_matches_selected_process_with_dyld_and_selected_listener(tmp_
             101: _lsof(101, blender, dyld=True),
             102: _lsof(102, _executable(tmp_path / "other/Blender")),
         },
-        _listener(101) + "f13\nn[::1]:9876\n",
+        _listener(101),
         0,
     )
     state = probe_blender_lifecycle(blender, runner)
@@ -822,6 +953,14 @@ def test_lifecycle_matches_selected_process_with_dyld_and_selected_listener(tmp_
     assert state.listener_executable == blender
     assert not state.port_free
     assert all(call[0] in {"/usr/bin/pgrep", "/usr/sbin/lsof"} for call in runner.calls)
+
+
+def _txt_record(path: Path, *, dev: int | None = None, ino: int | None = None) -> str:
+    info = path.stat()
+    return (
+        f"ftxt\nD{info.st_dev if dev is None else dev}\n"
+        f"i{info.st_ino if ino is None else ino}\nn{path}\n"
+    )
 
 
 def test_lifecycle_reports_free_port_and_foreign_listener_identity(tmp_path: Path) -> None:
@@ -835,6 +974,41 @@ def test_lifecycle_reports_free_port_and_foreign_listener_identity(tmp_path: Pat
     assert occupied.listener_pid == 77
     assert occupied.listener_executable == foreign
     assert not occupied.port_free
+
+
+def test_selected_main_ignores_later_same_basename_nonmatch(tmp_path: Path) -> None:
+    blender = _executable(tmp_path / "selected/Blender")
+    output = _lsof(10, blender) + "ftxt\nD1\ni1\nn/nonexistent/Blender\n"
+    state = probe_blender_lifecycle(blender, LifecycleRunner("10\n", {10: output}))
+    assert state.matching_selected_pids == (10,)
+
+
+@pytest.mark.parametrize("case", ["selected_duplicate", "selected_later"])
+def test_selected_exact_identity_in_later_txt_record_is_ambiguous(
+    tmp_path: Path, case: str
+) -> None:
+    blender = _executable(tmp_path / "selected/Blender")
+    if case == "selected_duplicate":
+        output = _lsof(10, blender) + _txt_record(blender)
+    else:
+        other = _executable(tmp_path / "other/Blender")
+        output = _lsof(10, other) + _txt_record(blender)
+    with pytest.raises(InstallerError):
+        probe_blender_lifecycle(blender, LifecycleRunner("10\n", {10: output}))
+
+
+@pytest.mark.parametrize("case", ["renamed_selected", "unrelated_blender"])
+def test_nonmatching_main_is_not_selected_by_basename_or_inode(tmp_path: Path, case: str) -> None:
+    blender = _executable(tmp_path / "selected/ChosenExecutable")
+    if case == "renamed_selected":
+        executable = tmp_path / "renamed/Blender"
+        executable.parent.mkdir()
+        os.link(blender, executable)
+    else:
+        executable = _executable(tmp_path / "other/Blender")
+    output = _lsof(10, executable, command="Blender")
+    state = probe_blender_lifecycle(blender, LifecycleRunner("10\n", {10: output}))
+    assert state.matching_selected_pids == ()
 
 
 @pytest.mark.parametrize(
@@ -869,6 +1043,27 @@ def test_lifecycle_rejects_malformed_duplicate_or_ambiguous_records(
 def test_listener_parser_rejects_malformed_duplicate_and_unknown_fields(raw: str) -> None:
     with pytest.raises(InstallerError):
         blender_adapter._parse_lsof_listener(raw)
+
+
+@pytest.mark.parametrize(
+    "raw,accepted",
+    [
+        (f"p10\ncBlender\nu{os.getuid()}\n", False),
+        (_listener(10), True),
+        (_listener(10) + "f13\nn[::1]:9876\n", False),
+        (_listener(10) + _listener(11), False),
+    ],
+)
+def test_listener_parser_requires_exactly_one_process_and_one_socket(
+    raw: str, accepted: bool
+) -> None:
+    if accepted:
+        processes = blender_adapter._parse_lsof_listener(raw)
+        assert len(processes) == 1
+        assert len(processes[0].files) == 1
+    else:
+        with pytest.raises(InstallerError):
+            blender_adapter._parse_lsof_listener(raw)
 
 
 @pytest.mark.parametrize(

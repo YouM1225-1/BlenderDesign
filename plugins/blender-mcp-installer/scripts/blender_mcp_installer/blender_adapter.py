@@ -366,22 +366,24 @@ def _open_directory_fd(path: Path, *, create_private: bool = False) -> int:
             if not stat.S_ISDIR(before.st_mode):
                 raise ValueError("path component is not a directory")
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            opened = os.fstat(child)
-            if (opened.st_dev, opened.st_ino, opened.st_uid, opened.st_mode) != (
-                before.st_dev,
-                before.st_ino,
-                before.st_uid,
-                before.st_mode,
-            ):
+            try:
+                opened = os.fstat(child)
+                if (opened.st_dev, opened.st_ino, opened.st_uid, opened.st_mode) != (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_uid,
+                    before.st_mode,
+                ):
+                    raise ValueError("directory changed while opening")
+                if created:
+                    if opened.st_uid != os.getuid() or stat.S_IMODE(opened.st_mode) != 0o700:
+                        raise ValueError("created directory has unsafe ownership or mode")
+                    os.fsync(child)
+                    os.fsync(fd)
+                os.close(fd)
+            except BaseException:
                 os.close(child)
-                raise ValueError("directory changed while opening")
-            if created:
-                if opened.st_uid != os.getuid() or stat.S_IMODE(opened.st_mode) != 0o700:
-                    os.close(child)
-                    raise ValueError("created directory has unsafe ownership or mode")
-                os.fsync(child)
-                os.fsync(fd)
-            os.close(fd)
+                raise
             fd = child
         return fd
     except BaseException:
@@ -1227,6 +1229,9 @@ def stage_blender_change(
         raise ValueError("Blender install stage overlaps the live profile")
     parent_fd = _open_directory_fd(install_stage.parent, create_private=True)
     try:
+        parent_info = os.fstat(parent_fd)
+        if not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.getuid():
+            raise ValueError("Blender install stage parent must be current-UID-owned")
         try:
             os.stat(install_stage.name, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -1459,9 +1464,7 @@ def _parse_lsof_txt(raw: str) -> tuple[_LsofProcess, ...]:
 
 def _parse_lsof_listener(raw: str) -> tuple[_LsofProcess, ...]:
     processes = _parse_lsof(raw, listener=True)
-    if len(processes) != 1 or len({item.fd for item in processes[0].files}) != len(
-        processes[0].files
-    ):
+    if len(processes) != 1 or len(processes[0].files) != 1:
         raise InstallerError("ambiguous Blender listener")
     return processes
 
@@ -1484,23 +1487,18 @@ def _process_executable(
     process: _LsofProcess,
     selected_path: Path,
     selected: os.stat_result,
-    *,
-    selected_candidate_required: bool,
 ) -> tuple[Path, bool]:
     if process.uid != os.getuid():
         raise InstallerError("Blender process belongs to another UID")
-    candidates = [
-        item
-        for item in process.files
-        if item.fd == "txt" and Path(item.path).name == selected_path.name
-    ]
-    if len(candidates) > 1 or (selected_candidate_required and len(candidates) != 1):
+    if any(
+        item.path == str(selected_path)
+        and (item.device, item.inode) == (selected.st_dev, selected.st_ino)
+        for item in process.files[1:]
+    ):
         raise InstallerError("ambiguous Blender executable records")
     # Darwin lsof emits the process's main executable as the first -d txt record,
     # followed by loaded libraries and dyld. The disposable parser probe guards this.
     record = process.files[0]
-    if candidates and candidates[0] != record:
-        raise InstallerError("ambiguous Blender executable records")
     if record.device is None or record.inode is None:
         raise InstallerError("invalid Blender executable record")
     path = Path(record.path)
@@ -1531,12 +1529,13 @@ def _process_executable(
         or (info.st_dev, info.st_ino) != (record.device, record.inode)
     ):
         raise InstallerError("Blender executable record identity mismatch")
-    if path == selected_path and (record.device, record.inode) != (
+    selected_path_match = record.path == str(selected_path)
+    if selected_path_match and (record.device, record.inode) != (
         selected.st_dev,
         selected.st_ino,
     ):
         raise InstallerError("selected Blender executable identity mismatch")
-    return path, path == selected_path and (record.device, record.inode) == (
+    return path, selected_path_match and (record.device, record.inode) == (
         selected.st_dev,
         selected.st_ino,
     )
@@ -1572,7 +1571,6 @@ def probe_blender_lifecycle(blender_bin: Path, runner: Runner) -> BlenderLifecyc
                 process,
                 blender_bin,
                 selected,
-                selected_candidate_required=True,
             )
             if is_selected:
                 matching.append(pid)
@@ -1603,7 +1601,6 @@ def probe_blender_lifecycle(blender_bin: Path, runner: Runner) -> BlenderLifecyc
             process,
             blender_bin,
             selected,
-            selected_candidate_required=False,
         )
         try:
             _linked_file(blender_bin, selected_parent, selected)
