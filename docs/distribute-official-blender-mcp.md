@@ -34,8 +34,9 @@ The operator supplies:
   `$HOME/.local/bin/uv` are probed.
 
 The skill gives the exact marketplace, inspect, install, verify, rollback, and private
-worktree cleanup commands. Do not substitute the source checkout for its trusted
-worktree.
+worktree cleanup commands. Its four installer launchers use Python `-B` so importing
+the installer cannot dirty the trusted worktree with bytecode. Do not substitute the
+source checkout for its trusted worktree.
 
 ## Operator workflow
 

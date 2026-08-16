@@ -286,7 +286,7 @@ cache caveat above.
 run_uv_bootstrap
 "$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" \
   --no-python-downloads --no-sync \
-  python -I -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
+  python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
   "$PLUGIN_ROOT/scripts/install.py" inspect \
   --bundle-root "$BUNDLE_ROOT" \
   --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
@@ -312,7 +312,7 @@ After four explicit yes answers, run the changed install once:
 run_uv_bootstrap
 "$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" \
   --no-python-downloads --no-sync \
-  python -I -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
+  python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
   "$PLUGIN_ROOT/scripts/install.py" install \
   --bundle-root "$BUNDLE_ROOT" \
   --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
@@ -331,7 +331,7 @@ after confirmation run verify:
 run_uv_bootstrap
 "$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" \
   --no-python-downloads --no-sync \
-  python -I -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
+  python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
   "$PLUGIN_ROOT/scripts/install.py" verify \
   --bundle-root "$BUNDLE_ROOT" \
   --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
@@ -356,7 +356,7 @@ set its absolute path as `RECEIPT_PATH`, and run:
 run_uv_bootstrap
 "$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" \
   --no-python-downloads --no-sync \
-  python -I -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
+  python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
   "$PLUGIN_ROOT/scripts/install.py" rollback \
   --bundle-root "$BUNDLE_ROOT" \
   --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \

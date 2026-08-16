@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -244,6 +245,139 @@ def test_trust_bootstrap_executes_without_source_hooks_or_redirected_environment
     assert not python_sentinel.exists()
 
 
+def test_documented_first_inspect_keeps_trusted_checkout_clean(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    real_uv = Path(shutil.which("uv") or Path.home() / ".local/bin/uv")
+    clang = Path("/usr/bin/clang")
+    for executable in (real_uv, clang):
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            pytest.skip(f"required executable is unavailable: {executable}")
+    codex = tmp_path / "codex"
+    codex.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        '  --version) echo "codex-cli 0.148.0-alpha.9" ;;\n'
+        '  "mcp get --help") echo "usage: codex mcp get --json" ;;\n'
+        '  "plugin marketplace add --help"|"plugin add --help") echo usage ;;\n'
+        '  "mcp get blender --json") echo "{}" ;;\n'
+        "  *) exit 2 ;;\n"
+        "esac\n"
+    )
+    codex.chmod(0o700)
+    blender_source = tmp_path / "fake_blender.c"
+    blender = tmp_path / "Blender"
+    blender_source.write_text(
+        r"""#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+int main(int argc, char **argv) {
+  if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+    puts("Blender 5.2.0");
+    return 0;
+  }
+  if (argc >= 3 && strcmp(argv[1], "--background") == 0) {
+    printf("__BLENDER_MCP_INSTALLER__{\"architecture\":\"arm64\","
+           "\"autostart\":null,\"binary_path\":\"%s\","
+           "\"config_root\":\"%s\",\"enabled\":false,"
+           "\"extensions_root\":\"%s\",\"host\":null,"
+           "\"online_access\":false,\"port\":null,"
+           "\"repository\":\"user_default\","
+           "\"user_resources\":\"%s\",\"version\":[5,2,0]}\n",
+           argv[0], getenv("BLENDER_USER_CONFIG"),
+           getenv("BLENDER_USER_EXTENSIONS"), getenv("BLENDER_USER_RESOURCES"));
+    return 0;
+  }
+  return 2;
+}
+"""
+    )
+    subprocess.run([clang, "-arch", "arm64", "-o", blender, blender_source], check=True)
+    python = str(
+        Path(
+            subprocess.run(
+                [
+                    real_uv,
+                    "python",
+                    "find",
+                    "3.13",
+                    "--no-project",
+                    "--no-python-downloads",
+                    "--no-config",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        ).resolve()
+    )
+    uv = tmp_path / "uv"
+    uv.write_text(
+        "#!/bin/sh\n"
+        'if test "$1" = --version; then\n'
+        '  printf "%s\\n" "uv 0.12.2"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if test "$1" = python && test "$2" = find; then\n'
+        f"  printf '%s\\n' {python!r}\n"
+        "  exit 0\n"
+        "fi\n"
+        f'exec {str(real_uv)!r} "$@"\n'
+    )
+    uv.chmod(0o700)
+    _git(ROOT, "worktree", "add", "--detach", str(source), "HEAD")
+    try:
+        commit = _git(source, "rev-parse", "HEAD")
+        profile = tmp_path / "profile"
+        resources = profile / "blender/resources"
+        for path in (
+            profile,
+            profile / "codex",
+            resources,
+            resources / "config",
+            resources / "extensions",
+        ):
+            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path.chmod(0o700)
+        script = "\n".join(
+            (
+                "{",
+                _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+                "} >&2",
+                _shell_block(SKILL.read_text(), "UV_BOOTSTRAP"),
+                'INSPECT_OUTPUT="$(',
+                _shell_block(SKILL.read_text(), "INSPECT"),
+                ')"',
+                'test -z "$(find "$TRUSTED_DISTRIBUTION_ROOT" -type d -name __pycache__ -print -quit)"',
+                'test -z "$(find "$TRUSTED_DISTRIBUTION_ROOT" -type f \\( -name "*.pyc" -o -name "*.pyo" \\) -print -quit)"',
+                'test -z "$("${GIT_TRUSTED[@]}" status --porcelain=v1 --untracked-files=all)"',
+                'printf "%s\\n" "$INSPECT_OUTPUT"',
+                _shell_block(SKILL.read_text(), "TRUST_CLEANUP"),
+            )
+        )
+        env = os.environ.copy()
+        env.update(
+            SOURCE_DISTRIBUTION_ROOT=str(source),
+            EXPECTED_DISTRIBUTION_COMMIT=commit,
+            BLENDER_BIN=str(blender),
+            CODEX_BIN=str(codex),
+            UV_BIN=str(uv),
+            HOME=str(profile),
+            CODEX_HOME=str(profile / "codex"),
+            BLENDER_USER_RESOURCES=str(resources),
+            BLENDER_USER_CONFIG=str(resources / "config"),
+            BLENDER_USER_EXTENSIONS=str(resources / "extensions"),
+        )
+        result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.endswith("\n") and len(result.stdout.splitlines()) == 1
+        assert json.loads(result.stdout)["command"] == "inspect"
+        assert not tuple(source.rglob("__pycache__"))
+        assert not tuple(source.rglob("*.py[co]"))
+        assert not _git(source, "status", "--porcelain=v1", "--untracked-files=all")
+    finally:
+        _git(ROOT, "worktree", "remove", "--force", str(source))
+
+
 def _executable_sentinel(tmp_path: Path, name: str) -> tuple[Path, Path]:
     sentinel = tmp_path / f"{name}-ran"
     helper = tmp_path / name
@@ -480,7 +614,7 @@ def test_uv_bootstrap_is_local_only_and_repeated_before_every_command() -> None:
     assert commands.count("run_uv_bootstrap") == 4
     assert commands.count('"$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN"') == 4
     assert commands.count("--no-python-downloads --no-sync") == 4
-    assert commands.count('python -I -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts"') == 4
+    assert commands.count('python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts"') == 4
     assert commands.count('"$PLUGIN_ROOT/scripts/install.py"') == 4
 
 
