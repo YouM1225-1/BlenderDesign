@@ -933,33 +933,18 @@ def _rename_refs(
                 rename_excl(source_parent, source_name, target_parent, target_name, fault)
 
 
-def _entry_matches(info: os.stat_result, entry: TreeEntry) -> bool:
-    return (
-        info.st_dev == entry.dev
-        and info.st_ino == entry.ino
-        and info.st_uid == entry.uid
-        and stat.S_IMODE(info.st_mode) == entry.mode
-        and info.st_size == entry.size
-        and info.st_mtime_ns == entry.mtime_ns
-    )
-
-
 def _tree_cleanup_order(image: TreeImage) -> tuple[str, ...]:
-    entries = {entry.path: entry for entry in image.entries}
+    children: dict[str, list[TreeEntry]] = {}
+    for entry in image.entries:
+        parent, _, _ = entry.path.rpartition("/")
+        children.setdefault(parent, []).append(entry)
     result: list[str] = []
 
     def visit(prefix: str) -> None:
-        depth = 0 if not prefix else len(PurePosixPath(prefix).parts)
-        children = sorted(
-            path
-            for path in entries
-            if len(PurePosixPath(path).parts) == depth + 1
-            and (not prefix or path.startswith(f"{prefix}/"))
-        )
-        for path in children:
-            if entries[path].kind == "dir":
-                visit(path)
-            result.append(path)
+        for entry in children.get(prefix, ()):
+            if entry.kind == "dir":
+                visit(entry.path)
+            result.append(entry.path)
 
     visit("")
     return tuple(result)
@@ -994,10 +979,11 @@ def _tree_prefix(current: TreeImage, expected: TreeImage) -> tuple[str, ...] | N
         ):
             return None
     order = _tree_cleanup_order(expected)
+    if len(current.entries) > len(order):
+        return None
     paths = {entry.path for entry in current.entries}
-    return next(
-        (order[index:] for index in range(len(order) + 1) if paths == set(order[index:])), None
-    )
+    remaining = order[len(order) - len(current.entries) :]
+    return remaining if paths == set(remaining) else None
 
 
 def _remove_tree_prefix(
@@ -1005,28 +991,37 @@ def _remove_tree_prefix(
     expected: TreeImage,
     fault: FaultInjector,
 ) -> None:
-    if _tree_prefix(_capture_reference(reference, tree=True), expected) is None:
-        raise InstallerError("transaction state conflict")
     fault.hit("before_cleanup_delete")
-    while True:
-        current = _capture_reference(reference, tree=True)
-        remaining = _tree_prefix(current, expected)
-        if remaining is None:
-            raise InstallerError("transaction state conflict")
-        if not remaining:
-            break
-        path = remaining[0]
-        entry = next(item for item in current.entries if item.path == path)
+    current = _capture_reference(reference, tree=True)
+    if not isinstance(current, TreeImage):
+        raise InstallerError("transaction state conflict")
+    remaining = _tree_prefix(current, expected)
+    if remaining is None:
+        raise InstallerError("transaction state conflict")
+    expected_entries = {entry.path: entry for entry in expected.entries}
+    current_entries = {entry.path: entry for entry in current.entries}
+    for path in remaining:
+        original = expected_entries[path]
+        entry = current_entries[path]
         relative = PurePosixPath(*reference.relative.parts, *PurePosixPath(path).parts)
         parent_fd, name = reference.root.open_parent(relative)
         try:
-            info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-            original = next(item for item in expected.entries if item.path == path)
             if entry.kind == "file":
-                if not _entry_matches(info, original):
+                expected_file = FileImage(
+                    ImageState.PRESENT,
+                    original.dev,
+                    original.ino,
+                    original.uid,
+                    original.mode,
+                    original.size,
+                    original.mtime_ns,
+                    original.sha256,
+                )
+                if _capture_file_at(parent_fd, name, reference.root.owner_uid) != expected_file:
                     raise InstallerError("transaction state conflict")
                 os.unlink(name, dir_fd=parent_fd)
             else:
+                info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
                 if (
                     not stat.S_ISDIR(info.st_mode)
                     or info.st_dev != original.dev
@@ -1037,25 +1032,34 @@ def _remove_tree_prefix(
                     raise InstallerError("transaction state conflict")
                 os.rmdir(name, dir_fd=parent_fd)
             os.fsync(parent_fd)
+        except InstallerError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise InstallerError("transaction state conflict") from exc
         finally:
             os.close(parent_fd)
         fault.hit("after_cleanup_entry")
-    with _parent_root(reference) as (parent, name):
-        directory = _open_verified_directory(parent.fd, name, parent.owner_uid)
-        try:
-            root = os.fstat(directory)
-            if (
-                root.st_dev != expected.dev
-                or root.st_ino != expected.ino
-                or root.st_uid != expected.uid
-                or stat.S_IMODE(root.st_mode) != expected.mode
-                or _listdir(directory)
-            ):
-                raise InstallerError("transaction state conflict")
-        finally:
-            os.close(directory)
-        os.rmdir(name, dir_fd=parent.fd)
-        os.fsync(parent.fd)
+    try:
+        with _parent_root(reference) as (parent, name):
+            directory = _open_verified_directory(parent.fd, name, parent.owner_uid)
+            try:
+                root = os.fstat(directory)
+                if (
+                    root.st_dev != expected.dev
+                    or root.st_ino != expected.ino
+                    or root.st_uid != expected.uid
+                    or stat.S_IMODE(root.st_mode) != expected.mode
+                    or _listdir(directory)
+                ):
+                    raise InstallerError("transaction state conflict")
+            finally:
+                os.close(directory)
+            os.rmdir(name, dir_fd=parent.fd)
+            os.fsync(parent.fd)
+    except InstallerError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise InstallerError("transaction state conflict") from exc
 
 
 def _remove_verified(

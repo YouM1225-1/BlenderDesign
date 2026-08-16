@@ -2937,6 +2937,137 @@ def test_tree_recovery_cleanup_preserves_foreign_remainder(tmp_path: Path, mutat
             assert (recovery.path / "foreign").read_bytes() == b"foreign"
 
 
+def _large_synthetic_tree() -> TreeImage:
+    entries = tuple(
+        sorted(
+            (
+                entry
+                for index in range(2500)
+                for entry in (
+                    TreeEntry(
+                        f"d{index:04d}", "dir", 1, index * 3 + 1, os.getuid(), 0o700, 0, 1, None
+                    ),
+                    TreeEntry(
+                        f"d{index:04d}/a",
+                        "file",
+                        1,
+                        index * 3 + 2,
+                        os.getuid(),
+                        0o600,
+                        1,
+                        1,
+                        HASH,
+                    ),
+                    TreeEntry(
+                        f"d{index:04d}/b",
+                        "file",
+                        1,
+                        index * 3 + 3,
+                        os.getuid(),
+                        0o600,
+                        1,
+                        1,
+                        HASH,
+                    ),
+                )
+            ),
+            key=lambda entry: entry.path,
+        )
+    )
+    raw = json.dumps(
+        [entry.to_dict() for entry in entries], sort_keys=True, separators=(",", ":")
+    ).encode()
+    return TreeImage(
+        ImageState.PRESENT,
+        1,
+        1,
+        os.getuid(),
+        0o700,
+        1,
+        hashlib.sha256(raw).hexdigest(),
+        entries,
+    )
+
+
+def test_tree_cleanup_order_is_linear_for_large_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    image = _large_synthetic_tree()
+    real_path = filesystem.PurePosixPath
+    calls = 0
+
+    def counted_path(value: str) -> PurePath:
+        nonlocal calls
+        calls += 1
+        if calls > len(image.entries) * 3:
+            raise AssertionError("cleanup order rescanned the entry table")
+        return real_path(value)
+
+    monkeypatch.setattr(filesystem, "PurePosixPath", counted_path)
+    order = filesystem._tree_cleanup_order(image)
+    assert len(order) == len(image.entries)
+    assert calls <= len(image.entries) * 3
+
+
+def test_tree_prefix_checks_one_length_derived_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = _large_synthetic_tree()
+    order = filesystem._tree_cleanup_order(expected)
+    by_path = {entry.path: entry for entry in expected.entries}
+    entries = (by_path[order[-1]],)
+    raw = json.dumps(
+        [entry.to_dict() for entry in entries], sort_keys=True, separators=(",", ":")
+    ).encode()
+    current = replace(expected, digest=hashlib.sha256(raw).hexdigest(), entries=entries)
+
+    class CountingOrder(tuple[str, ...]):
+        slices = 0
+
+        def __getitem__(self, index: object) -> object:
+            if isinstance(index, slice):
+                self.slices += 1
+                if self.slices > 1:
+                    raise AssertionError("cleanup prefix enumerated suffixes")
+            return super().__getitem__(index)
+
+    counted = CountingOrder(order)
+    monkeypatch.setattr(filesystem, "_tree_cleanup_order", lambda _: counted)
+    assert filesystem._tree_prefix(current, expected) == order[-1:]
+    assert counted.slices == 1
+
+
+def test_tree_cleanup_captures_tree_once_and_rechecks_each_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    for index in range(64):
+        _write_private_bytes(tree / f"f{index:02d}", b"payload")
+    with _safe(tmp_path) as root:
+        reference = TreeRef(root, PurePath("tree"))
+        expected = reference.capture()
+        captures = 0
+        hashes = 0
+        real_capture = filesystem._capture_reference
+        real_hash = filesystem._hash_fd
+
+        def bounded_capture(reference: TargetRef, *, tree: bool) -> FileImage | TreeImage:
+            nonlocal captures
+            captures += 1
+            if captures > 1:
+                raise AssertionError("cleanup recaptured the complete tree")
+            return real_capture(reference, tree=tree)
+
+        def counted_hash(fd: int) -> str:
+            nonlocal hashes
+            hashes += 1
+            return real_hash(fd)
+
+        monkeypatch.setattr(filesystem, "_capture_reference", bounded_capture)
+        monkeypatch.setattr(filesystem, "_hash_fd", counted_hash)
+        filesystem._remove_tree_prefix(reference, expected, NoOpFaultInjector())
+        assert captures == 1
+        assert hashes == 128
+        assert capture_tree(root, reference.relative) == TreeImage.absent()
+
+
 def _bundle_cleanup_fixture(root: SafeRoot) -> tuple[TreeRef, TreeImage, TargetRef, FileImage]:
     bundle = root.path / "bundle"
     (bundle / "nested").mkdir(parents=True)
