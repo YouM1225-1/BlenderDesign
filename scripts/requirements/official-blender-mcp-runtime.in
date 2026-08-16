@@ -1,0 +1,4 @@
+docutils
+mcp[cli]==1.28.1
+pyyaml
+tomlkit==0.13.3
