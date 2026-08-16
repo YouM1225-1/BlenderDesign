@@ -69,13 +69,28 @@ REMOVE_ENV = {
 def sanitized_environment(base: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(os.environ if base is None else base)
     for key in tuple(env):
-        if key in REMOVE_ENV or key.startswith(("UV_", "PIP_")):
+        if (
+            key in REMOVE_ENV
+            or key.startswith(("UV_", "PIP_", "GIT_CONFIG_"))
+            or key
+            in {
+                "GIT_REPLACE_REF_BASE",
+                "GIT_ATTR_NOSYSTEM",
+                "GIT_EXTERNAL_DIFF",
+                "GIT_DIFF_OPTS",
+            }
+        ):
             env.pop(key)
     env.update(
         {
             "BLENDER_MCP_HOST": "localhost",
             "BLENDER_MCP_PORT": "9876",
             "UV_DEFAULT_INDEX": INDEX,
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
         }
     )
     return env
@@ -106,21 +121,77 @@ def validate_extension_command(blender_bin: Path, normalized_zip: Path) -> list[
     return [str(blender_bin), "--command", "extension", "validate", str(normalized_zip)]
 
 
-def _extract_two_archives(source: Path, workspace: Path) -> tuple[Path, Path]:
+def _git_command(*arguments: str) -> list[str]:
+    return [
+        "git",
+        "--no-replace-objects",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "-c",
+        "core.attributesFile=/dev/null",
+        *arguments,
+    ]
+
+
+def _copy_object_store(source: Path, target: Path) -> None:
+    for entry in sorted(source.rglob("*")):
+        relative = entry.relative_to(source)
+        if relative.as_posix() in {"info/alternates", "info/http-alternates"}:
+            raise ValueError("upstream Git alternates are not allowed")
+        metadata = entry.lstat()
+        destination = target / relative
+        if stat.S_ISDIR(metadata.st_mode):
+            destination.mkdir(exist_ok=True)
+        elif stat.S_ISREG(metadata.st_mode):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(entry, destination)
+        else:
+            raise ValueError(f"unsafe upstream Git object-store entry: {relative}")
+
+
+def _extract_two_archives(source: Path, workspace: Path) -> tuple[tuple[Path, Path], int]:
     archives = (workspace / "source-1.tar", workspace / "source-2.tar")
     roots = (workspace / "source-1", workspace / "source-2")
+    isolated = workspace / "source.git"
     env = sanitized_environment()
+    common_dir = _run(
+        _git_command("rev-parse", "--git-common-dir"), cwd=source, env=env
+    ).stdout.strip()
+    source_objects = (source / common_dir / "objects").resolve()
+    if not source_objects.is_dir():
+        raise ValueError("upstream Git object store is missing")
+    _run(
+        _git_command("init", "--bare", str(isolated)),
+        env=env,
+    )
+    _copy_object_store(source_objects, isolated / "objects")
     for archive in archives:
         _run(
-            ["git", "archive", "--format=tar", "-o", str(archive), UPSTREAM_COMMIT],
-            cwd=source,
+            _git_command(
+                f"--git-dir={isolated}",
+                "archive",
+                "--format=tar",
+                "-o",
+                str(archive),
+                UPSTREAM_COMMIT,
+            ),
             env=env,
         )
+    epoch_text = _run(
+        _git_command(
+            f"--git-dir={isolated}", "show", "-s", "--format=%ct", UPSTREAM_COMMIT
+        ),
+        env=env,
+    ).stdout.strip()
+    if not epoch_text.isdigit() or int(epoch_text) <= 0:
+        raise ValueError("invalid source commit timestamp")
     for archive, root in zip(archives, roots, strict=True):
         root.mkdir()
         with tarfile.open(archive) as source_tar:
             source_tar.extractall(root, filter="data")
-    return roots
+    return roots, int(epoch_text)
 
 
 def _compile_lock(
@@ -177,29 +248,23 @@ def _create_venv(uv_bin: Path, path: Path) -> Path:
 
 
 def _install_lock(uv_bin: Path, python: Path, lock: Path) -> None:
-    argv = [
-        str(uv_bin),
-        "pip",
-        "install",
-        "--python",
-        str(python),
-        "--require-hashes",
-        "--only-binary",
-        ":all:",
-        "--no-build",
-        "--no-deps",
-        "--default-index",
-        INDEX,
-        "-r",
-        str(lock),
-    ]
-    try:
-        _run(argv)
-    except RuntimeError as exc:
-        conflict = "--only-binary <ONLY_BINARY>' cannot be used with '--no-build"
-        if conflict not in str(exc):
-            raise
-        _run([argument for argument in argv if argument != "--no-build"])
+    _run(
+        [
+            str(uv_bin),
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            "--require-hashes",
+            "--only-binary",
+            ":all:",
+            "--no-deps",
+            "--default-index",
+            INDEX,
+            "-r",
+            str(lock),
+        ]
+    )
 
 
 def _safe_zip_name(name: str) -> PurePosixPath:
@@ -406,6 +471,10 @@ def _validate_candidate(output: Path, blender_bin: Path) -> ReleaseManifest:
     }:
         raise ValueError("candidate has missing or extra files")
     manifest = parse_manifest((output / "manifest.json").read_bytes())
+    for artifact in manifest.artifacts:
+        content = (output / artifact.filename).read_bytes()
+        if len(content) != artifact.size or hashlib.sha256(content).hexdigest() != artifact.sha256:
+            raise ValueError(f"manifest artifact mismatch: {artifact.filename}")
     validate_runtime_lock((output / ARTIFACTS[2][1]).read_bytes())
     _validate_wheel(output / ARTIFACTS[0][1])
     _validate_extension(output / ARTIFACTS[1][1])
@@ -476,14 +545,9 @@ def build_distribution(
     try:
         with tempfile.TemporaryDirectory(prefix="blender-mcp-build.", dir="/private/tmp") as temp:
             workspace = Path(temp)
-            source_roots = _extract_two_archives(source, workspace)
-            epoch_text = _run(
-                ["git", "show", "-s", "--format=%ct", UPSTREAM_COMMIT], cwd=source
-            ).stdout.strip()
-            if not epoch_text.isdigit() or int(epoch_text) <= 0:
-                raise ValueError("invalid source commit timestamp")
+            source_roots, epoch = _extract_two_archives(source, workspace)
             manifest = _build_candidate(
-                source_roots, blender_bin, uv_bin, candidate, workspace, int(epoch_text)
+                source_roots, blender_bin, uv_bin, candidate, workspace, epoch
             )
         recovery = output_dir.parent / f".{output_dir.name}.recovery.{uuid.uuid4().hex}"
         had_output = output_dir.exists()

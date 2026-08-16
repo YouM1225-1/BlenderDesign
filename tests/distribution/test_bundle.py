@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +26,7 @@ from blender_mcp_installer.bundle import (  # noqa: E402
 from scripts.build_official_blender_mcp_distribution import (  # noqa: E402
     build_distribution,
 )
+import scripts.build_official_blender_mcp_distribution as builder  # noqa: E402
 
 
 COMMIT = "482c540395ad93a2f86b1ada1520f4fddf8ebcfa"
@@ -103,13 +105,17 @@ def test_manifest_rejects_bad_names_roles_and_traversal(field: str, value: str) 
         parse_manifest(raw(data))
 
 
-@pytest.mark.parametrize("mutation", ["version", "catalog", "order"])
+@pytest.mark.parametrize("mutation", ["version", "catalog", "order", "float_port", "bool_epoch"])
 def test_manifest_requires_fixed_versions_and_catalog(mutation: str) -> None:
     data = manifest()
     if mutation == "version":
         data["server"]["version"] = "2.0.0"
     elif mutation == "catalog":
         data["tools"] = data["tools"][:-1]
+    elif mutation == "float_port":
+        data["bridge"]["port"] = 9876.0
+    elif mutation == "bool_epoch":
+        data["build"]["source_date_epoch"] = True
     else:
         data["artifacts"].reverse()
     with pytest.raises(ValueError):
@@ -171,12 +177,85 @@ def test_checkout_rejects_scoped_untracked_file(tmp_path: Path) -> None:
         verify_distribution_checkout(bundle, commit, _git)
 
 
+def test_checkout_rejects_ignored_scoped_untracked_file(tmp_path: Path) -> None:
+    bundle, _ = _checkout(tmp_path)
+    root = bundle.parents[2]
+    _git(["git", "switch", "-qc", "ignore-fixture"], root)
+    (root / ".gitignore").write_text("*.ignored\n")
+    _git(["git", "add", ".gitignore"], root)
+    _git(["git", "commit", "-qm", "ignore fixture"], root)
+    commit = _git(["git", "rev-parse", "HEAD"], root).stdout.strip()
+    _git(["git", "checkout", "-q", "--detach", commit], root)
+    (bundle / "hostile.ignored").write_text("ignored but executable")
+    with pytest.raises(ValueError, match="dirty distribution checkout"):
+        verify_distribution_checkout(bundle, commit, _git)
+
+
 def test_checkout_ignores_redirected_git_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bundle, commit = _checkout(tmp_path)
     hostile = tmp_path / "hostile"
     hostile.mkdir()
     monkeypatch.setenv("GIT_DIR", str(hostile))
     assert verify_distribution_checkout(bundle, commit, _git).expected_commit == commit
+
+
+def _rewrite_payload(bundle: Path, filename: str, content: bytes) -> None:
+    (bundle / filename).write_bytes(content)
+    data = json.loads((bundle / "manifest.json").read_bytes())
+    artifact = next(item for item in data["artifacts"] if item["filename"] == filename)
+    artifact["size"] = len(content)
+    artifact["sha256"] = hashlib.sha256(content).hexdigest()
+    (bundle / "manifest.json").write_text(json.dumps(data, separators=(",", ":")) + "\n")
+    (bundle / "SHA256SUMS").write_text(
+        "".join(
+            f"{hashlib.sha256((bundle / name).read_bytes()).hexdigest()}  {name}\n"
+            for name in ["manifest.json", *(name for _, name in ARTIFACTS)]
+        )
+    )
+
+
+def test_checkout_rejects_distribution_replacement_ref(tmp_path: Path) -> None:
+    bundle, reviewed = _checkout(tmp_path)
+    root = bundle.parents[2]
+    _git(["git", "switch", "-qc", "hostile"], root)
+    _rewrite_payload(bundle, ARTIFACTS[0][1], b"hostile-wheel")
+    _git(["git", "add", "."], root)
+    _git(["git", "commit", "-qm", "hostile replacement"], root)
+    hostile = _git(["git", "rev-parse", "HEAD"], root).stdout.strip()
+    _git(["git", "replace", reviewed, hostile], root)
+    _git(["git", "checkout", "-q", "--detach", reviewed], root)
+    _git(["git", "reset", "-q", "--hard", reviewed], root)
+    with pytest.raises(ValueError, match="dirty distribution checkout"):
+        verify_distribution_checkout(bundle, reviewed, _git)
+
+
+def test_checkout_clears_git_config_and_disables_external_status_hooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, commit = _checkout(tmp_path)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.fsmonitor")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "!false")
+    monkeypatch.setenv("GIT_REPLACE_REF_BASE", "refs/hostile")
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def recording_runner(
+        argv: list[str], *, cwd: Path, env: dict[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, env))
+        return _git(argv, cwd, env)
+
+    verify_distribution_checkout(bundle, commit, recording_runner)
+    for argv, env in calls:
+        assert argv[:2] == ["git", "--no-replace-objects"]
+        assert "GIT_CONFIG_COUNT" not in env
+        assert "GIT_CONFIG_KEY_0" not in env
+        assert "GIT_CONFIG_VALUE_0" not in env
+        assert "GIT_REPLACE_REF_BASE" not in env
+        assert env["GIT_NO_REPLACE_OBJECTS"] == "1"
+        assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    status_argv = next(argv for argv, _ in calls if "status" in argv)
+    assert "core.fsmonitor=false" in status_argv
 
 
 @pytest.mark.parametrize("target", ["SHA256SUMS", "blender_mcp-1.0.0-py3-none-any.whl"])
@@ -217,6 +296,13 @@ def test_replace_wheel_zip_or_lock_after_verify_cannot_change_staged_copy(
         "demo @ https://example.invalid/demo.whl --hash=sha256:" + "a" * 64,
         "-e ./demo --hash=sha256:" + "a" * 64,
         "./demo==1 --hash=sha256:" + "a" * 64,
+        "demo==1 --hash=sha256:" + "a" * 64 + " -r other.lock",
+        "demo==1 --hash=sha256:" + "a" * 64 + " -c constraints.lock",
+        "demo==1 --hash=sha256:" + "a" * 64 + " --editable ./local",
+        "demo==1 --hash=sha256:" + "a" * 64 + " ./local",
+        "demo==1 --hash=sha256:" + "a" * 64 + " demo.tar.gz",
+        "demo==1 --hash=sha256:" + "a" * 64 + " --only-binary :all:",
+        "--index-url https://pypi.org/simple",
     ],
 )
 def test_runtime_lock_is_fully_pinned_and_hashed(lock: str) -> None:
@@ -225,17 +311,65 @@ def test_runtime_lock_is_fully_pinned_and_hashed(lock: str) -> None:
 
 
 def test_builder_uses_two_fresh_git_archives(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(["git", "init", "-q"], source)
+    _git(["git", "config", "user.name", "Test"], source)
+    _git(["git", "config", "user.email", "test@example.invalid"], source)
+    (source / "payload").write_text("reviewed")
+    _git(["git", "add", "."], source)
+    _git(["git", "commit", "-qm", "fixture"], source)
+    commit = _git(["git", "rev-parse", "HEAD"], source).stdout.strip()
     calls: list[list[str]] = []
+    real_run = builder._run
 
-    def fail_after_archives(*args: object, **kwargs: object) -> None:
-        calls.append(list(args[0]))
-        if sum(command[:2] == ["git", "archive"] for command in calls) == 2:
+    def fail_after_archives(argv: list[str], **kwargs: object) -> object:
+        calls.append(argv)
+        if sum("archive" in command for command in calls) == 2:
             raise RuntimeError("stop")
+        return real_run(argv, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", fail_after_archives)
+    monkeypatch.setattr(builder, "UPSTREAM_COMMIT", commit)
+    monkeypatch.setattr(builder, "_run", fail_after_archives)
     with pytest.raises(RuntimeError, match="stop"):
-        build_distribution(tmp_path, Path("blender"), Path("uv"), tmp_path / "out")
-    assert sum(command[:2] == ["git", "archive"] for command in calls) == 2
+        build_distribution(source, Path("blender"), Path("uv"), tmp_path / "out")
+    assert sum("archive" in command for command in calls) == 2
+
+
+def test_builder_ignores_upstream_replacement_and_source_info_attributes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "upstream"
+    source.mkdir()
+    _git(["git", "init", "-q", "-b", "main"], source)
+    _git(["git", "config", "user.name", "Test"], source)
+    _git(["git", "config", "user.email", "test@example.invalid"], source)
+    (source / "payload").write_text("reviewed")
+    (source / "excluded").write_text("committed exclusion")
+    (source / ".gitattributes").write_text("excluded export-ignore\n")
+    _git(["git", "add", "."], source)
+    _git(["git", "commit", "-qm", "reviewed"], source)
+    reviewed = _git(["git", "rev-parse", "HEAD"], source).stdout.strip()
+    _git(["git", "switch", "-qc", "hostile"], source)
+    (source / "payload").write_text("hostile")
+    _git(["git", "commit", "-qam", "hostile"], source)
+    hostile = _git(["git", "rev-parse", "HEAD"], source).stdout.strip()
+    _git(["git", "branch", "-f", "main", reviewed], source)
+    _git(["git", "replace", reviewed, hostile], source)
+    (source / ".git/info/attributes").write_text("payload export-ignore\n")
+    hostile_attributes = tmp_path / "hostile-attributes"
+    hostile_attributes.write_text("payload export-ignore\n")
+    _git(["git", "config", "core.attributesFile", str(hostile_attributes)], source)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.attributesFile")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(hostile_attributes))
+    monkeypatch.setattr(builder, "UPSTREAM_COMMIT", reviewed)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    roots, _epoch = builder._extract_two_archives(source, workspace)
+    for root in roots:
+        assert (root / "payload").read_text() == "reviewed"
+        assert not (root / "excluded").exists()
 
 
 def test_builder_sanitizes_probe_environment() -> None:
@@ -248,6 +382,24 @@ def test_builder_sanitizes_probe_environment() -> None:
     assert env["BLENDER_MCP_PORT"] == "9876"
     assert env["UV_DEFAULT_INDEX"] == "https://pypi.org/simple"
     assert "UV_INDEX_URL" not in env and "PIP_INDEX_URL" not in env
+
+
+def test_locked_install_uses_single_supported_uv_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def record(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append(argv)
+        return SimpleNamespace(stdout="", returncode=0)
+
+    monkeypatch.setattr(builder, "_run", record)
+    builder._install_lock(Path("uv"), Path("python"), tmp_path / "runtime.lock")
+    assert len(calls) == 1
+    assert "--no-build" not in calls[0]
+    assert "--require-hashes" in calls[0]
+    assert calls[0][calls[0].index("--only-binary") + 1] == ":all:"
+    assert "--no-deps" in calls[0]
 
 
 def test_normalized_extension_is_revalidated() -> None:
@@ -266,7 +418,7 @@ def test_publish_keeps_last_good_output_on_gate_failure(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(
         "scripts.build_official_blender_mcp_distribution._extract_two_archives",
-        lambda source, workspace: (tmp_path, tmp_path),
+        lambda source, workspace: ((tmp_path, tmp_path), 1),
     )
     monkeypatch.setattr(
         "scripts.build_official_blender_mcp_distribution._run",
@@ -276,3 +428,38 @@ def test_publish_keeps_last_good_output_on_gate_failure(tmp_path: Path, monkeypa
     with pytest.raises(RuntimeError, match="gate"):
         build_distribution(tmp_path, Path("blender"), Path("uv"), output)
     assert (output / "marker").read_text() == "last-good"
+
+
+def test_tampered_manifest_cannot_replace_last_good_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_bundle = ROOT / "plugins/blender-mcp-installer/artifacts"
+    output = tmp_path / "artifacts"
+    shutil.copytree(source_bundle, output)
+    before = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in output.iterdir()}
+
+    def tampered_candidate(
+        source_roots: tuple[Path, Path],
+        blender_bin: Path,
+        uv_bin: Path,
+        candidate: Path,
+        workspace: Path,
+        epoch: int,
+    ) -> object:
+        shutil.copytree(output, candidate)
+        data = json.loads((candidate / "manifest.json").read_bytes())
+        data["artifacts"][0]["size"] += 1
+        data["artifacts"][0]["sha256"] = "a" * 64
+        (candidate / "manifest.json").write_text(json.dumps(data, separators=(",", ":")) + "\n")
+        (candidate / "SHA256SUMS").write_text(builder._write_checksum_text(candidate))
+        return builder._validate_candidate(candidate, Path("blender"))
+
+    monkeypatch.setattr(
+        builder, "_extract_two_archives", lambda source, workspace: ((output, output), 1)
+    )
+    monkeypatch.setattr(builder, "_run", lambda *args, **kwargs: SimpleNamespace(stdout="1"))
+    monkeypatch.setattr(builder, "_build_candidate", tampered_candidate)
+    with pytest.raises(ValueError, match="manifest artifact"):
+        builder.build_distribution(Path("source"), Path("blender"), Path("uv"), output)
+    after = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in output.iterdir()}
+    assert after == before

@@ -57,7 +57,11 @@ GIT_REDIRECTS = (
 )
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
-_REQUIREMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9_,.-]+\])?==[^\s;\\]+")
+_NAME = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+_LOCK_STANZA = re.compile(
+    rf"{_NAME}(?:\[{_NAME}(?:,{_NAME})*\])?==[A-Za-z0-9][A-Za-z0-9.!+_-]*"
+    rf"(?:\s+--hash=sha256:[0-9a-f]{{64}})+\Z"
+)
 
 
 class Runner(Protocol):
@@ -137,7 +141,7 @@ def _keys(value: object, expected: tuple[str, ...], label: str) -> dict[str, obj
 
 def _fixed(value: object, expected: dict[str, object], label: str) -> dict[str, object]:
     parsed = _keys(value, tuple(expected), label)
-    if parsed != expected:
+    if any(type(parsed[key]) is not type(fixed) or parsed[key] != fixed for key, fixed in expected.items()):
         raise ValueError(f"invalid {label}")
     return parsed
 
@@ -267,36 +271,26 @@ def validate_runtime_lock(raw: bytes) -> None:
     except UnicodeDecodeError as exc:
         raise ValueError("runtime lock is not UTF-8") from exc
     stanzas: list[str] = []
-    current = ""
+    current: list[str] = []
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
+            if current:
+                raise ValueError("invalid requirement continuation")
             continue
-        if stripped.startswith(("--index-url ", "--trusted-host ")) and not current:
-            continue
-        current = f"{current} {stripped}".strip()
-        if not stripped.endswith("\\"):
-            stanzas.append(current.replace("\\", " "))
-            current = ""
+        continued = stripped.endswith("\\")
+        segment = stripped[:-1].rstrip() if continued else stripped
+        if "\\" in segment:
+            raise ValueError("invalid requirement continuation")
+        current.append(segment)
+        if not continued:
+            stanzas.append(" ".join(current))
+            current = []
     if current or not stanzas:
         raise ValueError("invalid requirement continuation")
     for stanza in stanzas:
-        lowered = stanza.lower()
-        if (
-            lowered.startswith(("-r ", "--requirement ", "-c ", "--constraint ", "-e ", "--editable "))
-            or " @ " in stanza
-            or "://" in stanza
-            or ".tar.gz" in lowered
-        ):
-            raise ValueError("unsafe runtime requirement")
-        requirement = stanza.split(" --hash=", 1)[0].strip()
-        if ";" in requirement:
-            requirement = requirement.split(";", 1)[0].strip()
-        if not _REQUIREMENT.fullmatch(requirement) or requirement.count("==") != 1:
-            raise ValueError("runtime requirement is not exactly pinned")
-        hashes = re.findall(r"--hash=sha256:([0-9a-f]{64})(?:\s|\Z)", stanza)
-        if not hashes:
-            raise ValueError("runtime requirement has no SHA-256 hash")
+        if not _LOCK_STANZA.fullmatch(stanza):
+            raise ValueError("runtime requirement is not an exact hashed pin")
 
 
 def _bytes(output: object) -> bytes:
@@ -308,6 +302,17 @@ def _bytes(output: object) -> bytes:
 
 
 def _git(runner: Runner, argv: list[str], root: Path, env: Mapping[str, str]) -> bytes:
+    argv = [
+        "git",
+        "--no-replace-objects",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "-c",
+        "core.attributesFile=/dev/null",
+        *argv[1:],
+    ]
     try:
         completed = runner(argv, cwd=root, env=env)
     except Exception as exc:
@@ -376,8 +381,23 @@ def verify_distribution_checkout(
     if not _COMMIT.fullmatch(expected_commit):
         raise ValueError("expected commit must be 40 lowercase hex characters")
     env = dict(os.environ)
-    for key in GIT_REDIRECTS:
-        env.pop(key, None)
+    for key in tuple(env):
+        if key in GIT_REDIRECTS or key.startswith("GIT_CONFIG_") or key in {
+            "GIT_REPLACE_REF_BASE",
+            "GIT_ATTR_NOSYSTEM",
+            "GIT_EXTERNAL_DIFF",
+            "GIT_DIFF_OPTS",
+        }:
+            env.pop(key)
+    env.update(
+        {
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+        }
+    )
     repository_root = Path(
         _git(runner, ["git", "rev-parse", "--show-toplevel"], bundle_root, env).decode().strip()
     ).resolve()
@@ -389,7 +409,16 @@ def verify_distribution_checkout(
     if head != expected_commit or branch != "HEAD":
         raise ValueError("checkout is not detached at the expected commit")
     status = _git(
-        runner, ["git", "status", "--porcelain=v1", "--untracked-files=all"], repository_root, env
+        runner,
+        [
+            "git",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ],
+        repository_root,
+        env,
     ).decode()
     scoped_dirs = (".agents/", "plugins/blender-mcp-installer/", "scripts/requirements/")
     scoped_files = (
@@ -399,7 +428,7 @@ def verify_distribution_checkout(
     )
     for line in status.splitlines():
         code, path = line[:2], line[3:].strip('"')
-        if code != "??" or path in scoped_files or path.startswith(scoped_dirs):
+        if code not in {"??", "!!"} or path in scoped_files or path.startswith(scoped_dirs):
             raise ValueError(f"dirty distribution checkout: {path}")
     committed_path = "plugins/blender-mcp-installer/artifacts/SHA256SUMS"
     trusted = _git(
