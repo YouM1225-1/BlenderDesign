@@ -253,8 +253,8 @@ class _Probe:
 @dataclass(frozen=True)
 class _LsofFile:
     fd: str
-    device: int
-    inode: int
+    device: int | None
+    inode: int | None
     path: str
 
 
@@ -348,11 +348,66 @@ def _component_safe(path: Path, *, allow_missing: bool) -> None:
         os.close(fd)
 
 
+def _open_directory_fd(path: Path, *, create_private: bool = False) -> int:
+    _absolute(path, "directory")
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in path.parts[1:]:
+            created = False
+            try:
+                before = os.stat(part, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                if not create_private or os.fstat(fd).st_uid != os.getuid():
+                    raise ValueError("path component is missing") from None
+                os.mkdir(part, mode=0o700, dir_fd=fd)
+                os.chmod(part, 0o700, dir_fd=fd, follow_symlinks=False)
+                before = os.stat(part, dir_fd=fd, follow_symlinks=False)
+                created = True
+            if not stat.S_ISDIR(before.st_mode):
+                raise ValueError("path component is not a directory")
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            opened = os.fstat(child)
+            if (opened.st_dev, opened.st_ino, opened.st_uid, opened.st_mode) != (
+                before.st_dev,
+                before.st_ino,
+                before.st_uid,
+                before.st_mode,
+            ):
+                os.close(child)
+                raise ValueError("directory changed while opening")
+            if created:
+                if opened.st_uid != os.getuid() or stat.S_IMODE(opened.st_mode) != 0o700:
+                    os.close(child)
+                    raise ValueError("created directory has unsafe ownership or mode")
+                os.fsync(child)
+                os.fsync(fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _linked_file(path: Path, retained_parent: int, expected: os.stat_result) -> None:
+    current_parent = _open_directory_fd(path.parent)
+    try:
+        retained = os.fstat(retained_parent)
+        current = os.fstat(current_parent)
+        linked = os.stat(path.name, dir_fd=current_parent, follow_symlinks=False)
+        if (retained.st_dev, retained.st_ino) != (current.st_dev, current.st_ino) or any(
+            getattr(linked, field) != getattr(expected, field)
+            for field in ("st_dev", "st_ino", "st_uid", "st_mode", "st_size", "st_mtime_ns")
+        ):
+            raise ValueError("file path identity changed")
+    finally:
+        os.close(current_parent)
+
+
 @contextmanager
-def _open_executable(path: Path) -> Iterator[tuple[int, os.stat_result]]:
+def _open_executable(path: Path) -> Iterator[tuple[int, int, os.stat_result]]:
     _absolute(path, "Blender executable")
-    _component_safe(path, allow_missing=False)
-    parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    parent_fd = _open_directory_fd(path.parent)
     try:
         before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
         if not stat.S_ISREG(before.st_mode) or not before.st_mode & 0o111:
@@ -366,7 +421,7 @@ def _open_executable(path: Path) -> Iterator[tuple[int, os.stat_result]]:
                 before.st_mode,
             ):
                 raise ValueError("Blender executable changed while opening")
-            yield fd, opened
+            yield fd, parent_fd, opened
         finally:
             os.close(fd)
     finally:
@@ -439,7 +494,7 @@ def _parse_probe(raw: str) -> Mapping[str, object]:
 
 def _probe_blender(blender_bin: Path, env: Mapping[str, str], runner: Runner) -> _Probe:
     clean = _profile_env(blender_bin, env)
-    with _open_executable(blender_bin) as (_, selected):
+    with _open_executable(blender_bin) as (_, parent_fd, selected):
         _, arch_output = _run(
             runner,
             ("/usr/bin/lipo", "-archs", str(blender_bin)),
@@ -448,6 +503,7 @@ def _probe_blender(blender_bin: Path, env: Mapping[str, str], runner: Runner) ->
             label="Blender architecture probe",
         )
         arches = _parse_arches(arch_output)
+        _linked_file(blender_bin, parent_fd, selected)
         _, output = _run(
             runner,
             (
@@ -464,10 +520,10 @@ def _probe_blender(blender_bin: Path, env: Mapping[str, str], runner: Runner) ->
         reported = Path(values["binary_path"]) if type(values["binary_path"]) is str else Path()
         if reported != blender_bin:
             raise InstallerError("Blender reported a different executable")
-        _component_safe(reported, allow_missing=False)
-        linked = reported.stat(follow_symlinks=False)
-        if (linked.st_dev, linked.st_ino) != (selected.st_dev, selected.st_ino):
-            raise InstallerError("Blender executable identity changed")
+        try:
+            _linked_file(reported, parent_fd, selected)
+        except ValueError as exc:
+            raise InstallerError("Blender executable identity changed") from exc
     return _Probe(arches, values)
 
 
@@ -537,40 +593,54 @@ def _payload_digest(entries: Sequence[PayloadEntry]) -> str:
 
 def _read_regular(path: Path, *, maximum: int) -> bytes:
     _absolute(path, "file")
-    _component_safe(path, allow_missing=False)
-    before = path.stat(follow_symlinks=False)
-    if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_size > maximum:
-        raise ValueError("unsafe regular file")
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    parent_fd = _open_directory_fd(path.parent)
     try:
-        opened = os.fstat(fd)
-        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
+        before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_size > maximum
         ):
-            raise ValueError("file changed while opening")
-        chunks: list[bytes] = []
-        size = 0
-        while chunk := os.read(fd, min(1024 * 1024, maximum + 1 - size)):
-            chunks.append(chunk)
-            size += len(chunk)
-            if size > maximum:
-                raise ValueError("file is too large")
-        after = os.fstat(fd)
-        linked = path.stat(follow_symlinks=False)
-        if any(
-            (
-                getattr(opened, field) != getattr(after, field)
-                or getattr(after, field) != getattr(linked, field)
-            )
-            for field in ("st_dev", "st_ino", "st_uid", "st_mode", "st_size", "st_mtime_ns")
-        ):
-            raise ValueError("file changed while reading")
-        return b"".join(chunks)
+            raise ValueError("unsafe regular file")
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+            ):
+                raise ValueError("file changed while opening")
+            chunks: list[bytes] = []
+            size = 0
+            while chunk := os.read(fd, min(1024 * 1024, maximum + 1 - size)):
+                chunks.append(chunk)
+                size += len(chunk)
+                if size > maximum:
+                    raise ValueError("file is too large")
+            after = os.fstat(fd)
+            linked = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            if any(
+                (
+                    getattr(opened, field) != getattr(after, field)
+                    or getattr(after, field) != getattr(linked, field)
+                )
+                for field in (
+                    "st_dev",
+                    "st_ino",
+                    "st_uid",
+                    "st_mode",
+                    "st_size",
+                    "st_mtime_ns",
+                )
+            ):
+                raise ValueError("file changed while reading")
+            return b"".join(chunks)
+        finally:
+            os.close(fd)
     finally:
-        os.close(fd)
+        os.close(parent_fd)
 
 
 def _load_extension_payload(raw: bytes) -> PayloadIndex:
@@ -580,13 +650,21 @@ def _load_extension_payload(raw: bytes) -> PayloadIndex:
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             for item in archive.infolist():
-                name = item.filename[:-1] if item.is_dir() else item.filename
-                pure = PurePosixPath(name)
+                raw_name = item.filename
+                directory = item.is_dir()
+                name = raw_name[:-1] if directory else raw_name
+                components = name.split("/")
                 if (
                     not name
-                    or pure.is_absolute()
-                    or any(part in {"", ".", ".."} for part in pure.parts)
-                    or "\\" in name
+                    or raw_name != name + ("/" if directory else "")
+                    or any(not part or part in {".", ".."} for part in components)
+                    or "\\" in raw_name
+                ):
+                    raise ValueError("unsafe extension archive entry")
+                pure = PurePosixPath(name)
+                if (
+                    pure.is_absolute()
+                    or pure.as_posix() != name
                     or name in entries
                     or item.file_size > _MAX_ARCHIVE
                     or total_size + item.file_size > _MAX_ARCHIVE
@@ -595,11 +673,15 @@ def _load_extension_payload(raw: bytes) -> PayloadIndex:
                 total_size += item.file_size
                 unix_mode = item.external_attr >> 16
                 mode = stat.S_IMODE(unix_mode)
-                kind = "dir" if item.is_dir() else "file"
+                kind = "dir" if directory else "file"
                 if (
-                    mode == 0
-                    or (kind == "dir" and unix_mode and not stat.S_ISDIR(unix_mode))
-                    or (kind == "file" and unix_mode and not stat.S_ISREG(unix_mode))
+                    item.create_system != 3
+                    or (
+                        kind == "dir"
+                        and (stat.S_IFMT(unix_mode), mode, item.file_size)
+                        != (stat.S_IFDIR, 0o755, 0)
+                    )
+                    or (kind == "file" and (stat.S_IFMT(unix_mode), mode) != (stat.S_IFREG, 0o644))
                 ):
                     raise ValueError("invalid extension archive mode")
                 content = b"" if kind == "dir" else archive.read(item)
@@ -616,6 +698,13 @@ def _load_extension_payload(raw: bytes) -> PayloadIndex:
         raise ValueError("invalid Blender extension ZIP") from exc
     if manifest_raw is None:
         raise ValueError("extension manifest is missing")
+    if any(
+        parent.as_posix() in entries and entries[parent.as_posix()].kind != "dir"
+        for name in entries
+        for parent in PurePosixPath(name).parents
+        if parent != PurePosixPath(".")
+    ):
+        raise ValueError("extension archive path crosses a file")
     try:
         manifest = tomllib.loads(manifest_raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
@@ -786,7 +875,13 @@ def _tree_payload_digest(image: TreeImage) -> str | None:
     excluded_files = {path for path in files if _mapped_pyc(path, files)}
     excluded_dirs = {PurePosixPath(path).parent.as_posix() for path in excluded_files}
     payload = tuple(
-        PayloadEntry(entry.path, entry.kind, entry.mode, entry.size, entry.sha256)
+        PayloadEntry(
+            entry.path,
+            entry.kind,
+            entry.mode,
+            0 if entry.kind == "dir" else entry.size,
+            entry.sha256,
+        )
         for entry in image.entries
         if entry.path not in excluded_files and entry.path not in excluded_dirs
     )
@@ -915,28 +1010,144 @@ def verify_blender_files(state: BlenderState, expected_payload: PayloadIndex) ->
         raise InstallerError("Blender file verification failed")
 
 
-def _write_private(path: Path, raw: bytes, mode: int = 0o600) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+def _create_private_directory(parent_fd: int, name: str) -> int:
+    os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        os.fchmod(fd, 0o700)
+        opened = os.fstat(fd)
+        linked = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o700
+            or (opened.st_dev, opened.st_ino, opened.st_uid, opened.st_mode)
+            != (linked.st_dev, linked.st_ino, linked.st_uid, linked.st_mode)
+        ):
+            raise ValueError("created private directory identity mismatch")
+        os.fsync(fd)
+        os.fsync(parent_fd)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _write_private_at(parent_fd: int, name: str, raw: bytes, mode: int = 0o600) -> None:
+    if type(raw) is not bytes or type(mode) is not int or mode < 0 or mode > 0o777:
+        raise ValueError("invalid private file")
+    fd = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        mode,
+        dir_fd=parent_fd,
+    )
     try:
         os.fchmod(fd, mode)
         offset = 0
         while offset < len(raw):
             offset += os.write(fd, raw[offset:])
         os.fsync(fd)
+        opened = os.fstat(fd)
+        linked = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != mode
+            or any(
+                getattr(opened, field) != getattr(linked, field)
+                for field in ("st_dev", "st_ino", "st_uid", "st_mode", "st_size", "st_mtime_ns")
+            )
+        ):
+            raise ValueError("created private file identity mismatch")
+    finally:
+        os.close(fd)
+    os.fsync(parent_fd)
+
+
+def _stage_is_linked(path: Path, parent_fd: int, stage_fd: int) -> None:
+    current_parent = _open_directory_fd(path.parent)
+    try:
+        retained_parent = os.fstat(parent_fd)
+        current = os.fstat(current_parent)
+        retained = os.fstat(stage_fd)
+        linked = os.stat(path.name, dir_fd=current_parent, follow_symlinks=False)
+        if (
+            (retained_parent.st_dev, retained_parent.st_ino) != (current.st_dev, current.st_ino)
+            or not stat.S_ISDIR(linked.st_mode)
+            or retained.st_uid != os.getuid()
+            or stat.S_IMODE(retained.st_mode) != 0o700
+            or (retained.st_dev, retained.st_ino, retained.st_uid, retained.st_mode)
+            != (linked.st_dev, linked.st_ino, linked.st_uid, linked.st_mode)
+        ):
+            raise InstallerError("Blender install stage identity changed")
+    except (OSError, ValueError) as exc:
+        raise InstallerError("Blender install stage identity changed") from exc
+    finally:
+        os.close(current_parent)
+
+
+def _fsync_file_at(parent_fd: int, name: str, uid: int) -> None:
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != uid:
+        raise InstallerError("unsafe staged Blender file")
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        opened = os.fstat(fd)
+        if any(
+            getattr(opened, field) != getattr(before, field)
+            for field in ("st_dev", "st_ino", "st_uid", "st_mode", "st_size", "st_mtime_ns")
+        ):
+            raise InstallerError("staged Blender file changed while opening")
+        os.fsync(fd)
+        after = os.fstat(fd)
+        linked = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if any(
+            getattr(opened, field) != getattr(after, field)
+            or getattr(after, field) != getattr(linked, field)
+            for field in ("st_dev", "st_ino", "st_uid", "st_mode", "st_size", "st_mtime_ns")
+        ):
+            raise InstallerError("staged Blender file changed during fsync")
     finally:
         os.close(fd)
 
 
-def _mkdirs_private(path: Path) -> None:
-    missing: list[Path] = []
-    current = path
-    while not current.exists():
-        missing.append(current)
-        current = current.parent
-    _component_safe(current, allow_missing=False)
-    for item in reversed(missing):
-        item.mkdir(mode=0o700)
-        item.chmod(0o700)
+def _fsync_tree_at(parent_fd: int, name: str, uid: int) -> None:
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode) or before.st_uid != uid:
+        raise InstallerError("unsafe staged Blender directory")
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino, opened.st_uid, opened.st_mode) != (
+            before.st_dev,
+            before.st_ino,
+            before.st_uid,
+            before.st_mode,
+        ):
+            raise InstallerError("staged Blender directory changed while opening")
+        names = sorted(os.listdir(fd))
+        for child in names:
+            info = os.stat(child, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISREG(info.st_mode):
+                _fsync_file_at(fd, child, uid)
+            elif stat.S_ISDIR(info.st_mode):
+                _fsync_tree_at(fd, child, uid)
+            else:
+                raise InstallerError("unsafe staged Blender tree entry")
+        os.fsync(fd)
+        after = os.fstat(fd)
+        linked = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            names != sorted(os.listdir(fd))
+            or (opened.st_dev, opened.st_ino, opened.st_uid, opened.st_mode)
+            != (after.st_dev, after.st_ino, after.st_uid, after.st_mode)
+            or (after.st_dev, after.st_ino, after.st_uid, after.st_mode)
+            != (linked.st_dev, linked.st_ino, linked.st_uid, linked.st_mode)
+        ):
+            raise InstallerError("staged Blender directory changed during fsync")
+    finally:
+        os.close(fd)
 
 
 def _capture_userpref(config: Path) -> FileImage:
@@ -1010,68 +1221,150 @@ def stage_blender_change(
             (),
         )
     _absolute(install_stage, "Blender install stage")
-    if install_stage.exists():
-        raise InstallerError("Blender install stage already exists")
     if install_stage.is_relative_to(state.user_resources) or state.user_resources.is_relative_to(
         install_stage
     ):
         raise ValueError("Blender install stage overlaps the live profile")
-    resources = install_stage / "resources"
-    config = resources / "config"
-    extensions = resources / "extensions"
-    _mkdirs_private(config)
-    _mkdirs_private(extensions)
-    staged_zip = install_stage / "mcp-1.0.0.zip"
-    _write_private(staged_zip, payload_raw)
-    pre_userpref = _capture_userpref(state.config_root)
-    if pre_userpref.state is ImageState.PRESENT:
-        pre_raw = _read_regular(state.userpref, maximum=64 * 1024 * 1024)
-        if (
-            _capture_userpref(state.config_root) != pre_userpref
-            or len(pre_raw) != pre_userpref.size
-            or hashlib.sha256(pre_raw).hexdigest() != pre_userpref.sha256
-        ):
-            raise InstallerError("Blender preferences changed before staging")
-        _write_private(config / "userpref.blend", pre_raw, pre_userpref.mode)
-    clean = _stage_env(state, install_stage)
-    _run(
-        runner,
-        (str(state.executable), "--command", "extension", "validate", str(staged_zip)),
-        cwd=state.executable.parent,
-        env=clean,
-        label="Blender extension validation",
-    )
-    _run(
-        runner,
-        (
-            str(state.executable),
-            "--command",
-            "extension",
-            "install-file",
-            "--repo",
-            _REPOSITORY,
-            "--enable",
-            str(staged_zip),
-        ),
-        cwd=state.executable.parent,
-        env=clean,
-        label="Blender extension installation",
-    )
-    _run(
-        runner,
-        (str(state.executable), "--background", "--python-expr", _PREFERENCES_EXPRESSION),
-        cwd=state.executable.parent,
-        env=clean,
-        label="Blender preference staging",
-    )
-    staged_state = inspect_blender(state.executable, clean, runner)
-    verify_blender_files(staged_state, payload)
-    image, _, root = _extension_snapshot(staged_state.extensions_root)
+    parent_fd = _open_directory_fd(install_stage.parent, create_private=True)
     try:
-        userpref = _capture_userpref(staged_state.config_root)
+        try:
+            os.stat(install_stage.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise InstallerError("Blender install stage already exists")
+        stage_fd = _create_private_directory(parent_fd, install_stage.name)
+        with SafeRoot(install_stage, os.getuid(), stage_fd) as stage_root:
+            resources_fd = _create_private_directory(stage_root.fd, "resources")
+            try:
+                config_fd = _create_private_directory(resources_fd, "config")
+                os.close(config_fd)
+                extensions_fd = _create_private_directory(resources_fd, "extensions")
+                os.close(extensions_fd)
+            finally:
+                os.close(resources_fd)
+            staged_zip = install_stage / "mcp-1.0.0.zip"
+            _write_private_at(stage_root.fd, staged_zip.name, payload_raw)
+            staged_zip_image = capture_file(stage_root, PurePath(staged_zip.name))
+            pre_userpref = _capture_userpref(state.config_root)
+            if pre_userpref.state is ImageState.PRESENT:
+                pre_raw = _read_regular(state.userpref, maximum=64 * 1024 * 1024)
+                if (
+                    _capture_userpref(state.config_root) != pre_userpref
+                    or len(pre_raw) != pre_userpref.size
+                    or hashlib.sha256(pre_raw).hexdigest() != pre_userpref.sha256
+                ):
+                    raise InstallerError("Blender preferences changed before staging")
+                config_fd = stage_root.open_directory(PurePath("resources", "config"))
+                try:
+                    _write_private_at(config_fd, "userpref.blend", pre_raw, pre_userpref.mode)
+                finally:
+                    os.close(config_fd)
+            clean = _stage_env(state, install_stage)
+            with _open_executable(state.executable) as (
+                _,
+                executable_parent,
+                executable_info,
+            ):
+                commands = (
+                    (
+                        (
+                            str(state.executable),
+                            "--command",
+                            "extension",
+                            "validate",
+                            str(staged_zip),
+                        ),
+                        "Blender extension validation",
+                    ),
+                    (
+                        (
+                            str(state.executable),
+                            "--command",
+                            "extension",
+                            "install-file",
+                            "--repo",
+                            _REPOSITORY,
+                            "--enable",
+                            str(staged_zip),
+                        ),
+                        "Blender extension installation",
+                    ),
+                    (
+                        (
+                            str(state.executable),
+                            "--background",
+                            "--python-expr",
+                            _PREFERENCES_EXPRESSION,
+                        ),
+                        "Blender preference staging",
+                    ),
+                )
+                for argv, label in commands:
+                    _linked_file(state.executable, executable_parent, executable_info)
+                    _stage_is_linked(install_stage, parent_fd, stage_root.fd)
+                    _run(
+                        runner,
+                        argv,
+                        cwd=state.executable.parent,
+                        env=clean,
+                        label=label,
+                    )
+                    _stage_is_linked(install_stage, parent_fd, stage_root.fd)
+            if capture_file(stage_root, PurePath(staged_zip.name)) != staged_zip_image:
+                raise InstallerError("staged Blender ZIP changed during installation")
+            staged_state = inspect_blender(state.executable, clean, runner)
+            _stage_is_linked(install_stage, parent_fd, stage_root.fd)
+            verify_blender_files(staged_state, payload)
+            _stage_is_linked(install_stage, parent_fd, stage_root.fd)
+            extension_relative = PurePath("resources", "extensions", _REPOSITORY, _EXTENSION_ID)
+            extension = TreeRef(stage_root, extension_relative)
+            comparison = compare_extension_tree(payload, extension)
+            if not comparison.exact:
+                raise InstallerError("staged Blender extension changed before fsync")
+            image = extension.capture()
+            extension_parent, extension_name = stage_root.open_parent(extension_relative)
+            try:
+                _fsync_tree_at(extension_parent, extension_name, os.getuid())
+                os.fsync(extension_parent)
+            finally:
+                os.close(extension_parent)
+            extensions_fd = stage_root.open_directory(PurePath("resources", "extensions"))
+            try:
+                os.fsync(extensions_fd)
+            finally:
+                os.close(extensions_fd)
+            userpref_relative = PurePath("resources", "config", "userpref.blend")
+            userpref_before = capture_file(stage_root, userpref_relative)
+            if userpref_before.state is not ImageState.PRESENT:
+                raise InstallerError("staged Blender preferences are absent")
+            config_fd, userpref_name = stage_root.open_parent(userpref_relative)
+            try:
+                _fsync_file_at(config_fd, userpref_name, os.getuid())
+                os.fsync(config_fd)
+            finally:
+                os.close(config_fd)
+            userpref = capture_file(stage_root, userpref_relative)
+            if extension.capture() != image or userpref != userpref_before:
+                raise InstallerError("staged Blender extension changed during fsync")
+            _stage_is_linked(install_stage, parent_fd, stage_root.fd)
+            compat_relative = PurePath("resources", "extensions", ".cache", "compat.dat")
+            try:
+                compat_parent, compat_name = stage_root.open_parent(compat_relative)
+            except FileNotFoundError:
+                compat_present = False
+            else:
+                try:
+                    compat_info = os.stat(compat_name, dir_fd=compat_parent, follow_symlinks=False)
+                    if not stat.S_ISREG(compat_info.st_mode) or compat_info.st_uid != os.getuid():
+                        raise InstallerError("unsafe staged Blender compatibility cache")
+                    compat_present = True
+                except FileNotFoundError:
+                    compat_present = False
+                finally:
+                    os.close(compat_parent)
     finally:
-        if root is not None:
-            root.close()
+        os.close(parent_fd)
     if userpref.state is not ImageState.PRESENT:
         raise InstallerError("staged Blender preferences are absent")
     compat = staged_state.extensions_root / ".cache/compat.dat"
@@ -1083,7 +1376,7 @@ def stage_blender_change(
         image,
         userpref,
         staged_state,
-        (compat,) if compat.exists() else (),
+        (compat,) if compat_present else (),
     )
 
 
@@ -1103,72 +1396,74 @@ def _device(value: str) -> int:
     return result
 
 
-def _parse_lsof_processes(raw: str) -> tuple[_LsofProcess, ...]:
+def _parse_lsof(raw: str, *, listener: bool) -> tuple[_LsofProcess, ...]:
+    if not raw or "\0" in raw or len(raw.encode("utf-8")) > _MAX_OUTPUT:
+        raise InstallerError("invalid lsof output")
+    lines = raw.splitlines()
     processes: list[_LsofProcess] = []
-    header: dict[str, str] | None = None
-    files: list[_LsofFile] = []
-    current: dict[str, str] | None = None
-
-    def finish_file() -> None:
-        nonlocal current
-        if current is None:
-            return
-        if set(current) != {"f", "D", "i", "n"} or not current["f"] or not current["n"]:
-            raise InstallerError("incomplete lsof file record")
-        files.append(
-            _LsofFile(
-                current["f"],
-                _device(current["D"]),
-                _decimal(current["i"], "inode"),
-                current["n"],
-            )
-        )
-        current = None
-
-    def finish_process() -> None:
-        nonlocal header, files
-        if header is None:
-            return
-        finish_file()
-        if set(header) != {"p", "c", "u"} or not header["c"] or not files:
+    index = 0
+    while index < len(lines):
+        if index + 3 > len(lines) or [line[:1] for line in lines[index : index + 3]] != [
+            "p",
+            "c",
+            "u",
+        ]:
+            raise InstallerError("invalid lsof process record")
+        pid_raw, command, uid_raw = (line[1:] for line in lines[index : index + 3])
+        pid = _decimal(pid_raw, "PID")
+        uid = _decimal(uid_raw, "UID")
+        if pid == 0 or not command:
+            raise InstallerError("invalid lsof process record")
+        index += 3
+        files: list[_LsofFile] = []
+        while index < len(lines) and lines[index].startswith("f"):
+            fd = lines[index][1:]
+            if not fd:
+                raise InstallerError("invalid lsof file descriptor")
+            if listener:
+                if index + 2 > len(lines) or lines[index + 1][:1] != "n":
+                    raise InstallerError("invalid lsof listener record")
+                path = lines[index + 1][1:]
+                if (
+                    not re.fullmatch(r"[0-9]+", fd)
+                    or not path
+                    or any(character.isspace() for character in path)
+                    or not path.endswith(":9876")
+                ):
+                    raise InstallerError("invalid lsof listener record")
+                files.append(_LsofFile(fd, None, None, path))
+                index += 2
+            else:
+                if (
+                    fd != "txt"
+                    or index + 4 > len(lines)
+                    or [line[:1] for line in lines[index + 1 : index + 4]] != ["D", "i", "n"]
+                ):
+                    raise InstallerError("invalid lsof txt record")
+                device, inode, path = (line[1:] for line in lines[index + 1 : index + 4])
+                if not path:
+                    raise InstallerError("invalid lsof txt record")
+                files.append(_LsofFile(fd, _device(device), _decimal(inode, "inode"), path))
+                index += 4
+        if not files:
             raise InstallerError("incomplete lsof process record")
-        processes.append(
-            _LsofProcess(
-                _decimal(header["p"], "PID"),
-                header["c"],
-                _decimal(header["u"], "UID"),
-                tuple(files),
-            )
-        )
-        header = None
-        files = []
-
-    if not raw or "\0" in raw:
-        raise InstallerError("invalid lsof output")
-    for line in raw.splitlines():
-        if len(line) < 2 or line[0] not in "pcufDin":
-            raise InstallerError("invalid lsof field")
-        field, value = line[0], line[1:]
-        if field == "p":
-            finish_process()
-            header = {"p": value}
-        elif field == "f":
-            if header is None:
-                raise InstallerError("lsof file precedes process header")
-            finish_file()
-            current = {"f": value}
-        elif field in {"c", "u"}:
-            if header is None or current is not None or field in header:
-                raise InstallerError("duplicate or misplaced lsof process field")
-            header[field] = value
-        else:
-            if current is None or field in current:
-                raise InstallerError("duplicate or misplaced lsof file field")
-            current[field] = value
-    finish_process()
-    if not processes:
-        raise InstallerError("invalid lsof output")
+        if index < len(lines) and not lines[index].startswith("p"):
+            raise InstallerError("unknown or misplaced lsof field")
+        processes.append(_LsofProcess(pid, command, uid, tuple(files)))
     return tuple(processes)
+
+
+def _parse_lsof_txt(raw: str) -> tuple[_LsofProcess, ...]:
+    return _parse_lsof(raw, listener=False)
+
+
+def _parse_lsof_listener(raw: str) -> tuple[_LsofProcess, ...]:
+    processes = _parse_lsof(raw, listener=True)
+    if len(processes) != 1 or len({item.fd for item in processes[0].files}) != len(
+        processes[0].files
+    ):
+        raise InstallerError("ambiguous Blender listener")
+    return processes
 
 
 def _txt_output(pid: int, runner: Runner) -> tuple[_LsofProcess, ...]:
@@ -1179,14 +1474,18 @@ def _txt_output(pid: int, runner: Runner) -> tuple[_LsofProcess, ...]:
         env={"PATH": _SYSTEM_PATH},
         label="Blender process probe",
     )
-    processes = _parse_lsof_processes(output)
+    processes = _parse_lsof_txt(output)
     if len(processes) != 1 or processes[0].pid != pid:
         raise InstallerError("ambiguous Blender process record")
     return processes
 
 
 def _process_executable(
-    process: _LsofProcess, selected_path: Path, selected: os.stat_result
+    process: _LsofProcess,
+    selected_path: Path,
+    selected: os.stat_result,
+    *,
+    selected_candidate_required: bool,
 ) -> tuple[Path, bool]:
     if process.uid != os.getuid():
         raise InstallerError("Blender process belongs to another UID")
@@ -1195,18 +1494,41 @@ def _process_executable(
         for item in process.files
         if item.fd == "txt" and Path(item.path).name == selected_path.name
     ]
-    if len(candidates) != 1:
+    if len(candidates) > 1 or (selected_candidate_required and len(candidates) != 1):
         raise InstallerError("ambiguous Blender executable records")
-    record = candidates[0]
+    # Darwin lsof emits the process's main executable as the first -d txt record,
+    # followed by loaded libraries and dyld. The disposable parser probe guards this.
+    record = process.files[0]
+    if candidates and candidates[0] != record:
+        raise InstallerError("ambiguous Blender executable records")
+    if record.device is None or record.inode is None:
+        raise InstallerError("invalid Blender executable record")
     path = Path(record.path)
     try:
-        _component_safe(path, allow_missing=False)
-        info = path.stat(follow_symlinks=False)
+        _absolute(path, "lsof executable")
+        parent_fd = _open_directory_fd(path.parent)
+        try:
+            before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            try:
+                info = os.fstat(fd)
+            finally:
+                os.close(fd)
+            linked = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            _linked_file(path, parent_fd, info)
+        finally:
+            os.close(parent_fd)
     except (OSError, ValueError) as exc:
         raise InstallerError("invalid Blender executable record") from exc
-    if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != (
-        record.device,
-        record.inode,
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or not info.st_mode & 0o111
+        or any(
+            getattr(before, field) != getattr(info, field)
+            or getattr(info, field) != getattr(linked, field)
+            for field in ("st_dev", "st_ino", "st_uid", "st_mode")
+        )
+        or (info.st_dev, info.st_ino) != (record.device, record.inode)
     ):
         raise InstallerError("Blender executable record identity mismatch")
     if path == selected_path and (record.device, record.inode) != (
@@ -1221,7 +1543,7 @@ def _process_executable(
 
 
 def probe_blender_lifecycle(blender_bin: Path, runner: Runner) -> BlenderLifecycle:
-    with _open_executable(blender_bin) as (_, selected):
+    with _open_executable(blender_bin) as (_, selected_parent, selected):
         code, output = _run(
             runner,
             ("/usr/bin/pgrep", "-x", "Blender"),
@@ -1244,7 +1566,14 @@ def probe_blender_lifecycle(blender_bin: Path, runner: Runner) -> BlenderLifecyc
         matching: list[int] = []
         for pid in pids:
             process = _txt_output(pid, runner)[0]
-            _, is_selected = _process_executable(process, blender_bin, selected)
+            if process.command != "Blender":
+                raise InstallerError("invalid Blender process command")
+            _, is_selected = _process_executable(
+                process,
+                blender_bin,
+                selected,
+                selected_candidate_required=True,
+            )
             if is_selected:
                 matching.append(pid)
         listener_code, listener_output = _run(
@@ -1258,13 +1587,26 @@ def probe_blender_lifecycle(blender_bin: Path, runner: Runner) -> BlenderLifecyc
         if listener_code == 1:
             if listener_output:
                 raise InstallerError("invalid Blender listener output")
+            try:
+                _linked_file(blender_bin, selected_parent, selected)
+            except ValueError as exc:
+                raise InstallerError("selected Blender executable identity changed") from exc
             return BlenderLifecycle(tuple(matching), None, None, True)
-        listeners = _parse_lsof_processes(listener_output)
-        if len(listeners) != 1 or len(listeners[0].files) != 1:
+        listeners = _parse_lsof_listener(listener_output)
+        if len(listeners) != 1:
             raise InstallerError("ambiguous Blender listener")
         listener = listeners[0]
         if listener.uid != os.getuid():
             raise InstallerError("Blender listener belongs to another UID")
         process = _txt_output(listener.pid, runner)[0]
-        executable, _ = _process_executable(process, blender_bin, selected)
+        executable, _ = _process_executable(
+            process,
+            blender_bin,
+            selected,
+            selected_candidate_required=False,
+        )
+        try:
+            _linked_file(blender_bin, selected_parent, selected)
+        except ValueError as exc:
+            raise InstallerError("selected Blender executable identity changed") from exc
         return BlenderLifecycle(tuple(matching), listener.pid, executable, False)

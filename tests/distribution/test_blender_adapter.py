@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import socket
+import stat
 import subprocess
 import sys
 import zipfile
@@ -296,6 +298,132 @@ def test_extension_zip_rejects_unsafe_entry_or_wrong_manifest_before_staging(
         load_extension_payload(archive)
 
 
+def _zip_entry(name: str, raw: bytes | str, mode: int) -> tuple[zipfile.ZipInfo, bytes | str]:
+    item = zipfile.ZipInfo(name)
+    item.create_system = 3
+    item.external_attr = mode << 16
+    return item, raw
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "dot_component",
+        "repeated_separator",
+        "exact_duplicate",
+        "alias_duplicate",
+        "symlink",
+        "special",
+        "setuid",
+        "world_writable",
+        "executable_file",
+        "wrong_directory_mode",
+    ],
+)
+@pytest.mark.filterwarnings("ignore:Duplicate name:UserWarning")
+def test_noncanonical_or_nonexact_zip_entry_is_rejected_before_runner_or_stage(
+    tmp_path: Path, case: str
+) -> None:
+    archive = tmp_path / f"{case}.zip"
+    entries = [
+        _zip_entry("blender_manifest.toml", 'id = "mcp"\nversion = "1.0.0"\n', stat.S_IFREG | 0o644)
+    ]
+    if case == "dot_component":
+        entries.append(_zip_entry("pkg/./x.py", "x", stat.S_IFREG | 0o644))
+    elif case == "repeated_separator":
+        entries.append(_zip_entry("pkg//x.py", "x", stat.S_IFREG | 0o644))
+    elif case == "exact_duplicate":
+        entries.extend(
+            [
+                _zip_entry("pkg/x.py", "x", stat.S_IFREG | 0o644),
+                _zip_entry("pkg/x.py", "x", stat.S_IFREG | 0o644),
+            ]
+        )
+    elif case == "alias_duplicate":
+        entries.extend(
+            [
+                _zip_entry("pkg/x.py", "x", stat.S_IFREG | 0o644),
+                _zip_entry("pkg/./x.py", "x", stat.S_IFREG | 0o644),
+            ]
+        )
+    elif case == "symlink":
+        entries.append(_zip_entry("pkg/x.py", "target", stat.S_IFLNK | 0o777))
+    elif case == "special":
+        entries.append(_zip_entry("pkg/x.py", "x", stat.S_IFIFO | 0o644))
+    elif case == "setuid":
+        entries.append(_zip_entry("pkg/x.py", "x", stat.S_IFREG | 0o4644))
+    elif case == "world_writable":
+        entries.append(_zip_entry("pkg/x.py", "x", stat.S_IFREG | 0o666))
+    elif case == "executable_file":
+        entries.append(_zip_entry("pkg/x.py", "x", stat.S_IFREG | 0o755))
+    else:
+        entries.append(_zip_entry("pkg/", b"", stat.S_IFDIR | 0o700))
+    with zipfile.ZipFile(archive, "w") as target:
+        for item, raw in entries:
+            target.writestr(item, raw)
+
+    blender = _executable(tmp_path / "Blender")
+    _, env = _profile(tmp_path)
+    runner = BlenderRunner(blender)
+    state = inspect_blender(blender, env, runner)
+    runner.calls.clear()
+    stage = tmp_path / "must-not-exist"
+    with pytest.raises(ValueError):
+        stage_blender_change(
+            state,
+            archive,
+            stage,
+            BlenderAuthorizations(True, True, True, True),
+            runner,
+        )
+    assert runner.calls == []
+    assert not stage.exists()
+
+
+def test_extension_zip_rejects_bounded_expansion(tmp_path: Path, monkeypatch) -> None:
+    archive = tmp_path / "expanded.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as target:
+        item, raw = _zip_entry(
+            "blender_manifest.toml",
+            b'id = "mcp"\nversion = "1.0.0"\n' + b" " * 1024,
+            stat.S_IFREG | 0o644,
+        )
+        target.writestr(item, raw)
+    monkeypatch.setattr(blender_adapter, "_MAX_ARCHIVE", 512)
+    with pytest.raises(ValueError):
+        load_extension_payload(archive)
+
+
+def test_directory_entries_use_canonical_zero_size_in_tree_digest(tmp_path: Path) -> None:
+    archive = tmp_path / "directory.zip"
+    with zipfile.ZipFile(archive, "w") as target:
+        for item, raw in (
+            _zip_entry(
+                "blender_manifest.toml",
+                'id = "mcp"\nversion = "1.0.0"\n',
+                stat.S_IFREG | 0o644,
+            ),
+            _zip_entry("pkg/", b"", stat.S_IFDIR | 0o755),
+            _zip_entry("pkg/x.py", "x", stat.S_IFREG | 0o644),
+        ):
+            target.writestr(item, raw)
+    payload = load_extension_payload(archive)
+    target = tmp_path / "mcp"
+    target.mkdir()
+    with zipfile.ZipFile(archive) as source:
+        source.extractall(target)
+    (target / "blender_manifest.toml").chmod(0o644)
+    (target / "pkg").chmod(0o755)
+    (target / "pkg/x.py").chmod(0o644)
+    root, reference = _tree_ref(target)
+    try:
+        image = reference.capture()
+        assert compare_extension_tree(payload, reference).exact
+        assert blender_adapter._tree_payload_digest(image) == payload.canonical_digest
+    finally:
+        root.close()
+
+
 def test_payload_policy_detects_missing_changed_and_foreign_extra(tmp_path: Path) -> None:
     expected = load_extension_payload(EXTENSION_ZIP)
     target = tmp_path / "mcp"
@@ -428,6 +556,125 @@ def test_staging_empty_profile_mutates_only_private_stage_and_sets_exact_prefere
         assert "PYTHONPATH" not in call_env
 
 
+def test_executable_ancestor_swap_is_rejected_before_blender_runs(tmp_path: Path) -> None:
+    selected_dir = _private(tmp_path / "selected")
+    blender = _executable(selected_dir / "Blender")
+    hostile = _executable(tmp_path / "hostile/Blender")
+    parked = tmp_path / "parked"
+    _, env = _profile(tmp_path)
+
+    class SwappingRunner(BlenderRunner):
+        def __call__(self, argv, *, cwd: Path, env):
+            result = super().__call__(argv, cwd=cwd, env=env)
+            if tuple(map(str, argv))[:2] == ("/usr/bin/lipo", "-archs"):
+                selected_dir.rename(parked)
+                selected_dir.symlink_to(hostile.parent, target_is_directory=True)
+            return result
+
+    runner = SwappingRunner(blender)
+    with pytest.raises((ValueError, InstallerError)):
+        inspect_blender(blender, env, runner)
+    assert [call[0][0] for call in runner.calls] == ["/usr/bin/lipo"]
+
+
+def test_source_ancestor_swap_cannot_redirect_payload_read(tmp_path: Path, monkeypatch) -> None:
+    source_dir = _private(tmp_path / "source")
+    archive = source_dir / "mcp.zip"
+    archive.write_bytes(EXTENSION_ZIP.read_bytes())
+    archive.chmod(0o600)
+    expected = load_extension_payload(archive).canonical_digest
+    hostile_dir = _private(tmp_path / "hostile")
+    hostile = hostile_dir / "mcp.zip"
+    with zipfile.ZipFile(hostile, "w") as target:
+        for item, raw in (
+            _zip_entry(
+                "blender_manifest.toml",
+                'id = "mcp"\nversion = "1.0.0"\n',
+                stat.S_IFREG | 0o644,
+            ),
+            _zip_entry("different.py", "hostile", stat.S_IFREG | 0o644),
+        ):
+            target.writestr(item, raw)
+    hostile.chmod(0o600)
+    parked = tmp_path / "parked-source"
+    original = blender_adapter._component_safe
+
+    def swap_after_validation(path: Path, *, allow_missing: bool) -> None:
+        original(path, allow_missing=allow_missing)
+        if path == archive:
+            source_dir.rename(parked)
+            source_dir.symlink_to(hostile_dir, target_is_directory=True)
+
+    monkeypatch.setattr(blender_adapter, "_component_safe", swap_after_validation)
+    assert load_extension_payload(archive).canonical_digest == expected
+
+
+def test_stage_ancestor_swap_is_rejected_before_writes_escape(tmp_path: Path) -> None:
+    blender = _executable(tmp_path / "Blender")
+    _, env = _profile(tmp_path)
+    stage = tmp_path / "transaction/stage"
+    parked = tmp_path / "parked-stage"
+    outside = _private(tmp_path / "outside")
+
+    class SwappingRunner(BlenderRunner):
+        def __call__(self, argv, *, cwd: Path, env):
+            result = super().__call__(argv, cwd=cwd, env=env)
+            args = tuple(map(str, argv))
+            if args[:4] == (str(blender), "--command", "extension", "validate"):
+                stage.rename(parked)
+                stage.symlink_to(outside, target_is_directory=True)
+            return result
+
+    runner = SwappingRunner(blender)
+    state = inspect_blender(blender, env, runner)
+    runner.calls.clear()
+    with pytest.raises((ValueError, InstallerError)):
+        stage_blender_change(
+            state,
+            EXTENSION_ZIP,
+            stage,
+            BlenderAuthorizations(True, True, True, True),
+            runner,
+        )
+    assert list(outside.iterdir()) == []
+    assert [call[0][3] for call in runner.calls] == ["validate"]
+
+
+def test_staged_blender_outputs_and_created_parents_are_fsynced(
+    tmp_path: Path, monkeypatch
+) -> None:
+    blender = _executable(tmp_path / "Blender")
+    _, env = _profile(tmp_path)
+    stage_parent = _private(tmp_path / "transactions")
+    stage = stage_parent / "stage"
+    runner = BlenderRunner(blender)
+    state = inspect_blender(blender, env, runner)
+    synced: set[tuple[int, int]] = set()
+    real_fsync = os.fsync
+
+    def recording_fsync(fd: int) -> None:
+        info = os.fstat(fd)
+        synced.add((info.st_dev, info.st_ino))
+        real_fsync(fd)
+
+    monkeypatch.setattr(blender_adapter.os, "fsync", recording_fsync)
+    change = stage_blender_change(
+        state,
+        EXTENSION_ZIP,
+        stage,
+        BlenderAuthorizations(True, True, True, True),
+        runner,
+    )
+    required = [stage_parent, stage, stage / "resources", stage / "resources/config"]
+    required.extend([stage / "resources/extensions", stage / "mcp-1.0.0.zip"])
+    required.extend(path for path in change.extension_path.rglob("*"))
+    required.extend([change.extension_path, change.userpref_path])
+    assert {(path.stat().st_dev, path.stat().st_ino) for path in required} <= synced
+    assert stat.S_IMODE(stage.stat().st_mode) == 0o700
+    assert stat.S_IMODE((stage / "resources/config").stat().st_mode) == 0o700
+    assert stat.S_IMODE((stage / "mcp-1.0.0.zip").stat().st_mode) == 0o600
+
+
 def test_staging_copies_existing_userpref_but_absent_profile_starts_without_copy(
     tmp_path: Path,
 ) -> None:
@@ -518,22 +765,22 @@ def _lsof(
     dev: int | None = None,
     ino: int | None = None,
     dyld: bool = False,
+    command: str | None = None,
 ) -> str:
     info = executable.stat()
-    records = []
+    records = [
+        f"ftxt\nD{info.st_dev if dev is None else dev}\ni{info.st_ino if ino is None else ino}\nn{executable}\n"
+    ]
     if dyld:
         records.append("ftxt\nD1\ni1\nn/usr/lib/dyld\n")
-    records.append(
-        f"ftxt\nD{info.st_dev if dev is None else dev}\ni{info.st_ino if ino is None else ino}\nn{executable}\n"
+    return (
+        f"p{pid}\nc{executable.name if command is None else command}\n"
+        f"u{os.getuid() if uid is None else uid}\n" + "".join(records)
     )
-    return f"p{pid}\ncBlender\nu{os.getuid() if uid is None else uid}\n" + "".join(records)
 
 
 def _listener(pid: int, *, uid: int | None = None) -> str:
-    return (
-        f"p{pid}\ncBlender\nu{os.getuid() if uid is None else uid}\n"
-        "f12u\nD1\ni2\nnTCP 127.0.0.1:9876 (LISTEN)\n"
-    )
+    return f"p{pid}\ncBlender\nu{os.getuid() if uid is None else uid}\nf12\nn127.0.0.1:9876\n"
 
 
 class LifecycleRunner:
@@ -566,7 +813,7 @@ def test_lifecycle_matches_selected_process_with_dyld_and_selected_listener(tmp_
             101: _lsof(101, blender, dyld=True),
             102: _lsof(102, _executable(tmp_path / "other/Blender")),
         },
-        _listener(101),
+        _listener(101) + "f13\nn[::1]:9876\n",
         0,
     )
     state = probe_blender_lifecycle(blender, runner)
@@ -579,7 +826,7 @@ def test_lifecycle_matches_selected_process_with_dyld_and_selected_listener(tmp_
 
 def test_lifecycle_reports_free_port_and_foreign_listener_identity(tmp_path: Path) -> None:
     blender = _executable(tmp_path / "Blender")
-    foreign = _executable(tmp_path / "foreign/Blender")
+    foreign = _executable(tmp_path / "foreign/Python")
     free = probe_blender_lifecycle(blender, LifecycleRunner("", {}))
     assert free.matching_selected_pids == ()
     assert free.listener_pid is None and free.listener_executable is None and free.port_free
@@ -608,6 +855,36 @@ def test_lifecycle_rejects_malformed_duplicate_or_ambiguous_records(
         probe_blender_lifecycle(blender, runner)
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "p10\ncBlender\nu501\nf12\n",
+        "p10\ncBlender\nu501\nf12\nn*:9876\nn*:9876\n",
+        "p10\ncBlender\nu501\nf12\nD1\nn*:9876\n",
+        "p10\ncBlender\nu501\nf12\nxunknown\nn*:9876\n",
+        "p10\ncBlender\nu501\nf12\nf13\nn*:9876\n",
+        "p10\ncBlender\nu501\nf12\nn*:9876\nf12\nn*:9876\n",
+    ],
+)
+def test_listener_parser_rejects_malformed_duplicate_and_unknown_fields(raw: str) -> None:
+    with pytest.raises(InstallerError):
+        blender_adapter._parse_lsof_listener(raw)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "p10\ncBlender\nu501\nftxt\nD1\ni2\n",
+        "p10\ncBlender\nu501\nftxt\nD1\ni2\nn/x/Blender\nn/x/Blender\n",
+        "p10\ncBlender\nu501\nftxt\nD1\ni2\nxunknown\nn/x/Blender\n",
+        "p10\ncBlender\nu501\nftxt\nD1\ni2\nfmem\nn/x/Blender\n",
+    ],
+)
+def test_txt_parser_rejects_malformed_duplicate_and_unknown_fields(raw: str) -> None:
+    with pytest.raises(InstallerError):
+        blender_adapter._parse_lsof_txt(raw)
+
+
 @pytest.mark.parametrize("failure", ["wrong_uid", "same_path_wrong_inode", "multiple_executables"])
 def test_lifecycle_fails_closed_on_selected_executable_identity_ambiguity(
     tmp_path: Path, failure: str
@@ -633,8 +910,43 @@ def test_disposable_live_process_lsof_output_is_accepted_by_strict_parser() -> N
         capture_output=True,
         text=True,
     )
-    processes = blender_adapter._parse_lsof_processes(completed.stdout)
+    processes = blender_adapter._parse_lsof_txt(completed.stdout)
     assert len(processes) == 1
     assert processes[0].pid == os.getpid()
     assert processes[0].uid == os.getuid()
     assert processes[0].files
+    main = processes[0].files[0]
+    assert os.path.samefile(main.path, sys.executable)
+    main_info = Path(main.path).stat()
+    assert (main.device, main.inode) == (main_info.st_dev, main_info.st_ino)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="disposable lsof parser probe is Darwin-only")
+def test_disposable_live_listener_exact_command_is_accepted_by_strict_parser() -> None:
+    listener = socket.socket()
+    try:
+        try:
+            listener.bind(("127.0.0.1", 9876))
+        except OSError:
+            pytest.skip("TCP port 9876 is already occupied")
+        listener.listen()
+        completed = subprocess.run(
+            [
+                "/usr/sbin/lsof",
+                "-nP",
+                "-iTCP:9876",
+                "-sTCP:LISTEN",
+                "-FpcfDinu",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        processes = blender_adapter._parse_lsof_listener(completed.stdout)
+        assert len(processes) == 1
+        assert processes[0].pid == os.getpid()
+        assert processes[0].uid == os.getuid()
+        assert len(processes[0].files) == 1
+        assert processes[0].files[0].path.endswith(":9876")
+    finally:
+        listener.close()
