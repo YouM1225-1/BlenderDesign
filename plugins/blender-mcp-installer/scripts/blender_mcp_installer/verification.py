@@ -960,29 +960,51 @@ def inspect_installation(
     return inspection
 
 
-def _valid_initialize(value: object, manifest: ReleaseManifest) -> bool:
-    if type(value) is not dict or set(value) != {
-        "protocolVersion",
-        "capabilities",
-        "serverInfo",
-    }:
+def _exact_value(value: object, expected: object) -> bool:
+    if type(value) is not type(expected):
         return False
-    capabilities = value["capabilities"]
-    server = value["serverInfo"]
-    return (
-        type(value["protocolVersion"]) is str
-        and value["protocolVersion"] == "2025-06-18"
-        and type(capabilities) is dict
-        and set(capabilities) == {"tools"}
-        and type(capabilities["tools"]) is dict
-        and not capabilities["tools"]
-        and type(server) is dict
-        and set(server) == {"name", "version"}
-        and type(server["name"]) is str
-        and server["name"] == manifest.server["distribution"]
-        and type(server["version"]) is str
-        and server["version"] == manifest.server["version"]
-    )
+    if type(expected) is dict:
+        return value.keys() == expected.keys() and all(
+            _exact_value(value[key], item) for key, item in expected.items()
+        )
+    return value == expected
+
+
+def _valid_initialize(value: object, manifest: ReleaseManifest) -> bool:
+    legacy = {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {"tools": {}},
+        "serverInfo": {
+            "name": manifest.server["distribution"],
+            "version": manifest.server["version"],
+        },
+    }
+    if _exact_value(value, legacy):
+        return True
+    if type(value) is not dict or type(value.get("instructions")) is not str:
+        return False
+    current = {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {
+            "completions": None,
+            "experimental": {},
+            "logging": None,
+            "prompts": {"listChanged": False},
+            "resources": {"listChanged": False, "subscribe": False},
+            "tasks": None,
+            "tools": {"listChanged": False},
+        },
+        "serverInfo": {
+            "name": manifest.server["distribution"],
+            "version": manifest.server["mcp_sdk"],
+            "icons": None,
+            "title": None,
+            "websiteUrl": None,
+        },
+        "_meta": None,
+        "instructions": value["instructions"],
+    }
+    return _exact_value(value, current)
 
 
 def verify_live(

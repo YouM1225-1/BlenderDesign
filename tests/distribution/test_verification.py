@@ -804,6 +804,30 @@ class Session:
         return {"content": [{"type": "text", "text": "{}"}]}
 
 
+def _observed_initialize():
+    return {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {
+            "completions": None,
+            "experimental": {},
+            "logging": None,
+            "prompts": {"listChanged": False},
+            "resources": {"listChanged": False, "subscribe": False},
+            "tasks": None,
+            "tools": {"listChanged": False},
+        },
+        "serverInfo": {
+            "name": "blender-mcp",
+            "version": "1.28.1",
+            "icons": None,
+            "title": None,
+            "websiteUrl": None,
+        },
+        "_meta": None,
+        "instructions": "Blender MCP server instructions",
+    }
+
+
 class Handle:
     def __init__(self, client: Session, *, fail: str | None = None) -> None:
         self.client = client
@@ -955,7 +979,7 @@ def test_official_probe_keeps_locked_runtime_tree_and_marker_exact(tmp_path: Pat
         try:
             client = handle.open_client()
             initialized = client.initialize()
-            assert type(initialized) is dict and type(initialized.get("protocolVersion")) is str
+            assert verification._valid_initialize(initialized, bundle.manifest)
             assert tuple(client.list_tools()) == bundle.manifest.tools
             assert type(client.call_tool("get_blendfile_summary_datablocks", {})) is dict
         finally:
@@ -1107,6 +1131,84 @@ def test_live_rejects_noncanonical_managed_target_tuple(
     assert probe.command is None and not handle.opened
 
 
+def test_live_accepts_exact_observed_initialize_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = Session(initialize_result=_observed_initialize())
+    bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
+
+    result = verify_live(
+        bundle,
+        inspection,
+        inspection.runtime_command,
+        inspection.host.codex_bin,
+        hostile,
+        probe,
+    )
+
+    assert result.tool_count == 26
+    assert handle.closed and handle.terminated and handle.waited == 2.0
+
+
+_MISSING = object()
+
+
+@pytest.mark.parametrize(
+    "path,replacement",
+    [
+        (("_meta",), _MISSING),
+        (("extra",), True),
+        (("_meta",), {}),
+        (("instructions",), None),
+        (("instructions",), True),
+        (("protocolVersion",), "2025-06-18"),
+        (("capabilities", "tools"), _MISSING),
+        (("capabilities", "extra"), None),
+        (("capabilities", "completions"), False),
+        (("capabilities", "experimental"), []),
+        (("capabilities", "prompts", "listChanged"), 0),
+        (("capabilities", "resources", "subscribe"), True),
+        (("capabilities", "tasks"), {}),
+        (("capabilities", "tools", "listChanged"), None),
+        (("serverInfo", "title"), _MISSING),
+        (("serverInfo", "extra"), None),
+        (("serverInfo", "name"), "foreign"),
+        (("serverInfo", "version"), "999"),
+        (("serverInfo", "icons"), []),
+        (("serverInfo", "title"), ""),
+        (("serverInfo", "websiteUrl"), False),
+    ],
+)
+def test_live_rejects_any_observed_initialize_schema_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: tuple[str, ...],
+    replacement,
+) -> None:
+    initialize = _observed_initialize()
+    target = initialize
+    for key in path[:-1]:
+        target = target[key]
+    if replacement is _MISSING:
+        target.pop(path[-1])
+    else:
+        target[path[-1]] = replacement
+    bundle, inspection, probe, handle, hostile = _live(
+        tmp_path, monkeypatch, Session(initialize_result=initialize)
+    )
+
+    with pytest.raises(InstallerError, match="MCP handshake failed"):
+        verify_live(
+            bundle,
+            inspection,
+            inspection.runtime_command,
+            inspection.host.codex_bin,
+            hostile,
+            probe,
+        )
+    assert handle.closed and handle.terminated and handle.waited == 2.0
+
+
 @pytest.mark.parametrize(
     "initialize_result",
     [
@@ -1142,8 +1244,22 @@ def test_live_rejects_noncanonical_managed_target_tuple(
             "serverInfo": {"name": "blender-mcp", "version": "1.0.0"},
             "extra": True,
         },
+        {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "blender-mcp", "version": "1.0.0"},
+        },
     ],
-    ids=("missing", "protocol", "capability", "capability-type", "name", "version", "extra"),
+    ids=(
+        "missing",
+        "protocol",
+        "capability",
+        "capability-type",
+        "name",
+        "version",
+        "extra",
+        "mixed",
+    ),
 )
 def test_live_rejects_malformed_or_wrong_initialize_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, initialize_result
