@@ -103,12 +103,18 @@ class RuntimeRunner:
             python.chmod(0o700)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[1:4] == ("pip", "install", "--python"):
-            if args[-1] == str(self.bundle.wheel_path):
+            if Path(args[-1]).name == self.bundle.wheel_path.name:
                 server = Path(args[4]).with_name("blender-mcp")
                 probe = server.with_name("server-probe.py")
                 module = server.parent.parent / "lib/python3.13/site-packages/blmcp/__init__.py"
                 module.parent.mkdir(parents=True)
                 module.write_text("# fake official module\n")
+                tool = module.parent / "tools/changed.py"
+                tool.parent.mkdir()
+                tool.write_text("# fake official tool\n")
+                dependency = module.parent.parent / "mcp/dependency.py"
+                dependency.parent.mkdir()
+                dependency.write_text("# fake locked dependency\n")
                 probe.write_text(
                     "import json, pathlib, sys\n"
                     "raw = pathlib.Path(sys.argv[1]).with_name('observed-env').read_bytes()\n"
@@ -136,6 +142,27 @@ class RuntimeRunner:
             }
             return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
         raise AssertionError(args)
+
+
+class BundleSwapRunner(RuntimeRunner):
+    def __init__(self, bundle: StagedBundle, role: str, after_call: int, mutation: str):
+        super().__init__(bundle)
+        self.role = role
+        self.after_call = after_call
+        self.mutation = mutation
+        self.swapped = False
+
+    def __call__(self, argv, *, cwd: Path, env):
+        result = super().__call__(argv, cwd=cwd, env=env)
+        if len(self.calls) - 1 == self.after_call:
+            path = self.bundle.runtime_lock_path if self.role == "lock" else self.bundle.wheel_path
+            if self.mutation == "replace":
+                original = path.with_name(path.name + ".opened-original")
+                path.rename(original)
+            path.write_bytes(b"replacement-with-expected-fake-metadata")
+            path.chmod(0o600)
+            self.swapped = True
+        return result
 
 
 def _stage(tmp_path: Path, bundle: StagedBundle):
@@ -186,7 +213,7 @@ def test_stage_uses_hash_binary_only_commands_and_closed_environment(tmp_path: P
             "--default-index",
             "https://pypi.org/simple",
             "-r",
-            str(bundle.runtime_lock_path),
+            str(stage.path / bundle.runtime_lock_path.name),
         )
         assert wheel[0] == (
             "/opt/uv",
@@ -196,8 +223,10 @@ def test_stage_uses_hash_binary_only_commands_and_closed_environment(tmp_path: P
             str(stage.path / "bin/python"),
             "--no-deps",
             "--no-build",
-            str(bundle.wheel_path),
+            str(stage.path / bundle.wheel_path.name),
         )
+        assert not (stage.path / bundle.runtime_lock_path.name).exists()
+        assert not (stage.path / bundle.wheel_path.name).exists()
         assert probe[0][0] == str(stage.path / "bin/python")
         for index, (_argv, _cwd, env) in enumerate(runner.calls):
             if index == 2:
@@ -340,6 +369,66 @@ def test_absent_and_altered_runtime_are_not_exact(tmp_path: Path) -> None:
         assert not inspect_runtime(TreeRef(root, stage.relative), bundle.manifest).exact
     finally:
         root.close()
+
+
+@pytest.mark.parametrize(
+    "relative,mode",
+    [
+        ("bin/python", 0o700),
+        ("lib/python3.13/site-packages/blmcp/tools/changed.py", 0o600),
+        ("lib/python3.13/site-packages/mcp/dependency.py", 0o600),
+        ("extra-unmanaged-code.py", 0o600),
+    ],
+)
+def test_complete_runtime_content_is_bound_before_execution(
+    tmp_path: Path, relative: str, mode: int
+) -> None:
+    bundle = _bundle(tmp_path)
+    root, stage, runner = _stage(tmp_path, bundle)
+    try:
+        target = stage.path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"changed-after-staging")
+        target.chmod(mode)
+        before = len(runner.calls)
+        assert not inspect_runtime(TreeRef(root, stage.relative), bundle.manifest).exact
+        with pytest.raises(InstallerError, match="runtime verification failed"):
+            verify_runtime(
+                TreeRef(root, stage.relative), bundle.manifest, _profile(tmp_path), runner
+            )
+        assert len(runner.calls) == before
+    finally:
+        root.close()
+
+
+@pytest.mark.parametrize("role", ["lock", "wheel"])
+@pytest.mark.parametrize("after_call", [0, 1, 2])
+@pytest.mark.parametrize("mutation", ["replace", "rewrite"])
+def test_bundle_inputs_remain_fd_bound_at_every_runner_boundary(
+    tmp_path: Path, role: str, after_call: int, mutation: str
+) -> None:
+    bundle = _bundle(tmp_path, copy=True)
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    with SafeRoot.open(data, os.getuid(), data) as root:
+        created = create_deterministic_stage(
+            root, "runtime.stage", TreeImage.absent(), NoOpFaultInjector()
+        )
+        assert isinstance(created, StagedTree)
+        runner = BundleSwapRunner(bundle, role, after_call, mutation)
+        with pytest.raises(InstallerError, match="runtime installer input changed"):
+            stage_runtime(
+                bundle,
+                Path("/opt/uv").absolute(),
+                Path(sys.executable),
+                _profile(tmp_path),
+                created,
+                runner,
+            )
+        assert runner.swapped
+        assert not any(
+            len(argv) == 4 and argv[1:3] == ("-I", "-c") for argv, _cwd, _env in runner.calls
+        )
 
 
 def test_runtime_tree_uses_task3_forward_and_reverse_states(tmp_path: Path) -> None:

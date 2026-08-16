@@ -6,10 +6,11 @@ import os
 import re
 import shlex
 import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from types import MappingProxyType
-from typing import Mapping, Sequence
+from typing import Iterator, Mapping, Sequence
 
 from .bundle import ReleaseManifest, Runner, StagedBundle, validate_runtime_lock
 from .codex_adapter import ManagedProfile
@@ -150,40 +151,57 @@ def _absent_state(tree: TreeImage) -> RuntimeState:
     return RuntimeState(tree, None, {}, None, None, None, None, None, None, None, {}, (), False)
 
 
+def _content_summary(tree: TreeImage) -> tuple[int, str]:
+    entries = [
+        {
+            "path": entry.path,
+            "kind": entry.kind,
+            "mode": entry.mode,
+            "size": entry.size if entry.kind == "file" else None,
+            "sha256": entry.sha256,
+        }
+        for entry in tree.entries
+        if entry.path != _MARKER
+    ]
+    raw = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()
+    return len(entries), hashlib.sha256(raw).hexdigest()
+
+
 def _read_stable(path: Path, *, maximum: int | None = None) -> bytes:
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
-        before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode) or before.st_nlink < 1:
-            raise InstallerError("runtime input is not a regular file")
-        if maximum is not None and before.st_size > maximum:
-            raise InstallerError("runtime metadata is too large")
-        raw = b""
-        while len(raw) <= before.st_size:
-            chunk = os.read(fd, min(1024 * 1024, before.st_size - len(raw) + 1))
-            if not chunk:
-                break
-            raw += chunk
-        after = os.fstat(fd)
-        if (
-            before.st_dev,
-            before.st_ino,
-            before.st_uid,
-            before.st_mode,
-            before.st_size,
-            before.st_mtime_ns,
-        ) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_uid,
-            after.st_mode,
-            after.st_size,
-            after.st_mtime_ns,
-        ) or len(raw) != before.st_size:
-            raise InstallerError("runtime input changed while reading")
-        return raw
+        return _read_fd_stable(fd, maximum=maximum)
     finally:
         os.close(fd)
+
+
+def _identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+    )
+
+
+def _read_fd_stable(fd: int, *, maximum: int | None = None) -> bytes:
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink < 1:
+        raise InstallerError("runtime input is not a regular file")
+    if maximum is not None and before.st_size > maximum:
+        raise InstallerError("runtime metadata is too large")
+    raw = b""
+    while len(raw) <= before.st_size:
+        chunk = os.pread(fd, min(1024 * 1024, before.st_size - len(raw) + 1), len(raw))
+        if not chunk:
+            break
+        raw += chunk
+    if _identity(os.fstat(fd)) != _identity(before) or len(raw) != before.st_size:
+        raise InstallerError("runtime input changed while reading")
+    return raw
 
 
 def _locked_distributions(raw: bytes) -> dict[str, str]:
@@ -213,22 +231,134 @@ def _expected_distributions(lock_raw: bytes, manifest: ReleaseManifest) -> dict[
     return dict(sorted(result.items()))
 
 
-def _verify_bundle(bundle: StagedBundle) -> tuple[bytes, dict[str, str]]:
+@dataclass
+class _RetainedInput:
+    parent_fd: int
+    name: str
+    fd: int
+    identity: tuple[int, ...]
+    size: int
+    sha256: str
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
+def _validate_input(item: _RetainedInput) -> None:
+    try:
+        linked = os.stat(item.name, dir_fd=item.parent_fd, follow_symlinks=False)
+        raw = _read_fd_stable(item.fd)
+    except (FileNotFoundError, OSError, InstallerError) as exc:
+        raise InstallerError("runtime installer input changed") from exc
+    if (
+        _identity(linked) != item.identity
+        or _identity(os.fstat(item.fd)) != item.identity
+        or len(raw) != item.size
+        or hashlib.sha256(raw).hexdigest() != item.sha256
+    ):
+        raise InstallerError("runtime installer input changed")
+
+
+def _validate_inputs(items: Sequence[_RetainedInput]) -> None:
+    for item in items:
+        _validate_input(item)
+
+
+@contextmanager
+def _verified_bundle_inputs(
+    bundle: StagedBundle,
+) -> Iterator[tuple[dict[str, _RetainedInput], bytes, dict[str, str]]]:
     if type(bundle) is not StagedBundle:
         raise ValueError("invalid staged bundle")
     _absolute(bundle.root, "staged bundle root")
     by_role = {artifact.role: artifact for artifact in bundle.manifest.artifacts}
-    for role, path in (
-        ("runtime_lock", bundle.runtime_lock_path),
-        ("server_wheel", bundle.wheel_path),
-    ):
-        raw = _read_stable(path)
-        artifact = by_role[role]
-        if len(raw) != artifact.size or hashlib.sha256(raw).hexdigest() != artifact.sha256:
-            raise InstallerError("bundle artifact changed")
-        if role == "runtime_lock":
-            lock_raw = raw
-    return lock_raw, _expected_distributions(lock_raw, bundle.manifest)
+    root_fd = os.open(bundle.root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    opened: dict[str, _RetainedInput] = {}
+    try:
+        for role, name in (
+            ("runtime_lock", bundle.runtime_lock_path.name),
+            ("server_wheel", bundle.wheel_path.name),
+        ):
+            fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd)
+            try:
+                info = os.fstat(fd)
+                raw = _read_fd_stable(fd)
+                artifact = by_role[role]
+                if len(raw) != artifact.size or hashlib.sha256(raw).hexdigest() != artifact.sha256:
+                    raise InstallerError("bundle artifact changed")
+                opened[role] = _RetainedInput(
+                    root_fd,
+                    name,
+                    fd,
+                    _identity(info),
+                    artifact.size,
+                    artifact.sha256,
+                )
+            except BaseException:
+                os.close(fd)
+                raise
+        _validate_inputs(tuple(opened.values()))
+        lock_raw = _read_fd_stable(opened["runtime_lock"].fd)
+        yield opened, lock_raw, _expected_distributions(lock_raw, bundle.manifest)
+    finally:
+        for item in opened.values():
+            item.close()
+        os.close(root_fd)
+
+
+def _copy_retained_input(
+    source: _RetainedInput,
+    stage_fd: int,
+) -> _RetainedInput:
+    _validate_input(source)
+    fd = os.open(
+        source.name,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=stage_fd,
+    )
+    try:
+        copied = 0
+        digest = hashlib.sha256()
+        while chunk := os.pread(source.fd, 1024 * 1024, copied):
+            offset = 0
+            while offset < len(chunk):
+                offset += os.write(fd, chunk[offset:])
+            digest.update(chunk)
+            copied += len(chunk)
+        os.fchmod(fd, 0o600)
+        os.fsync(fd)
+        info = os.fstat(fd)
+        if copied != source.size or digest.hexdigest() != source.sha256:
+            raise InstallerError("runtime installer input changed")
+        result = _RetainedInput(
+            stage_fd,
+            source.name,
+            fd,
+            _identity(info),
+            source.size,
+            source.sha256,
+        )
+        _validate_input(source)
+        _validate_input(result)
+        return result
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _remove_private_inputs(stage_fd: int, inputs: Sequence[_RetainedInput]) -> None:
+    for item in inputs:
+        _validate_input(item)
+    for item in inputs:
+        os.unlink(item.name, dir_fd=stage_fd)
+    os.fsync(stage_fd)
+    for item in inputs:
+        try:
+            os.stat(item.name, dir_fd=stage_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        raise InstallerError("runtime installer input changed")
 
 
 def _run(
@@ -254,6 +384,21 @@ def _run(
     if not isinstance(stdout, str):
         raise InstallerError(f"{label} failed")
     return stdout
+
+
+def _run_with_inputs(
+    runner: Runner,
+    argv: Sequence[str],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    label: str,
+    inputs: Sequence[_RetainedInput],
+) -> str:
+    _validate_inputs(inputs)
+    result = _run(runner, argv, cwd=cwd, env=env, label=label)
+    _validate_inputs(inputs)
+    return result
 
 
 def _parse_probe(
@@ -385,53 +530,78 @@ def stage_runtime(
         or stage.image.entries
     ):
         raise InstallerError("runtime stage state conflict")
-    lock_raw, expected = _verify_bundle(bundle)
-    env = _install_env(profile)
-    wheel_env = dict(env)
-    del wheel_env["UV_REQUIRE_HASHES"]
     runtime = stage.path
-    commands = (
-        (
+    with _verified_bundle_inputs(bundle) as (bundle_inputs, lock_raw, expected):
+        sources = tuple(bundle_inputs.values())
+        env = _install_env(profile)
+        wheel_env = dict(env)
+        del wheel_env["UV_REQUIRE_HASHES"]
+        _run_with_inputs(
+            runner,
             (str(uv_bin), "venv", "--relocatable", "--python", str(python_bin), str(runtime)),
-            "runtime virtual environment creation",
-            env,
-        ),
-        (
-            (
-                str(uv_bin),
-                "pip",
-                "install",
-                "--python",
-                str(runtime / "bin/python"),
-                "--require-hashes",
-                "--only-binary",
-                ":all:",
-                "--no-deps",
-                "--default-index",
-                _INDEX,
-                "-r",
-                str(bundle.runtime_lock_path),
-            ),
-            "locked runtime installation",
-            env,
-        ),
-        (
-            (
-                str(uv_bin),
-                "pip",
-                "install",
-                "--python",
-                str(runtime / "bin/python"),
-                "--no-deps",
-                "--no-build",
-                str(bundle.wheel_path),
-            ),
-            "official server installation",
-            wheel_env,
-        ),
-    )
-    for argv, label, command_env in commands:
-        _run(runner, argv, cwd=runtime.parent, env=command_env, label=label)
+            cwd=runtime.parent,
+            env=env,
+            label="runtime virtual environment creation",
+            inputs=sources,
+        )
+        stage_fd = stage.root.open_directory(stage.relative)
+        private_inputs: list[_RetainedInput] = []
+        try:
+            for role in ("runtime_lock", "server_wheel"):
+                private_inputs.append(_copy_retained_input(bundle_inputs[role], stage_fd))
+            os.fsync(stage_fd)
+            bound = (*sources, *private_inputs)
+            _run_with_inputs(
+                runner,
+                (
+                    str(uv_bin),
+                    "pip",
+                    "install",
+                    "--python",
+                    str(runtime / "bin/python"),
+                    "--require-hashes",
+                    "--only-binary",
+                    ":all:",
+                    "--no-deps",
+                    "--default-index",
+                    _INDEX,
+                    "-r",
+                    str(runtime / bundle.runtime_lock_path.name),
+                ),
+                cwd=runtime.parent,
+                env=env,
+                label="locked runtime installation",
+                inputs=bound,
+            )
+            _run_with_inputs(
+                runner,
+                (
+                    str(uv_bin),
+                    "pip",
+                    "install",
+                    "--python",
+                    str(runtime / "bin/python"),
+                    "--no-deps",
+                    "--no-build",
+                    str(runtime / bundle.wheel_path.name),
+                ),
+                cwd=runtime.parent,
+                env=wheel_env,
+                label="official server installation",
+                inputs=bound,
+            )
+            _remove_private_inputs(stage_fd, private_inputs)
+        except BaseException:
+            try:
+                if private_inputs:
+                    _remove_private_inputs(stage_fd, private_inputs)
+            except InstallerError:
+                pass
+            raise
+        finally:
+            for item in private_inputs:
+                item.close()
+            os.close(stage_fd)
     _materialize_links(runtime)
     metadata = _probe_runtime(runtime, expected, bundle.manifest.tools, profile, runner)
     launcher_environment = _profile_env(profile)
@@ -440,9 +610,13 @@ def stage_runtime(
     _write_exclusive(runtime / _LOCK_COPY, lock_raw, 0o600)
     entry_point_raw = _read_stable(runtime / PurePath(metadata["entry_point_relative"]))
     module_raw = _read_stable(runtime / PurePath(metadata["module_relative"]))
+    _sync_tree(runtime)
+    content_count, content_sha256 = _content_summary(stage.capture())
     marker = {
         "schema_version": 1,
         **metadata,
+        "content_count": content_count,
+        "content_sha256": content_sha256,
         "entry_point_sha256": hashlib.sha256(entry_point_raw).hexdigest(),
         "module_sha256": hashlib.sha256(module_raw).hexdigest(),
         "launcher_relative": _LAUNCHER,
@@ -469,6 +643,8 @@ def _load_marker(runtime: Path) -> dict[str, object]:
         raise InstallerError("invalid runtime metadata") from exc
     keys = {
         "schema_version",
+        "content_count",
+        "content_sha256",
         "python_version",
         "distributions",
         "entry_point",
@@ -493,6 +669,15 @@ def _state(runtime_root: TargetRef, manifest: ReleaseManifest, *, strict: bool) 
     runtime = runtime_root.path
     try:
         marker = _load_marker(runtime)
+        content_count, content_sha256 = _content_summary(tree)
+        if (
+            type(marker["content_count"]) is not int
+            or marker["content_count"] != content_count
+            or type(marker["content_sha256"]) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", marker["content_sha256"])
+            or marker["content_sha256"] != content_sha256
+        ):
+            raise InstallerError("runtime content changed")
         lock_raw = _read_stable(runtime / _LOCK_COPY)
         runtime_lock = next(
             artifact for artifact in manifest.artifacts if artifact.role == "runtime_lock"
