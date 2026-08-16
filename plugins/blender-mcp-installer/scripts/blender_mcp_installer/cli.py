@@ -10,7 +10,7 @@ import sys
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PurePosixPath
 from types import MappingProxyType
 from typing import Iterator, Mapping, Sequence
 from uuid import UUID, uuid4
@@ -1974,24 +1974,51 @@ def _extension_restore_comparison(
     absent = TreeImage.absent()
     expected_recovery = action.pre if action.pre.state is ImageState.PRESENT else absent
     comparison = compare_extension_tree(load_extension_payload(bundle.extension_path), target)
-    disposable = set(comparison.disposable_pyc) | set(comparison.disposable_dirs)
+    if not isinstance(post, TreeImage):
+        raise InstallerError("rollback preflight conflict")
+    post_entries = {entry.path: entry for entry in post.entries}
+    preserved = set(post_entries)
+    removable_pyc = set(comparison.disposable_pyc) - preserved
+    removable_dirs = set(comparison.disposable_dirs) - preserved
+    removable = removable_pyc | removable_dirs
+    affected_dirs = {
+        parent.as_posix()
+        for path in removable
+        for parent in PurePosixPath(path).parents
+        if parent != PurePosixPath(".")
+    }
     current = comparison.current_image
-    cleaned_entries = tuple(entry for entry in current.entries if entry.path not in disposable)
+    cleaned_entries = []
+    for entry in current.entries:
+        if entry.path in removable:
+            continue
+        if entry.path in affected_dirs:
+            expected = post_entries.get(entry.path)
+            if (
+                expected is None
+                or entry.kind != "dir"
+                or expected.kind != "dir"
+                or (entry.dev, entry.ino, entry.uid, entry.mode)
+                != (expected.dev, expected.ino, expected.uid, expected.mode)
+            ):
+                raise InstallerError("rollback preflight conflict")
+            cleaned_entries.append(expected)
+        else:
+            cleaned_entries.append(entry)
     if (
         action.kind is not ActionKind.EXTENSION_TREE
         or action.state is not ActionState.COMPLETED
-        or not isinstance(post, TreeImage)
         or capture_tree(stage.root, stage.relative) != absent
         or capture_tree(recovery.root, recovery.relative) != expected_recovery
         or not comparison.exact
-        or not comparison.disposable_pyc
+        or not removable_pyc
         or (
             current.state,
             current.dev,
             current.ino,
             current.uid,
             current.mode,
-            cleaned_entries,
+            tuple(cleaned_entries),
         )
         != (post.state, post.dev, post.ino, post.uid, post.mode, post.entries)
     ):

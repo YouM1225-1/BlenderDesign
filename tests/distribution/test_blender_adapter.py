@@ -467,6 +467,13 @@ def test_only_source_mapped_current_uid_pyc_is_disposable_and_removed_fd_relativ
     for file in target.rglob("*"):
         if file.is_file():
             file.chmod(0o644)
+    subprocess.run(
+        [sys.executable, "-I", "-c", "import py_compile;py_compile.compile('__init__.py')"],
+        cwd=target,
+        check=True,
+    )
+    cache = target / "__pycache__"
+    baseline_pyc = next(cache.glob("__init__.*.pyc"))
     root, reference = _tree_ref(target)
     try:
         expected_image = reference.capture()
@@ -477,15 +484,16 @@ def test_only_source_mapped_current_uid_pyc_is_disposable_and_removed_fd_relativ
         cwd=target,
         check=True,
     )
-    cache = target / "__pycache__"
     pyc = next(cache.glob("capture_output.*.pyc"))
     root, reference = _tree_ref(target)
     try:
         comparison = compare_extension_tree(expected, reference)
         assert comparison.exact
-        assert comparison.disposable_pyc == (f"__pycache__/{pyc.name}",)
+        assert comparison.disposable_pyc == tuple(
+            sorted((f"__pycache__/{baseline_pyc.name}", f"__pycache__/{pyc.name}"))
+        )
         image = prepare_extension_for_restore(comparison, expected_image)
-        assert not cache.exists()
+        assert cache.is_dir() and tuple(cache.glob("*.pyc")) == (baseline_pyc,)
         assert image == expected_image
         assert compare_extension_tree(expected, reference).exact
     finally:

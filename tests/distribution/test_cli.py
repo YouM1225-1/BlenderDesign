@@ -839,6 +839,30 @@ def test_first_install_orchestrates_journaled_adapters(
     assert not roots.codex_config.exists()
 
 
+_BASELINE_EXTENSION_SOURCES = (
+    "__init__.py",
+    "capture_output.py",
+    "cli.py",
+    "execute_blocking.py",
+)
+_LIVE_EXTENSION_SOURCES = ("deferred_tool.py", "weak_sandbox.py")
+
+
+def _compile_extension_sources(root: Path, sources: tuple[str, ...]) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            "import py_compile;"
+            + "".join(f"py_compile.compile({source!r},doraise=True);" for source in sources),
+        ],
+        cwd=root,
+        check=True,
+    )
+
+
 def _extension_rollback_fixture(
     host: HostHarness,
 ) -> tuple[InstallRoots, StagedBundle, Receipt, Path, TreeImage]:
@@ -868,6 +892,7 @@ def _extension_rollback_fixture(
     for path in roots.extension_target.rglob("*"):
         if path.is_file():
             path.chmod(0o644)
+    _compile_extension_sources(roots.extension_target, _BASELINE_EXTENSION_SOURCES)
     with SafeRoot.open(host.extensions, os.getuid(), host.resources) as extensions:
         extension_post = capture_tree(extensions, Path("user_default/mcp"))
     selector = cli._selector(None, install_id, 1)
@@ -988,21 +1013,9 @@ def _extension_rollback_fixture(
 
 
 def _compile_live_extension(roots: InstallRoots) -> Path:
-    subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            "-B",
-            "-c",
-            "import py_compile;"
-            "py_compile.compile('__init__.py',doraise=True);"
-            "py_compile.compile('capture_output.py',doraise=True)",
-        ],
-        cwd=roots.extension_target,
-        check=True,
-    )
+    _compile_extension_sources(roots.extension_target, _LIVE_EXTENSION_SOURCES)
     cache = roots.extension_target / "__pycache__"
-    assert len(tuple(cache.glob("*.pyc"))) == 2
+    assert len(tuple(cache.glob("*.pyc"))) == 6
     return cache
 
 
@@ -1010,7 +1023,15 @@ def test_extension_rollback_cleans_live_pyc_after_intent_before_native_restore(
     host: HostHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     roots, bundle, receipt, receipt_path, extension_post = _extension_rollback_fixture(host)
+    baseline_pyc = {
+        entry.path: entry for entry in extension_post.entries if entry.path.endswith(".pyc")
+    }
+    assert len(baseline_pyc) == 4 and any(
+        entry.path == "__pycache__" for entry in extension_post.entries
+    )
     cache = _compile_live_extension(roots)
+    live_pyc = {f"__pycache__/{path.name}" for path in cache.glob("*.pyc")} - set(baseline_pyc)
+    assert len(live_pyc) == 2
     prepare = cli.prepare_extension_for_restore
     compare = cli.compare_extension_tree
     observed: list[ReceiptStatus] = []
@@ -1025,7 +1046,11 @@ def test_extension_rollback_cleans_live_pyc_after_intent_before_native_restore(
         observed.append(cli.load_receipt(receipt_path, roots).status)
         image = prepare(comparison, expected)
         assert image == extension_post
-        assert not cache.exists()
+        assert cache.is_dir()
+        assert {f"__pycache__/{path.name}" for path in cache.glob("*.pyc")} == set(baseline_pyc)
+        assert {entry.path: entry for entry in image.entries if entry.path in baseline_pyc} == (
+            baseline_pyc
+        )
         return image
 
     monkeypatch.setattr(cli, "compare_extension_tree", tracked_compare)
@@ -1062,7 +1087,9 @@ def test_extension_rollback_cleanup_is_retryable_at_native_restore_fault(
             manifest_sha256="0" * 64,
         )
 
-    assert not any(path.name == "__pycache__" for path in host.root.rglob("__pycache__"))
+    recovery_cache = roots.extension_recovery(receipt.install_id) / "__pycache__"
+    assert not roots.extension_target.exists()
+    assert recovery_cache.is_dir() and len(tuple(recovery_cache.glob("*.pyc"))) == 4
     pending = cli.load_receipt(receipt_path, roots)
     rolled = cli._rollback_receipt(
         roots,
@@ -1074,11 +1101,19 @@ def test_extension_rollback_cleanup_is_retryable_at_native_restore_fault(
     )
     assert rolled.status is ReceiptStatus.ROLLED_BACK
     assert not roots.extension_target.exists()
+    assert not roots.extension_recovery(receipt.install_id).exists()
 
 
 @pytest.mark.parametrize(
     "conflict",
-    ["foreign-pyc", "unmapped", "nested", "wrong-uid", "source-modified"],
+    [
+        "foreign-pyc",
+        "unmapped",
+        "nested",
+        "wrong-uid",
+        "source-modified",
+        "baseline-pyc-changed",
+    ],
 )
 def test_extension_cache_conflicts_fail_before_rollback_intent(
     host: HostHarness, monkeypatch: pytest.MonkeyPatch, conflict: str
@@ -1088,7 +1123,6 @@ def test_extension_cache_conflicts_fail_before_rollback_intent(
         (roots.extension_target / "foreign.pyc").write_bytes(b"foreign")
     elif conflict == "unmapped":
         cache = roots.extension_target / "__pycache__"
-        cache.mkdir()
         (cache / "foreign.cpython-313.pyc").write_bytes(b"foreign")
     elif conflict == "nested":
         cache = roots.extension_target / "nested/__pycache__"
@@ -1098,6 +1132,9 @@ def test_extension_cache_conflicts_fail_before_rollback_intent(
         _compile_live_extension(roots)
         if conflict == "source-modified":
             (roots.extension_target / "capture_output.py").write_bytes(b"modified")
+        elif conflict == "baseline-pyc-changed":
+            pyc = next((roots.extension_target / "__pycache__").glob("capture_output.*.pyc"))
+            pyc.write_bytes(b"modified")
         else:
             compare = cli.compare_extension_tree
             real_uid = os.getuid()
