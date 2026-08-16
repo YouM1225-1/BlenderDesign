@@ -131,10 +131,10 @@ def test_trust_bootstrap_is_fail_fast_commit_derived_and_hook_free() -> None:
         '-c core.hooksPath="$PRIVATE_GIT_DIR/hooks"',
         'GIT_SOURCE_VIEW=("${GIT_PRIVATE[@]}" --work-tree="$SOURCE_DISTRIBUTION_ROOT")',
         '"${GIT_PRIVATE[@]}" cat-file -e "$EXPECTED_DISTRIBUTION_COMMIT^{commit}"',
-        '"${GIT_SOURCE_VIEW[@]}" diff --no-ext-diff --quiet',
         '"${GIT_SOURCE_VIEW[@]}" diff --no-ext-diff --cached --quiet',
-        "--untracked-files=all -- .agents plugins/blender-mcp-installer",
         '"${GIT_PRIVATE[@]}" read-tree "$EXPECTED_DISTRIBUTION_COMMIT"',
+        '"${GIT_SOURCE_VIEW[@]}" diff --no-ext-diff --quiet',
+        "--untracked-files=all -- .agents plugins/blender-mcp-installer",
         "worktree add --detach --no-checkout",
         'GIT_TRUSTED=("${GIT_SAFE_ENV[@]}" /usr/bin/git --no-pager --no-replace-objects',
         '-C "$TRUSTED_DISTRIBUTION_ROOT")',
@@ -326,6 +326,35 @@ def test_trust_bootstrap_rejects_tree_replace_attack_before_materialization(
     result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
     assert result.returncode != 0
     assert not evidence.exists()
+
+
+@pytest.mark.parametrize("index_flag", ["--assume-unchanged", "--skip-worktree"])
+def test_trust_bootstrap_rejects_dirty_tracked_source_hidden_by_index_flag(
+    tmp_path: Path, index_flag: str
+) -> None:
+    repo, commit = _trust_fixture(tmp_path)
+    relative_install = "plugins/blender-mcp-installer/scripts/install.py"
+    _git(repo, "update-index", index_flag, relative_install)
+    (repo / relative_install).write_text("MALICIOUS WORKTREE\n")
+    import_sentinel = tmp_path / "plugin-imported"
+    materialized = tmp_path / "materialized-installer"
+    env, _, _ = _trust_env(repo, commit, tmp_path)
+    env.update(
+        PLUGIN_IMPORT_SENTINEL=str(import_sentinel),
+        MATERIALIZED_EVIDENCE=str(materialized),
+    )
+    script = "\n".join(
+        (
+            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            'touch "$PLUGIN_IMPORT_SENTINEL"',
+            'cat "$PLUGIN_ROOT/scripts/install.py" > "$MATERIALIZED_EVIDENCE"',
+            _shell_block(SKILL.read_text(), "TRUST_CLEANUP"),
+        )
+    )
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert not import_sentinel.exists()
+    assert not materialized.exists()
 
 
 @pytest.mark.parametrize("mutation", ["dirty_script", "scoped_untracked", "checksum_tamper"])

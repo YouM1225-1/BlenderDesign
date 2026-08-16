@@ -170,15 +170,15 @@ cleanup_trust_on_exit() {
 }
 trap cleanup_trust_on_exit EXIT
 "${GIT_PRIVATE[@]}" cat-file -e "$EXPECTED_DISTRIBUTION_COMMIT^{commit}"
-"${GIT_SOURCE_VIEW[@]}" diff --no-ext-diff --quiet
 "${GIT_SOURCE_VIEW[@]}" diff --no-ext-diff --cached --quiet \
   "$EXPECTED_DISTRIBUTION_COMMIT"
+"${GIT_PRIVATE[@]}" read-tree "$EXPECTED_DISTRIBUTION_COMMIT"
+"${GIT_SOURCE_VIEW[@]}" diff --no-ext-diff --quiet
 test -z "$("${GIT_SOURCE_VIEW[@]}" status --porcelain=v1 \
   --untracked-files=all -- .agents plugins/blender-mcp-installer \
   docs/distribute-official-blender-mcp.md \
   docs/audits/2026-08-16-official-blender-mcp-distribution-acceptance.md \
   scripts/build_official_blender_mcp_distribution.py scripts/requirements)"
-"${GIT_PRIVATE[@]}" read-tree "$EXPECTED_DISTRIBUTION_COMMIT"
 "${GIT_PRIVATE[@]}" \
   worktree add --detach --no-checkout \
   "$TRUSTED_DISTRIBUTION_ROOT" "$EXPECTED_DISTRIBUTION_COMMIT"
@@ -219,9 +219,12 @@ cmp "$TRUSTED_CHECKSUMS" "$BUNDLE_ROOT/SHA256SUMS"
 This `--no-checkout` worktree is materialized with `read-tree` plus built-in
 `git archive`, so source checkout hooks and working-tree filters do not execute.
 Every Git object, index, worktree, and archive operation uses a private mode-0700 Git
-admin with empty config, hooks, templates, and info attributes. It reads only the
-validated source object database by hash. Source repository config/info metadata is
-never loaded; system/global config and replacement objects are disabled.
+admin with empty config, hooks, templates, and info attributes. The copied source
+index is used only for the staged-vs-reviewed check; `read-tree` then rebuilds it from
+the reviewed commit before any source-worktree comparison, so mutable source index
+flags cannot hide dirty files. The private admin reads only the validated source
+object database by hash. Source repository config/info metadata is never loaded;
+system/global config and replacement objects are disabled.
 Keep the private worktree and checksum file until the workflow is complete; they
 are evidence and all later paths derive from them. Never reset `DISTRIBUTION_ROOT`
 to the source checkout.
