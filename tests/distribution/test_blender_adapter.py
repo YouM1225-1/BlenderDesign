@@ -29,6 +29,7 @@ from blender_mcp_installer.blender_adapter import (  # noqa: E402
     resolve_blender_paths,
     stage_blender_change,
     verify_blender_files,
+    verify_blender_payload,
 )
 from blender_mcp_installer.filesystem import (  # noqa: E402
     InstallerError,
@@ -1072,6 +1073,29 @@ def test_wrong_manifest_and_preferences_fail_file_verification(tmp_path: Path) -
     manifest.write_text(manifest.read_text().replace('version = "1.0.0"', 'version = "9.9.9"'))
     with pytest.raises(InstallerError):
         verify_blender_files(state, load_extension_payload(EXTENSION_ZIP))
+
+
+def test_payload_verification_is_independent_from_managed_preferences(tmp_path: Path) -> None:
+    blender = _executable(tmp_path / "Blender")
+    resources, env = _profile(tmp_path)
+    _installed_profile(resources, env)
+    state = inspect_blender(
+        blender,
+        env,
+        BlenderRunner(
+            blender,
+            enabled=True,
+            online_access=False,
+            host="localhost",
+            port=9876,
+            autostart=True,
+        ),
+    )
+    payload = load_extension_payload(EXTENSION_ZIP)
+
+    verify_blender_payload(state, payload)
+    with pytest.raises(InstallerError):
+        verify_blender_files(state, payload)
 
 
 def _lsof(

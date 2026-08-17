@@ -421,6 +421,14 @@ int main(int argc, char **argv) {
         payload = json.loads(result.stdout)
         assert payload["command"] == "inspect"
         assert payload["host"]["uv_version"] == "0.12.2"
+        assert len(payload["checks"]) == 13
+        assert set(payload["blender_checks"]) == {
+            "extension_files",
+            "online_access",
+            "host",
+            "port",
+            "autostart",
+        }
         assert not tuple(source.rglob("__pycache__"))
         assert not tuple(source.rglob("*.py[co]"))
         assert not _git(source, "status", "--porcelain=v1", "--untracked-files=all")

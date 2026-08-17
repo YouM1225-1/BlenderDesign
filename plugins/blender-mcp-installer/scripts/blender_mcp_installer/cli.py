@@ -97,6 +97,7 @@ from .model import (
 )
 from .runtime import stage_runtime, verify_runtime
 from .verification import (
+    EXACT_CHECK_NAMES,
     HostCapabilities,
     InstallationInspection,
     OfficialMCPProbe,
@@ -1067,9 +1068,15 @@ def _inspection(context: _Context) -> InstallationInspection:
 def inspect(args: argparse.Namespace) -> dict[str, object]:
     with _context(args) as context:
         inspection = _inspection(context)
+        checks = {name: getattr(inspection, name) for name in EXACT_CHECK_NAMES}
         return {
             "command": "inspect",
             "exact": inspection.exact,
+            "checks": checks,
+            "blender_checks": {
+                "extension_files": inspection.extension_files,
+                **inspection.preference_checks,
+            },
             "host": {
                 "platform": context.host.platform_system,
                 "machine": context.host.platform_machine,

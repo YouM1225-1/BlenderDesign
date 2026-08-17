@@ -1184,7 +1184,7 @@ def _current_comparison(
         root.close()
 
 
-def verify_blender_files(
+def verify_blender_payload(
     state: BlenderState,
     expected_payload: PayloadIndex,
     provenance: TreeImage | None = None,
@@ -1195,10 +1195,21 @@ def verify_blender_files(
     except (OSError, ValueError, InstallerError) as exc:
         raise InstallerError("Blender file verification failed") from exc
     if (
-        state.repository != _REPOSITORY
-        or manifest_id != expected_payload.manifest_id
+        manifest_id != expected_payload.manifest_id
         or manifest_version != expected_payload.manifest_version
         or not comparison.exact
+    ):
+        raise InstallerError("Blender file verification failed")
+
+
+def verify_blender_files(
+    state: BlenderState,
+    expected_payload: PayloadIndex,
+    provenance: TreeImage | None = None,
+) -> None:
+    verify_blender_payload(state, expected_payload, provenance)
+    if (
+        state.repository != _REPOSITORY
         or not state.enabled
         or not state.online_access
         or state.host != _HOST

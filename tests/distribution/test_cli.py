@@ -208,7 +208,9 @@ def test_empty_home_outer_python_inspect_does_not_rediscover_python(
         "cli.resolve_blender_paths=lambda blender,env,_runner: resolve(blender,env,host_run); "
         "cli.probe_host=lambda *args: probe(*args,runner=host_run); "
         "cli._inspection=lambda _context: SimpleNamespace("
-        "exact=False,managed_targets=(),active_install_id=None); "
+        "**{name:False for name in cli.EXACT_CHECK_NAMES},exact=False,extension_files=False,"
+        "preference_checks={'online_access':False,'host':False,'port':False,'autostart':False},"
+        "managed_targets=(),active_install_id=None); "
         'runpy.run_path(script,run_name="__main__")'
     )
     command = [
