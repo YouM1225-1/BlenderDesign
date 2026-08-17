@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -48,7 +49,7 @@ def test_manifest_is_skill_only_and_validator_shaped() -> None:
         "interface",
     }
     assert manifest["name"] == "blender-mcp-installer"
-    assert manifest["version"] == "1.0.0"
+    assert re.fullmatch(r"1\.0\.0\+codex\.\d{14}", manifest["version"])
     assert manifest["skills"] == "./skills/"
     assert "mcpServers" not in manifest
     assert "apps" not in manifest

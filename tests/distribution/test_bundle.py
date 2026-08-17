@@ -29,7 +29,7 @@ from scripts.build_official_blender_mcp_distribution import (  # noqa: E402
 import scripts.build_official_blender_mcp_distribution as builder  # noqa: E402
 
 
-COMMIT = "482c540395ad93a2f86b1ada1520f4fddf8ebcfa"
+COMMIT = "98d1624b39d8e35baf1ae8ce0c1d13a2c321c9a4"
 
 
 def manifest() -> dict[str, object]:
@@ -39,7 +39,7 @@ def manifest() -> dict[str, object]:
     ]
     return {
         "schema_version": 2,
-        "bundle_version": "1.0.0+482c540395ad",
+        "bundle_version": "1.0.0+98d1624b39d8",
         "platform": {"system": "Darwin", "machine": "arm64"},
         "upstream": {
             "url": "https://projects.blender.org/lab/blender_mcp.git",

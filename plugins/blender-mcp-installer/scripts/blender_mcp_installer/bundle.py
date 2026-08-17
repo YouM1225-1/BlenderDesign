@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Iterator, Mapping, Protocol, Sequence
 
 
-UPSTREAM_COMMIT = "482c540395ad93a2f86b1ada1520f4fddf8ebcfa"
+UPSTREAM_COMMIT = "98d1624b39d8e35baf1ae8ce0c1d13a2c321c9a4"
 TOOLS = (
     "execute_blender_code",
     "execute_blender_code_for_cli",
@@ -184,7 +184,7 @@ def parse_manifest(raw: bytes) -> ReleaseManifest:
     )
     if type(top["schema_version"]) is not int or top["schema_version"] != 2:
         raise ValueError("invalid schema_version")
-    if top["bundle_version"] != "1.0.0+482c540395ad":
+    if top["bundle_version"] != "1.0.0+98d1624b39d8":
         raise ValueError("invalid bundle_version")
     platform = _fixed(top["platform"], {"system": "Darwin", "machine": "arm64"}, "platform")
     upstream = _fixed(
