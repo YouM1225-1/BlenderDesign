@@ -761,12 +761,18 @@ def _invoke_readonly_helper(
         if writer >= 0:
             os.close(writer)
         if process is not None and process.poll() is None:
-            process.terminate()
             try:
-                process.wait(timeout=0.25)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=0.25)
+                process.terminate()
+                try:
+                    process.wait(timeout=0.25)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    try:
+                        process.wait(timeout=0.25)
+                    except subprocess.TimeoutExpired:
+                        pass
+            except ProcessLookupError:
+                pass
     try:
         output = json.loads(stdout.decode("utf-8"))
     except (UnboundLocalError, UnicodeDecodeError, json.JSONDecodeError):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 import tomllib
@@ -731,6 +732,29 @@ def test_effective_verification_has_fixed_timeout(tmp_path: Path) -> None:
 
     assert time.monotonic() - started < 5
     assert str(caught.value) == "effective Codex verification failed"
+
+
+def test_readonly_helper_timeout_exit_race_remains_installer_error(monkeypatch) -> None:
+    class ExitedProcess:
+        returncode = None
+
+        def __init__(self, *_args, pass_fds: tuple[int, ...], **_kwargs) -> None:
+            self.request_fd = os.dup(pass_fds[0])
+
+        def communicate(self, timeout: float):
+            os.close(self.request_fd)
+            raise subprocess.TimeoutExpired("helper", timeout)
+
+        def poll(self):
+            return None
+
+        def terminate(self) -> None:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(codex_adapter.subprocess, "Popen", ExitedProcess)
+
+    with pytest.raises(InstallerError, match="Codex configuration merge failed"):
+        codex_adapter._invoke_readonly_helper({}, Path(sys.executable), ())
 
 
 def test_exact_rollback_uses_native_transaction_and_restores_preimage(tmp_path: Path) -> None:
