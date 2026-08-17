@@ -5,12 +5,10 @@ description: Inspect, install, verify, or roll back the reviewed official Blende
 
 # Install Official Blender MCP
 
-Use only for the reviewed distribution. It is a delivery adapter, not another MCP server:
-Codex connects to the bundled official wheel through its managed launcher.
+Use only for the reviewed distribution. It is a delivery adapter, not another MCP server: Codex connects to the bundled official wheel through its managed launcher.
 ## Hard boundaries
 
-- Support exactly Darwin arm64, Blender >=5.2.0,<5.3.0, local Python 3.13.13,
-  uv 0.12.2, and localhost:9876.
+- Support exactly Darwin arm64, Blender >=5.2.0,<5.3.0, local Python 3.13.13, uv 0.12.2, and localhost:9876.
 - Never import or run anything from the source checkout. SHA-256 provides integrity,
   not authenticity. The reviewed immutable distribution commit is the authenticity boundary.
 - Keep the trust bootstrap, plugin add, and installer commands in one fail-fast shell
@@ -29,10 +27,9 @@ Codex connects to the bundled official wheel through its managed launcher.
 
 ## 1. Establish the trusted distribution
 
-The operator supplies `SOURCE_DISTRIBUTION_ROOT`, a reviewed 40-lowercase-hex
-`EXPECTED_DISTRIBUTION_COMMIT`, absolute `BLENDER_BIN` and `PYTHON_BIN` inputs, and
-a validated absolute `CODEX_BIN`. Python must resolve to 3.13.13. Run this before
-plugin marketplace add/import or installer commands. Do not split shell sessions.
+The operator supplies `SOURCE_DISTRIBUTION_ROOT`, a reviewed 40-lowercase-hex `EXPECTED_DISTRIBUTION_COMMIT`,
+absolute `BLENDER_BIN` and `PYTHON_BIN` inputs, and a validated absolute `CODEX_BIN`. Python must resolve to
+3.13.13. Run this before plugin marketplace add/import or installer commands. Do not split shell sessions.
 
 <!-- TRUST_BOOTSTRAP_BEGIN -->
 ```bash
@@ -245,6 +242,9 @@ run_uv_bootstrap() {
   CANONICAL_PYTHON="$(/bin/realpath "$PYTHON_BIN")"
   case "$CANONICAL_PYTHON" in /*) ;; *) echo "canonical Python path must be absolute" >&2; return 1;; esac
   test -f "$CANONICAL_PYTHON" && test ! -L "$CANONICAL_PYTHON" && test -x "$CANONICAL_PYTHON"
+  PYTHON_OWNER="$(/usr/bin/stat -f %u "$CANONICAL_PYTHON")" || { echo "cannot read canonical Python owner" >&2; return 1; }
+  case "$PYTHON_OWNER" in ''|*[!0-9]*) echo "canonical Python owner is invalid" >&2; return 1;; esac
+  test "$PYTHON_OWNER" = "$OWNER_UID" || test "$PYTHON_OWNER" = 0 || { echo "canonical Python owner is not trusted" >&2; return 1; }
   PYTHON_MODE="$(/usr/bin/stat -f %Lp "$CANONICAL_PYTHON")"
   case "$PYTHON_MODE" in ''|*[!0-7]*) echo "canonical Python mode is invalid" >&2; return 1;; esac
   case "$PYTHON_MODE" in *[2367][0-7]|*[0-7][2367]) echo "canonical Python must not be group/world-writable" >&2; return 1;; esac

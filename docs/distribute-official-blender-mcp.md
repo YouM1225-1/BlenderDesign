@@ -35,9 +35,11 @@ The operator supplies:
 - `EXPECTED_DISTRIBUTION_COMMIT`: exactly 40 lowercase hexadecimal characters.
 - `BLENDER_BIN`: the absolute selected Blender executable.
 - `CODEX_BIN`: a validated absolute Codex executable.
-- `PYTHON_BIN`: an absolute path whose resolved regular executable is Python 3.13.13
-  and is not group/world-writable. A symlink such as `.venv/bin/python` is accepted;
-  its canonical target is reused by every installer command across cwd changes.
+- `PYTHON_BIN`: an absolute path whose resolved regular executable is Python 3.13.13,
+  is owned by the current operator or root, and is not group/world-writable. Owner
+  lookup failures and malformed owner IDs fail closed. A symlink such as
+  `.venv/bin/python` is accepted; its canonical target is reused by every installer
+  command across cwd changes.
 - optionally `UV_BIN`: an absolute regular or symlinked uv executable; otherwise the
   saved operator PATH and then `$HOME/.local/bin/uv` are probed. The supplied Python
   canonicalizes uv before any installer command or host check.
