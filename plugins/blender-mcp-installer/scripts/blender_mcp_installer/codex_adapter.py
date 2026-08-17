@@ -55,6 +55,7 @@ _NAMESPACE = "mcp__blender"
 _MAX_CONFIG = 16 * 1024 * 1024
 _MAX_STDERR = 64 * 1024
 _EFFECTIVE_TIMEOUT = 2.0
+_TOOL_TIMEOUT_SEC = 150.0
 
 
 def _absolute(path: Path, label: str) -> Path:
@@ -107,7 +108,7 @@ class ManagedCodexValues:
             type(self.startup_timeout_sec) is not float
             or self.startup_timeout_sec != 20.0
             or type(self.tool_timeout_sec) is not float
-            or self.tool_timeout_sec != 60.0
+            or self.tool_timeout_sec != _TOOL_TIMEOUT_SEC
             or self.default_tools_approval_mode != "approve"
         ):
             raise ValueError("managed Codex timeout/approval policy is fixed")
@@ -343,7 +344,7 @@ def desired_codex_values(
         args=(),
         omit_tools_from=(),
         startup_timeout_sec=20.0,
-        tool_timeout_sec=60.0,
+        tool_timeout_sec=_TOOL_TIMEOUT_SEC,
         default_tools_approval_mode="approve",
         enabled_tools=catalog,
         env={

@@ -153,7 +153,7 @@ def _assert_owned(parsed: dict[str, object], desired) -> None:
     assert server["args"] == []
     assert server["omit_tools_from"] == []
     assert server["startup_timeout_sec"] == 20.0
-    assert server["tool_timeout_sec"] == 60.0
+    assert server["tool_timeout_sec"] == 150.0
     assert server["default_tools_approval_mode"] == "approve"
     assert server["enabled_tools"] == list(TOOLS)
     assert all(server["env"].get(key) == value for key, value in desired.env.items())
@@ -233,7 +233,7 @@ def test_desired_values_are_closed_and_ignore_hostile_ambient(monkeypatch, tmp_p
     assert desired.args == ()
     assert desired.omit_tools_from == ()
     assert desired.startup_timeout_sec == 20.0
-    assert desired.tool_timeout_sec == 60.0
+    assert desired.tool_timeout_sec == 150.0
     assert desired.default_tools_approval_mode == "approve"
     assert desired.enabled_tools == TOOLS
     assert dict(desired.env) == {
@@ -500,7 +500,7 @@ def _nested_effective_payload(desired) -> dict[str, object]:
         "enabled_tools": list(desired.enabled_tools),
         "disabled_tools": None,
         "startup_timeout_sec": 20.0,
-        "tool_timeout_sec": 60.0,
+        "tool_timeout_sec": 150.0,
     }
 
 
@@ -516,7 +516,7 @@ def test_effective_verification_runs_explicit_command_after_publication(tmp_path
         "env": {**dict(desired.env), "FOREIGN": "keep"},
         "enabled_tools": list(desired.enabled_tools),
         "startup_timeout_sec": 20.0,
-        "tool_timeout_sec": 60.0,
+        "tool_timeout_sec": 150.0,
         "enabled": True,
     }
     _effective_launcher(codex, payload, marker)
@@ -553,7 +553,7 @@ def test_effective_verification_accepts_observed_stdio_transport_layout(tmp_path
     assert state.env == desired.env
     assert state.enabled_tools == desired.enabled_tools
     assert state.startup_timeout_sec == 20.0
-    assert state.tool_timeout_sec == 60.0
+    assert state.tool_timeout_sec == 150.0
 
 
 @pytest.mark.parametrize("key", ["type", "command", "args", "env", "env_vars", "cwd"])
@@ -584,7 +584,7 @@ def test_effective_transport_rejects_extra_field(tmp_path: Path) -> None:
     [
         ("enabled_tools", ["foreign"]),
         ("startup_timeout_sec", 21.0),
-        ("tool_timeout_sec", 61.0),
+        ("tool_timeout_sec", 151.0),
     ],
 )
 def test_effective_transport_rejects_outer_owned_value_mismatch(
@@ -662,7 +662,7 @@ def test_effective_transport_rejects_duplicate_key(tmp_path: Path) -> None:
         ("args", ["foreign"]),
         ("enabled_tools", ["one"]),
         ("startup_timeout_sec", 21.0),
-        ("tool_timeout_sec", 61.0),
+        ("tool_timeout_sec", 151.0),
         ("env", {"HOME": "/foreign"}),
     ],
 )
@@ -676,7 +676,7 @@ def test_effective_verification_rejects_changed_subset(
         "env": dict(desired.env),
         "enabled_tools": list(desired.enabled_tools),
         "startup_timeout_sec": 20.0,
-        "tool_timeout_sec": 60.0,
+        "tool_timeout_sec": 150.0,
     }
     payload[field] = value
     codex = tmp_path / "codex"
