@@ -236,7 +236,7 @@ Add the repository marketplace and plugin from this trusted tree in the same she
 
 ```bash
 "$CODEX_BIN" plugin marketplace add "$DISTRIBUTION_ROOT"
-"$CODEX_BIN" plugin add "blender-mcp-installer@personal"
+"$CODEX_BIN" plugin add "blender-mcp-installer@official-blender-mcp"
 ```
 
 If the marketplace reports a different name, read the top-level `name` from the

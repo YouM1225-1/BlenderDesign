@@ -67,6 +67,11 @@ def test_manifest_is_skill_only_and_validator_shaped() -> None:
 def test_marketplace_entry_resolves_to_intact_plugin_artifacts() -> None:
     marketplace = json.loads(MARKETPLACE.read_text())
     assert set(marketplace) == {"name", "interface", "plugins"}
+    assert marketplace["name"] == "official-blender-mcp"
+    assert (
+        'plugin add "blender-mcp-installer@official-blender-mcp"'
+        in SKILL.read_text()
+    )
     entry = marketplace["plugins"]
     assert len(entry) == 1
     assert entry[0] == {

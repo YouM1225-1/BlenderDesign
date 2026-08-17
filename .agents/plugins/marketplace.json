@@ -1,7 +1,7 @@
 {
-  "name": "personal",
+  "name": "official-blender-mcp",
   "interface": {
-    "displayName": "Personal"
+    "displayName": "Official Blender MCP"
   },
   "plugins": [
     {
