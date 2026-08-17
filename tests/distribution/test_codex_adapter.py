@@ -734,27 +734,108 @@ def test_effective_verification_has_fixed_timeout(tmp_path: Path) -> None:
     assert str(caught.value) == "effective Codex verification failed"
 
 
-def test_readonly_helper_timeout_exit_race_remains_installer_error(monkeypatch) -> None:
-    class ExitedProcess:
-        returncode = None
+class _HelperPipe:
+    def __init__(self) -> None:
+        self.closed = False
 
-        def __init__(self, *_args, pass_fds: tuple[int, ...], **_kwargs) -> None:
-            self.request_fd = os.dup(pass_fds[0])
+    def close(self) -> None:
+        self.closed = True
 
-        def communicate(self, timeout: float):
-            os.close(self.request_fd)
+
+class _TimedOutHelper:
+    returncode = None
+
+    def __init__(
+        self,
+        wait_timeouts: int,
+        *,
+        terminate_error: OSError | None = None,
+        kill_error: OSError | None = None,
+    ) -> None:
+        self.wait_timeouts = wait_timeouts
+        self.terminate_error = terminate_error
+        self.kill_error = kill_error
+        self.stdout = _HelperPipe()
+        self.stderr = _HelperPipe()
+        self.calls: list[str] = []
+        self.request_fd = -1
+
+    def communicate(self, timeout: float):
+        os.close(self.request_fd)
+        self.request_fd = -1
+        raise subprocess.TimeoutExpired("helper", timeout)
+
+    def poll(self):
+        self.calls.append("poll")
+        return None
+
+    def terminate(self) -> None:
+        self.calls.append("terminate")
+        if self.terminate_error is not None:
+            raise self.terminate_error
+
+    def kill(self) -> None:
+        self.calls.append("kill")
+        if self.kill_error is not None:
+            raise self.kill_error
+
+    def wait(self, timeout: float):
+        self.calls.append("wait")
+        if self.wait_timeouts:
+            self.wait_timeouts -= 1
             raise subprocess.TimeoutExpired("helper", timeout)
+        self.returncode = 0
+        return 0
 
-        def poll(self):
-            return None
 
-        def terminate(self) -> None:
-            raise ProcessLookupError
+def _run_timed_out_helper(monkeypatch, process: _TimedOutHelper):
+    def spawn(*_args, pass_fds: tuple[int, ...], **_kwargs):
+        process.request_fd = os.dup(pass_fds[0])
+        return process
 
-    monkeypatch.setattr(codex_adapter.subprocess, "Popen", ExitedProcess)
-
-    with pytest.raises(InstallerError, match="Codex configuration merge failed"):
+    monkeypatch.setattr(codex_adapter.subprocess, "Popen", spawn)
+    before = _open_fds()
+    with pytest.raises(InstallerError) as caught:
         codex_adapter._invoke_readonly_helper({}, Path(sys.executable), ())
+    assert _open_fds() == before
+    assert process.stdout.closed and process.stderr.closed
+    assert process.request_fd == -1
+    return caught.value
+
+
+def test_readonly_helper_cleanup_is_bounded_and_controlled(monkeypatch) -> None:
+    reaped = [
+        (_TimedOutHelper(0, terminate_error=ProcessLookupError()), ["poll", "terminate", "wait"]),
+        (_TimedOutHelper(1), ["poll", "terminate", "wait", "kill", "wait"]),
+        (
+            _TimedOutHelper(1, kill_error=ProcessLookupError()),
+            ["poll", "terminate", "wait", "kill", "wait"],
+        ),
+    ]
+    for process, calls in reaped:
+        error = _run_timed_out_helper(monkeypatch, process)
+        assert str(error) == "Codex configuration merge failed"
+        assert process.calls == calls
+        assert process.returncode == 0
+
+    process = _TimedOutHelper(2)
+    error = _run_timed_out_helper(monkeypatch, process)
+    assert str(error) == "Codex configuration merge cleanup failed"
+    assert isinstance(error.__cause__, subprocess.TimeoutExpired)
+    assert process.calls == ["poll", "terminate", "wait", "kill", "wait"]
+
+    for operation in ("terminate", "kill"):
+        for failure in (PermissionError("denied"), OSError("failed")):
+            process = _TimedOutHelper(
+                int(operation == "kill"),
+                terminate_error=failure if operation == "terminate" else None,
+                kill_error=failure if operation == "kill" else None,
+            )
+            error = _run_timed_out_helper(monkeypatch, process)
+            assert str(error) == "Codex configuration merge cleanup failed"
+            assert error.__cause__ is failure
+            assert process.calls[-1] == "wait"
+            assert process.returncode == 0
 
 
 def test_exact_rollback_uses_native_transaction_and_restores_preimage(tmp_path: Path) -> None:

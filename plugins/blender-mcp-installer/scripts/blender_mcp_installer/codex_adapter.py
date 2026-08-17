@@ -760,19 +760,43 @@ def _invoke_readonly_helper(
             os.close(request_fd)
         if writer >= 0:
             os.close(writer)
-        if process is not None and process.poll() is None:
+        cleanup_error: OSError | subprocess.TimeoutExpired | None = None
+        if process is not None:
             try:
-                process.terminate()
+                running = process.poll() is None
+            except OSError as exc:
+                cleanup_error = exc
+                running = False
+            if running:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+                except OSError as exc:
+                    cleanup_error = exc
                 try:
                     process.wait(timeout=0.25)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    except OSError as exc:
+                        cleanup_error = cleanup_error or exc
                     try:
                         process.wait(timeout=0.25)
-                    except subprocess.TimeoutExpired:
-                        pass
-            except ProcessLookupError:
-                pass
+                    except (OSError, subprocess.TimeoutExpired) as exc:
+                        cleanup_error = cleanup_error or exc
+                except OSError as exc:
+                    cleanup_error = cleanup_error or exc
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except OSError as exc:
+                        cleanup_error = cleanup_error or exc
+            if cleanup_error is not None:
+                raise InstallerError("Codex configuration merge cleanup failed") from cleanup_error
     try:
         output = json.loads(stdout.decode("utf-8"))
     except (UnboundLocalError, UnicodeDecodeError, json.JSONDecodeError):
