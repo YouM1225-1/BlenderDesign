@@ -22,7 +22,7 @@ exact no-op on repeat installation, rolled back to its original image, and recov
 one real post-publication crash. The bounded normal-profile and project inventory was
 byte-identical before and after.
 
-The final reviewed implementation commit was
+The original full-lifecycle reviewed implementation commit was
 `660163365127bcc32c310bff50a01be66285dcf0`. The acceptance began from the last complete
 repository-gate capture at `b470dcc4d931b3e455fecd57d9a2488897ca3f43` and then exercised
 the final rollback correction from a fresh, commit-derived trust root against the same
@@ -33,6 +33,62 @@ Ruff, formatting, mypy, and clean-diff gates before the preserved-profile rollba
 Evidence was retained under the mode-0700 disposable directory
 `/private/tmp/blender-mcp-task10-evidence.enzkXO`. It contains metadata and closed command
 results, not copied normal credentials.
+
+## Final Execution Audit Remediation Gate
+
+FINAL_EXECUTION_AUDIT_REMEDIATION_GATE: PASS
+
+The post-audit reviewed implementation is
+`7e81cb7a8305cf5ac6389dffd8590fe4ace22879`; the aligned workflow-document commit exercised
+by this gate is `40c34d5b18fe0529032c3183fffbadf53ea5fba3`. From that exact commit, the current Skill's
+literal `TRUST_BOOTSTRAP`, `UV_BOOTSTRAP`, and public `inspect` blocks created a fresh private
+trusted tree and ran this redacted ordinary-profile command shape in the same fail-fast shell:
+
+```bash
+env -i HOME="$SYSTEM_ACCOUNT_HOME" PATH="$SANITIZED_PATH" \
+  SOURCE_DISTRIBUTION_ROOT="$REVIEWED_SOURCE" \
+  EXPECTED_DISTRIBUTION_COMMIT=40c34d5b18fe0529032c3183fffbadf53ea5fba3 \
+  BLENDER_BIN=/Applications/Blender.app/Contents/MacOS/Blender \
+  CODEX_BIN=/Applications/ChatGPT.app/Contents/Resources/codex /bin/bash
+# CODEX_HOME and all BLENDER_USER_* variables omitted
+"$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" \
+  --no-python-downloads --no-sync python -I -B -c "$ISOLATED_RUNNER" \
+  "$PLUGIN_ROOT/scripts" "$PLUGIN_ROOT/scripts/install.py" inspect \
+  --bundle-root "$BUNDLE_ROOT" \
+  --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
+  --blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN"
+```
+
+The real host identities were Blender 5.2.0 LTS, Codex 0.148.0-alpha.9, uv 0.12.2, and
+CPython 3.13.13. `inspect` exited 0 and emitted exactly one closed JSON object with
+`command=inspect`, `managed_target_count=5`, `active_install_id=null`, and no stderr. Its
+stdout SHA-256 is `9648b922012dc6b266b21f537f692ec2651174ac155b7795738761a924c74570`.
+The trusted Skill SHA-256 was
+`ce2261da9585e8da2133149ec42ec1e1661fd940f3c73e807fe5d4804c575f74`.
+
+Blender's factory discovery reported the normal system-account resources, config, and
+extensions roots under `$HOME/Library/Application Support/Blender/5.2`; the normalized
+discovery evidence SHA-256 is
+`ab44be33af0bb62a6399bf036a7c888b457bfd0d0c3ab13ba419c3db0ecb2cd7`.
+The 55-entry bounded byte inventory covered the normal Codex config, installer state and
+data, those discovered Blender roots, `userpref.blend`, the managed extension tree,
+`compat.dat`, and repository `.blend` files. Before and after were byte-identical with
+SHA-256 `0bb2bd42dc5133b0d21332b4c7472690a30df4582ca7bb654223013a8553f712`.
+Source bytecode inventory was also identical before and after; the source and trusted-tree
+Git status captures were empty, the trusted tree and evidence directory gained no bytecode,
+and no Blender process or localhost:9876 listener remained.
+
+Evidence is retained under the mode-0700 directory
+`/private/tmp/blender-mcp-final-home-only.3491qA`; normal paths inside evidence are expressed
+as `$HOME`/`$PROJECT_ROOT` logical targets rather than copied credentials. An initial
+disposable-HOME preflight intentionally failed before public `inspect`: on this macOS host,
+Blender factory discovery continued to return the system-account roots. The preflight
+normal-profile/project inventories were nevertheless identical before and after (SHA-256
+`08b382fc0bf33836b465f67c68fd39369b9a9048effe0985111df6e97ea61ada`), so the acceptance
+assumption was corrected to the ordinary-profile gate above without a profile mutation.
+No install, GUI launch, listener, or authenticated LLM invocation occurred in this
+post-audit gate. `LOCAL_LLM_INVOCATION_STATUS` and `SECOND_MAC_CANARY_STATUS` therefore
+remain `NOT_RUN`.
 
 ## Trust and repository gates
 
