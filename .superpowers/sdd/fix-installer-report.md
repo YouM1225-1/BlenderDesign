@@ -24,6 +24,11 @@ snapshot detection. They are intentionally byte-exact so rollback does not silen
 overwrite unrelated user preferences changed after installation. They are not compared
 with the current whole file by inspection.
 
+`managed_target_count=6` means the five canonical live targets (runtime, extension,
+user preferences, Codex config, and active selector) plus the selected receipt. It is a
+snapshot/TOCTOU inventory count, not a count of failed exact checks and not a whole-file
+equality verdict.
+
 Blender can legitimately rewrite unrelated bytes in `userpref.blend`. A regression test
 therefore records a different receipt post-image hash while returning all managed
 semantics as valid, and proves `exact=true`. This is a counterexample baseline that
