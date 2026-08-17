@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -11,12 +12,14 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 
 MARKETPLACE_NAME = "official-blender-mcp"
 PLUGIN_NAME = "blender-mcp-installer"
+REMOVE_MARKETPLACE = ("plugin", "marketplace", "remove", MARKETPLACE_NAME)
 
 
 def _lstat(path: Path) -> os.stat_result | None:
@@ -32,10 +35,19 @@ def _owner_directory(path: Path, uid: int, *, private: bool = False) -> None:
         parent = _lstat(path.parent)
         if parent is None or not stat.S_ISDIR(parent.st_mode) or parent.st_uid != uid:
             raise RuntimeError(f"unsafe parent for directory: {path}")
-        path.mkdir(mode=0o700)
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
         current = path.lstat()
-    if not stat.S_ISDIR(current.st_mode) or current.st_uid != uid:
-        raise RuntimeError(f"directory must be owned, ordinary, and non-symlink: {path}")
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or current.st_uid != uid
+        or stat.S_IMODE(current.st_mode) & 0o022
+    ):
+        raise RuntimeError(
+            f"directory must be owned, non-symlink, and not group/world-writable: {path}"
+        )
     if private:
         path.chmod(0o700)
         if stat.S_IMODE(path.lstat().st_mode) != 0o700:
@@ -76,10 +88,37 @@ def _prepare_roots(home: Path, codex_home: Path) -> tuple[Path, Path]:
     config = codex_home / "config.toml"
     config_stat = _lstat(config)
     if config_stat is not None and (
-        not stat.S_ISREG(config_stat.st_mode) or config_stat.st_uid != uid
+        not stat.S_ISREG(config_stat.st_mode)
+        or config_stat.st_uid != uid
+        or stat.S_IMODE(config_stat.st_mode) & 0o022
     ):
-        raise RuntimeError("Codex config must be an owned ordinary non-symlink file")
+        raise RuntimeError(
+            "Codex config must be owned, non-symlink, and not group/world-writable"
+        )
     return projection_parent, recovery_root
+
+
+@contextmanager
+def _codex_lock(codex_home: Path):
+    lock_path = codex_home / ".blender-mcp-marketplace.lock"
+    descriptor = os.open(
+        lock_path,
+        os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        value = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(value.st_mode)
+            or value.st_uid != os.getuid()
+            or stat.S_IMODE(value.st_mode) != 0o600
+        ):
+            raise RuntimeError("marketplace lock must be an owned private ordinary file")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def _private_git(
@@ -249,6 +288,47 @@ def _tree_manifest(root: Path) -> list[tuple[str, str, int, str]]:
     return sorted(result)
 
 
+def _content_manifest(root: Path) -> list[tuple[str, str, str]]:
+    uid = os.getuid()
+    result: list[tuple[str, str, str]] = []
+    for path in (root, *root.rglob("*")):
+        value = path.lstat()
+        if (
+            stat.S_ISLNK(value.st_mode)
+            or value.st_uid != uid
+            or stat.S_IMODE(value.st_mode) & 0o022
+        ):
+            raise RuntimeError(f"plugin cache contains an unsafe path: {path}")
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        if stat.S_ISDIR(value.st_mode):
+            result.append((relative, "directory", ""))
+        elif stat.S_ISREG(value.st_mode):
+            result.append(
+                (relative, "file", hashlib.sha256(path.read_bytes()).hexdigest())
+            )
+        else:
+            raise RuntimeError(f"plugin cache contains a non-ordinary path: {path}")
+    return sorted(result)
+
+
+def _plugin_cache(projection: Path, codex_home: Path) -> Path:
+    manifest_path = projection / "plugins/blender-mcp-installer/.codex-plugin/plugin.json"
+    manifest = json.loads(manifest_path.read_text())
+    version = manifest.get("version") if type(manifest) is dict else None
+    if type(version) is not str or not re.fullmatch(r"[A-Za-z0-9.+-]+", version):
+        raise RuntimeError("projected plugin version is invalid")
+    return codex_home / "plugins/cache" / MARKETPLACE_NAME / PLUGIN_NAME / version
+
+
+def _validate_plugin_cache(projection: Path, codex_home: Path) -> None:
+    cache = _plugin_cache(projection, codex_home)
+    if _lstat(cache) is None:
+        raise RuntimeError("Codex did not materialize the reviewed plugin cache version")
+    projected_plugin = projection / "plugins/blender-mcp-installer"
+    if _content_manifest(cache) != _content_manifest(projected_plugin):
+        raise RuntimeError("Codex plugin cache differs from the reviewed projection")
+
+
 def _verify_checksums(root: Path, trusted_checksums: Path) -> None:
     bundle_root = root / "plugins/blender-mcp-installer/artifacts"
     materialized = bundle_root / "SHA256SUMS"
@@ -312,6 +392,11 @@ def _marketplace_snapshot(config: Path) -> tuple[dict[str, Any], dict[str, Any]]
     else:
         if type(target) is not dict:
             raise RuntimeError("target marketplace config must be a table")
+        allowed = {"last_updated", "source", "source_type"}
+        if not {"source", "source_type"} <= set(target) <= allowed:
+            raise RuntimeError("target marketplace config has unsupported fields")
+        if "last_updated" in target and type(target["last_updated"]) is not str:
+            raise RuntimeError("target marketplace last_updated must be a string")
         source_type = target.get("source_type")
         source = target.get("source")
         if (
@@ -379,12 +464,11 @@ def _restore(
     home: Path,
     codex_home: Path,
     before: dict[str, Any],
+    non_target_before: dict[str, Any],
 ) -> None:
-    subprocess.run(
-        [str(codex), "plugin", "marketplace", "remove", MARKETPLACE_NAME],
-        capture_output=True,
-        env={**os.environ, "HOME": str(home), "CODEX_HOME": str(codex_home)},
-    )
+    current, _ = _marketplace_snapshot(codex_home / "config.toml")
+    if current["present"]:
+        _codex(codex, home, codex_home, *REMOVE_MARKETPLACE)
     if before["present"]:
         _codex(
             codex,
@@ -395,6 +479,15 @@ def _restore(
             "add",
             before["source"],
         )
+    restored, non_target_restored = _marketplace_snapshot(codex_home / "config.toml")
+    restored_semantics = {
+        key: restored[key] for key in ("present", "source_type", "source") if key in restored
+    }
+    before_semantics = {
+        key: before[key] for key in ("present", "source_type", "source") if key in before
+    }
+    if restored_semantics != before_semantics or non_target_restored != non_target_before:
+        raise RuntimeError("restored marketplace registration differs from prior state")
 
 
 def _register(
@@ -412,7 +505,10 @@ def _register(
     _atomic_json(recovery / "non-target-before.json", non_target_before)
     restore_lines = [
         f"Restore only marketplace {MARKETPLACE_NAME}; installer receipts are not required.",
-        f"Remove the current target with: codex plugin marketplace remove {MARKETPLACE_NAME}",
+        f"CODEX_BIN: {codex}",
+        f"HOME: {home}",
+        f"CODEX_HOME: {codex_home}",
+        f"Remove the target with the recorded environment: plugin marketplace remove {MARKETPLACE_NAME}",
     ]
     if before["present"]:
         restore_lines.append(
@@ -430,17 +526,10 @@ def _register(
     try:
         if changed:
             if before["present"]:
-                _codex(
-                    codex,
-                    home,
-                    codex_home,
-                    "plugin",
-                    "marketplace",
-                    "remove",
-                    MARKETPLACE_NAME,
-                )
+                _codex(codex, home, codex_home, *REMOVE_MARKETPLACE)
             _codex(codex, home, codex_home, *add_marketplace)
         _codex(codex, home, codex_home, *add_plugin)
+        _validate_plugin_cache(projection, codex_home)
         after, non_target_after = _marketplace_snapshot(config)
         _atomic_json(recovery / "after.json", after)
         _atomic_json(recovery / "non-target-after.json", non_target_after)
@@ -451,7 +540,7 @@ def _register(
     except BaseException as error:
         if changed:
             try:
-                _restore(codex, home, codex_home, before)
+                _restore(codex, home, codex_home, before, non_target_before)
             except BaseException as restore_error:
                 raise RuntimeError(
                     f"marketplace replacement and restoration failed; evidence: {recovery}"
@@ -499,14 +588,15 @@ def _prepare(args: argparse.Namespace) -> None:
         f"{args.reviewed_commit}^{{commit}}",
     )
     projection_parent, recovery_root = _prepare_roots(home, codex_home)
-    projection = _materialize(
-        projection_parent,
-        private_git_dir,
-        git_safe_home,
-        args.reviewed_commit,
-        trusted_checksums,
-    )
-    recovery = _register(projection, recovery_root, codex, home, codex_home)
+    with _codex_lock(codex_home):
+        projection = _materialize(
+            projection_parent,
+            private_git_dir,
+            git_safe_home,
+            args.reviewed_commit,
+            trusted_checksums,
+        )
+        recovery = _register(projection, recovery_root, codex, home, codex_home)
     print(
         json.dumps(
             {
@@ -527,6 +617,7 @@ def _verify(args: argparse.Namespace) -> None:
     codex_home = Path(args.codex_home)
     _validate_secure_tree(projection)
     _private_owner_directory(recovery, os.getuid())
+    _validate_plugin_cache(projection, codex_home)
     marketplaces_text = _codex(
         codex, home, codex_home, "plugin", "marketplace", "list", "--json"
     )

@@ -285,7 +285,7 @@ mode-0600 recovery evidence is receipt-independent. The helper then runs
 `plugin add "blender-mcp-installer@official-blender-mcp"`.
 <!-- PERSISTENT_MARKETPLACE_BEGIN -->
 ```bash
-test -n "${PYTHON_BIN:-}" || run_uv_bootstrap
+run_uv_bootstrap
 NORMAL_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 MARKETPLACE_PREPARE_JSON="$("$PYTHON_BIN" -I -B \
   "$PLUGIN_ROOT/scripts/project_marketplace.py" prepare \
@@ -483,8 +483,8 @@ rmdir "$TRUST_PARENT"
 ```
 <!-- TRUST_CLEANUP_END -->
 
-After private trust cleanup, verify the normal profile and retain both successful
-listings beside the independent recovery evidence.
+After private trust cleanup, verify both normal-profile listings and retain their
+credential-safe summaries and fingerprints beside the independent recovery evidence.
 <!-- PERSISTENT_MARKETPLACE_VERIFY_BEGIN -->
 ```bash
 "$PYTHON_BIN" -I -B \

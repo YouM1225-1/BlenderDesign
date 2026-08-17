@@ -191,12 +191,16 @@ def _trust_fixture(tmp_path: Path) -> tuple[Path, str]:
     repo = tmp_path / "source"
     artifact_root = repo / "plugins/blender-mcp-installer/artifacts"
     (repo / ".agents/plugins").mkdir(parents=True)
+    (repo / "plugins/blender-mcp-installer/.codex-plugin").mkdir(parents=True)
     (repo / "plugins/blender-mcp-installer/scripts").mkdir(parents=True)
     artifact_root.mkdir(parents=True)
     (repo / ".agents/plugins/marketplace.json").write_text(
         '{"name":"official-blender-mcp","interface":{},"plugins":[]}\n'
     )
     (repo / "plugins/blender-mcp-installer/scripts/install.py").write_text("trusted\n")
+    (repo / "plugins/blender-mcp-installer/.codex-plugin/plugin.json").write_text(
+        '{"name":"blender-mcp-installer","version":"1.0.0+codex.fixture"}\n'
+    )
     if MARKETPLACE_PROJECTOR.exists():
         shutil.copy2(
             MARKETPLACE_PROJECTOR,
@@ -757,7 +761,9 @@ def _fake_marketplace_codex(tmp_path: Path) -> Path:
         f"#!{sys.executable}\n"
         r'''import json
 import os
+import shutil
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -792,12 +798,15 @@ if args[:3] == ["plugin", "marketplace", "remove"]:
     marketplaces = read_marketplaces()
     if args[3] not in marketplaces:
         raise SystemExit(1)
+    if args[3] == os.environ.get("FAIL_MARKETPLACE_REMOVE"):
+        raise SystemExit(44)
     del marketplaces[args[3]]
     write_marketplaces(marketplaces)
 elif args[:3] == ["plugin", "marketplace", "add"]:
     source = str(Path(args[3]).resolve())
     if source == os.environ.get("FAIL_MARKETPLACE_ADD"):
         raise SystemExit(42)
+    time.sleep(float(os.environ.get("SLEEP_MARKETPLACE_ADD", "0")))
     manifest = json.loads(
         (Path(source) / ".agents/plugins/marketplace.json").read_text()
     )
@@ -826,11 +835,18 @@ elif args == ["plugin", "marketplace", "list", "--json"]:
         )
     print(json.dumps({"marketplaces": payload}))
 elif args[:2] == ["plugin", "add"]:
-    if os.environ.get("FAIL_PLUGIN_ADD"):
-        raise SystemExit(43)
     marketplace = args[2].split("@", 1)[1]
-    if marketplace not in read_marketplaces():
+    source = read_marketplaces().get(marketplace, {}).get("source")
+    if not source:
         raise SystemExit(4)
+    plugin = Path(source) / "plugins/blender-mcp-installer"
+    version = json.loads((plugin / ".codex-plugin/plugin.json").read_text())["version"]
+    cache = home / "plugins/cache" / marketplace / "blender-mcp-installer" / version
+    if os.environ.get("FAIL_PLUGIN_ADD"):
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / "partial").write_text("partial")
+        raise SystemExit(43)
+    shutil.copytree(plugin, cache, dirs_exist_ok=True)
     installed.write_text(args[2])
 elif args[:2] == ["plugin", "list"] and "--json" in args:
     marketplace = args[args.index("--marketplace") + 1]
@@ -890,6 +906,7 @@ def test_persistent_marketplace_contract_is_commit_bound_and_transactional() -> 
     block = _shell_block(text, "PERSISTENT_MARKETPLACE")
     projector = MARKETPLACE_PROJECTOR.read_text()
     required = (
+        "run_uv_bootstrap",
         '"$PLUGIN_ROOT/scripts/project_marketplace.py" prepare',
         '--private-git-dir "$PRIVATE_GIT_DIR"',
         '--git-safe-home "$GIT_SAFE_HOME"',
@@ -942,6 +959,7 @@ def test_persistent_marketplace_survives_private_cleanup_and_lists_normally(
     script = "\n".join(
         (
             _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            'run_uv_bootstrap() { :; }',
             _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
             _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
             'printf "%s\\n" "$PERSISTENT_MARKETPLACE_ROOT" > "$RECORDED_ROOT"',
@@ -985,6 +1003,13 @@ def test_persistent_marketplace_survives_private_cleanup_and_lists_normally(
     cleanup_evidence = tuple(recovery.glob("registration.*/marketplaces-after-cleanup.json"))
     assert len(cleanup_evidence) == 1
     assert "other-source" not in cleanup_evidence[0].read_text()
+    restore = tuple(recovery.glob("registration.*/RESTORE.txt"))
+    assert len(restore) == 2
+    assert all(f"CODEX_BIN: {env['CODEX_BIN']}" in path.read_text() for path in restore)
+    assert all(f"HOME: {home}" in path.read_text() for path in restore)
+    assert all(f"CODEX_HOME: {codex_home}" in path.read_text() for path in restore)
+    lock = codex_home / ".blender-mcp-marketplace.lock"
+    assert lock.stat().st_mode & 0o777 == 0o600
     assert not (home / ".local/state/blender-mcp-installer/receipts").exists()
 
 
@@ -1005,6 +1030,7 @@ def test_marketplace_registration_failure_restores_only_previous_target(
     script = "\n".join(
         (
             _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            'run_uv_bootstrap() { :; }',
             _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
         )
     )
@@ -1030,6 +1056,7 @@ def test_persistent_marketplace_rejects_checksum_drift_before_registration(
         (
             _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
             'printf "%064d  payload\\n" 0 > "$TRUSTED_CHECKSUMS"',
+            'run_uv_bootstrap() { :; }',
             _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
         )
     )
@@ -1038,3 +1065,94 @@ def test_persistent_marketplace_rejects_checksum_drift_before_registration(
     assert not projection.exists()
     config = (codex_home / "config.toml").read_text()
     assert f"source = {json.dumps(str(old_source.resolve()))}" in config
+
+
+def test_persistent_marketplace_always_revalidates_the_python_runner(
+    tmp_path: Path,
+) -> None:
+    env, _, _, _, _ = _persistent_marketplace_env(tmp_path)
+    hostile_sentinel = tmp_path / "hostile-python-ran"
+    bootstrap_sentinel = tmp_path / "bootstrap-ran"
+    hostile_python = tmp_path / "hostile-python-bin"
+    hostile_python.write_text(f"#!/bin/sh\ntouch {hostile_sentinel}\nexit 97\n")
+    hostile_python.chmod(0o700)
+    env.update(
+        PYTHON_BIN=str(hostile_python),
+        VALID_PYTHON=sys.executable,
+        BOOTSTRAP_SENTINEL=str(bootstrap_sentinel),
+    )
+    script = "\n".join(
+        (
+            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            'run_uv_bootstrap() { PYTHON_BIN="$VALID_PYTHON"; touch "$BOOTSTRAP_SENTINEL"; }',
+            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
+        )
+    )
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert bootstrap_sentinel.is_file()
+    assert not hostile_sentinel.exists()
+
+
+@pytest.mark.parametrize("unsafe", ["home", "codex_home", "config"])
+def test_persistent_marketplace_rejects_writable_profile_paths(
+    tmp_path: Path, unsafe: str
+) -> None:
+    env, home, codex_home, old_source, _ = _persistent_marketplace_env(tmp_path)
+    target = {"home": home, "codex_home": codex_home, "config": codex_home / "config.toml"}[
+        unsafe
+    ]
+    target.chmod(0o777 if target.is_dir() else 0o666)
+    script = "\n".join(
+        (
+            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            'run_uv_bootstrap() { :; }',
+            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
+        )
+    )
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert f"source = {json.dumps(str(old_source.resolve()))}" in (
+        codex_home / "config.toml"
+    ).read_text()
+
+
+def test_failed_restore_is_reported_and_never_claimed_success(tmp_path: Path) -> None:
+    env, home, codex_home, _, _ = _persistent_marketplace_env(tmp_path)
+    config = codex_home / "config.toml"
+    config.write_text(config.read_text().split("[marketplaces.official-blender-mcp]", 1)[0])
+    env.update(
+        FAIL_PLUGIN_ADD="1",
+        FAIL_MARKETPLACE_REMOVE="official-blender-mcp",
+    )
+    script = "\n".join(
+        (
+            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            'run_uv_bootstrap() { :; }',
+            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
+        )
+    )
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "replacement and restoration failed" in result.stderr
+    recovery = home / ".local/state/blender-mcp-installer/marketplace-recovery"
+    assert tuple(recovery.glob("registration.*/before.json"))
+
+
+def test_marketplace_registration_is_serialized_per_codex_home(tmp_path: Path) -> None:
+    env, _, codex_home, _, _ = _persistent_marketplace_env(tmp_path)
+    env["SLEEP_MARKETPLACE_ADD"] = "0.2"
+    script = "\n".join(
+        (
+            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            'run_uv_bootstrap() { :; }',
+            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
+        )
+    )
+    processes = [
+        subprocess.Popen(["bash", "-c", script], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for _ in range(2)
+    ]
+    results = [process.communicate(timeout=20) + (process.returncode,) for process in processes]
+    assert [result[2] for result in results] == [0, 0], results
+    assert "[marketplaces.other]" in (codex_home / "config.toml").read_text()
