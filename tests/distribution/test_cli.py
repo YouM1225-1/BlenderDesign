@@ -843,9 +843,12 @@ _BASELINE_EXTENSION_SOURCES = (
     "__init__.py",
     "capture_output.py",
     "cli.py",
+    "deferred_tool.py",
     "execute_blocking.py",
+    "execute_interactive.py",
+    "mcp_to_blender_server.py",
+    "weak_sandbox.py",
 )
-_LIVE_EXTENSION_SOURCES = ("deferred_tool.py", "weak_sandbox.py")
 
 
 def _compile_extension_sources(root: Path, sources: tuple[str, ...]) -> None:
@@ -1012,70 +1015,46 @@ def _extension_rollback_fixture(
     return roots, bundle, receipt, receipt_path, extension_post
 
 
-def _compile_live_extension(roots: InstallRoots) -> Path:
-    _compile_extension_sources(roots.extension_target, _LIVE_EXTENSION_SOURCES)
-    cache = roots.extension_target / "__pycache__"
-    assert len(tuple(cache.glob("*.pyc"))) == 6
-    return cache
-
-
-def test_extension_rollback_cleans_live_pyc_after_intent_before_native_restore(
+def test_extension_rollback_passes_post_provenance_and_rejects_unrecorded_pyc(
     host: HostHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     roots, bundle, receipt, receipt_path, extension_post = _extension_rollback_fixture(host)
-    baseline_pyc = {
-        entry.path: entry for entry in extension_post.entries if entry.path.endswith(".pyc")
-    }
-    assert len(baseline_pyc) == 4 and any(
-        entry.path == "__pycache__" for entry in extension_post.entries
-    )
-    cache = _compile_live_extension(roots)
-    live_pyc = {f"__pycache__/{path.name}" for path in cache.glob("*.pyc")} - set(baseline_pyc)
-    assert len(live_pyc) == 2
-    prepare = cli.prepare_extension_for_restore
+    foreign = roots.extension_target / "__pycache__/cli.cpython-999.pyc"
+    foreign.write_bytes(b"foreign")
+    foreign.chmod(0o644)
     compare = cli.compare_extension_tree
-    observed: list[ReceiptStatus] = []
-    comparisons = 0
+    receipt_before = receipt_path.read_bytes()
+    active_before = roots.active.read_bytes()
+    with SafeRoot.open(host.extensions, os.getuid(), host.resources) as extensions:
+        extension_before = capture_tree(extensions, Path("user_default/mcp"))
+    provenances: list[TreeImage | None] = []
 
-    def tracked_compare(payload, current):
-        nonlocal comparisons
-        comparisons += 1
-        return compare(payload, current)
-
-    def tracked_prepare(comparison, expected):
-        observed.append(cli.load_receipt(receipt_path, roots).status)
-        image = prepare(comparison, expected)
-        assert image == extension_post
-        assert cache.is_dir()
-        assert {f"__pycache__/{path.name}" for path in cache.glob("*.pyc")} == set(baseline_pyc)
-        assert {entry.path: entry for entry in image.entries if entry.path in baseline_pyc} == (
-            baseline_pyc
-        )
-        return image
+    def tracked_compare(payload, current, provenance=None):
+        provenances.append(provenance)
+        return compare(payload, current, provenance)
 
     monkeypatch.setattr(cli, "compare_extension_tree", tracked_compare)
-    monkeypatch.setattr(cli, "prepare_extension_for_restore", tracked_prepare)
-
-    rolled = cli._rollback_receipt(
-        roots,
-        bundle,
-        object(),
-        receipt,
-        NoOpFaultInjector(),
-        manifest_sha256="0" * 64,
-    )
-
-    assert observed == [ReceiptStatus.ROLLBACK_PENDING]
-    assert comparisons == 2
-    assert rolled.status is ReceiptStatus.ROLLED_BACK
-    assert not roots.extension_target.exists()
+    with pytest.raises(InstallerError, match="rollback preflight conflict"):
+        cli._rollback_receipt(
+            roots,
+            bundle,
+            object(),
+            receipt,
+            NoOpFaultInjector(),
+            manifest_sha256="0" * 64,
+        )
+    assert provenances == [extension_post]
+    assert receipt_path.read_bytes() == receipt_before
+    assert roots.active.read_bytes() == active_before
+    with SafeRoot.open(host.extensions, os.getuid(), host.resources) as extensions:
+        assert capture_tree(extensions, Path("user_default/mcp")) == extension_before
+    assert foreign.read_bytes() == b"foreign"
 
 
 def test_extension_rollback_cleanup_is_retryable_at_native_restore_fault(
     host: HostHarness,
 ) -> None:
     roots, bundle, receipt, receipt_path, _ = _extension_rollback_fixture(host)
-    _compile_live_extension(roots)
 
     with pytest.raises(SystemExit, match="70"):
         cli._rollback_receipt(
@@ -1089,7 +1068,7 @@ def test_extension_rollback_cleanup_is_retryable_at_native_restore_fault(
 
     recovery_cache = roots.extension_recovery(receipt.install_id) / "__pycache__"
     assert not roots.extension_target.exists()
-    assert recovery_cache.is_dir() and len(tuple(recovery_cache.glob("*.pyc"))) == 4
+    assert recovery_cache.is_dir() and len(tuple(recovery_cache.glob("*.pyc"))) == 8
     pending = cli.load_receipt(receipt_path, roots)
     rolled = cli._rollback_receipt(
         roots,
@@ -1108,19 +1087,22 @@ def test_extension_rollback_cleanup_is_retryable_at_native_restore_fault(
     "conflict",
     [
         "foreign-pyc",
+        "mapped-unrecorded",
         "unmapped",
         "nested",
-        "wrong-uid",
         "source-modified",
         "baseline-pyc-changed",
     ],
 )
 def test_extension_cache_conflicts_fail_before_rollback_intent(
-    host: HostHarness, monkeypatch: pytest.MonkeyPatch, conflict: str
+    host: HostHarness, conflict: str
 ) -> None:
     roots, bundle, receipt, receipt_path, _ = _extension_rollback_fixture(host)
     if conflict == "foreign-pyc":
         (roots.extension_target / "foreign.pyc").write_bytes(b"foreign")
+    elif conflict == "mapped-unrecorded":
+        cache = roots.extension_target / "__pycache__"
+        (cache / "cli.cpython-999.pyc").write_bytes(b"foreign")
     elif conflict == "unmapped":
         cache = roots.extension_target / "__pycache__"
         (cache / "foreign.cpython-313.pyc").write_bytes(b"foreign")
@@ -1129,22 +1111,11 @@ def test_extension_cache_conflicts_fail_before_rollback_intent(
         cache.mkdir(parents=True)
         (cache / "capture_output.cpython-313.pyc").write_bytes(b"foreign")
     else:
-        _compile_live_extension(roots)
         if conflict == "source-modified":
             (roots.extension_target / "capture_output.py").write_bytes(b"modified")
         elif conflict == "baseline-pyc-changed":
             pyc = next((roots.extension_target / "__pycache__").glob("capture_output.*.pyc"))
             pyc.write_bytes(b"modified")
-        else:
-            compare = cli.compare_extension_tree
-            real_uid = os.getuid()
-
-            def compare_as_foreign_owner(payload, current):
-                with monkeypatch.context() as scoped:
-                    scoped.setattr(os, "getuid", lambda: real_uid + 1)
-                    return compare(payload, current)
-
-            monkeypatch.setattr(cli, "compare_extension_tree", compare_as_foreign_owner)
     receipt_before = receipt_path.read_bytes()
     active_before = roots.active.read_bytes()
     with SafeRoot.open(host.extensions, os.getuid(), host.resources) as extensions:

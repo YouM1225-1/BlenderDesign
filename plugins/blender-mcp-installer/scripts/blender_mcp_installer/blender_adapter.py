@@ -159,6 +159,7 @@ class PayloadIndex:
 @dataclass(frozen=True)
 class ExtensionComparison:
     expected: PayloadIndex
+    provenance: TreeImage | None
     current: TreeRef
     current_image: TreeImage
     missing: tuple[str, ...]
@@ -456,6 +457,7 @@ def _profile_env(blender_bin: Path, env: Mapping[str, str]) -> dict[str, str]:
         "BLENDER_MCP_HOST": _HOST,
         "BLENDER_MCP_PORT": str(_PORT),
         "PATH": _path_env(blender_bin),
+        "PYTHONDONTWRITEBYTECODE": "1",
     }
     if all(supplied):
         resources, config, extensions = (Path(env[name]) for name in names)
@@ -721,73 +723,131 @@ def load_extension_payload(extension_zip: Path) -> PayloadIndex:
     return _load_extension_payload(_read_regular(extension_zip, maximum=_MAX_ARCHIVE))
 
 
-def _mapped_pyc(path: str, expected_files: set[str]) -> bool:
+def _compile_expression(payload: PayloadIndex) -> str:
+    sources = tuple(
+        entry.path
+        for entry in payload.entries
+        if entry.kind == "file" and entry.path.endswith(".py")
+    )
+    if not sources:
+        raise ValueError("extension payload has no Python sources")
+    return (
+        "import importlib.util,os,pathlib,py_compile;"
+        "r=pathlib.Path(os.environ['BLENDER_USER_EXTENSIONS'])/'user_default'/'mcp';"
+        f"s={sources!r};"
+        "[(lambda p,n:py_compile.compile(str(p),"
+        "cfile=importlib.util.cache_from_source(str(p),optimization=''),"
+        "dfile=n,doraise=True,optimize=0,"
+        "invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH))(r/n,n) for n in s]"
+    )
+
+
+def _mapped_source(path: str, expected_files: set[str]) -> str | None:
     pure = PurePosixPath(path)
     if pure.parent.name != "__pycache__":
-        return False
+        return None
     match = _PYC.fullmatch(pure.name)
     if match is None:
-        return False
+        return None
     source = pure.parent.parent / f"{match.group('stem')}.py"
-    return source.as_posix() in expected_files
+    return source.as_posix() if source.as_posix() in expected_files else None
 
 
-def compare_extension_tree(expected_payload: PayloadIndex, current: TreeRef) -> ExtensionComparison:
+def _mapped_pyc(path: str, expected_files: set[str]) -> bool:
+    return _mapped_source(path, expected_files) is not None
+
+
+def _provenance_extras(
+    expected: Mapping[str, PayloadEntry], provenance: TreeImage | None
+) -> tuple[dict[str, TreeEntry], set[str], set[str]]:
+    if provenance is None:
+        return {}, set(), set()
+    if type(provenance) is not TreeImage or provenance.state is not ImageState.PRESENT:
+        raise ValueError("invalid extension pyc provenance")
+    expected_files = {path for path, entry in expected.items() if entry.kind == "file"}
+    sources = {path for path in expected_files if path.endswith(".py")}
+    extras = {entry.path: entry for entry in provenance.entries if entry.path not in expected}
+    pyc = {
+        path: source
+        for path, entry in extras.items()
+        if entry.kind == "file"
+        and entry.uid == os.getuid()
+        and entry.mode == 0o644
+        and (source := _mapped_source(path, expected_files)) is not None
+    }
+    cache_dirs = {PurePosixPath(path).parent.as_posix() for path in pyc}
+    if (
+        len(pyc) != len(sources)
+        or set(pyc.values()) != sources
+        or set(extras) != set(pyc) | cache_dirs
+        or any(
+            extras[path].kind != "dir"
+            or extras[path].uid != os.getuid()
+            or extras[path].mode != 0o755
+            for path in cache_dirs
+        )
+    ):
+        raise ValueError("invalid extension pyc provenance")
+    return extras, set(pyc), cache_dirs
+
+
+def compare_extension_tree(
+    expected_payload: PayloadIndex,
+    current: TreeRef,
+    provenance: TreeImage | None = None,
+) -> ExtensionComparison:
     if type(expected_payload) is not PayloadIndex or type(current) is not TreeRef:
         raise ValueError("invalid extension comparison input")
+    expected = {entry.path: entry for entry in expected_payload.entries}
+    provenance_entries, provenance_pyc, provenance_dirs = _provenance_extras(expected, provenance)
     image = current.capture()
     if image.state is ImageState.ABSENT:
         return ExtensionComparison(
             expected_payload,
+            provenance,
             current,
             image,
-            tuple(entry.path for entry in expected_payload.entries),
+            tuple(sorted(set(expected) | set(provenance_entries))),
             (),
             (),
             (),
             (),
         )
-    expected = {entry.path: entry for entry in expected_payload.entries}
     actual = {entry.path: entry for entry in image.entries}
-    missing = tuple(sorted(set(expected) - set(actual)))
-    changed = tuple(
-        sorted(
-            path
-            for path in set(expected) & set(actual)
-            if (
-                actual[path].kind != expected[path].kind
-                or actual[path].mode != expected[path].mode
-                or (
-                    expected[path].kind == "file"
-                    and (
-                        actual[path].size != expected[path].size
-                        or actual[path].sha256 != expected[path].sha256
-                    )
+    missing = tuple(sorted((set(expected) | set(provenance_entries)) - set(actual)))
+    changed_payload = {
+        path
+        for path in set(expected) & set(actual)
+        if (
+            actual[path].kind != expected[path].kind
+            or actual[path].mode != expected[path].mode
+            or (
+                expected[path].kind == "file"
+                and (
+                    actual[path].size != expected[path].size
+                    or actual[path].sha256 != expected[path].sha256
                 )
             )
         )
-    )
-    expected_files = {path for path, entry in expected.items() if entry.kind == "file"}
+    }
+    changed_provenance = {
+        path
+        for path in set(provenance_entries) & set(actual)
+        if actual[path] != provenance_entries[path]
+    }
+    changed = tuple(sorted(changed_payload | changed_provenance))
     extras = set(actual) - set(expected)
-    pyc = {
+    exact_provenance = {
         path
-        for path in extras
-        if actual[path].kind == "file"
-        and actual[path].uid == os.getuid()
-        and _mapped_pyc(path, expected_files)
+        for path in extras & set(provenance_entries)
+        if actual[path] == provenance_entries[path]
     }
-    cache_dirs = {
-        path
-        for path in extras
-        if actual[path].kind == "dir"
-        and PurePosixPath(path).name == "__pycache__"
-        and actual[path].uid == os.getuid()
-    }
-    used_cache_dirs = {PurePosixPath(path).parent.as_posix() for path in pyc}
-    disposable_dirs = cache_dirs & used_cache_dirs
-    foreign = tuple(sorted(extras - pyc - disposable_dirs))
+    pyc = exact_provenance & provenance_pyc
+    disposable_dirs = exact_provenance & provenance_dirs
+    foreign = tuple(sorted(extras - set(provenance_entries)))
     return ExtensionComparison(
         expected_payload,
+        provenance,
         current,
         image,
         missing,
@@ -817,6 +877,10 @@ def prepare_extension_for_restore(
         type(comparison) is not ExtensionComparison
         or not comparison.exact
         or (expected_image is not None and type(expected_image) is not TreeImage)
+        or (
+            (comparison.disposable_pyc or comparison.disposable_dirs)
+            and expected_image != comparison.provenance
+        )
     ):
         raise InstallerError("extension payload conflict")
     reference = comparison.current
@@ -962,7 +1026,7 @@ def prepare_extension_for_restore(
         result = reference.capture()
         if result != expected_image:
             raise InstallerError("extension payload conflict after metadata restore")
-    if not compare_extension_tree(comparison.expected, reference).exact:
+    if not compare_extension_tree(comparison.expected, reference, comparison.provenance).exact:
         raise InstallerError("extension payload conflict after cleanup")
     return result
 
@@ -1078,22 +1142,26 @@ def inspect_blender(blender_bin: Path, env: Mapping[str, str], runner: Runner) -
 
 
 def _current_comparison(
-    state: BlenderState, payload: PayloadIndex
+    state: BlenderState, payload: PayloadIndex, provenance: TreeImage | None = None
 ) -> tuple[ExtensionComparison, TreeImage]:
     image, reference, root = _extension_snapshot(state.extensions_root)
     if reference is None or root is None:
         raise InstallerError("extension payload is absent")
     try:
-        comparison = compare_extension_tree(payload, reference)
+        comparison = compare_extension_tree(payload, reference, provenance)
         return comparison, image
     finally:
         root.close()
 
 
-def verify_blender_files(state: BlenderState, expected_payload: PayloadIndex) -> None:
+def verify_blender_files(
+    state: BlenderState,
+    expected_payload: PayloadIndex,
+    provenance: TreeImage | None = None,
+) -> None:
     try:
         manifest_id, manifest_version = _read_manifest(state.extension_root)
-        comparison, _ = _current_comparison(state, expected_payload)
+        comparison, _ = _current_comparison(state, expected_payload, provenance)
     except (OSError, ValueError, InstallerError) as exc:
         raise InstallerError("Blender file verification failed") from exc
     if (
@@ -1267,6 +1335,7 @@ def _stage_env(state: BlenderState, stage: Path) -> dict[str, str]:
         "BLENDER_MCP_HOST": _HOST,
         "BLENDER_MCP_PORT": str(_PORT),
         "PATH": _path_env(state.executable),
+        "PYTHONDONTWRITEBYTECODE": "1",
     }
 
 
@@ -1398,6 +1467,15 @@ def stage_blender_change(
                             str(state.executable),
                             "--background",
                             "--python-expr",
+                            _compile_expression(payload),
+                        ),
+                        "Blender extension bytecode compilation",
+                    ),
+                    (
+                        (
+                            str(state.executable),
+                            "--background",
+                            "--python-expr",
                             _PREFERENCES_EXPRESSION,
                         ),
                         "Blender preference staging",
@@ -1416,16 +1494,16 @@ def stage_blender_change(
                     _stage_is_linked(install_stage, parent_fd, stage_root.fd)
             if capture_file(stage_root, PurePath(staged_zip.name)) != staged_zip_image:
                 raise InstallerError("staged Blender ZIP changed during installation")
-            staged_state = inspect_blender(state.executable, clean, runner)
-            _stage_is_linked(install_stage, parent_fd, stage_root.fd)
-            verify_blender_files(staged_state, payload)
-            _stage_is_linked(install_stage, parent_fd, stage_root.fd)
             extension_relative = PurePath("resources", "extensions", _REPOSITORY, _EXTENSION_ID)
             extension = TreeRef(stage_root, extension_relative)
-            comparison = compare_extension_tree(payload, extension)
-            if not comparison.exact:
-                raise InstallerError("staged Blender extension changed before fsync")
             image = extension.capture()
+            comparison = compare_extension_tree(payload, extension, image)
+            if not comparison.exact:
+                raise InstallerError("staged Blender extension changed before verification")
+            staged_state = inspect_blender(state.executable, clean, runner)
+            _stage_is_linked(install_stage, parent_fd, stage_root.fd)
+            verify_blender_files(staged_state, payload, image)
+            _stage_is_linked(install_stage, parent_fd, stage_root.fd)
             extension_parent, extension_name = stage_root.open_parent(extension_relative)
             try:
                 _fsync_tree_at(extension_parent, extension_name, os.getuid())

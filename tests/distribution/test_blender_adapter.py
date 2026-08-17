@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import py_compile
 import socket
 import stat
 import subprocess
@@ -135,6 +137,22 @@ class BlenderRunner:
             return SimpleNamespace(returncode=0, stdout="installed\n", stderr="")
         if args[:2] == (str(self.blender), "--background"):
             expression = args[-1]
+            if "py_compile.compile" in expression:
+                target = Path(clean["BLENDER_USER_EXTENSIONS"]) / "user_default/mcp"
+                for source in sorted(target.rglob("*.py")):
+                    relative = source.relative_to(target).as_posix()
+                    cache = Path(importlib.util.cache_from_source(str(source), optimization=""))
+                    py_compile.compile(
+                        str(source),
+                        cfile=str(cache),
+                        dfile=relative,
+                        doraise=True,
+                        optimize=0,
+                        invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH,
+                    )
+                    cache.parent.chmod(0o755)
+                    cache.chmod(0o644)
+                self.mutated.append(target)
             if "save_userpref" in expression:
                 target = Path(clean["BLENDER_USER_CONFIG"]) / "userpref.blend"
                 before = target.read_bytes() if target.exists() else b""
@@ -215,7 +233,54 @@ def test_inspect_uses_one_expression_and_exact_allowlisted_profile(tmp_path: Pat
         "BLENDER_MCP_HOST": "localhost",
         "BLENDER_MCP_PORT": "9876",
         "PATH": f"{blender.parent}:/usr/bin:/bin:/usr/sbin:/sbin",
+        "PYTHONDONTWRITEBYTECODE": "1",
     }
+
+
+@pytest.mark.parametrize("failing_probe", [False, True])
+def test_read_only_blender_probe_suppresses_bytecode_on_success_and_failure(
+    tmp_path: Path, failing_probe: bool
+) -> None:
+    blender = _executable(tmp_path / "Blender")
+    resources, env = _profile(tmp_path)
+    env["PYTHONDONTWRITEBYTECODE"] = "0"
+    _installed_profile(resources, env)
+    extension = Path(env["BLENDER_USER_EXTENSIONS"]) / "user_default/mcp"
+
+    class BytecodeProbeRunner(BlenderRunner):
+        def __call__(self, argv, *, cwd: Path, env):
+            args = tuple(map(str, argv))
+            if (
+                args[:2] == (str(blender), "--background")
+                and dict(env).get("PYTHONDONTWRITEBYTECODE") != "1"
+            ):
+                source = extension / "cli.py"
+                py_compile.compile(str(source), doraise=True)
+            result = super().__call__(argv, cwd=cwd, env=env)
+            if failing_probe and args[:2] == (str(blender), "--background"):
+                return SimpleNamespace(returncode=0, stdout="invalid\n", stderr="")
+            return result
+
+    runner = BytecodeProbeRunner(
+        blender,
+        enabled=True,
+        online_access=True,
+        host="localhost",
+        port=9876,
+        autostart=True,
+    )
+    before = tuple(sorted(path.relative_to(extension) for path in extension.rglob("*")))
+    if failing_probe:
+        with pytest.raises(InstallerError):
+            inspect_blender(blender, env, runner)
+    else:
+        inspect_blender(blender, env, runner)
+    assert tuple(sorted(path.relative_to(extension) for path in extension.rglob("*"))) == before
+    assert all(
+        call_env["PYTHONDONTWRITEBYTECODE"] == "1"
+        for args, _, call_env in runner.calls
+        if args[0] in {"/usr/bin/lipo", str(blender)}
+    )
 
 
 @pytest.mark.parametrize("failure", ["missing_resources", "config_escape", "reported_escape"])
@@ -456,7 +521,7 @@ def test_payload_policy_detects_missing_changed_and_foreign_extra(tmp_path: Path
         root.close()
 
 
-def test_only_source_mapped_current_uid_pyc_is_disposable_and_removed_fd_relatively(
+def test_unrecorded_source_mapped_current_uid_pyc_is_foreign_and_untouched(
     tmp_path: Path,
 ) -> None:
     expected = load_extension_payload(EXTENSION_ZIP)
@@ -467,35 +532,103 @@ def test_only_source_mapped_current_uid_pyc_is_disposable_and_removed_fd_relativ
     for file in target.rglob("*"):
         if file.is_file():
             file.chmod(0o644)
-    subprocess.run(
-        [sys.executable, "-I", "-c", "import py_compile;py_compile.compile('__init__.py')"],
-        cwd=target,
-        check=True,
-    )
     cache = target / "__pycache__"
-    baseline_pyc = next(cache.glob("__init__.*.pyc"))
-    root, reference = _tree_ref(target)
-    try:
-        expected_image = reference.capture()
-    finally:
-        root.close()
-    subprocess.run(
-        [sys.executable, "-I", "-c", "import sys;sys.path.insert(0,'.');import capture_output"],
-        cwd=target,
-        check=True,
-    )
-    pyc = next(cache.glob("capture_output.*.pyc"))
+    cache.mkdir()
+    pyc = cache / "cli.cpython-313.pyc"
+    pyc.write_bytes(b"arbitrary foreign bytes")
+    pyc.chmod(0o644)
     root, reference = _tree_ref(target)
     try:
         comparison = compare_extension_tree(expected, reference)
-        assert comparison.exact
-        assert comparison.disposable_pyc == tuple(
-            sorted((f"__pycache__/{baseline_pyc.name}", f"__pycache__/{pyc.name}"))
+        before = reference.capture()
+        assert not comparison.exact
+        assert comparison.disposable_pyc == ()
+        assert comparison.foreign == ("__pycache__", f"__pycache__/{pyc.name}")
+        with pytest.raises(InstallerError):
+            prepare_extension_for_restore(comparison, before)
+        assert reference.capture() == before
+        assert pyc.read_bytes() == b"arbitrary foreign bytes"
+    finally:
+        root.close()
+
+
+def test_stage_deterministically_compiles_complete_pyc_provenance_and_rejects_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blender = _executable(tmp_path / "Blender")
+    _, env = _profile(tmp_path)
+    state = inspect_blender(blender, env, BlenderRunner(blender))
+    payload = load_extension_payload(EXTENSION_ZIP)
+    changes = []
+    runners = []
+    for name in ("stage-a", "stage-b"):
+        runner = BlenderRunner(blender)
+        changes.append(
+            stage_blender_change(
+                state,
+                EXTENSION_ZIP,
+                tmp_path / name,
+                BlenderAuthorizations(True, True, True, True),
+                runner,
+            )
         )
-        image = prepare_extension_for_restore(comparison, expected_image)
-        assert cache.is_dir() and tuple(cache.glob("*.pyc")) == (baseline_pyc,)
-        assert image == expected_image
-        assert compare_extension_tree(expected, reference).exact
+        runners.append(runner)
+    source_paths = {entry.path for entry in payload.entries if entry.path.endswith(".py")}
+    pyc_images = []
+    for change, runner in zip(changes, runners, strict=True):
+        pyc = tuple(
+            entry for entry in change.extension_image.entries if entry.path.endswith(".pyc")
+        )
+        assert len(pyc) == len(source_paths)
+        assert all(blender_adapter._mapped_pyc(entry.path, source_paths) for entry in pyc)
+        assert "__pycache__" in {entry.path for entry in change.extension_image.entries}
+        compile_calls = [
+            call
+            for call in runner.calls
+            if call[0][:2] == (str(blender), "--background") and "py_compile.compile" in call[0][-1]
+        ]
+        assert len(compile_calls) == 1
+        expression = compile_calls[0][0][-1]
+        assert all(f"import {PurePath(source).stem}" not in expression for source in source_paths)
+        assert compile_calls[0][2]["PYTHONDONTWRITEBYTECODE"] == "1"
+        root, reference = _tree_ref(change.extension_path)
+        try:
+            comparison = compare_extension_tree(payload, reference, change.extension_image)
+            assert comparison.exact
+            assert comparison.disposable_pyc == tuple(sorted(entry.path for entry in pyc))
+            assert prepare_extension_for_restore(comparison, change.extension_image) == (
+                change.extension_image
+            )
+        finally:
+            root.close()
+        pyc_images.append({entry.path: (entry.mode, entry.size, entry.sha256) for entry in pyc})
+    assert pyc_images[0] == pyc_images[1]
+
+    recorded_uid = changes[0].extension_image.uid
+    assert recorded_uid is not None
+    root, reference = _tree_ref(changes[0].extension_path)
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(os, "getuid", lambda: recorded_uid + 1)
+            with pytest.raises(ValueError, match="invalid extension pyc provenance"):
+                compare_extension_tree(payload, reference, changes[0].extension_image)
+    finally:
+        root.close()
+
+    change = changes[0]
+    foreign = change.extension_path / "__pycache__/cli.cpython-999.pyc"
+    foreign.write_bytes(b"foreign")
+    foreign.chmod(0o644)
+    root, reference = _tree_ref(change.extension_path)
+    try:
+        comparison = compare_extension_tree(payload, reference, change.extension_image)
+        before = reference.capture()
+        assert not comparison.exact
+        assert comparison.foreign == ("__pycache__/cli.cpython-999.pyc",)
+        with pytest.raises(InstallerError):
+            prepare_extension_for_restore(comparison, change.extension_image)
+        assert reference.capture() == before
+        assert foreign.read_bytes() == b"foreign"
     finally:
         root.close()
 

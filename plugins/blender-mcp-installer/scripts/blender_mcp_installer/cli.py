@@ -1973,9 +1973,9 @@ def _extension_restore_comparison(
     post = action.actual_post or action.intended_post
     absent = TreeImage.absent()
     expected_recovery = action.pre if action.pre.state is ImageState.PRESENT else absent
-    comparison = compare_extension_tree(load_extension_payload(bundle.extension_path), target)
     if not isinstance(post, TreeImage):
         raise InstallerError("rollback preflight conflict")
+    comparison = compare_extension_tree(load_extension_payload(bundle.extension_path), target, post)
     post_entries = {entry.path: entry for entry in post.entries}
     preserved = set(post_entries)
     removable_pyc = set(comparison.disposable_pyc) - preserved
