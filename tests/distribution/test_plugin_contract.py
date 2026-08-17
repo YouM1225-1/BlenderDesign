@@ -641,7 +641,9 @@ def test_marketplace_list_validator_accepts_one_installed_plugin(tmp_path: Path)
 
 def test_uv_bootstrap_is_local_only_and_repeated_before_every_command() -> None:
     text = SKILL.read_text()
+    trust = _shell_block(text, "TRUST_BOOTSTRAP")
     block = _shell_block(text, "UV_BOOTSTRAP")
+    assert ': "${PYTHON_BIN:?set absolute Python 3.13.13 executable}"' in trust
     assert 'if test -n "${UV_BIN:-}"' in block
     assert 'PATH="$OPERATOR_PATH" command -v uv' in block
     assert 'test -x "$HOME/.local/bin/uv"' in block
@@ -650,10 +652,14 @@ def test_uv_bootstrap_is_local_only_and_repeated_before_every_command() -> None:
     assert '"$CANDIDATE_UV" --version' in block
     assert '"$CANDIDATE_UV" run --help | grep -q -- "--no-sync"' in block
     assert '"$CANDIDATE_UV" run --help | grep -q -- "--no-python-downloads"' in block
-    assert '"$CANDIDATE_UV" python find 3.13 --no-project' in block
-    assert "--no-python-downloads --no-config" in block
-    assert '"$PYTHON_BIN" -I -c' in block
-    assert "resolve(strict=True)" in block
+    assert "python find" not in block
+    assert 'case "$PYTHON_BIN" in /*)' in block
+    assert 'CANONICAL_PYTHON="$(/bin/realpath "$PYTHON_BIN")"' in block
+    assert 'test -f "$CANONICAL_PYTHON"' in block
+    assert 'test ! -L "$CANONICAL_PYTHON"' in block
+    assert 'PYTHON_MODE="$(/usr/bin/stat -f %Lp "$CANONICAL_PYTHON")"' in block
+    assert "(3, 13, 13)" in block
+    assert 'PYTHON_BIN="$CANONICAL_PYTHON"' in block
     assert 'test -f "$CANONICAL_UV"' in block
     assert 'test ! -L "$CANONICAL_UV"' in block
     assert block.count('"$CANONICAL_UV" --version') == 1
@@ -667,6 +673,107 @@ def test_uv_bootstrap_is_local_only_and_repeated_before_every_command() -> None:
     assert commands.count("--no-python-downloads --no-sync") == 4
     assert commands.count('python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts"') == 4
     assert commands.count('"$PLUGIN_ROOT/scripts/install.py"') == 4
+
+
+def _python_31313() -> Path:
+    candidate = (ROOT / ".venv/bin/python").resolve()
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        pytest.skip("the certified Python 3.13.13 is unavailable")
+    version = subprocess.run(
+        [candidate, "--version"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    if version != "Python 3.13.13":
+        pytest.skip(f"the certified Python changed: {version}")
+    return candidate
+
+
+def _fake_uv(tmp_path: Path, discovered_python: Path) -> tuple[Path, Path]:
+    log = tmp_path / "uv.log"
+    uv = tmp_path / "uv"
+    uv.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$PWD|$*\" >> {str(log)!r}\n"
+        "if test \"$1\" = --version; then echo 'uv 0.12.2'; exit 0; fi\n"
+        "if test \"$1 $2\" = 'run --help'; then "
+        "echo 'usage: --no-sync --no-python-downloads'; exit 0; fi\n"
+        "if test \"$1 $2\" = 'python find'; then "
+        f"printf '%s\\n' {str(discovered_python)!r}; exit 0; fi\n"
+        "exit 2\n"
+    )
+    uv.chmod(0o700)
+    return uv, log
+
+
+def _run_uv_bootstrap(cwd: Path, uv: Path, python: str) -> subprocess.CompletedProcess[str]:
+    script = "\n".join(
+        (
+            "set -euo pipefail",
+            'OPERATOR_PATH="$PATH"',
+            _shell_block(SKILL.read_text(), "UV_BOOTSTRAP"),
+            "run_uv_bootstrap",
+            'printf "%s\\n" "$PYTHON_BIN"',
+        )
+    )
+    env = os.environ.copy()
+    env.update(UV_BIN=str(uv), PYTHON_BIN=python)
+    return subprocess.run(
+        ["bash", "-c", script], cwd=cwd, env=env, capture_output=True, text=True
+    )
+
+
+def test_uv_bootstrap_reuses_one_canonical_python_across_cwd_and_restart(
+    tmp_path: Path,
+) -> None:
+    python = _python_31313()
+    python_link = tmp_path / "python-link"
+    python_link.symlink_to(python)
+    wrong_cwd = tmp_path / "other-cwd"
+    wrong_cwd.mkdir()
+    uv, log = _fake_uv(tmp_path, Path("/definitely/cwd-dependent/python"))
+
+    first = _run_uv_bootstrap(ROOT, uv, str(python_link))
+    second = _run_uv_bootstrap(wrong_cwd, uv, str(python_link))
+
+    assert first.returncode == second.returncode == 0, first.stderr + second.stderr
+    assert first.stdout.strip() == second.stdout.strip() == str(python)
+    assert "python find" not in log.read_text()
+
+
+@pytest.mark.parametrize("invalid", ["missing", "relative", "group_writable"])
+def test_uv_bootstrap_rejects_invalid_explicit_python(
+    tmp_path: Path, invalid: str
+) -> None:
+    python = _python_31313()
+    uv, _ = _fake_uv(tmp_path, python)
+    supplied = str(python)
+    if invalid == "missing":
+        supplied = str(tmp_path / "missing-python")
+    elif invalid == "relative":
+        supplied = "python"
+    else:
+        unsafe = tmp_path / "unsafe-python"
+        shutil.copy2(python, unsafe)
+        unsafe.chmod(0o775)
+        supplied = str(unsafe)
+
+    result = _run_uv_bootstrap(tmp_path, uv, supplied)
+
+    assert result.returncode != 0
+
+
+def test_uv_bootstrap_rejects_noncertified_python_patch_version(tmp_path: Path) -> None:
+    wrong = Path("/Users/yeminjie/Developer/BlenderDesign/.venv/bin/python").resolve()
+    if not wrong.is_file() or not os.access(wrong, os.X_OK):
+        pytest.skip("the non-certified Python fixture is unavailable")
+    if subprocess.run(
+        [wrong, "--version"], check=True, capture_output=True, text=True
+    ).stdout.strip() == "Python 3.13.13":
+        pytest.skip("the non-certified Python fixture no longer differs")
+    uv, _ = _fake_uv(tmp_path, _python_31313())
+
+    result = _run_uv_bootstrap(tmp_path, uv, str(wrong))
+
+    assert result.returncode != 0
 
 
 def test_installer_commands_use_exact_real_parser_arguments_and_consents() -> None:
