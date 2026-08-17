@@ -1,5 +1,10 @@
 # Official Blender MCP final distribution certification
 
+> Historical certification for `f240166030e916265f0b5796ea99274897e6cff2`.
+> It is superseded for new installer authorization by
+> `2026-08-17-official-blender-mcp-final-certification-v2.md` after the Python-owner
+> review fix. Preserve this report; do not use its candidate as the current release.
+
 Status: **PASS**
 
 Certification date: 2026-08-17
