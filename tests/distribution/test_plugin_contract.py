@@ -662,8 +662,14 @@ def test_uv_bootstrap_is_local_only_and_repeated_before_every_command() -> None:
     assert 'CANONICAL_PYTHON="$(/bin/realpath "$PYTHON_BIN")"' in block
     assert 'test -f "$CANONICAL_PYTHON"' in block
     assert 'test ! -L "$CANONICAL_PYTHON"' in block
+    owner_check = 'PYTHON_OWNER="$(/usr/bin/stat -f %u "$CANONICAL_PYTHON")"'
+    assert owner_check in block
+    assert 'case "$PYTHON_OWNER" in \'\'|*[!0-9]*)' in block
+    assert 'test "$PYTHON_OWNER" = "$OWNER_UID"' in block
+    assert 'test "$PYTHON_OWNER" = 0' in block
     assert 'PYTHON_MODE="$(/usr/bin/stat -f %Lp "$CANONICAL_PYTHON")"' in block
     assert "(3, 13, 13)" in block
+    assert block.index(owner_check) < block.index('"$CANONICAL_PYTHON" -I -c')
     assert 'PYTHON_BIN="$CANONICAL_PYTHON"' in block
     assert 'test -f "$CANONICAL_UV"' in block
     assert 'test ! -L "$CANONICAL_UV"' in block
@@ -709,7 +715,9 @@ def _fake_uv(tmp_path: Path, discovered_python: Path) -> tuple[Path, Path]:
     return uv, log
 
 
-def _run_uv_bootstrap(cwd: Path, uv: Path, python: str) -> subprocess.CompletedProcess[str]:
+def _run_uv_bootstrap(
+    cwd: Path, uv: Path, python: str, *, owner_uid: str | None = None
+) -> subprocess.CompletedProcess[str]:
     script = "\n".join(
         (
             "set -euo pipefail",
@@ -720,7 +728,11 @@ def _run_uv_bootstrap(cwd: Path, uv: Path, python: str) -> subprocess.CompletedP
         )
     )
     env = os.environ.copy()
-    env.update(UV_BIN=str(uv), PYTHON_BIN=python)
+    env.update(
+        UV_BIN=str(uv),
+        PYTHON_BIN=python,
+        OWNER_UID=str(os.getuid()) if owner_uid is None else owner_uid,
+    )
     return subprocess.run(
         ["bash", "-c", script], cwd=cwd, env=env, capture_output=True, text=True
     )
@@ -767,18 +779,39 @@ def test_uv_bootstrap_rejects_invalid_explicit_python(
 
 
 def test_uv_bootstrap_rejects_noncertified_python_patch_version(tmp_path: Path) -> None:
-    wrong = Path("/Users/yeminjie/Developer/BlenderDesign/.venv/bin/python").resolve()
-    if not wrong.is_file() or not os.access(wrong, os.X_OK):
-        pytest.skip("the non-certified Python fixture is unavailable")
-    if subprocess.run(
+    wrong = tmp_path / "python-3.13.14-shim"
+    wrong.write_text(
+        "#!/bin/sh\n"
+        "if test \"$1\" = --version; then echo 'Python 3.13.14'; exit 0; fi\n"
+        "exit 1\n"
+    )
+    wrong.chmod(0o700)
+    assert subprocess.run(
         [wrong, "--version"], check=True, capture_output=True, text=True
-    ).stdout.strip() == "Python 3.13.13":
-        pytest.skip("the non-certified Python fixture no longer differs")
+    ).stdout.strip() == "Python 3.13.14"
     uv, _ = _fake_uv(tmp_path, _python_31313())
 
     result = _run_uv_bootstrap(tmp_path, uv, str(wrong))
 
     assert result.returncode != 0
+
+
+def test_uv_bootstrap_rejects_foreign_python_owner_before_execution(
+    tmp_path: Path,
+) -> None:
+    sentinel = tmp_path / "python-executed"
+    foreign = tmp_path / "foreign-python"
+    foreign.write_text(f"#!/bin/sh\ntouch {str(sentinel)!r}\nexit 1\n")
+    foreign.chmod(0o700)
+    uv, _ = _fake_uv(tmp_path, _python_31313())
+    mismatched_owner = str(os.getuid() + 1 or 1)
+
+    result = _run_uv_bootstrap(
+        tmp_path, uv, str(foreign), owner_uid=mismatched_owner
+    )
+
+    assert result.returncode != 0
+    assert not sentinel.exists()
 
 
 def test_installer_commands_use_exact_real_parser_arguments_and_consents() -> None:
