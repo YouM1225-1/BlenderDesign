@@ -1,5 +1,11 @@
 # Official Blender MCP final distribution certification v2
 
+> Historical certification for `2b1f1f4172602f899161e961cff35133702367fe`.
+> It is superseded for new installer authorization by
+> `2026-08-17-official-blender-mcp-final-certification-v3.md` after the bounded
+> Codex-helper cleanup review fix. Preserve this report; do not use its candidate as
+> the current release.
+
 Status: **PASS**
 
 Certification date: 2026-08-17
