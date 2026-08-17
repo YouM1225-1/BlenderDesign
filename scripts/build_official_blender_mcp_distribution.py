@@ -23,6 +23,7 @@ sys.path.insert(0, str(PLUGIN_SCRIPTS))
 
 from blender_mcp_installer.bundle import (  # noqa: E402
     ARTIFACTS,
+    BUNDLE_VERSION,
     TOOLS,
     UPSTREAM_COMMIT,
     ReleaseManifest,
@@ -511,7 +512,7 @@ def _manifest(epoch: int, output: Path) -> ReleaseManifest:
         )
     value = {
         "schema_version": 2,
-        "bundle_version": "1.0.0+3800c17797dd",
+        "bundle_version": BUNDLE_VERSION,
         "platform": {"system": "Darwin", "machine": "arm64"},
         "upstream": {
             "url": "https://projects.blender.org/lab/blender_mcp.git",

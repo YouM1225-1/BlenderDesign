@@ -17,7 +17,9 @@ sys.path.insert(0, str(ROOT / "plugins/blender-mcp-installer/scripts"))
 
 from blender_mcp_installer.bundle import (  # noqa: E402
     ARTIFACTS,
+    BUNDLE_VERSION,
     TOOLS,
+    UPSTREAM_COMMIT,
     open_verified_bundle,
     parse_manifest,
     validate_runtime_lock,
@@ -29,7 +31,12 @@ from scripts.build_official_blender_mcp_distribution import (  # noqa: E402
 import scripts.build_official_blender_mcp_distribution as builder  # noqa: E402
 
 
-COMMIT = "3800c17797dda55d87ae655182001ad94cc11b8b"
+COMMIT = UPSTREAM_COMMIT
+
+
+def test_bundle_version_is_derived_from_upstream_commit() -> None:
+    assert len(UPSTREAM_COMMIT) == 40
+    assert BUNDLE_VERSION == "1.0.0+" + UPSTREAM_COMMIT[:12]
 
 
 def manifest() -> dict[str, object]:
@@ -39,7 +46,7 @@ def manifest() -> dict[str, object]:
     ]
     return {
         "schema_version": 2,
-        "bundle_version": "1.0.0+3800c17797dd",
+        "bundle_version": BUNDLE_VERSION,
         "platform": {"system": "Darwin", "machine": "arm64"},
         "upstream": {
             "url": "https://projects.blender.org/lab/blender_mcp.git",

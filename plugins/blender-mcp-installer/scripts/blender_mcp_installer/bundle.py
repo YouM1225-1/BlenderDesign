@@ -12,6 +12,7 @@ from typing import Iterator, Mapping, Protocol, Sequence
 
 
 UPSTREAM_COMMIT = "3800c17797dda55d87ae655182001ad94cc11b8b"
+BUNDLE_VERSION = "1.0.0+" + UPSTREAM_COMMIT[:12]
 TOOLS = (
     "execute_blender_code",
     "execute_blender_code_for_cli",
@@ -184,7 +185,7 @@ def parse_manifest(raw: bytes) -> ReleaseManifest:
     )
     if type(top["schema_version"]) is not int or top["schema_version"] != 2:
         raise ValueError("invalid schema_version")
-    if top["bundle_version"] != "1.0.0+3800c17797dd":
+    if top["bundle_version"] != BUNDLE_VERSION:
         raise ValueError("invalid bundle_version")
     platform = _fixed(top["platform"], {"system": "Darwin", "machine": "arm64"}, "platform")
     upstream = _fixed(
