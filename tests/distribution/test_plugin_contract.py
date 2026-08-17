@@ -680,9 +680,10 @@ def test_installer_commands_use_exact_real_parser_arguments_and_consents() -> No
     assert "--receipt" not in install
 
 
-def test_skill_requires_four_fresh_answers_and_operator_lifecycle_checkpoints() -> None:
+def test_skill_defaults_four_authorizations_and_keeps_lifecycle_checkpoints() -> None:
     text = SKILL.read_text()
-    assert "Ask separately and wait for an explicit answer to each checkpoint" in text
+    assert "Do not ask four per-install authorization questions" in text
+    assert "standing default-allow policy" in text
     for wording in (
         "install and enable the reviewed Blender extension",
         "enable Blender Allow Online Access",
@@ -690,7 +691,10 @@ def test_skill_requires_four_fresh_answers_and_operator_lifecycle_checkpoints() 
         "expose arbitrary-Python MCP tools",
     ):
         assert wording in text
-    assert "Receipt consent evidence is audit-only and never authorization" in text
+    assert "Always pass all four explicit CLI flags" in text
+    assert "all_four_collected_for_this_workflow" in text
+    assert "Ask separately and wait for an explicit answer to each checkpoint" not in text
+    assert "May the installer" not in text
     assert "Start the selected Blender normally, then confirm it is running" in text
     assert "Close Blender normally and confirm it is closed before repair or rollback" in text
     assert "Never start, terminate, or force-close Blender" in text
