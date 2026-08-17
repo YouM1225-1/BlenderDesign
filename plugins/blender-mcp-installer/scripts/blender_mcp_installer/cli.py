@@ -1643,8 +1643,12 @@ def _changed_install(context: _Context, fault: FaultInjector) -> dict[str, objec
                     refs["runtime"], staged_bundle.manifest, profile, context.host.runner
                 )
                 fresh_blender = getattr(_inspection(context), "blender_state", context.blender)
+                if not isinstance(extension_action.actual_post, TreeImage):
+                    raise InstallerError("invalid extension postimage")
                 verify_blender_files(
-                    fresh_blender, load_extension_payload(staged_bundle.extension_path)
+                    fresh_blender,
+                    load_extension_payload(staged_bundle.extension_path),
+                    extension_action.actual_post,
                 )
                 verify_codex_toml(roots.codex_config.read_bytes(), desired)
                 verify_codex_effective(context.host.codex_bin, desired, context.host.env)

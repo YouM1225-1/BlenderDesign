@@ -728,7 +728,12 @@ def test_first_install_orchestrates_journaled_adapters(
     monkeypatch.setattr(cli, "stage_blender_change", fake_blender)
     monkeypatch.setattr(cli, "stage_codex_config", fake_codex)
     monkeypatch.setattr(cli, "verify_runtime", lambda *_a, **_k: None)
-    monkeypatch.setattr(cli, "verify_blender_files", lambda *_a, **_k: None)
+    blender_verifications: list[TreeImage | None] = []
+
+    def verify_blender(_state, _payload, provenance=None):
+        blender_verifications.append(provenance)
+
+    monkeypatch.setattr(cli, "verify_blender_files", verify_blender)
     monkeypatch.setattr(cli, "load_extension_payload", lambda *_a, **_k: object())
     monkeypatch.setattr(cli, "verify_codex_toml", lambda *_a, **_k: None)
     monkeypatch.setattr(cli, "verify_codex_effective", lambda *_a, **_k: None)
@@ -747,6 +752,7 @@ def test_first_install_orchestrates_journaled_adapters(
         "codex_file",
     ]
     assert value["actions"][0]["state"] == "cleaned"
+    assert blender_verifications == [TreeImage.from_dict(value["actions"][2]["actual_post"])]
     assert not roots.bundle_stage(value["install_id"]).exists()
     before = {
         path: path.read_bytes()
