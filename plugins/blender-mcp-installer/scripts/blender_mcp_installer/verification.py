@@ -30,7 +30,7 @@ from .codex_adapter import (
     verify_codex_toml,
 )
 from .filesystem import InstallerError, SafeRoot, TargetRef
-from .model import ActiveSelector, InstallRoots, ReceiptStatus, parse_receipt
+from .model import ActiveSelector, InstallRoots, ReceiptStatus, TargetRole, TreeImage, parse_receipt
 from .runtime import verify_runtime
 
 
@@ -819,8 +819,19 @@ def _inspect(
         except (OSError, ValueError, InstallerError):
             runtime_state = None
     expected_payload = load_extension_payload(bundle.extension_path)
+    extension_provenance = (
+        None
+        if receipt is None
+        else next(
+            target.install_post
+            for target in receipt.targets
+            if target.role is TargetRole.BLENDER_EXTENSION
+        )
+    )
+    if extension_provenance is not None and type(extension_provenance) is not TreeImage:
+        raise InstallerError("invalid recorded extension provenance")
     try:
-        verify_blender_files(current_blender, expected_payload)
+        verify_blender_files(current_blender, expected_payload, extension_provenance)
         blender_files_exact = True
     except (OSError, ValueError, InstallerError):
         blender_files_exact = False

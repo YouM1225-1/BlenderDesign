@@ -39,7 +39,13 @@ from blender_mcp_installer.verification import (
     probe_host,
     verify_live,
 )
-from tests.distribution.test_filesystem import INSTALL_ID, _active, _receipt, _roots
+from tests.distribution.test_filesystem import (
+    INSTALL_ID,
+    _active,
+    _present_tree,
+    _receipt,
+    _roots,
+)
 from tests.distribution.test_runtime import _bundle as _runtime_bundle
 from tests.distribution.test_runtime import _profile as _runtime_profile
 
@@ -557,6 +563,28 @@ def test_adapter_backed_exact_inspection_binds_receipt_and_all_authorities(
     assert calls == ["runtime", "blender_files", "codex_toml", "codex_effective"]
     assert controls["runtime_profile"].home == roots.home
     assert controls["runtime_profile"].blender_path == roots.blender.executable
+
+
+def test_installed_inspection_passes_recorded_extension_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, _, _, receipt, receipt_path = _installed(tmp_path, monkeypatch)
+    recorded = _present_tree()
+    next(target for target in receipt["targets"] if target["role"] == "blender_extension")[
+        "install_post"
+    ] = recorded
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True))
+    seen: list[object] = []
+    monkeypatch.setattr(
+        verification,
+        "verify_blender_files",
+        lambda _state, _payload, provenance=None: seen.append(provenance),
+    )
+
+    inspected = inspect_installation(bundle, roots, blender, host)
+
+    assert inspected.exact
+    assert seen == [TreeImage.from_dict(recorded)]
 
 
 def test_clean_host_inspection_is_prepublication_safe_and_first_install_ready(
