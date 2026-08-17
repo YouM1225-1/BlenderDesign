@@ -4,11 +4,13 @@ import importlib.util
 import json
 import os
 import py_compile
+import shutil
 import socket
 import stat
 import subprocess
 import sys
 import zipfile
+from dataclasses import replace
 from pathlib import Path, PurePath
 from types import SimpleNamespace
 
@@ -1075,7 +1077,20 @@ def test_wrong_manifest_and_preferences_fail_file_verification(tmp_path: Path) -
         verify_blender_files(state, load_extension_payload(EXTENSION_ZIP))
 
 
-def test_payload_verification_is_independent_from_managed_preferences(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "drift",
+    [
+        {"repository": "foreign"},
+        {"enabled": False},
+        {"online_access": False},
+        {"host": "foreign"},
+        {"port": 1},
+        {"autostart": False},
+    ],
+)
+def test_payload_verification_is_independent_from_managed_state(
+    tmp_path: Path, drift: dict[str, object]
+) -> None:
     blender = _executable(tmp_path / "Blender")
     resources, env = _profile(tmp_path)
     _installed_profile(resources, env)
@@ -1085,12 +1100,18 @@ def test_payload_verification_is_independent_from_managed_preferences(tmp_path: 
         BlenderRunner(
             blender,
             enabled=True,
-            online_access=False,
+            online_access=True,
             host="localhost",
             port=9876,
             autostart=True,
         ),
     )
+    drift = dict(drift)
+    if "repository" in drift:
+        foreign = state.extensions_root / str(drift["repository"]) / "mcp"
+        shutil.copytree(state.extension_root, foreign)
+        drift["extension_root"] = foreign
+    state = replace(state, **drift)
     payload = load_extension_payload(EXTENSION_ZIP)
 
     verify_blender_payload(state, payload)

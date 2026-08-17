@@ -310,6 +310,65 @@ def test_ancestor_and_leaf_symlinks_rejected(tmp_path: Path) -> None:
             capture_file(root, PurePath("leaf"))
 
 
+def test_verified_directory_open_allows_concurrent_content_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    real_open = os.open
+    changed = False
+
+    def change_after_open(*args: object, **kwargs: object) -> int:
+        nonlocal changed
+        fd = real_open(*args, **kwargs)
+        name = args[0] if args else kwargs.get("path")
+        if name == "child" and kwargs.get("dir_fd") == parent_fd and not changed:
+            changed = True
+            (child / "concurrent").write_bytes(b"content")
+            info = child.stat()
+            os.utime(child, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000))
+        return fd
+
+    monkeypatch.setattr(filesystem.os, "open", change_after_open)
+    try:
+        child_fd = filesystem._open_verified_directory(parent_fd, "child", os.getuid())
+        os.close(child_fd)
+    finally:
+        os.close(parent_fd)
+    assert changed
+
+
+def test_verified_directory_open_rejects_identity_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    original_ino = child.stat().st_ino
+    real_open = os.open
+    replaced = False
+
+    def replace_before_open(*args: object, **kwargs: object) -> int:
+        nonlocal replaced
+        name = args[0] if args else kwargs.get("path")
+        if name == "child" and kwargs.get("dir_fd") == parent_fd and not replaced:
+            replaced = True
+            child.rmdir()
+            child.mkdir()
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(filesystem.os, "open", replace_before_open)
+    try:
+        with pytest.raises(ValueError, match="changed while opening"):
+            filesystem._open_verified_directory(parent_fd, "child", os.getuid())
+    finally:
+        os.close(parent_fd)
+    assert replaced and child.stat().st_ino != original_ino
+
+
 def test_foreign_owner_and_special_file_rejected(tmp_path: Path) -> None:
     owned = tmp_path / "owned"
     owned.mkdir()
