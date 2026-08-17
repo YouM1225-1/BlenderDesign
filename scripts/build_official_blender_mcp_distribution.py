@@ -511,7 +511,7 @@ def _manifest(epoch: int, output: Path) -> ReleaseManifest:
         )
     value = {
         "schema_version": 2,
-        "bundle_version": "1.0.0+98d1624b39d8",
+        "bundle_version": "1.0.0+3800c17797dd",
         "platform": {"system": "Darwin", "machine": "arm64"},
         "upstream": {
             "url": "https://projects.blender.org/lab/blender_mcp.git",
