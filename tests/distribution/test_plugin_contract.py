@@ -193,8 +193,15 @@ def _trust_fixture(tmp_path: Path) -> tuple[Path, str]:
     (repo / ".agents/plugins").mkdir(parents=True)
     (repo / "plugins/blender-mcp-installer/scripts").mkdir(parents=True)
     artifact_root.mkdir(parents=True)
-    (repo / ".agents/plugins/marketplace.json").write_text("{}\n")
+    (repo / ".agents/plugins/marketplace.json").write_text(
+        '{"name":"official-blender-mcp","interface":{},"plugins":[]}\n'
+    )
     (repo / "plugins/blender-mcp-installer/scripts/install.py").write_text("trusted\n")
+    if MARKETPLACE_PROJECTOR.exists():
+        shutil.copy2(
+            MARKETPLACE_PROJECTOR,
+            repo / "plugins/blender-mcp-installer/scripts/project_marketplace.py",
+        )
     payload = b"payload\n"
     (artifact_root / "payload").write_bytes(payload)
     (artifact_root / "SHA256SUMS").write_text(f"{hashlib.sha256(payload).hexdigest()}  payload\n")
@@ -819,6 +826,8 @@ elif args == ["plugin", "marketplace", "list", "--json"]:
         )
     print(json.dumps({"marketplaces": payload}))
 elif args[:2] == ["plugin", "add"]:
+    if os.environ.get("FAIL_PLUGIN_ADD"):
+        raise SystemExit(43)
     marketplace = args[2].split("@", 1)[1]
     if marketplace not in read_marketplaces():
         raise SystemExit(4)
@@ -890,8 +899,8 @@ def test_persistent_marketplace_contract_is_commit_bound_and_transactional() -> 
     )
     projector_required = (
         '".local/share/blender-mcp-installer"',
-        'projection_parent / args.reviewed_commit',
-        '"archive", "--format=tar", args.reviewed_commit',
+        "projection_parent / reviewed_commit",
+        '"archive", "--format=tar", reviewed_commit',
         'bundle_root / "SHA256SUMS"',
         '"/usr/bin/shasum", "-a", "256", "-c"',
         '"plugin", "marketplace", "remove"',
@@ -934,6 +943,7 @@ def test_persistent_marketplace_survives_private_cleanup_and_lists_normally(
         (
             _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
             _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
+            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
             'printf "%s\\n" "$PERSISTENT_MARKETPLACE_ROOT" > "$RECORDED_ROOT"',
             _shell_block(SKILL.read_text(), "TRUST_CLEANUP"),
             'test ! -e "$TRUST_PARENT"',
@@ -972,11 +982,15 @@ def test_persistent_marketplace_survives_private_cleanup_and_lists_normally(
     evidence = tuple(recovery.glob("registration.*/*.json"))
     assert evidence
     assert all(path.stat().st_mode & 0o777 == 0o600 for path in evidence)
+    cleanup_evidence = tuple(recovery.glob("registration.*/marketplaces-after-cleanup.json"))
+    assert len(cleanup_evidence) == 1
+    assert "other-source" not in cleanup_evidence[0].read_text()
     assert not (home / ".local/state/blender-mcp-installer/receipts").exists()
 
 
+@pytest.mark.parametrize("failure", ["marketplace_add", "plugin_add"])
 def test_marketplace_registration_failure_restores_only_previous_target(
-    tmp_path: Path,
+    tmp_path: Path, failure: str
 ) -> None:
     env, home, codex_home, old_source, commit = _persistent_marketplace_env(tmp_path)
     projection = (
@@ -984,7 +998,10 @@ def test_marketplace_registration_failure_restores_only_previous_target(
         / ".local/share/blender-mcp-installer/marketplaces/official-blender-mcp"
         / commit
     )
-    env["FAIL_MARKETPLACE_ADD"] = str(projection)
+    if failure == "marketplace_add":
+        env["FAIL_MARKETPLACE_ADD"] = str(projection)
+    else:
+        env["FAIL_PLUGIN_ADD"] = "1"
     script = "\n".join(
         (
             _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
@@ -998,3 +1015,26 @@ def test_marketplace_registration_failure_restores_only_previous_target(
     assert "[marketplaces.other]" in config
     recovery = home / ".local/state/blender-mcp-installer/marketplace-recovery"
     assert tuple(recovery.glob("registration.*/before.json"))
+
+
+def test_persistent_marketplace_rejects_checksum_drift_before_registration(
+    tmp_path: Path,
+) -> None:
+    env, home, codex_home, old_source, commit = _persistent_marketplace_env(tmp_path)
+    projection = (
+        home
+        / ".local/share/blender-mcp-installer/marketplaces/official-blender-mcp"
+        / commit
+    )
+    script = "\n".join(
+        (
+            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            'printf "%064d  payload\\n" 0 > "$TRUSTED_CHECKSUMS"',
+            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
+        )
+    )
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert not projection.exists()
+    config = (codex_home / "config.toml").read_text()
+    assert f"source = {json.dumps(str(old_source.resolve()))}" in config

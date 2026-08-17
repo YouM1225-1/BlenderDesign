@@ -18,7 +18,10 @@ Before adding the repository marketplace or importing the plugin, follow the exa
 Git and Python redirection variables, checks a clean scoped source tree, creates a
 private detached hook-free worktree from the reviewed commit, and compares the
 commit-object checksum file with the materialized artifacts. All later plugin and
-bundle paths must come from that private worktree in the same fail-fast shell session.
+bundle execution paths must come from that private worktree in the same fail-fast
+shell session. Before installer execution, the bundled helper uses the same private
+Git/archive/checksum boundary to create an owner-controlled, commit-addressed
+persistent marketplace projection under `$HOME/.local/share/blender-mcp-installer`.
 Its private mode-0700 Git admin has empty config, hooks, templates, and info
 attributes, reads the validated source object database only by hash, and never loads
 source repository configuration. Replacement objects and system/global config remain
@@ -36,14 +39,15 @@ The operator supplies:
   saved operator PATH and then `$HOME/.local/bin/uv` are probed. The resolved Python
   canonicalizes uv before any installer command or host check.
 
-The skill gives the exact marketplace, inspect, install, verify, rollback, and private
-worktree cleanup commands. Its four installer launchers use Python `-B` so importing
-the installer cannot dirty the trusted worktree with bytecode. Do not substitute the
-source checkout for its trusted worktree.
+The skill gives the exact persistent-marketplace, inspect, install, verify, rollback,
+and private-worktree cleanup commands. Its four installer launchers use Python `-B`,
+so importing the installer cannot dirty the trusted worktree with bytecode. Do not
+substitute the source checkout for its trusted worktree.
 
 ## Operator workflow
 
-1. Establish the trusted worktree and add its repository marketplace/plugin.
+1. Establish the trusted worktree, materialize the persistent marketplace projection,
+   and transactionally replace only the target marketplace registration.
 2. Resolve uv 0.12.2 and an already-installed local Python 3.13 without downloads.
 3. Run `inspect` before mutation.
 4. Apply the operator's standing default-allow policy for extension install/enable,
@@ -68,11 +72,14 @@ The repository marketplace makes the operator workflow discoverable to an LLM; i
 does not add `.mcp.json`, an app, a daemon, a second server, or a separate Codex
 installer. The generated Codex MCP entry points at a local STDIO managed launcher.
 
-Marketplace add/plugin add/list is a local blocking gate. An actual `codex exec`
-invocation requires an independently supplied `DISPOSABLE_CODEX_API_KEY` and a
-private disposable `HOME`/`CODEX_HOME`. Never copy normal Codex credentials. Without
-that credential record `LOCAL_LLM_INVOCATION_STATUS: NOT_RUN`; this does not block
-the implementation gate. The separate physical-host result starts as
+Marketplace add/plugin add/list before and after private-worktree cleanup is a local
+blocking gate. Registration recovery evidence is stored separately from installer
+receipts and preserves the prior target source plus non-target fingerprints. An
+actual `codex exec` invocation requires an independently supplied
+`DISPOSABLE_CODEX_API_KEY` and a private disposable `HOME`/`CODEX_HOME`. Never copy
+normal Codex credentials. Without that credential record
+`LOCAL_LLM_INVOCATION_STATUS: NOT_RUN`; this does not block the implementation gate.
+The separate physical-host result starts as
 `SECOND_MAC_CANARY_STATUS: NOT_RUN` until a release operator supplies another Mac.
 
 Supported failures are transactional and receipt-backed, but the threat model does

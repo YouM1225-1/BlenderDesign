@@ -17,6 +17,8 @@ wheel and Codex connects through the generated local STDIO managed launcher.
   not authenticity. The reviewed immutable distribution commit is the authenticity boundary.
 - Keep the trust bootstrap, plugin add, and installer commands in one fail-fast shell
   session. A new session must repeat the bootstrap.
+- Use the private trusted worktree only for installer execution. Register the
+  commit-bound persistent marketplace projection, never the private worktree.
 - Never start, terminate, or force-close Blender. Never open or modify a project
   `.blend` file.
 - Do not install uv or Python. A symlinked uv executable is allowed when its supplied
@@ -231,19 +233,8 @@ flags cannot hide dirty files. The private admin reads only the validated source
 object database by hash. Source repository config/info metadata is never loaded;
 system/global config and replacement objects are disabled.
 Keep the private worktree and checksum file until the workflow is complete; they
-are evidence and all later paths derive from them. Never reset `DISTRIBUTION_ROOT`
-to the source checkout.
-
-Add the repository marketplace and plugin from this trusted tree in the same shell:
-
-```bash
-"$CODEX_BIN" plugin marketplace add "$DISTRIBUTION_ROOT"
-"$CODEX_BIN" plugin add "blender-mcp-installer@official-blender-mcp"
-```
-
-If the marketplace reports a different name, read the top-level `name` from the
-trusted `.agents/plugins/marketplace.json` without importing repository Python and
-use that exact name. Do not proceed from an untrusted or dirty checkout.
+are evidence and all installer paths derive from them. Never reset
+`DISTRIBUTION_ROOT` to the source checkout. Do not register it as a marketplace.
 
 ## 2. Resolve the local runner before each command
 
@@ -287,6 +278,33 @@ run_uv_bootstrap() {
 }
 ```
 <!-- UV_BOOTSTRAP_END -->
+
+Run the bootstrap, then create and register the immutable commit-addressed projection
+before installer commands. New commits are verified before target-only replacement;
+mode-0600 recovery evidence is receipt-independent. The helper then runs
+`plugin add "blender-mcp-installer@official-blender-mcp"`.
+<!-- PERSISTENT_MARKETPLACE_BEGIN -->
+```bash
+test -n "${PYTHON_BIN:-}" || run_uv_bootstrap
+NORMAL_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+MARKETPLACE_PREPARE_JSON="$("$PYTHON_BIN" -I -B \
+  "$PLUGIN_ROOT/scripts/project_marketplace.py" prepare \
+  --private-git-dir "$PRIVATE_GIT_DIR" \
+  --git-safe-home "$GIT_SAFE_HOME" \
+  --reviewed-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
+  --trusted-checksums "$TRUSTED_CHECKSUMS" \
+  --codex "$CODEX_BIN" --home "$HOME" --codex-home "$NORMAL_CODEX_HOME")"
+MARKETPLACE_NAME="$("$PYTHON_BIN" -I -c \
+  'import json,sys; print(json.loads(sys.argv[1])["marketplace"])' \
+  "$MARKETPLACE_PREPARE_JSON")"
+PERSISTENT_MARKETPLACE_ROOT="$("$PYTHON_BIN" -I -c \
+  'import json,sys; print(json.loads(sys.argv[1])["projection"])' \
+  "$MARKETPLACE_PREPARE_JSON")"
+REGISTRATION_RECOVERY_DIR="$("$PYTHON_BIN" -I -c \
+  'import json,sys; print(json.loads(sys.argv[1])["recovery"])' \
+  "$MARKETPLACE_PREPARE_JSON")"
+```
+<!-- PERSISTENT_MARKETPLACE_END -->
 
 ## 3. Inspect, apply default authorization, and install
 
@@ -415,10 +433,10 @@ assert sum(x["name"] == "blender-mcp-installer" for x in p["installed"]) == 1, "
 PY
 )"
 HOME="$SMOKE_HOME" CODEX_HOME="$SMOKE_CODEX_HOME" PATH="$SMOKE_PATH" \
-  "$CODEX_BIN" plugin marketplace add "$DISTRIBUTION_ROOT"
+  "$CODEX_BIN" plugin marketplace add "$PERSISTENT_MARKETPLACE_ROOT"
 MARKETPLACE_NAME="$("$PYTHON_BIN" -I -c \
   'import json,sys;print(json.load(open(sys.argv[1]))["name"])' \
-  "$DISTRIBUTION_ROOT/.agents/plugins/marketplace.json")"
+  "$PERSISTENT_MARKETPLACE_ROOT/.agents/plugins/marketplace.json")"
 HOME="$SMOKE_HOME" CODEX_HOME="$SMOKE_CODEX_HOME" PATH="$SMOKE_PATH" \
   "$CODEX_BIN" plugin add "blender-mcp-installer@$MARKETPLACE_NAME"
 HOME="$SMOKE_HOME" CODEX_HOME="$SMOKE_CODEX_HOME" PATH="$SMOKE_PATH" \
@@ -464,6 +482,18 @@ rm -R "$PRIVATE_GIT_DIR" "$EMPTY_TEMPLATE" "$GIT_SAFE_HOME"
 rmdir "$TRUST_PARENT"
 ```
 <!-- TRUST_CLEANUP_END -->
+
+After private trust cleanup, verify the normal profile and retain both successful
+listings beside the independent recovery evidence.
+<!-- PERSISTENT_MARKETPLACE_VERIFY_BEGIN -->
+```bash
+"$PYTHON_BIN" -I -B \
+  "$PERSISTENT_MARKETPLACE_ROOT/plugins/blender-mcp-installer/scripts/project_marketplace.py" \
+  verify --projection "$PERSISTENT_MARKETPLACE_ROOT" \
+  --recovery "$REGISTRATION_RECOVERY_DIR" \
+  --codex "$CODEX_BIN" --home "$HOME" --codex-home "$NORMAL_CODEX_HOME"
+```
+<!-- PERSISTENT_MARKETPLACE_VERIFY_END -->
 
 Record the physical-host gate separately as `SECOND_MAC_CANARY_STATUS: NOT_RUN`
 until an independent release operator runs it.
