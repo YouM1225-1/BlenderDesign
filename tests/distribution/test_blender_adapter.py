@@ -98,16 +98,19 @@ class BlenderRunner:
         self.mutated: list[Path] = []
 
     def _state(self, env: dict[str, str]) -> dict[str, object]:
-        config = Path(env["BLENDER_USER_CONFIG"])
+        resources = env.get("BLENDER_USER_RESOURCES", str(Path(env["HOME"]) / "normal/resources"))
+        config_value = env.get("BLENDER_USER_CONFIG", str(Path(resources) / "config"))
+        extensions = env.get("BLENDER_USER_EXTENSIONS", str(Path(resources) / "extensions"))
+        config = Path(config_value)
         preferences = config / "userpref.blend"
         staged = preferences.exists() and b"TASK5-PREFERENCES" in preferences.read_bytes()
         return {
             "binary_path": str(self.reported_binary),
             "version": [5, 2, 0],
             "architecture": self.architecture,
-            "user_resources": env["BLENDER_USER_RESOURCES"],
-            "config_root": env["BLENDER_USER_CONFIG"],
-            "extensions_root": env["BLENDER_USER_EXTENSIONS"],
+            "user_resources": resources,
+            "config_root": config_value,
+            "extensions_root": extensions,
             "repository": self.repository,
             "enabled": True if staged else self.enabled,
             "online_access": True if staged else self.online_access,
@@ -160,6 +163,22 @@ class BlenderRunner:
                 target.chmod(0o600)
                 self.mutated.append(target)
             payload = json.dumps(self._state(clean), sort_keys=True)
+            if "--factory-startup" in args:
+                state = self._state(clean)
+                payload = json.dumps(
+                    {
+                        key: state[key]
+                        for key in (
+                            "binary_path",
+                            "version",
+                            "architecture",
+                            "user_resources",
+                            "config_root",
+                            "extensions_root",
+                        )
+                    },
+                    sort_keys=True,
+                )
             return SimpleNamespace(
                 returncode=0,
                 stdout=f"Blender log\n__BLENDER_MCP_INSTALLER__{payload}\n",
@@ -306,6 +325,27 @@ def test_profile_discovery_rejects_missing_root_or_resource_escape(
         runner._state = escaped
     with pytest.raises((ValueError, InstallerError)):
         resolve_blender_paths(blender, env, runner)
+
+
+def test_path_discovery_is_factory_startup_and_omits_live_profile(
+    tmp_path: Path,
+) -> None:
+    blender = _executable(tmp_path / "Blender")
+    home = _private(tmp_path / "home")
+    runner = BlenderRunner(blender)
+
+    paths = resolve_blender_paths(blender, {"HOME": str(home)}, runner)
+
+    assert paths.user_resources == home / "normal/resources"
+    blender_call = next(call for call in runner.calls if call[0][0] == str(blender))
+    assert blender_call[0][:3] == (str(blender), "--background", "--factory-startup")
+    assert blender_call[2] == {
+        "HOME": str(home),
+        "BLENDER_MCP_HOST": "localhost",
+        "BLENDER_MCP_PORT": "9876",
+        "PATH": f"{blender.parent}:/usr/bin:/bin:/usr/sbin:/sbin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
 
 
 @pytest.mark.parametrize("failure", ["symlink", "not_executable", "non_arm64", "reported_binary"])

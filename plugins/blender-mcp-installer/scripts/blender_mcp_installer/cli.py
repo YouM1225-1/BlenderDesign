@@ -20,10 +20,10 @@ from .blender_adapter import (
     BlenderState,
     ExtensionComparison,
     compare_extension_tree,
-    inspect_blender,
     load_extension_payload,
     prepare_extension_for_restore,
     probe_blender_lifecycle,
+    resolve_blender_paths,
     stage_blender_change,
     verify_blender_files,
 )
@@ -80,7 +80,6 @@ from .model import (
     ActionKind,
     ActionState,
     ActiveSelector,
-    BlenderPaths,
     BoundaryRole,
     FileImage,
     Image,
@@ -252,17 +251,23 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _environment() -> dict[str, str]:
-    required = (
-        "HOME",
-        "CODEX_HOME",
+    try:
+        home = os.environ["HOME"]
+    except KeyError as exc:
+        raise InstallerError("explicit installer profile is required") from exc
+    values = {
+        "HOME": home,
+        "CODEX_HOME": os.environ.get("CODEX_HOME", str(Path(home) / ".codex")),
+    }
+    blender_names = (
         "BLENDER_USER_RESOURCES",
         "BLENDER_USER_CONFIG",
         "BLENDER_USER_EXTENSIONS",
     )
-    try:
-        values = {name: os.environ[name] for name in required}
-    except KeyError as exc:
-        raise InstallerError("explicit installer profile is required") from exc
+    supplied = tuple(name in os.environ for name in blender_names)
+    if any(supplied) and not all(supplied):
+        raise InstallerError("explicit installer profile is required")
+    values.update({name: os.environ[name] for name in blender_names if name in os.environ})
     values.update(
         {
             "PATH": _SYSTEM_PATH,
@@ -284,7 +289,7 @@ def _resolve_python() -> Path:
         if not source.is_absolute() or ".." in source.parts:
             raise ValueError
         path = _executable(str(source.resolve(strict=True)))
-        if path.lstat().st_uid != os.getuid():
+        if path.lstat().st_uid not in {0, os.getuid()}:
             raise ValueError
         return path
     except Exception as exc:
@@ -300,15 +305,45 @@ def _context(args: argparse.Namespace) -> Iterator[_Context]:
         with open_verified_bundle(checkout) as verified:
             env = _environment()
             python = _resolve_python()
+            paths = resolve_blender_paths(
+                args.blender,
+                env,
+                lambda argv, *, cwd, env: subprocess.run(
+                    argv,
+                    cwd=cwd,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                ),
+            )
             host = probe_host(args.blender, args.codex, args.uv, python, env)
-            blender = inspect_blender(args.blender, host.env, host.runner)
-            paths = BlenderPaths(
-                blender.executable,
-                blender.reported_architecture,
-                blender.version,
-                blender.user_resources,
-                blender.config_root,
-                blender.extensions_root,
+            if (
+                paths.version != host.blender_version
+                or paths.architecture not in host.blender_arches
+            ):
+                raise InstallerError("Blender discovery does not match host probe")
+            blender = BlenderState(
+                paths.executable,
+                (paths.architecture,),
+                paths.executable,
+                paths.architecture,
+                paths.version,
+                Path(env["HOME"]),
+                paths.user_resources,
+                paths.user_config,
+                paths.user_config / "userpref.blend",
+                paths.user_extensions,
+                "user_default",
+                paths.user_extensions / "user_default/mcp",
+                None,
+                None,
+                False,
+                False,
+                None,
+                None,
+                None,
+                None,
             )
             roots = InstallRoots.discover(
                 Path(env["HOME"]),
@@ -1331,6 +1366,9 @@ def _changed_install(context: _Context, fault: FaultInjector) -> dict[str, objec
                 manifest_sha256=context.manifest_sha256,
             )
             inspection = _inspection(context)
+            context = replace(
+                context, blender=getattr(inspection, "blender_state", context.blender)
+            )
             if inspection.exact:
                 assert inspection.receipt_path is not None
                 return {
@@ -1604,9 +1642,7 @@ def _changed_install(context: _Context, fault: FaultInjector) -> dict[str, objec
                 verify_runtime(
                     refs["runtime"], staged_bundle.manifest, profile, context.host.runner
                 )
-                fresh_blender = inspect_blender(
-                    context.host.blender_bin, context.host.env, context.host.runner
-                )
+                fresh_blender = getattr(_inspection(context), "blender_state", context.blender)
                 verify_blender_files(
                     fresh_blender, load_extension_payload(staged_bundle.extension_path)
                 )

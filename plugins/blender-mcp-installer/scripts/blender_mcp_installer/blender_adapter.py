@@ -41,6 +41,23 @@ _DISCOVERY_KEYS = {
     "port",
     "autostart",
 }
+_PATH_DISCOVERY_KEYS = {
+    "binary_path",
+    "version",
+    "architecture",
+    "user_resources",
+    "config_root",
+    "extensions_root",
+}
+_PATH_DISCOVERY_EXPRESSION = (
+    "import bpy,json,platform;"
+    "print('__BLENDER_MCP_INSTALLER__'+json.dumps({"
+    "'binary_path':bpy.app.binary_path,'version':list(bpy.app.version),"
+    "'architecture':platform.machine(),"
+    "'user_resources':bpy.utils.resource_path('USER'),"
+    "'config_root':bpy.utils.user_resource('CONFIG'),"
+    "'extensions_root':bpy.utils.user_resource('EXTENSIONS')},sort_keys=True))"
+)
 _DISCOVERY_EXPRESSION = (
     "import bpy,json,platform;"
     "m='bl_ext.user_default.mcp';a=bpy.context.preferences.addons;"
@@ -479,7 +496,7 @@ def _parse_arches(raw: str) -> tuple[str, ...]:
     return arches
 
 
-def _parse_probe(raw: str) -> Mapping[str, object]:
+def _parse_probe(raw: str, expected_keys: set[str]) -> Mapping[str, object]:
     lines = [line[len(_MARKER) :] for line in raw.splitlines() if line.startswith(_MARKER)]
     if len(lines) != 1:
         raise InstallerError("invalid Blender discovery output")
@@ -491,12 +508,21 @@ def _parse_probe(raw: str) -> Mapping[str, object]:
         )
     except (json.JSONDecodeError, ValueError) as exc:
         raise InstallerError("invalid Blender discovery output") from exc
-    if type(value) is not dict or set(value) != _DISCOVERY_KEYS:
+    if type(value) is not dict or frozenset(value) not in {
+        frozenset(expected_keys),
+        frozenset(_DISCOVERY_KEYS),
+    }:
         raise InstallerError("invalid Blender discovery output")
-    return MappingProxyType(value)
+    return MappingProxyType({key: value[key] for key in expected_keys})
 
 
-def _probe_blender(blender_bin: Path, env: Mapping[str, str], runner: Runner) -> _Probe:
+def _probe_blender(
+    blender_bin: Path,
+    env: Mapping[str, str],
+    runner: Runner,
+    *,
+    factory_startup: bool = False,
+) -> _Probe:
     clean = _profile_env(blender_bin, env)
     with _open_executable(blender_bin) as (_, parent_fd, selected):
         _, arch_output = _run(
@@ -508,19 +534,23 @@ def _probe_blender(blender_bin: Path, env: Mapping[str, str], runner: Runner) ->
         )
         arches = _parse_arches(arch_output)
         _linked_file(blender_bin, parent_fd, selected)
+        argv = [str(blender_bin), "--background"]
+        if factory_startup:
+            argv.append("--factory-startup")
+        argv.extend(
+            (
+                "--python-expr",
+                _PATH_DISCOVERY_EXPRESSION if factory_startup else _DISCOVERY_EXPRESSION,
+            )
+        )
         _, output = _run(
             runner,
-            (
-                str(blender_bin),
-                "--background",
-                "--python-expr",
-                _DISCOVERY_EXPRESSION,
-            ),
+            tuple(argv),
             cwd=blender_bin.parent,
             env=clean,
             label="Blender discovery",
         )
-        values = _parse_probe(output)
+        values = _parse_probe(output, _PATH_DISCOVERY_KEYS if factory_startup else _DISCOVERY_KEYS)
         reported = Path(values["binary_path"]) if type(values["binary_path"]) is str else Path()
         if reported != blender_bin:
             raise InstallerError("Blender reported a different executable")
@@ -570,7 +600,7 @@ def _paths_from_probe(
 def resolve_blender_paths(
     blender_bin: Path, env: Mapping[str, str], runner: Runner
 ) -> BlenderPaths:
-    probe = _probe_blender(blender_bin, env, runner)
+    probe = _probe_blender(blender_bin, env, runner, factory_startup=True)
     resources, config, extensions, version, architecture = _paths_from_probe(
         blender_bin, env, probe
     )

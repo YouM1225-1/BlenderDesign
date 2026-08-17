@@ -783,6 +783,17 @@ def _inspect(
         current_blender.extensions_root,
         current_blender.executable,
     )
+    profile_names = (
+        "BLENDER_USER_RESOURCES",
+        "BLENDER_USER_CONFIG",
+        "BLENDER_USER_EXTENSIONS",
+    )
+    supplied_profile = tuple(host.env.get(name) for name in profile_names)
+    profile_env_matches = all(value is None for value in supplied_profile) or supplied_profile == (
+        str(current_blender.user_resources),
+        str(current_blender.config_root),
+        str(current_blender.extensions_root),
+    )
     profile_matches = (
         roots.blender.executable == host.blender_bin == current_blender.executable
         and roots.blender.user_resources == current_blender.user_resources
@@ -793,9 +804,7 @@ def _inspect(
         and roots.home == current_blender.home
         and host.env.get("HOME") == str(roots.home)
         and host.env.get("CODEX_HOME") == str(roots.codex_home)
-        and host.env.get("BLENDER_USER_RESOURCES") == str(current_blender.user_resources)
-        and host.env.get("BLENDER_USER_CONFIG") == str(current_blender.config_root)
-        and host.env.get("BLENDER_USER_EXTENSIONS") == str(current_blender.extensions_root)
+        and profile_env_matches
     )
     runtime_state = None
     if roots.data_root.exists():

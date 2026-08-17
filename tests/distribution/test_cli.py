@@ -124,17 +124,20 @@ def test_empty_home_outer_python_inspect_does_not_rediscover_python(
         }
     )
     host.state_file.write_text(json.dumps(state, sort_keys=True) + "\n")
+    blender_log = tmp_path / "blender-invocations.jsonl"
     host.blender.write_text(
         f"#!{sys.executable}\n"
-        "import json,sys\n"
+        "import json,os,sys\n"
         f"state=json.load(open({str(host.state_file)!r}))\n"
+        f"with open({str(blender_log)!r},'a') as log:\n"
+        " log.write(json.dumps({'argv':sys.argv[1:],'env':{k:os.environ[k] for k in "
+        "os.environ if k.startswith('BLENDER_USER_') or k=='PYTHONDONTWRITEBYTECODE'}})+"
+        "'\\n')\n"
         "if sys.argv[1:]==['--version']:\n print('Blender '+state['version'])\n"
         "elif '--background' in sys.argv and '--python-expr' in sys.argv:\n"
         " value={'binary_path':sys.argv[0],'version':[5,2,0],"
         "'architecture':state['architecture'],'user_resources':state['resources'],"
-        "'config_root':state['config'],'extensions_root':state['extensions'],"
-        "'repository':state['repository'],'enabled':False,'online_access':False,"
-        "'host':None,'port':None,'autostart':None}\n"
+        "'config_root':state['config'],'extensions_root':state['extensions']}\n"
         " print('__BLENDER_MCP_INSTALLER__'+json.dumps(value,sort_keys=True))\n"
         "else:\n raise SystemExit(2)\n"
     )
@@ -146,6 +149,8 @@ def test_empty_home_outer_python_inspect_does_not_rediscover_python(
         "from blender_mcp_installer import cli,verification; probe=cli.probe_host; "
         "host_run=lambda argv,**kw: subprocess.CompletedProcess(argv,0,b'arm64\\n',b'') "
         "if argv[0]=='/usr/bin/lipo' else verification._default_runner(argv,**kw); "
+        "resolve=cli.resolve_blender_paths; "
+        "cli.resolve_blender_paths=lambda blender,env,_runner: resolve(blender,env,host_run); "
         "cli.probe_host=lambda *args: probe(*args,runner=host_run); "
         "cli._inspection=lambda _context: SimpleNamespace("
         "exact=False,managed_targets=(),active_install_id=None); "
@@ -181,10 +186,6 @@ def test_empty_home_outer_python_inspect_does_not_rediscover_python(
     ]
     env = {
         "HOME": str(profile),
-        "CODEX_HOME": str(codex_home),
-        "BLENDER_USER_RESOURCES": str(resources),
-        "BLENDER_USER_CONFIG": str(config),
-        "BLENDER_USER_EXTENSIONS": str(extensions),
         "PATH": f"{real_uv.parent}:/usr/bin:/bin:/usr/sbin:/sbin",
     }
 
@@ -202,6 +203,34 @@ def test_empty_home_outer_python_inspect_does_not_rediscover_python(
     assert [call["argv"] for call in calls if call["tool"] == "uv"] == [["--version"]]
     assert all(call["argv"][:2] != ["python", "find"] for call in calls)
     assert command[1] == "run" and command[1:3] != ["python", "find"]
+    blender_calls = [json.loads(line) for line in blender_log.read_text().splitlines()]
+    assert blender_calls[0]["argv"][:2] == ["--background", "--factory-startup"]
+    assert blender_calls[0]["env"] == {"PYTHONDONTWRITEBYTECODE": "1"}
+
+
+def test_environment_defaults_codex_and_accepts_only_none_or_all_blender_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    for name in (
+        "CODEX_HOME",
+        "BLENDER_USER_RESOURCES",
+        "BLENDER_USER_CONFIG",
+        "BLENDER_USER_EXTENSIONS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(home))
+
+    assert cli._environment()["CODEX_HOME"] == str(home / ".codex")
+
+    monkeypatch.setenv("BLENDER_USER_RESOURCES", str(home / "resources"))
+    with pytest.raises(InstallerError, match="explicit installer profile is required"):
+        cli._environment()
+
+    monkeypatch.setenv("BLENDER_USER_CONFIG", str(home / "resources/config"))
+    monkeypatch.setenv("BLENDER_USER_EXTENSIONS", str(home / "resources/extensions"))
+    assert cli._environment()["BLENDER_USER_CONFIG"] == str(home / "resources/config")
 
 
 @pytest.mark.parametrize("value", [None, "", "relative-python", "non-executable", "broken-symlink"])
@@ -284,6 +313,28 @@ def test_current_python_must_be_owned_by_current_user(
         cli._resolve_python()
 
 
+def test_current_python_accepts_root_owned_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    python = tmp_path / "python"
+    python.write_bytes(b"python")
+    python.chmod(0o700)
+    monkeypatch.setattr(sys, "executable", str(python))
+    original_lstat = Path.lstat
+
+    def root_lstat(path: Path) -> os.stat_result:
+        info = original_lstat(path)
+        if path != python:
+            return info
+        values = list(info)
+        values[4] = 0
+        return os.stat_result(values)
+
+    monkeypatch.setattr(Path, "lstat", root_lstat)
+
+    assert cli._resolve_python() == python
+
+
 def test_current_python_wrong_version_remains_bound_to_host_probe(
     tmp_path: Path, host: HostHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -293,6 +344,18 @@ def test_current_python_wrong_version_remains_bound_to_host_probe(
     monkeypatch.setattr(sys, "executable", str(python))
     monkeypatch.setattr(cli, "verify_distribution_checkout", lambda *_args: object())
     monkeypatch.setattr(cli, "open_verified_bundle", lambda _checkout: nullcontext(object()))
+    monkeypatch.setattr(
+        cli,
+        "resolve_blender_paths",
+        lambda *_args: BlenderPaths(
+            host.blender,
+            "arm64",
+            "5.2.0",
+            host.resources,
+            host.config,
+            host.extensions,
+        ),
+    )
     for name, value in {
         "HOME": host.home,
         "CODEX_HOME": host.codex_home,
@@ -576,6 +639,7 @@ def test_first_install_orchestrates_journaled_adapters(
         None,
         None,
     )
+    inspected_blender = replace(blender, online_access=True)
     env = {
         "HOME": str(host.home),
         "CODEX_HOME": str(host.codex_home),
@@ -619,7 +683,11 @@ def test_first_install_orchestrates_journaled_adapters(
         blender,
         roots,
     )
-    monkeypatch.setattr(cli, "_inspection", lambda _context: SimpleNamespace(exact=False))
+    monkeypatch.setattr(
+        cli,
+        "_inspection",
+        lambda _context: SimpleNamespace(exact=False, blender_state=inspected_blender),
+    )
     monkeypatch.setattr(cli, "_lifecycle_closed", lambda _context: None)
 
     def fake_runtime(_bundle, _uv, _python, _profile, stage, _runner):
@@ -629,6 +697,7 @@ def test_first_install_orchestrates_journaled_adapters(
         return capture_tree(stage.root, stage.relative)
 
     def fake_blender(_state, _zip, work: Path, _authorizations, _runner):
+        assert _state is inspected_blender
         extension = work / "resources/extensions/user_default/mcp"
         extension.mkdir(parents=True)
         (extension / "blender_manifest.toml").write_bytes(b"payload")
@@ -659,7 +728,6 @@ def test_first_install_orchestrates_journaled_adapters(
     monkeypatch.setattr(cli, "stage_blender_change", fake_blender)
     monkeypatch.setattr(cli, "stage_codex_config", fake_codex)
     monkeypatch.setattr(cli, "verify_runtime", lambda *_a, **_k: None)
-    monkeypatch.setattr(cli, "inspect_blender", lambda *_a, **_k: blender)
     monkeypatch.setattr(cli, "verify_blender_files", lambda *_a, **_k: None)
     monkeypatch.setattr(cli, "load_extension_payload", lambda *_a, **_k: object())
     monkeypatch.setattr(cli, "verify_codex_toml", lambda *_a, **_k: None)
@@ -689,7 +757,9 @@ def test_first_install_orchestrates_journaled_adapters(
     monkeypatch.setattr(
         cli,
         "_inspection",
-        lambda _context: SimpleNamespace(exact=True, receipt_path=receipt),
+        lambda _context: SimpleNamespace(
+            exact=True, receipt_path=receipt, blender_state=inspected_blender
+        ),
     )
     no_op = cli._changed_install(context, NoOpFaultInjector())
     after = {
@@ -715,7 +785,11 @@ def test_first_install_orchestrates_journaled_adapters(
 
     monkeypatch.setattr(cli, "_restore_codex", native_codex)
     installed = cli.load_receipt(receipt, roots)
-    monkeypatch.setattr(cli, "_inspection", lambda _context: SimpleNamespace(exact=False))
+    monkeypatch.setattr(
+        cli,
+        "_inspection",
+        lambda _context: SimpleNamespace(exact=False, blender_state=inspected_blender),
+    )
     second_result = cli._changed_install(context, NoOpFaultInjector())
     second_receipt_path = Path(second_result["receipt"])
     second = cli.load_receipt(second_receipt_path, roots)

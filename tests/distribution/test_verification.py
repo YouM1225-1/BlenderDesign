@@ -734,6 +734,41 @@ def test_current_profile_cross_bind_is_required_for_runtime_and_recorded_identit
     assert not inspected.recorded_blender_executable
 
 
+def test_discovered_default_profile_matches_when_override_variables_are_omitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, _, _, _, _ = _installed(tmp_path, monkeypatch)
+    omitted = {key: value for key, value in host.env.items() if not key.startswith("BLENDER_USER_")}
+
+    inspected = inspect_installation(bundle, roots, blender, replace(host, env=omitted))
+
+    assert inspected.runtime
+    assert inspected.recorded_blender_executable
+
+
+def test_live_blender_probe_is_inside_managed_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, controls, _ = _absent(tmp_path, monkeypatch)
+    events: list[str] = []
+    original_snapshot = verification._snapshot
+
+    def snapshot(paths):
+        events.append("snapshot")
+        return original_snapshot(paths)
+
+    def live_probe(*_args):
+        events.append("live")
+        return controls["blender"]
+
+    monkeypatch.setattr(verification, "_snapshot", snapshot)
+    monkeypatch.setattr(verification, "inspect_blender", live_probe)
+
+    inspect_installation(bundle, roots, blender, host)
+
+    assert events == ["snapshot", "live", "snapshot"]
+
+
 class LifecycleRunner:
     def __init__(self, blender: Path, *, listener: str = "selected") -> None:
         self.blender = blender
