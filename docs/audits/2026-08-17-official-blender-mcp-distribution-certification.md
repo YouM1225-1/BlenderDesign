@@ -1,5 +1,10 @@
 # Official Blender MCP distribution certification
 
+> Historical D4 certification. It certifies `53b6488c85b77520a5abe538527b26110e4684a1`
+> only and is superseded for new installer authorization by
+> `2026-08-17-official-blender-mcp-final-certification.md`. Preserve this report as
+> artifact/reproducibility evidence; do not use its commit as the final candidate.
+
 Status: PASS
 
 Certification date: 2026-08-17
