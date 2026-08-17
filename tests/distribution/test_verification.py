@@ -8,7 +8,7 @@ import sys
 import hashlib
 import time
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePath
 from types import SimpleNamespace
 
 import pytest
@@ -26,6 +26,7 @@ from blender_mcp_installer.filesystem import (
     NoOpFaultInjector,
     SafeRoot,
     StagedTree,
+    capture_file,
     create_deterministic_stage,
 )
 from blender_mcp_installer.model import TreeImage
@@ -461,6 +462,7 @@ def _installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, runner=object
         lambda path: SimpleNamespace(canonical_digest=digest),
     )
     monkeypatch.setattr(verification, "verify_blender_files", blender_files)
+    monkeypatch.setattr(verification, "verify_blender_payload", blender_files, raising=False)
     monkeypatch.setattr(
         verification,
         "_codex_checks",
@@ -563,6 +565,56 @@ def test_adapter_backed_exact_inspection_binds_receipt_and_all_authorities(
     assert calls == ["runtime", "blender_files", "codex_toml", "codex_effective"]
     assert controls["runtime_profile"].home == roots.home
     assert controls["runtime_profile"].blender_path == roots.blender.executable
+
+
+def test_unrelated_userpref_rewrite_does_not_change_semantic_exactness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, _, _, receipt, receipt_path = _installed(
+        tmp_path, monkeypatch
+    )
+    with SafeRoot.open(
+        roots.blender.user_config, os.getuid(), roots.blender.user_config
+    ) as config:
+        recorded = capture_file(config, PurePath("userpref.blend"))
+    next(target for target in receipt["targets"] if target["role"] == "blender_userpref")[
+        "install_post"
+    ] = recorded.to_dict()
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True))
+    roots.userpref_target.write_bytes(
+        roots.userpref_target.read_bytes() + b"\nunrelated-preference-rewrite"
+    )
+
+    inspected = inspect_installation(bundle, roots, blender, host)
+
+    assert recorded.sha256 not in inspected.managed_images[2]
+    assert inspected.exact and inspected.preferences
+
+
+def test_online_access_drift_does_not_poison_unrelated_blender_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, controls, _, _, _ = _installed(tmp_path, monkeypatch)
+    controls["blender"] = replace(blender, online_access=False)
+
+    def legacy_full_check(state, *_args):
+        if not state.online_access:
+            raise InstallerError("Blender file verification failed")
+
+    monkeypatch.setattr(verification, "verify_blender_files", legacy_full_check)
+
+    inspected = inspect_installation(bundle, roots, blender, host)
+
+    assert not inspected.exact and not inspected.preferences
+    assert all(
+        (
+            inspected.extension_repository,
+            inspected.extension_id,
+            inspected.extension_version,
+            inspected.extension_payload_digest,
+            inspected.enablement,
+        )
+    )
 
 
 def test_installed_inspection_passes_recorded_extension_provenance(

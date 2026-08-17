@@ -83,6 +83,61 @@ def _argv(host: HostHarness, command: str) -> list[str]:
     return result
 
 
+def test_inspect_reports_exact_and_blender_subchecks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exact_checks = {
+        "runtime": True,
+        "extension_repository": True,
+        "extension_id": True,
+        "extension_version": True,
+        "extension_payload_digest": True,
+        "enablement": True,
+        "preferences": False,
+        "codex_policy": True,
+        "codex_namespace": True,
+        "codex_effective": True,
+        "active_generation": True,
+        "manifest_hash": True,
+        "recorded_blender_executable": True,
+    }
+    inspection = SimpleNamespace(
+        **exact_checks,
+        exact=False,
+        extension_files=True,
+        preference_checks={
+            "online_access": False,
+            "host": True,
+            "port": True,
+            "autostart": True,
+        },
+        managed_targets=(Path("/managed"),),
+        active_install_id="install-id",
+    )
+    host = SimpleNamespace(
+        platform_system="Darwin",
+        platform_machine="arm64",
+        blender_version="5.2.0",
+        codex_version="0.148.0-alpha.9",
+        uv_version="0.12.2",
+        python_version="3.13.13",
+    )
+    monkeypatch.setattr(cli, "_context", lambda _args: nullcontext(SimpleNamespace(host=host)))
+    monkeypatch.setattr(cli, "_inspection", lambda _context: inspection)
+
+    result = cli.inspect(SimpleNamespace())
+
+    assert result["exact"] is False
+    assert result["checks"] == exact_checks
+    assert result["blender_checks"] == {
+        "extension_files": True,
+        "online_access": False,
+        "host": True,
+        "port": True,
+        "autostart": True,
+    }
+
+
 def test_empty_home_outer_python_inspect_does_not_rediscover_python(
     tmp_path: Path, host: HostHarness
 ) -> None:
