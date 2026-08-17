@@ -4,7 +4,7 @@ Date: 2026-08-16
 
 Plan: `docs/superpowers/plans/2026-08-16-official-blender-mcp-distributable-codex-installer.md`
 
-Current plan SHA-256: `da3a85433b11b05b6a32ec9e22b2965e5c6950765b402a0bc629848d15f9a18c`
+Current plan SHA-256: `3f02690824056bca17afcddb4bd9c9ad501d3fc1df54da20f900b0977d7dcd74`
 
 Initial frozen plan SHA-256: `fb69e31ef0445d38c2caeed277c69519f95ed19c5f067eabcd7e7733dc767d72`
 
@@ -245,6 +245,14 @@ as the sole executable operator workflow instead of retaining stale copies.
 It also records the exact tested Codex transport, Blender/uv version suffixes,
 MCP 1.28 initialize schemas, no-bytecode launchers, current isolated Python,
 ordinary-profile discovery, and extension bytecode provenance. Task 10 adds a
-blocking real disposable HOME-only inspect before its explicit-profile
+blocking real ordinary-profile inspect before its explicit-profile
 mutation flow. This amendment is documentation alignment to reviewed code and
 removes duplicated shell rather than introducing another implementation.
+
+The real post-remediation probe corrected one acceptance-only assumption:
+macOS Blender factory discovery continued to report the system account's user
+directory when only process HOME changed. The blocking public-command gate
+therefore uses the actual ordinary system HOME with no CODEX_HOME or
+BLENDER_USER_* overrides and proves its bounded normal profile/project
+inventory is byte-identical before and after. Disposable mutation acceptance
+continues to use all three explicit Blender overrides.

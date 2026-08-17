@@ -22,7 +22,7 @@
 - Existing path components and recursive trees are walked fd-relative with O_DIRECTORY/O_NOFOLLOW. Every writable-boundary and nested entry is current-UID-owned; stable identity, metadata, and entry sets are checked before/after capture. Existing CODEX_HOME, HOME, Blender resource roots, and other parents are never chmodded. Only installer-created private directories receive mode 0700. The already-resolved Python executable may be owned by the current UID or UID 0; every writable target remains current-UID-owned.
 - install/repair/rollback hold one exclusive state lock. inspect and verify do not create the lock and are read-only for managed targets. Their uv launcher may read or create uv execution-cache metadata, but --no-python-downloads and --no-sync prohibit interpreter/package downloads.
 - Blender and Codex executable paths are required on inspect, install, verify, and rollback. The installer rejects a symlink/non-executable Blender leaf, requires arm64 in its Mach-O architecture list, queries Blender-reported version/architecture/binary path, and records the values. Codex must be an absolute executable whose validated identity is forwarded unchanged to capability and effective-config probes.
-- Blender resource paths are queried from the selected executable; no target-host application or user-directory assumption is permitted. The three BLENDER_USER_* overrides are either all absent for ordinary HOME-based discovery or all explicit, with config/extensions beneath resources. All three reported paths must match the selected executable's factory-startup discovery and remain descendants of the selected resource root.
+- Blender resource paths are queried from the selected executable; no target-host application or user-directory assumption is permitted. The three BLENDER_USER_* overrides are either all absent for ordinary factory discovery or all explicit, with config/extensions beneath resources. All three reported paths must match the selected executable's factory-startup discovery and remain descendants of the selected resource root; V1 does not assume that changing process HOME relocates Blender's macOS user directory.
 - No command opens, modifies, moves, or deletes a project .blend file. userpref.blend is a separately modeled preference target.
 - Exact no-op classification occurs under the lock before the closed-Blender gate. A no-op creates no receipt, backup, generation, or mutator log entry and returns the active receipt. Any repair and every rollback require Blender normally closed.
 - install configures state and returns requires_blender_start. It never launches, kills, or claims ownership of Blender. The skill asks the operator to start the selected Blender normally; verify then performs listener, MCP handshake/catalog, and the single read-only get_blendfile_summary_datablocks call.
@@ -1063,6 +1063,7 @@ Expected: canonical before-inventory JSON lives under disposable evidence direct
 Create empty mode-0700 TEST_HOME, TEST_CODEX_HOME, BLENDER_USER_RESOURCES, BLENDER_USER_CONFIG, and BLENDER_USER_EXTENSIONS, with config/extensions beneath resources. Do not copy userpref.blend. Set CLEAN_PATH to dirname UV_BIN plus /usr/bin:/bin:/usr/sbin:/sbin.
 
 ~~~bash
+ORDINARY_HOME="$HOME"
 TEST_HOME="$(mktemp -d /private/tmp/blender-mcp-profile.XXXXXX)"
 chmod 700 "$TEST_HOME"
 EVIDENCE_DIR="$TRUST_PARENT/evidence"
@@ -1080,12 +1081,12 @@ chmod 700 "$TEST_CODEX_HOME" "$BLENDER_USER_RESOURCES" \
 CLEAN_PATH="$(dirname "$UV_BIN"):/usr/bin:/bin:/usr/sbin:/sbin"
 ~~~
 
-First exercise the literal ordinary-profile contract with only HOME and PATH; explicitly remove CODEX_HOME and all three Blender overrides. The command must return one closed inspect JSON object, leave installer state absent, and report Blender factory-discovered roots below the disposable HOME:
+First exercise the literal ordinary-profile contract with the current system HOME and PATH; explicitly remove CODEX_HOME and all three Blender overrides. The command must return one closed inspect JSON object. Repeat Step 3's bounded normal-target inventory and require byte-for-byte equality; factory-discovered Blender roots are authoritative and need not move when process HOME is substituted:
 
 ~~~bash
 ORDINARY_INSPECT_JSON="$EVIDENCE_DIR/ordinary-inspect.json"
 env -u CODEX_HOME -u BLENDER_USER_RESOURCES -u BLENDER_USER_CONFIG \
-  -u BLENDER_USER_EXTENSIONS HOME="$TEST_HOME" PATH="$CLEAN_PATH" \
+  -u BLENDER_USER_EXTENSIONS HOME="$ORDINARY_HOME" PATH="$CLEAN_PATH" \
   "$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" \
   --no-python-downloads --no-sync \
   python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
@@ -1094,7 +1095,6 @@ env -u CODEX_HOME -u BLENDER_USER_RESOURCES -u BLENDER_USER_CONFIG \
   --blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN" \
   > "$ORDINARY_INSPECT_JSON"
 "$PYTHON_BIN" -I -B -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["command"]=="inspect" and type(p["exact"]) is bool' "$ORDINARY_INSPECT_JSON"
-test ! -e "$TEST_HOME/.local/state/blender-mcp-installer"
 ~~~
 
 Then run the mutation acceptance with all five explicit profile variables. First inspect and assert Blender-reported user/config/extensions plus every managed target are descendants of the declared disposable roots:
