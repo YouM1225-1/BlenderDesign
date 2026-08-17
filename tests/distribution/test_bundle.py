@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from zipfile import ZipFile
 
 import pytest
 
@@ -519,6 +520,49 @@ def test_normalized_extension_is_revalidated() -> None:
     from scripts.build_official_blender_mcp_distribution import validate_extension_command
 
     assert validate_extension_command(Path("blender"), Path("normalized.zip"))[-1] == "normalized.zip"
+
+
+def _metadata_wheel(path: Path, requirements: list[str]) -> Path:
+    dist_info = "blender_mcp-1.0.0.dist-info/"
+    metadata = [
+        "Name: blender-mcp",
+        "Version: 1.0.0",
+        "Requires-Python: >=3.10",
+        *(f"Requires-Dist: {requirement}" for requirement in requirements),
+    ]
+    with ZipFile(path, "w") as archive:
+        archive.writestr(dist_info + "METADATA", "\n".join(metadata) + "\n")
+        archive.writestr(
+            dist_info + "WHEEL",
+            "Root-Is-Purelib: true\nTag: py3-none-any\n",
+        )
+        archive.writestr(
+            dist_info + "entry_points.txt",
+            "[console_scripts]\nblender-mcp = blmcp:main\n",
+        )
+    return path
+
+
+def test_wheel_metadata_accepts_reviewed_upstream_mcp_range(tmp_path: Path) -> None:
+    wheel = _metadata_wheel(
+        tmp_path / "wheel.whl", ["docutils", "mcp[cli]>=1.2.0", "pyyaml"]
+    )
+    builder._validate_wheel(wheel)
+
+
+@pytest.mark.parametrize(
+    "requirements",
+    [
+        ["docutils", "mcp[cli]==1.28.1", "pyyaml"],
+        ["docutils", "mcp[cli]>=1.2.0", "pyyaml", "unexpected"],
+    ],
+)
+def test_wheel_metadata_rejects_unreviewed_dependencies(
+    tmp_path: Path, requirements: list[str]
+) -> None:
+    wheel = _metadata_wheel(tmp_path / "wheel.whl", requirements)
+    with pytest.raises(ValueError, match="unexpected wheel metadata"):
+        builder._validate_wheel(wheel)
 
 
 def test_publish_keeps_last_good_output_on_gate_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -448,7 +448,7 @@ def _validate_wheel(wheel: Path) -> None:
         fields.get("Name") != ["blender-mcp"]
         or fields.get("Version") != ["1.0.0"]
         or fields.get("Requires-Python") != [">=3.10"]
-        or fields.get("Requires-Dist") != ["docutils", "mcp[cli]==1.28.1", "pyyaml"]
+        or fields.get("Requires-Dist") != ["docutils", "mcp[cli]>=1.2.0", "pyyaml"]
         or "Root-Is-Purelib: true\n" not in wheel_metadata
         or "Tag: py3-none-any\n" not in wheel_metadata
         or entry_points != "[console_scripts]\nblender-mcp = blmcp:main\n"

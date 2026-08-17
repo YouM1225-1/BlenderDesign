@@ -46,7 +46,12 @@ def test_wheel_uses_bounded_result_file_and_process_group() -> None:
 
 def test_arbitrary_cli_uses_private_snapshot() -> None:
     source = _wheel_source("blmcp/tools/execute_blender_code.py")
-    assert "with private_blend_for_cli(blend_file) as private_path:" in source
+    assert "deadline = time.monotonic() + _CLI_TIMEOUT" in source
+    assert (
+        "with private_blend_for_cli(blend_file, deadline=deadline) as private_path:"
+        in source
+    )
+    assert "run_blender_cli(private_path, code, deadline=deadline)" in source
     assert "not a sandbox for hostile Python" in source
 
 
@@ -68,11 +73,15 @@ def test_retina_scale_precedes_small_file_return() -> None:
     source = _wheel_source(
         "blmcp/tools/_template_image_downscale_to_size_limit.py"
     )
-    scale = source.index("pixel_size = float(")
-    fast_return = source.index("if pixel_size <= 1.0 and source_fits:")
+    scale = source.index("coordinate_size = (")
+    fast_return = source.index("if im.size == coordinate_size and source_fits:")
     assert scale < fast_return
-    assert "max(1, round(width / pixel_size))" in source
-    assert "max(1, round(height / pixel_size))" in source
+    assert "max(1, coordinate_size[0])" in source
+    assert "max(1, coordinate_size[1])" in source
+    assert "im.resize(\n            coordinate_size," in source
+    assert "pixel_size" not in source
+    for token in ("width // 2", "height // 2", "width / 2", "height / 2"):
+        assert token not in source
 
 
 def test_inner_timeouts_are_120_seconds() -> None:
