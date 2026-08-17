@@ -4,7 +4,7 @@ Date: 2026-08-16
 
 Plan: `docs/superpowers/plans/2026-08-16-official-blender-mcp-distributable-codex-installer.md`
 
-Current plan SHA-256: `3f02690824056bca17afcddb4bd9c9ad501d3fc1df54da20f900b0977d7dcd74`
+Current plan SHA-256: `63fd8b8bb8d2a3dd9a129f4cf3b1a840066be2a24db139a304ea934f7e630ce7`
 
 Initial frozen plan SHA-256: `fb69e31ef0445d38c2caeed277c69519f95ed19c5f067eabcd7e7733dc767d72`
 
@@ -256,3 +256,8 @@ therefore uses the actual ordinary system HOME with no CODEX_HOME or
 BLENDER_USER_* overrides and proves its bounded normal profile/project
 inventory is byte-identical before and after. Disposable mutation acceptance
 continues to use all three explicit Blender overrides.
+
+The final execution re-audit found one remaining documentation-only
+no-bytecode mismatch in the Task 2/Task 10 fault-driver example. Both the
+descriptive contract and literal command now invoke that trusted-tree helper
+with `Python -I -B`; no production or test behavior changed.

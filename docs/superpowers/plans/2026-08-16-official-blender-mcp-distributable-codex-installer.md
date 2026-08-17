@@ -449,7 +449,7 @@ Receipt/pending/active files are 0600 and every transition uses write_atomic_jso
 - fake uv handles --version, python find, venv --relocatable, and exact pip install forms. It materializes a deterministic fake runtime and blender-mcp executable.
 - fake blender-mcp implements newline JSON-RPC initialize, tools/list, and tools/call; tools/call succeeds only for get_blendfile_summary_datablocks.
 - every fake appends JSON to commands.jsonl with tool, argv, sanitized env subset, and mutated paths. Fakes never read failure controls from environment.
-- fault_driver.py is invoked by absolute path with Python `-I`; it first parses and validates the required `--point POINT --fixture-kind KIND --preimage present|absent|any --` descriptor against its closed matrix, then derives the trusted distribution root from its own resolved `__file__`, inserts only that root's `plugins/blender-mcp-installer/scripts` into `sys.path`, imports run_cli, and supplies ExitFaultInjector explicitly for the named internal point. It is never packaged into the plugin.
+- fault_driver.py is invoked by absolute path with Python `-I -B`; it first parses and validates the required `--point POINT --fixture-kind KIND --preimage present|absent|any --` descriptor against its closed matrix, then derives the trusted distribution root from its own resolved `__file__`, inserts only that root's `plugins/blender-mcp-installer/scripts` into `sys.path`, imports run_cli, and supplies ExitFaultInjector explicitly for the named internal point. It is never packaged into the plugin.
 
 - [ ] **Step 1: Write RED tests for closed-state rules**
 
@@ -1194,7 +1194,7 @@ env HOME="$CRASH_HOME" CODEX_HOME="$CRASH_CODEX_HOME" \
   BLENDER_USER_RESOURCES="$CRASH_BLENDER_USER_RESOURCES" \
   BLENDER_USER_CONFIG="$CRASH_BLENDER_USER_CONFIG" \
   BLENDER_USER_EXTENSIONS="$CRASH_BLENDER_USER_EXTENSIONS" PATH="$CLEAN_PATH" \
-  "$PYTHON_BIN" -I "$DISTRIBUTION_ROOT/tests/distribution/fault_driver.py" \
+  "$PYTHON_BIN" -I -B "$DISTRIBUTION_ROOT/tests/distribution/fault_driver.py" \
   --point after_extension_tree_publish \
   --fixture-kind extension_tree --preimage absent -- install \
   --bundle-root "$BUNDLE_ROOT" \
