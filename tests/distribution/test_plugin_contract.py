@@ -17,6 +17,7 @@ PLUGIN = ROOT / "plugins/blender-mcp-installer"
 SKILL = PLUGIN / "skills/install-official-blender-mcp/SKILL.md"
 MARKETPLACE = ROOT / ".agents/plugins/marketplace.json"
 GUIDE = ROOT / "docs/distribute-official-blender-mcp.md"
+MARKETPLACE_PROJECTOR = PLUGIN / "scripts/project_marketplace.py"
 
 
 def _marked(text: str, name: str) -> str:
@@ -562,7 +563,7 @@ def test_disposable_marketplace_smoke_is_isolated_and_schema_checked() -> None:
         'chmod 700 "$SMOKE_HOME"',
         'chmod 700 "$SMOKE_CODEX_HOME"',
         'HOME="$SMOKE_HOME" CODEX_HOME="$SMOKE_CODEX_HOME" PATH="$SMOKE_PATH"',
-        '"$CODEX_BIN" plugin marketplace add "$DISTRIBUTION_ROOT"',
+        '"$CODEX_BIN" plugin marketplace add "$PERSISTENT_MARKETPLACE_ROOT"',
         '"$CODEX_BIN" plugin add "blender-mcp-installer@$MARKETPLACE_NAME"',
         '"$CODEX_BIN" plugin list --marketplace "$MARKETPLACE_NAME" --json',
         '"$PYTHON_BIN" -I -c "$MARKETPLACE_LIST_CHECK"',
@@ -741,3 +742,259 @@ def test_docs_index_and_repository_checks_include_plugin_contract() -> None:
     assert '"$UV_BIN" run --frozen --with tomlkit==0.13.3' in checks
     assert "pytest tests/distribution -q" in checks
     assert 'scripts/validate_plugin.py" plugins/blender-mcp-installer' in checks
+
+
+def _fake_marketplace_codex(tmp_path: Path) -> Path:
+    codex = tmp_path / "codex"
+    codex.write_text(
+        f"#!{sys.executable}\n"
+        r'''import json
+import os
+import sys
+import tomllib
+from pathlib import Path
+
+home = Path(os.environ["CODEX_HOME"])
+config = home / "config.toml"
+installed = home / "installed"
+
+
+def read_marketplaces():
+    if not config.exists():
+        return {}
+    return tomllib.loads(config.read_text()).get("marketplaces", {})
+
+
+def write_marketplaces(marketplaces):
+    lines = []
+    for name, value in marketplaces.items():
+        lines.extend(
+            (
+                f"[marketplaces.{name}]",
+                f"source_type = {json.dumps(value['source_type'])}",
+                f"source = {json.dumps(value['source'])}",
+                "",
+            )
+        )
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("\n".join(lines))
+
+
+args = sys.argv[1:]
+if args[:3] == ["plugin", "marketplace", "remove"]:
+    marketplaces = read_marketplaces()
+    if args[3] not in marketplaces:
+        raise SystemExit(1)
+    del marketplaces[args[3]]
+    write_marketplaces(marketplaces)
+elif args[:3] == ["plugin", "marketplace", "add"]:
+    source = str(Path(args[3]).resolve())
+    if source == os.environ.get("FAIL_MARKETPLACE_ADD"):
+        raise SystemExit(42)
+    manifest = json.loads(
+        (Path(source) / ".agents/plugins/marketplace.json").read_text()
+    )
+    name = manifest["name"]
+    marketplaces = read_marketplaces()
+    if name in marketplaces and marketplaces[name]["source"] != source:
+        raise SystemExit(2)
+    marketplaces[name] = {"source_type": "local", "source": source}
+    write_marketplaces(marketplaces)
+elif args == ["plugin", "marketplace", "list", "--json"]:
+    marketplaces = read_marketplaces()
+    payload = []
+    for name, value in marketplaces.items():
+        root = Path(value["source"])
+        if not (root / ".agents/plugins/marketplace.json").is_file():
+            raise SystemExit(3)
+        payload.append(
+            {
+                "name": name,
+                "root": str(root),
+                "marketplaceSource": {
+                    "sourceType": value["source_type"],
+                    "source": str(root),
+                },
+            }
+        )
+    print(json.dumps({"marketplaces": payload}))
+elif args[:2] == ["plugin", "add"]:
+    marketplace = args[2].split("@", 1)[1]
+    if marketplace not in read_marketplaces():
+        raise SystemExit(4)
+    installed.write_text(args[2])
+elif args[:2] == ["plugin", "list"] and "--json" in args:
+    marketplace = args[args.index("--marketplace") + 1]
+    source = read_marketplaces().get(marketplace, {}).get("source")
+    if not source or not (Path(source) / ".agents/plugins/marketplace.json").is_file():
+        raise SystemExit(5)
+    names = [] if not installed.exists() else [{"name": installed.read_text().split("@", 1)[0]}]
+    print(json.dumps({"installed": names, "available": []}))
+else:
+    raise SystemExit(f"unexpected fake Codex arguments: {args!r}")
+'''
+    )
+    codex.chmod(0o700)
+    return codex
+
+
+def _marketplace_source(path: Path, name: str) -> None:
+    manifest = path / ".agents/plugins/marketplace.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps({"name": name, "interface": {"displayName": name}, "plugins": []})
+    )
+
+
+def _persistent_marketplace_env(
+    tmp_path: Path,
+) -> tuple[dict[str, str], Path, Path, Path, str]:
+    repo, commit = _trust_fixture(tmp_path)
+    home = tmp_path / "home"
+    codex_home = home / ".codex"
+    old_source = tmp_path / "old-source"
+    other_source = tmp_path / "other-source"
+    for path in (home, codex_home):
+        path.mkdir(mode=0o700)
+    _marketplace_source(old_source, "official-blender-mcp")
+    _marketplace_source(other_source, "other")
+    (codex_home / "config.toml").write_text(
+        "[marketplaces.other]\n"
+        'source_type = "local"\n'
+        f"source = {json.dumps(str(other_source.resolve()))}\n\n"
+        "[marketplaces.official-blender-mcp]\n"
+        'source_type = "local"\n'
+        f"source = {json.dumps(str(old_source.resolve()))}\n"
+    )
+    env, _, _ = _trust_env(repo, commit, tmp_path)
+    env.update(
+        HOME=str(home),
+        CODEX_HOME=str(codex_home),
+        CODEX_BIN=str(_fake_marketplace_codex(tmp_path)),
+        PYTHON_BIN=sys.executable,
+    )
+    return env, home, codex_home, old_source, commit
+
+
+def test_persistent_marketplace_contract_is_commit_bound_and_transactional() -> None:
+    text = SKILL.read_text()
+    block = _shell_block(text, "PERSISTENT_MARKETPLACE")
+    projector = MARKETPLACE_PROJECTOR.read_text()
+    required = (
+        '"$PLUGIN_ROOT/scripts/project_marketplace.py" prepare',
+        '--private-git-dir "$PRIVATE_GIT_DIR"',
+        '--git-safe-home "$GIT_SAFE_HOME"',
+        '--reviewed-commit "$EXPECTED_DISTRIBUTION_COMMIT"',
+        '--trusted-checksums "$TRUSTED_CHECKSUMS"',
+        '--codex "$CODEX_BIN"',
+    )
+    projector_required = (
+        '".local/share/blender-mcp-installer"',
+        'projection_parent / args.reviewed_commit',
+        '"archive", "--format=tar", args.reviewed_commit',
+        'bundle_root / "SHA256SUMS"',
+        '"/usr/bin/shasum", "-a", "256", "-c"',
+        '"plugin", "marketplace", "remove"',
+        '"plugin", "marketplace", "add"',
+        '"plugin", "add", f"blender-mcp-installer@{MARKETPLACE_NAME}"',
+        "tomllib",
+        "marketplace-recovery",
+    )
+    assert all(fragment in block for fragment in required)
+    assert all(fragment in projector for fragment in projector_required)
+    assert 'plugin marketplace add "$DISTRIBUTION_ROOT"' not in text
+    assert text.index("<!-- TRUST_CLEANUP_BEGIN -->") < text.index(
+        "<!-- PERSISTENT_MARKETPLACE_VERIFY_BEGIN -->"
+    )
+
+
+def test_trust_bootstrap_rejects_audit_checkout_at_a_different_head(
+    tmp_path: Path,
+) -> None:
+    repo, reviewed_commit = _trust_fixture(tmp_path)
+    (repo / "audit-only").write_text("different head\n")
+    _git(repo, "add", "audit-only")
+    _git(repo, "commit", "-qm", "audit head")
+    env, _, _ = _trust_env(repo, reviewed_commit, tmp_path)
+    result = subprocess.run(
+        ["bash", "-c", _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP")],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+
+
+def test_persistent_marketplace_survives_private_cleanup_and_lists_normally(
+    tmp_path: Path,
+) -> None:
+    env, home, codex_home, _, commit = _persistent_marketplace_env(tmp_path)
+    recorded_root = tmp_path / "persistent-root"
+    script = "\n".join(
+        (
+            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
+            'printf "%s\\n" "$PERSISTENT_MARKETPLACE_ROOT" > "$RECORDED_ROOT"',
+            _shell_block(SKILL.read_text(), "TRUST_CLEANUP"),
+            'test ! -e "$TRUST_PARENT"',
+            'test -d "$PERSISTENT_MARKETPLACE_ROOT"',
+            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE_VERIFY"),
+        )
+    )
+    env["RECORDED_ROOT"] = str(recorded_root)
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+    projection = Path(recorded_root.read_text().strip())
+    assert projection == (
+        home
+        / ".local/share/blender-mcp-installer/marketplaces/official-blender-mcp"
+        / commit
+    )
+    assert (projection / ".agents/plugins/marketplace.json").is_file()
+    artifacts = projection / "plugins/blender-mcp-installer/artifacts"
+    digest, filename = (artifacts / "SHA256SUMS").read_text().strip().split("  ")
+    assert hashlib.sha256((artifacts / filename).read_bytes()).hexdigest() == digest
+    for path in (
+        home / ".local/share/blender-mcp-installer",
+        home / ".local/share/blender-mcp-installer/marketplaces",
+        home / ".local/share/blender-mcp-installer/marketplaces/official-blender-mcp",
+        projection,
+    ):
+        assert path.stat().st_mode & 0o777 == 0o700
+    assert not any(path.is_symlink() for path in projection.rglob("*"))
+    assert not any(path.stat().st_mode & 0o022 for path in projection.rglob("*"))
+
+    config = (codex_home / "config.toml").read_text()
+    assert f"source = {json.dumps(str(projection))}" in config
+    assert "[marketplaces.other]" in config
+    recovery = home / ".local/state/blender-mcp-installer/marketplace-recovery"
+    evidence = tuple(recovery.glob("registration.*/*.json"))
+    assert evidence
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in evidence)
+    assert not (home / ".local/state/blender-mcp-installer/receipts").exists()
+
+
+def test_marketplace_registration_failure_restores_only_previous_target(
+    tmp_path: Path,
+) -> None:
+    env, home, codex_home, old_source, commit = _persistent_marketplace_env(tmp_path)
+    projection = (
+        home
+        / ".local/share/blender-mcp-installer/marketplaces/official-blender-mcp"
+        / commit
+    )
+    env["FAIL_MARKETPLACE_ADD"] = str(projection)
+    script = "\n".join(
+        (
+            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
+        )
+    )
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode != 0
+    config = (codex_home / "config.toml").read_text()
+    assert f"source = {json.dumps(str(old_source.resolve()))}" in config
+    assert "[marketplaces.other]" in config
+    recovery = home / ".local/state/blender-mcp-installer/marketplace-recovery"
+    assert tuple(recovery.glob("registration.*/before.json"))
