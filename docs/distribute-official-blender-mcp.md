@@ -1,8 +1,8 @@
 # Official Blender MCP distributable installer
 
 This repository packages a reviewed, LLM-driven installer for the official Blender
-MCP. It targets Darwin arm64 with Blender >=5.2.0,<5.3.0, uv 0.12.2, and a local
-Python 3.13. The Codex plugin is a skill-only delivery adapter, not another MCP
+MCP. It targets Darwin arm64 with Blender >=5.2.0,<5.3.0, uv 0.12.2, and local
+Python 3.13.13. The Codex plugin is a skill-only delivery adapter, not another MCP
 server; the installed managed launcher connects Codex to the official server over
 local STDIO and the Blender extension over localhost:9876.
 
@@ -35,8 +35,11 @@ The operator supplies:
 - `EXPECTED_DISTRIBUTION_COMMIT`: exactly 40 lowercase hexadecimal characters.
 - `BLENDER_BIN`: the absolute selected Blender executable.
 - `CODEX_BIN`: a validated absolute Codex executable.
+- `PYTHON_BIN`: an absolute path whose resolved regular executable is Python 3.13.13
+  and is not group/world-writable. A symlink such as `.venv/bin/python` is accepted;
+  its canonical target is reused by every installer command across cwd changes.
 - optionally `UV_BIN`: an absolute regular or symlinked uv executable; otherwise the
-  saved operator PATH and then `$HOME/.local/bin/uv` are probed. The resolved Python
+  saved operator PATH and then `$HOME/.local/bin/uv` are probed. The supplied Python
   canonicalizes uv before any installer command or host check.
 
 The skill gives the exact persistent-marketplace, inspect, install, verify, rollback,
@@ -48,7 +51,7 @@ substitute the source checkout for its trusted worktree.
 
 1. Establish the trusted worktree, materialize the persistent marketplace projection,
    and transactionally replace only the target marketplace registration.
-2. Resolve uv 0.12.2 and an already-installed local Python 3.13 without downloads.
+2. Validate uv 0.12.2 and the supplied local Python 3.13.13 without downloads.
 3. Run `inspect` before mutation.
 4. Apply the operator's standing default-allow policy for extension install/enable,
    Blender Allow Online Access, localhost bridge, and arbitrary-Python tools. Do not

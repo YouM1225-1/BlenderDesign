@@ -5,13 +5,11 @@ description: Inspect, install, verify, or roll back the reviewed official Blende
 
 # Install Official Blender MCP
 
-Use this skill only for the reviewed repository distribution. It is a delivery adapter,
-not another MCP server: the installed server is the bundled official `blender-mcp`
-wheel and Codex connects through the generated local STDIO managed launcher.
-
+Use only for the reviewed distribution. It is a delivery adapter, not another MCP server:
+Codex connects to the bundled official wheel through its managed launcher.
 ## Hard boundaries
 
-- Support exactly Darwin arm64, Blender >=5.2.0,<5.3.0, local Python 3.13,
+- Support exactly Darwin arm64, Blender >=5.2.0,<5.3.0, local Python 3.13.13,
   uv 0.12.2, and localhost:9876.
 - Never import or run anything from the source checkout. SHA-256 provides integrity,
   not authenticity. The reviewed immutable distribution commit is the authenticity boundary.
@@ -32,9 +30,9 @@ wheel and Codex connects through the generated local STDIO managed launcher.
 ## 1. Establish the trusted distribution
 
 The operator supplies `SOURCE_DISTRIBUTION_ROOT`, a reviewed 40-lowercase-hex
-`EXPECTED_DISTRIBUTION_COMMIT`, an absolute `BLENDER_BIN`, and a validated absolute
-executable `CODEX_BIN`. Run this before plugin marketplace add, plugin import, or any
-installer command. Do not split it across shell sessions.
+`EXPECTED_DISTRIBUTION_COMMIT`, absolute `BLENDER_BIN` and `PYTHON_BIN` inputs, and
+a validated absolute `CODEX_BIN`. Python must resolve to 3.13.13. Run this before
+plugin marketplace add/import or installer commands. Do not split shell sessions.
 
 <!-- TRUST_BOOTSTRAP_BEGIN -->
 ```bash
@@ -46,6 +44,7 @@ export PATH
 : "${EXPECTED_DISTRIBUTION_COMMIT:?set reviewed 40-hex commit}"
 : "${BLENDER_BIN:?set absolute Blender executable}"
 : "${CODEX_BIN:?set absolute Codex executable}"
+: "${PYTHON_BIN:?set absolute Python 3.13.13 executable}"
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_CEILING_DIRECTORIES
 unset PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT \
@@ -58,6 +57,7 @@ esac
 test "${#EXPECTED_DISTRIBUTION_COMMIT}" -eq 40
 case "$BLENDER_BIN" in /*) ;; *) echo "BLENDER_BIN must be absolute" >&2; exit 1;; esac
 case "$CODEX_BIN" in /*) ;; *) echo "CODEX_BIN must be absolute" >&2; exit 1;; esac
+case "$PYTHON_BIN" in /*) ;; *) echo "PYTHON_BIN must be absolute" >&2; exit 1;; esac
 test -x "$BLENDER_BIN"
 test -x "$CODEX_BIN"
 case "$SOURCE_DISTRIBUTION_ROOT" in /*) ;; *) echo "source repository path must be absolute" >&2; exit 1;; esac
@@ -223,18 +223,13 @@ cmp "$TRUSTED_CHECKSUMS" "$BUNDLE_ROOT/SHA256SUMS"
 ```
 <!-- TRUST_BOOTSTRAP_END -->
 
-This `--no-checkout` worktree is materialized with `read-tree` plus built-in
-`git archive`, so source checkout hooks and working-tree filters do not execute.
-Every Git object, index, worktree, and archive operation uses a private mode-0700 Git
-admin with empty config, hooks, templates, and info attributes. The copied source
-index is used only for the staged-vs-reviewed check; `read-tree` then rebuilds it from
-the reviewed commit before any source-worktree comparison, so mutable source index
-flags cannot hide dirty files. The private admin reads only the validated source
-object database by hash. Source repository config/info metadata is never loaded;
-system/global config and replacement objects are disabled.
-Keep the private worktree and checksum file until the workflow is complete; they
-are evidence and all installer paths derive from them. Never reset
-`DISTRIBUTION_ROOT` to the source checkout. Do not register it as a marketplace.
+This `--no-checkout` worktree uses `read-tree` plus built-in `git archive`, so source
+checkout hooks and filters do not execute. Every Git operation uses a private mode-0700
+admin with empty config, hooks, templates, and attributes. Its copied source index is
+only for the staged check; `read-tree` rebuilds it before source comparison, so index
+flags cannot hide dirt. The admin reads only validated objects by hash; source metadata,
+system/global config, and replacements stay disabled. Retain the worktree and checksums
+through the workflow. Never reset it to the source checkout or register it as a marketplace.
 
 ## 2. Resolve the local runner before each command
 
@@ -246,6 +241,15 @@ interpreter or package installation.
 <!-- UV_BOOTSTRAP_BEGIN -->
 ```bash
 run_uv_bootstrap() {
+  case "$PYTHON_BIN" in /*) ;; *) echo "PYTHON_BIN must be absolute" >&2; return 1;; esac
+  CANONICAL_PYTHON="$(/bin/realpath "$PYTHON_BIN")"
+  case "$CANONICAL_PYTHON" in /*) ;; *) echo "canonical Python path must be absolute" >&2; return 1;; esac
+  test -f "$CANONICAL_PYTHON" && test ! -L "$CANONICAL_PYTHON" && test -x "$CANONICAL_PYTHON"
+  PYTHON_MODE="$(/usr/bin/stat -f %Lp "$CANONICAL_PYTHON")"
+  case "$PYTHON_MODE" in ''|*[!0-7]*) echo "canonical Python mode is invalid" >&2; return 1;; esac
+  case "$PYTHON_MODE" in *[2367][0-7]|*[0-7][2367]) echo "canonical Python must not be group/world-writable" >&2; return 1;; esac
+  "$CANONICAL_PYTHON" -I -c 'import sys; raise SystemExit(sys.version_info[:3] != (3, 13, 13))'
+  PYTHON_BIN="$CANONICAL_PYTHON"
   if test -n "${UV_BIN:-}"; then
     CANDIDATE_UV="$UV_BIN"
   elif CANDIDATE_UV="$(PATH="$OPERATOR_PATH" command -v uv 2>/dev/null)"; then
@@ -253,7 +257,7 @@ run_uv_bootstrap() {
   elif test -x "$HOME/.local/bin/uv"; then
     CANDIDATE_UV="$HOME/.local/bin/uv"
   else
-    echo "uv 0.12.2 and a local Python 3.13 are required; install them, then retry." >&2
+    echo "uv 0.12.2 is required; install it, then retry." >&2
     return 1
   fi
   case "$CANDIDATE_UV" in /*) ;; *) echo "UV_BIN must be absolute" >&2; return 1;; esac
@@ -261,10 +265,6 @@ run_uv_bootstrap() {
   test "$("$CANDIDATE_UV" --version | awk '{print $2}')" = "0.12.2"
   "$CANDIDATE_UV" run --help | grep -q -- "--no-sync"
   "$CANDIDATE_UV" run --help | grep -q -- "--no-python-downloads"
-  PYTHON_BIN="$("$CANDIDATE_UV" python find 3.13 --no-project \
-    --no-python-downloads --no-config)"
-  test -x "$PYTHON_BIN"
-  "$PYTHON_BIN" -I -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 13))'
   CANONICAL_UV="$("$PYTHON_BIN" -I -c \
     'import sys; from pathlib import Path; print(Path(sys.argv[1]).resolve(strict=True))' \
     "$CANDIDATE_UV")"

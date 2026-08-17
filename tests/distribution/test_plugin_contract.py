@@ -174,7 +174,10 @@ def test_trust_bootstrap_is_fail_fast_commit_derived_and_hook_free() -> None:
     assert '"${GIT_PRIVATE[@]}" worktree remove' in cleanup
     assert "\ngit " not in cleanup
     assert "git checkout" not in block
-    assert "python" not in block.lower().replace("pythonpath", "").replace(
+    trust_without_python_input = "\n".join(
+        line for line in block.lower().splitlines() if "python_bin" not in line
+    )
+    assert "python" not in trust_without_python_input.replace("pythonpath", "").replace(
         "pythonhome", ""
     ).replace("pythonuserbase", "").replace("pythonstartup", "").replace(
         "pythoninspect", ""
@@ -234,6 +237,7 @@ def _trust_env(repo: Path, commit: str, tmp_path: Path) -> tuple[dict[str, str],
         EXPECTED_DISTRIBUTION_COMMIT=commit,
         BLENDER_BIN="/usr/bin/true",
         CODEX_BIN="/usr/bin/true",
+        PYTHON_BIN=str(_python_31313()),
         GIT_DIR=str(tmp_path / "redirected-git-dir"),
         GIT_WORK_TREE=str(tmp_path / "redirected-work-tree"),
         PYTHONPATH=str(hostile_python),
@@ -404,6 +408,7 @@ int main(int argc, char **argv) {
             BLENDER_BIN=str(blender),
             CODEX_BIN=str(codex),
             UV_BIN=str(uv_link),
+            PYTHON_BIN=python,
             HOME=str(profile),
             CODEX_HOME=str(profile / "codex"),
             BLENDER_USER_RESOURCES=str(resources),
