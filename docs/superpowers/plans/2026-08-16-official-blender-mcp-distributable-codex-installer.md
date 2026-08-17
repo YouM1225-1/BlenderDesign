@@ -19,10 +19,10 @@
 - Four independent install flags are required: --allow-extension-install, --allow-online-access, --allow-localhost-bridge, and --approve-arbitrary-python. Missing any one exits 2 before creating the state root, lock, backup, receipt, runtime, config, or Blender file.
 - Authorization never travels in the bundle and is never reusable from a receipt. A receipt may contain only consent.all_four_collected_for_this_workflow=true for its install ID.
 - The supported threat model covers accidental concurrent edits, concurrent installer runs, stale snapshots, unsafe symlinked ancestors/leaves, foreign ownership, and special files. It does not claim protection from an actively malicious same-UID process.
-- Existing path components and recursive trees are walked fd-relative with O_DIRECTORY/O_NOFOLLOW. Every writable-boundary and nested entry is current-UID-owned; stable identity, metadata, and entry sets are checked before/after capture. Existing CODEX_HOME, HOME, Blender resource roots, and other parents are never chmodded. Only installer-created private directories receive mode 0700.
+- Existing path components and recursive trees are walked fd-relative with O_DIRECTORY/O_NOFOLLOW. Every writable-boundary and nested entry is current-UID-owned; stable identity, metadata, and entry sets are checked before/after capture. Existing CODEX_HOME, HOME, Blender resource roots, and other parents are never chmodded. Only installer-created private directories receive mode 0700. The already-resolved Python executable may be owned by the current UID or UID 0; every writable target remains current-UID-owned.
 - install/repair/rollback hold one exclusive state lock. inspect and verify do not create the lock and are read-only for managed targets. Their uv launcher may read or create uv execution-cache metadata, but --no-python-downloads and --no-sync prohibit interpreter/package downloads.
 - Blender and Codex executable paths are required on inspect, install, verify, and rollback. The installer rejects a symlink/non-executable Blender leaf, requires arm64 in its Mach-O architecture list, queries Blender-reported version/architecture/binary path, and records the values. Codex must be an absolute executable whose validated identity is forwarded unchanged to capability and effective-config probes.
-- Blender resource paths are queried from the selected executable; no target-host application or user-directory assumption is permitted. BLENDER_USER_RESOURCES is explicit whenever profile isolation is used, with BLENDER_USER_CONFIG and BLENDER_USER_EXTENSIONS beneath it; all three reported paths must remain descendants of the selected resource root.
+- Blender resource paths are queried from the selected executable; no target-host application or user-directory assumption is permitted. The three BLENDER_USER_* overrides are either all absent for ordinary HOME-based discovery or all explicit, with config/extensions beneath resources. All three reported paths must match the selected executable's factory-startup discovery and remain descendants of the selected resource root.
 - No command opens, modifies, moves, or deletes a project .blend file. userpref.blend is a separately modeled preference target.
 - Exact no-op classification occurs under the lock before the closed-Blender gate. A no-op creates no receipt, backup, generation, or mutator log entry and returns the active receipt. Any repair and every rollback require Blender normally closed.
 - install configures state and returns requires_blender_start. It never launches, kills, or claims ownership of Blender. The skill asks the operator to start the selected Blender normally; verify then performs listener, MCP handshake/catalog, and the single read-only get_blendfile_summary_datablocks call.
@@ -31,6 +31,13 @@
 - The implementation completion gate is local and reproducible. A real second-Mac canary is documented separately and remains NOT_RUN until a release operator supplies a host; it does not block the implementation commit.
 - Task 1 implementation does not begin until three fresh read-only reviewers re-audit this revised plan as READY with zero Critical and zero Important findings.
 - Do not add a generic package manager, daemon, GUI installer, other-client adapter, signing infrastructure, root-project tomlkit dependency, or second MCP server.
+
+## Tested Host Compatibility Bindings
+
+- Codex effective MCP JSON accepts exactly one of two layouts: legacy top-level command/args/env, or Codex 0.148's `transport` object with exact keys type/command/args/env/env_vars/cwd, `type=stdio`, `env_vars=[]`, and `cwd=null`. Enabled tools and timeouts remain exact top-level values; mixed or widened layouts fail closed.
+- Version parsing is product-bound. Blender alone may append exact terminal ` LTS`; uv alone may append one terminal `(hex-commit YYYY-MM-DD hyphenated-target)` build tuple. Arbitrary suffixes and cross-product forms fail.
+- MCP initialize accepts the exact legacy 2025-06-18 result or the exact MCP 1.28.1 2025-11-25 result, including its closed capabilities, serverInfo, `_meta`, and string instructions fields. The production probe and every isolated installer/helper invocation use `-B` or `PYTHONDONTWRITEBYTECODE=1`.
+- The public profile contract requires HOME, defaults CODEX_HOME to `$HOME/.codex`, and permits either zero or all three Blender profile overrides. The installer binds its already-isolated resolved `sys.executable`; it does not perform a second uv Python discovery after HOME changes.
 
 ## Artifact Contract
 
@@ -561,7 +568,7 @@ Owned values are command=the verified runtime/bin/blender-mcp-managed launcher; 
 
 tomlkit runs only through the staged/active locked runtime; pyproject.toml and uv.lock do not change. The helper reads the live config, when present, through the inherited validated fd and writes only the deterministic mode-0600 merged stage. It creates no preimage copy. Present-pre publication uses RENAME_SWAP, then parks the old config at the deterministic Codex recovery path as the sole protected preimage. Absent-pre publication uses RENAME_EXCL and the deterministic recovery reference remains absent. Receipt stores only the re-derived path/image and managed key metadata.
 
-Semantic rollback reads pre values/nodes from the recovery object when pre is present; with absent pre, R supplies no pre nodes and remains absent. For each owned scalar/list/env key: current==installer-post restores pre; current==pre is already restored; any other current value is a conflict. Foreign table/env keys and namespace additions are preserved. Exact current/post uses the generic native swap. A non-conflicting semantic merge follows C0-C4 in the central contract: journal and fsync codex.rollback.stage, call `fault.hit(after_codex_semantic_stage_fsync)`, swap it with current, call the matching swap hit, journal both semantic images and hit the receipt boundary, validate/remove the displaced current and hit its cleanup boundary, then validate/remove the protected preimage when present and hit its cleanup boundary. Task 8 supplies the synchronous complete-receipt journal callback. `run_cli(..., fault)` forwards its explicit injector to `rollback_codex`; production supplies only `NoOpFaultInjector`. Any managed-key or unlisted crash-state conflict stops before deletion/publication. Parsed TOML verifies every owned value; codex mcp get blender --json runs only after publication and verifies its exposed command, args, env, enabled tools, and timeouts.
+Semantic rollback reads pre values/nodes from the recovery object when pre is present; with absent pre, R supplies no pre nodes and remains absent. For each owned scalar/list/env key: current==installer-post restores pre; current==pre is already restored; any other current value is a conflict. Foreign table/env keys and namespace additions are preserved. Exact current/post uses the generic native swap. A non-conflicting semantic merge follows C0-C4 in the central contract: journal and fsync codex.rollback.stage, call `fault.hit(after_codex_semantic_stage_fsync)`, swap it with current, call the matching swap hit, journal both semantic images and hit the receipt boundary, validate/remove the displaced current and hit its cleanup boundary, then validate/remove the protected preimage when present and hit its cleanup boundary. Task 8 supplies the synchronous complete-receipt journal callback. `run_cli(..., fault)` forwards its explicit injector to `rollback_codex`; production supplies only `NoOpFaultInjector`. Any managed-key or unlisted crash-state conflict stops before deletion/publication. Parsed TOML verifies every owned value; codex mcp get blender --json runs only after publication and must match exactly either the legacy top-level layout or the tested current stdio `transport` layout in Tested Host Compatibility Bindings.
 
 - [ ] **Step 1: Write RED adapter tests**
 
@@ -624,7 +631,7 @@ The lifecycle probe runs only fixed /usr/bin/pgrep and /usr/sbin/lsof paths. It 
 
 Staging retains and requires a current-UID-owned install-stage parent, sets BLENDER_USER_RESOURCES, BLENDER_USER_CONFIG, and BLENDER_USER_EXTENSIONS to private transaction descendants, copies existing userpref into staging when present, never copies one for absent preimage, validates/installs staged ZIP into user_default, enables bl_ext.user_default.mcp, sets Online Access/localhost/9876/autostart, then saves only staged userpref. Installer-created names are fd-relative/no-follow and parent-fsynced; Blender-produced extension/userpref outputs are recursively fsynced, recaptured, and revalidated through retained roots. A fresh process inspects staged extension/userpref before publication.
 
-One extension policy serves inspect/no-op/verify/recovery/rollback. ZIP indexing rejects raw noncanonical names, aliases, and duplicates and accepts only normalized regular `0644` and directory `0755` entries before any runner call. Every bundled payload entry must match bytes/mode exactly. The only allowed extras are current-UID regular files matching __pycache__/*.pyc whose source stem maps to a bundled .py file; they are disposable, never part of payload digest, and are removed fd-relatively after revalidation before restore. Missing/changed payload or any other extra conflicts. Blender's .cache/compat.dat outside the managed mcp subtree is documented as an unowned side effect and is inventoried, not deleted.
+One extension policy serves inspect/no-op/verify/recovery/rollback. ZIP indexing rejects raw noncanonical names, aliases, and duplicates and accepts only normalized regular `0644` and directory `0755` entries before any runner call. Every bundled payload entry must match bytes/mode exactly. Staging deterministically checked-hash-compiles every bundled Python source and records the complete resulting tree as receipt provenance. Only bytecode entries present in that durable provenance are accepted; an unrecorded mapped-name pyc is foreign and causes a zero-write conflict. Restore removes only provenance-proven disposable live additions after fd-relative revalidation. Missing/changed payload or any other extra conflicts. Blender's .cache/compat.dat outside the managed mcp subtree is documented as an unowned side effect and is inventoried, not deleted.
 
 - [ ] **Step 1: Write RED adapter tests**
 
@@ -686,7 +693,7 @@ uv pip install --python <stage-python> --no-deps --no-build <verified-wheel>
 
 The locked-requirements command sets UV_REQUIRE_HASHES=1, UV_NO_BUILD=1, the fixed index, and literal bridge values while removing competing uv/pip/index/bridge variables. The separate direct-wheel command retains UV_NO_BUILD=1 but omits UV_REQUIRE_HASHES only after the local private wheel copy is bound to the release-manifest size/hash; it still uses --no-deps --no-build. uv cache/network writes during install are an explicit non-managed side effect. Exact runtime is no-op. Different, incomplete, or altered runtime uses Task 3 state machine.
 
-Stage writes runtime/bin/blender-mcp-managed as the only Codex command. The launcher uses os.execve on the verified official blender-mcp entry point. It discards inherited environment and constructs exactly PATH=/usr/bin:/bin:/usr/sbin:/sbin, HOME, BLENDER_USER_RESOURCES, BLENDER_USER_CONFIG, BLENDER_USER_EXTENSIONS, BLENDER_PATH, BLENDER_MCP_HOST=localhost, BLENDER_MCP_PORT=9876, PYTHONNOUSERSITE=1, and PYTHONSAFEPATH=1. LANG, LC_ALL, TMPDIR, PYTHONPATH, PYTHONHOME, PYTHONUSERBASE, PYTHONSTARTUP, PYTHONINSPECT, VIRTUAL_ENV, UV_*, PIP_*, and all other BLENDER_* values are absent. Tests execute the actual launcher under a hostile parent and assert the exact environment, runtime import path, selected binary/profile, and bridge identity.
+Stage writes runtime/bin/blender-mcp-managed as the only Codex command. The launcher uses os.execve to start the sibling runtime Python with `-B` and the verified official blender-mcp entry point. It discards inherited environment and constructs exactly PATH=/usr/bin:/bin:/usr/sbin:/sbin, HOME, BLENDER_USER_RESOURCES, BLENDER_USER_CONFIG, BLENDER_USER_EXTENSIONS, BLENDER_PATH, BLENDER_MCP_HOST=localhost, BLENDER_MCP_PORT=9876, PYTHONNOUSERSITE=1, and PYTHONSAFEPATH=1. LANG, LC_ALL, TMPDIR, PYTHONPATH, PYTHONHOME, PYTHONUSERBASE, PYTHONSTARTUP, PYTHONINSPECT, VIRTUAL_ENV, UV_*, PIP_*, and all other BLENDER_* values are absent. Tests execute the actual launcher under a hostile parent and assert the exact environment, runtime import path, selected binary/profile, bridge identity, and byte-identical runtime tree after launch.
 
 - [ ] **Step 1: Write RED runtime tests**
 
@@ -736,11 +743,11 @@ git commit -m "feat: add locked Blender MCP runtime transaction"
 - verify_live(bundle, inspection, runtime_command, codex_bin, env, mcp_probe) -> VerificationResult.
 - OfficialMCPProbe(runtime_python: Path) is the production MCPProbe backed by the locked runtime's official MCP client; Task 8 supplies it to verify_live without duplicating protocol code.
 
-HostCapabilities records actual platform, Codex/uv/Blender/Python versions, arm64 evidence, and exact capability probes. codex mcp get --help must exit 0 and contain --json; codex plugin marketplace add --help and codex plugin add --help must exit 0. codex mcp get blender --json is forbidden before Codex publication and runs only in post-publication inspection/verification. Unsupported/missing capability fails before mutation and actual versions remain in redacted evidence.
+HostCapabilities records actual platform, Codex/uv/Blender/Python versions, arm64 evidence, and exact capability probes. Product-specific suffix handling is limited to Tested Host Compatibility Bindings. codex mcp get --help must exit 0 and contain --json; codex plugin marketplace add --help and codex plugin add --help must exit 0. codex mcp get blender --json is forbidden before Codex publication and runs only in post-publication inspection/verification. Unsupported/missing capability fails before mutation and actual versions remain in redacted evidence.
 
 InstallationInspection is exact only when runtime, extension repository/ID/version/payload digest, enablement, preferences, Codex parsed policy/namespace, effective Codex subset, active generation, manifest hash, and recorded Blender executable all match. It does not require a running GUI. inspect and verify snapshot all managed targets before/after and fail if they change.
 
-verify_live calls Task 5 lifecycle probe and requires the 9876 listener PID/executable to match the selected Blender as far as pgrep/lsof prove. It then launches the actual configured managed STDIO command under a hostile parent, requires MCP initialize, exact ordered catalog, and get_blendfile_summary_datablocks with no arguments. TCP/handshake from a foreign matching-protocol listener never passes. No execute, render, screenshot, or _for_cli tool is called. In finally it closes MCP streams, sends terminate to the temporary STDIO child, waits with a fixed timeout, and reports cleanup failure; it never terminates Blender.
+verify_live calls Task 5 lifecycle probe and requires the 9876 listener PID/executable to match the selected Blender as far as pgrep/lsof prove. It then launches the actual configured managed STDIO command under a hostile parent through runtime Python `-I -B`, requires one of the two exact initialize schemas in Tested Host Compatibility Bindings, the exact ordered catalog, and get_blendfile_summary_datablocks with no arguments. TCP/handshake from a foreign matching-protocol listener never passes. No execute, render, screenshot, or _for_cli tool is called. In finally it closes MCP streams, sends terminate to the temporary STDIO child, waits with a fixed timeout, and reports cleanup failure; it never terminates Blender.
 
 - [ ] **Step 1: Write RED verification tests**
 
@@ -812,7 +819,7 @@ ARTIFACTS must be the exact artifacts directory in Derived Paths. Public functio
 **Install sequence:**
 
 1. argparse validates BUNDLE_ROOT shape, 40-hex expected commit, absolute executable --blender/--codex/--uv, and all four install flags before invoking any installer function; the validated Codex path is forwarded unchanged to every capability/effective probe.
-2. Open TrustedCheckout/VerifiedBundle, retaining fds; run read-only uv/Python/Codex/Blender capability and path probes.
+2. Open TrustedCheckout/VerifiedBundle, retaining fds; bind the current isolated Python executable; run factory-startup Blender path discovery and read-only uv/Python/Codex/Blender capability probes. Live Blender preferences/add-on inspection occurs only inside the managed before/after snapshot boundary.
 3. Acquire exclusive lock; re-derive roots/targets and reconcile pending/receipt/active plus deterministic JSON temps exactly as the selector table states.
 4. If the active receipt is prepared or rollback_pending, reconcile each action and selector against the exact native/semantic tables, then recover before continuing. If it is installed but bundle_stage is staged or its cleanup rewrite is incomplete, validate/remove the present stage or accept its verified absence, rewrite bundle_stage=cleaned, and finish cleanup before no-op classification; this covers after_receipt_installed.
 5. Inspect exact state. If exact, return no_op=true and active receipt without mutation even if Blender is open.
@@ -905,108 +912,13 @@ git commit -m "feat: orchestrate recoverable Blender MCP installation"
 
 - Plugin manifest has exactly name, version, description, author, skills, interface; skills is ./skills/; mcpServers and apps are absent.
 - Marketplace source is ./plugins/blender-mcp-installer with installation AVAILABLE and authentication ON_INSTALL.
-- Operator supplies SOURCE_DISTRIBUTION_ROOT, EXPECTED_DISTRIBUTION_COMMIT, BLENDER_BIN, and a validated absolute CODEX_BIN. Before plugin add/import, the following fail-fast external bootstrap is the sole entrypoint. It materializes `.agents/` and the complete plugin tree inside a fresh private detached worktree; thereafter DISTRIBUTION_ROOT always means that trusted worktree, PLUGIN_ROOT is `$DISTRIBUTION_ROOT/plugins/blender-mcp-installer`, and BUNDLE_ROOT is `$PLUGIN_ROOT/artifacts`.
+- Operator supplies SOURCE_DISTRIBUTION_ROOT, EXPECTED_DISTRIBUTION_COMMIT, BLENDER_BIN, and a validated absolute CODEX_BIN. Before plugin add/import, the sole normative entrypoint is the exact block between `TRUST_BOOTSTRAP_BEGIN` and `TRUST_BOOTSTRAP_END` in `plugins/blender-mcp-installer/skills/install-official-blender-mcp/SKILL.md`. Contract tests extract and execute that marked block. It uses a private empty Git admin over the validated source object database, disables replacements/config/hooks/filters/index flags, fixes system-tool paths, materializes a fresh private detached worktree, and binds `DISTRIBUTION_ROOT`, `PLUGIN_ROOT`, `BUNDLE_ROOT`, and the private checksum evidence.
 
-~~~bash
-set -euo pipefail
-: "${SOURCE_DISTRIBUTION_ROOT:?set source repository path}"
-: "${EXPECTED_DISTRIBUTION_COMMIT:?set reviewed 40-hex commit}"
-: "${BLENDER_BIN:?set absolute Blender executable}"
-: "${CODEX_BIN:?set absolute Codex executable}"
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
-  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_CEILING_DIRECTORIES
-unset PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT \
-  PYTHONBREAKPOINT VIRTUAL_ENV
-export PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1
-case "$EXPECTED_DISTRIBUTION_COMMIT" in
-  ''|*[!0-9a-f]*) echo "expected distribution commit must be 40 lowercase hex characters" >&2; exit 1 ;;
-  *) ;;
-esac
-test "${#EXPECTED_DISTRIBUTION_COMMIT}" -eq 40
-test "$(git -C "$SOURCE_DISTRIBUTION_ROOT" rev-parse HEAD)" = \
-  "$EXPECTED_DISTRIBUTION_COMMIT"
-git -C "$SOURCE_DISTRIBUTION_ROOT" diff --quiet
-git -C "$SOURCE_DISTRIBUTION_ROOT" diff --cached --quiet
-test -z "$(git -C "$SOURCE_DISTRIBUTION_ROOT" status --porcelain=v1 \
-  --untracked-files=all -- .agents plugins/blender-mcp-installer \
-  docs/distribute-official-blender-mcp.md \
-  docs/audits/2026-08-16-official-blender-mcp-distribution-acceptance.md \
-  scripts/build_official_blender_mcp_distribution.py scripts/requirements)"
-TRUST_PARENT="$(mktemp -d /private/tmp/blender-mcp-trust.XXXXXX)"
-chmod 700 "$TRUST_PARENT"
-TRUSTED_DISTRIBUTION_ROOT="$TRUST_PARENT/distribution"
-EMPTY_HOOKS="$TRUST_PARENT/empty-hooks"
-mkdir "$EMPTY_HOOKS"
-chmod 700 "$EMPTY_HOOKS"
-git -c core.hooksPath="$EMPTY_HOOKS" -C "$SOURCE_DISTRIBUTION_ROOT" \
-  worktree add --detach --no-checkout \
-  "$TRUSTED_DISTRIBUTION_ROOT" "$EXPECTED_DISTRIBUTION_COMMIT"
-chmod 700 "$TRUSTED_DISTRIBUTION_ROOT"
-git -c core.hooksPath="$EMPTY_HOOKS" -C "$TRUSTED_DISTRIBUTION_ROOT" \
-  read-tree "$EXPECTED_DISTRIBUTION_COMMIT"
-git -c core.hooksPath="$EMPTY_HOOKS" -C "$SOURCE_DISTRIBUTION_ROOT" \
-  archive --format=tar "$EXPECTED_DISTRIBUTION_COMMIT" | \
-  tar -x -C "$TRUSTED_DISTRIBUTION_ROOT"
-test -z "$(git -C "$TRUSTED_DISTRIBUTION_ROOT" symbolic-ref -q HEAD || true)"
-test "$(git -C "$TRUSTED_DISTRIBUTION_ROOT" rev-parse HEAD)" = \
-  "$EXPECTED_DISTRIBUTION_COMMIT"
-git -C "$TRUSTED_DISTRIBUTION_ROOT" diff --quiet
-git -C "$TRUSTED_DISTRIBUTION_ROOT" diff --cached --quiet
-test -z "$(git -C "$TRUSTED_DISTRIBUTION_ROOT" status --porcelain=v1 \
-  --untracked-files=all -- .agents plugins/blender-mcp-installer)"
-test -d "$TRUSTED_DISTRIBUTION_ROOT/.agents"
-test -d "$TRUSTED_DISTRIBUTION_ROOT/plugins/blender-mcp-installer"
-TRUSTED_CHECKSUMS="$(mktemp "$TRUST_PARENT/SHA256SUMS.XXXXXX")"
-chmod 600 "$TRUSTED_CHECKSUMS"
-git -C "$TRUSTED_DISTRIBUTION_ROOT" show \
-  "$EXPECTED_DISTRIBUTION_COMMIT:plugins/blender-mcp-installer/artifacts/SHA256SUMS" \
-  > "$TRUSTED_CHECKSUMS"
-DISTRIBUTION_ROOT="$TRUSTED_DISTRIBUTION_ROOT"
-PLUGIN_ROOT="$DISTRIBUTION_ROOT/plugins/blender-mcp-installer"
-BUNDLE_ROOT="$PLUGIN_ROOT/artifacts"
-cmp "$TRUSTED_CHECKSUMS" "$BUNDLE_ROOT/SHA256SUMS"
-(cd "$BUNDLE_ROOT" && shasum -a 256 -c "$TRUSTED_CHECKSUMS")
-~~~
+Every shell command checks status because `set -euo pipefail` remains active. Plugin-add and each installer command execute in the same fail-fast shell session as the marked bootstrap and never reuse an unchecked path from another session. The private trusted worktree, admin, and checksum remain evidence until exact cleanup. Tests cover dirty tracked/index/scoped-untracked state, source index flags, redirected Git/config/replace/filter/attribute/hook inputs, hostile PATH/Python startup, payload/checksum tamper, and source replacement; every negative fails before plugin import.
 
-Every shell command checks status because `set -euo pipefail` remains active. The worktree is created with `--no-checkout` and an empty private hooks path; `read-tree` plus built-in `git archive --format=tar` materializes commit objects without checkout hooks or working-tree filters before the scoped clean check. Plugin-add and each installer command execute in the same fail-fast shell session as this bootstrap and never reuse an unchecked path from another session; a new session reruns the bootstrap. The trusted worktree and checksum file are retained through the workflow as evidence. Cleanup first runs `git -c core.hooksPath="$EMPTY_HOOKS" -C "$SOURCE_DISTRIBUTION_ROOT" worktree remove "$TRUSTED_DISTRIBUTION_ROOT"`, then removes exactly `$TRUSTED_CHECKSUMS` and the now-empty `$EMPTY_HOOKS` directory, and only then removes the now-empty private parent. Tests cover a dirty tracked installer script, scoped untracked file, redirected Git variables, hostile `PYTHONPATH` sitecustomize, payload plus working checksum tamper, replacement of the source-checkout script after the clean check, and a source `post-checkout` sentinel hook that must never run; every negative fails before plugin import, while the post-check source replacement proves execution still comes from the unchanged trusted worktree.
+- After external trust is established, before every installer command the skill runs the exact `UV_BOOTSTRAP_BEGIN`/`UV_BOOTSTRAP_END` block without installing uv/Python. It discovers uv only through the saved operator PATH or explicit input, binds uv 0.12.2 and local Python 3.13 without downloads, resolves and revalidates the canonical uv target, and defines the isolated runner.
 
-- After external trust is established, before every installer command the skill runs this bootstrap without installing uv/Python:
-
-~~~bash
-if test -n "$UV_BIN"; then
-  CANDIDATE_UV="$UV_BIN"
-elif command -v uv >/dev/null 2>&1; then
-  CANDIDATE_UV="$(command -v uv)"
-elif test -x "$HOME/.local/bin/uv"; then
-  CANDIDATE_UV="$HOME/.local/bin/uv"
-else
-  echo "uv 0.12.2 and a local Python 3.13 are required; install them, then retry." >&2
-  exit 1
-fi
-case "$CANDIDATE_UV" in /*) ;; *) echo "UV_BIN must be absolute" >&2; exit 1;; esac
-test -x "$CANDIDATE_UV"
-test "$("$CANDIDATE_UV" --version | awk '{print $2}')" = "0.12.2"
-"$CANDIDATE_UV" run --help | grep -q -- "--no-sync"
-"$CANDIDATE_UV" run --help | grep -q -- "--no-python-downloads"
-PYTHON_BIN="$("$CANDIDATE_UV" python find 3.13 --no-project \
-  --no-python-downloads --no-config)"
-test -x "$PYTHON_BIN"
-"$PYTHON_BIN" -I -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 13))'
-UV_BIN="$CANDIDATE_UV"
-ISOLATED_RUNNER='import runpy,sys; root=sys.argv[1]; script=sys.argv[2]; sys.argv=sys.argv[2:]; sys.path.insert(0,root); runpy.run_path(script,run_name="__main__")'
-~~~
-
-The skill then runs:
-
-~~~bash
-"$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" \
-  --no-python-downloads --no-sync \
-  python -I -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
-  "$PLUGIN_ROOT/scripts/install.py" inspect \
-  --bundle-root "$BUNDLE_ROOT" \
-  --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
-  --blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN"
-~~~
+- The only normative inspect/install/verify/rollback command bodies are between `INSTALLER_COMMANDS_BEGIN` and `INSTALLER_COMMANDS_END` in the Skill. Every command uses the canonical uv and Python, `python -I -B -c`, the committed artifacts directory, the expected commit, and the exact Blender/Codex/uv arguments. Contract tests extract those bodies; the plan does not duplicate executable shell.
 
 The exact command suffixes after the isolated runner and `"$PLUGIN_ROOT/scripts/install.py"` are:
 
@@ -1072,14 +984,14 @@ chmod 700 "$SMOKE_CODEX_HOME"
 SMOKE_PATH="$(dirname "$UV_BIN"):/usr/bin:/bin:/usr/sbin:/sbin"
 HOME="$SMOKE_HOME" CODEX_HOME="$SMOKE_CODEX_HOME" PATH="$SMOKE_PATH" \
   "$CODEX_BIN" plugin marketplace add "$DISTRIBUTION_ROOT"
-MARKETPLACE_NAME="$("$PYTHON_BIN" -I -c \
+MARKETPLACE_NAME="$("$PYTHON_BIN" -I -B -c \
   'import json,sys;print(json.load(open(sys.argv[1]))["name"])' \
   "$DISTRIBUTION_ROOT/.agents/plugins/marketplace.json")"
 HOME="$SMOKE_HOME" CODEX_HOME="$SMOKE_CODEX_HOME" PATH="$SMOKE_PATH" \
   "$CODEX_BIN" plugin add "blender-mcp-installer@$MARKETPLACE_NAME"
 HOME="$SMOKE_HOME" CODEX_HOME="$SMOKE_CODEX_HOME" PATH="$SMOKE_PATH" \
   "$CODEX_BIN" plugin list --marketplace "$MARKETPLACE_NAME" --json > "$SMOKE_HOME/plugins.json"
-"$PYTHON_BIN" -I -c 'import json,sys; p=json.load(open(sys.argv[1])); assert type(p) is dict and set(p)=={"installed","available"}; assert type(p["installed"]) is list and type(p["available"]) is list; assert all(type(x) is dict and type(x.get("name")) is str for x in p["installed"]+p["available"]); assert sum(x["name"]=="blender-mcp-installer" for x in p["installed"])==1' \
+"$PYTHON_BIN" -I -B -c 'import json,sys; p=json.load(open(sys.argv[1])); assert type(p) is dict and set(p)=={"installed","available"}; assert type(p["installed"]) is list and type(p["available"]) is list; assert all(type(x) is dict and type(x.get("name")) is str for x in p["installed"]+p["available"]); assert sum(x["name"]=="blender-mcp-installer" for x in p["installed"])==1' \
   "$SMOKE_HOME/plugins.json"
 ~~~
 
@@ -1136,77 +1048,9 @@ Expected: AssertionError because no local evidence has passed yet.
 
 Resolve UV_BIN and the download-disabled local Python 3.13 PYTHON_BIN with Task 9's executable/version/capability bootstrap before this block; this step still performs no repository import.
 
-~~~bash
-set -euo pipefail
-: "${SOURCE_DISTRIBUTION_ROOT:?set source repository path}"
-: "${EXPECTED_DISTRIBUTION_COMMIT:?set reviewed 40-hex commit}"
-: "${BLENDER_BIN:?set absolute Blender executable}"
-: "${CODEX_BIN:?set absolute Codex executable}"
-: "${UV_BIN:?set validated absolute uv executable}"
-: "${PYTHON_BIN:?set validated local Python 3.13 executable}"
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
-  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_CEILING_DIRECTORIES
-unset PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT \
-  PYTHONBREAKPOINT VIRTUAL_ENV
-export PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1
-ISOLATED_RUNNER='import runpy,sys; root=sys.argv[1]; script=sys.argv[2]; sys.argv=sys.argv[2:]; sys.path.insert(0,root); runpy.run_path(script,run_name="__main__")'
-case "$EXPECTED_DISTRIBUTION_COMMIT" in
-  ''|*[!0-9a-f]*) echo "expected distribution commit must be 40 lowercase hex characters" >&2; exit 1 ;;
-  *) ;;
-esac
-test "${#EXPECTED_DISTRIBUTION_COMMIT}" -eq 40
-test "$(git -C "$SOURCE_DISTRIBUTION_ROOT" rev-parse HEAD)" = \
-  "$EXPECTED_DISTRIBUTION_COMMIT"
-git -C "$SOURCE_DISTRIBUTION_ROOT" diff --quiet
-git -C "$SOURCE_DISTRIBUTION_ROOT" diff --cached --quiet
-test -z "$(git -C "$SOURCE_DISTRIBUTION_ROOT" status --porcelain=v1 \
-  --untracked-files=all -- .agents plugins/blender-mcp-installer \
-  docs/distribute-official-blender-mcp.md \
-  docs/audits/2026-08-16-official-blender-mcp-distribution-acceptance.md \
-  scripts/build_official_blender_mcp_distribution.py scripts/requirements)"
-TRUST_PARENT="$(mktemp -d /private/tmp/blender-mcp-accept.XXXXXX)"
-chmod 700 "$TRUST_PARENT"
-TRUSTED_DISTRIBUTION_ROOT="$TRUST_PARENT/distribution"
-EMPTY_HOOKS="$TRUST_PARENT/empty-hooks"
-mkdir "$EMPTY_HOOKS"
-chmod 700 "$EMPTY_HOOKS"
-git -c core.hooksPath="$EMPTY_HOOKS" -C "$SOURCE_DISTRIBUTION_ROOT" \
-  worktree add --detach --no-checkout \
-  "$TRUSTED_DISTRIBUTION_ROOT" "$EXPECTED_DISTRIBUTION_COMMIT"
-chmod 700 "$TRUSTED_DISTRIBUTION_ROOT"
-git -c core.hooksPath="$EMPTY_HOOKS" -C "$TRUSTED_DISTRIBUTION_ROOT" \
-  read-tree "$EXPECTED_DISTRIBUTION_COMMIT"
-git -c core.hooksPath="$EMPTY_HOOKS" -C "$SOURCE_DISTRIBUTION_ROOT" \
-  archive --format=tar "$EXPECTED_DISTRIBUTION_COMMIT" | \
-  tar -x -C "$TRUSTED_DISTRIBUTION_ROOT"
-DISTRIBUTION_ROOT="$TRUSTED_DISTRIBUTION_ROOT"
-PLUGIN_ROOT="$DISTRIBUTION_ROOT/plugins/blender-mcp-installer"
-BUNDLE_ROOT="$PLUGIN_ROOT/artifacts"
-test -z "$(git -C "$DISTRIBUTION_ROOT" symbolic-ref -q HEAD || true)"
-test "$(git -C "$DISTRIBUTION_ROOT" rev-parse HEAD)" = "$EXPECTED_DISTRIBUTION_COMMIT"
-git -C "$DISTRIBUTION_ROOT" diff --quiet
-git -C "$DISTRIBUTION_ROOT" diff --cached --quiet
-test -z "$(git -C "$DISTRIBUTION_ROOT" status --porcelain=v1 \
-  --untracked-files=all -- .agents plugins/blender-mcp-installer \
-  docs/distribute-official-blender-mcp.md \
-  docs/audits/2026-08-16-official-blender-mcp-distribution-acceptance.md \
-  scripts/build_official_blender_mcp_distribution.py scripts/requirements)"
-test -d "$DISTRIBUTION_ROOT/.agents"
-test -d "$PLUGIN_ROOT"
-TRUSTED_CHECKSUMS="$(mktemp "$TRUST_PARENT/SHA256SUMS.XXXXXX")"
-chmod 600 "$TRUSTED_CHECKSUMS"
-git -C "$DISTRIBUTION_ROOT" show \
-  "$EXPECTED_DISTRIBUTION_COMMIT:plugins/blender-mcp-installer/artifacts/SHA256SUMS" \
-  > "$TRUSTED_CHECKSUMS"
-cmp "$TRUSTED_CHECKSUMS" "$BUNDLE_ROOT/SHA256SUMS"
-(cd "$BUNDLE_ROOT" && shasum -a 256 -c "$TRUSTED_CHECKSUMS")
-(cd "$DISTRIBUTION_ROOT" && ./scripts/checks.sh)
-test -n "$PLUGIN_CREATOR_ROOT"
-"$PYTHON_BIN" -I "$PLUGIN_CREATOR_ROOT/scripts/validate_plugin.py" \
-  "$PLUGIN_ROOT"
-~~~
+Task 10 does not own or duplicate a trust implementation. In the same fail-fast shell session it executes, verbatim, the current Skill blocks `TRUST_BOOTSTRAP_BEGIN`/`TRUST_BOOTSTRAP_END` and `UV_BOOTSTRAP_BEGIN`/`UV_BOOTSTRAP_END`, then runs repository checks and the plugin validator from the resulting private detached tree before any plugin import. Task 10 records the marked-block hashes, private admin/worktree/checksum paths, and cleanup evidence.
 
-Expected: fail-fast detached/commit/dirty/scoped-untracked/trusted-checksum gates, private worktree/checksum paths, repository checks, and validator pass before any plugin import. This is the same hook-free bootstrap used by Task 9, not a second implementation. Negative acceptance cases cover dirty installer script, scoped untracked file, redirected Git variables, hostile sitecustomize, replacement of the source script after the clean check, payload plus working SHA256SUMS at unchanged HEAD, and a source `post-checkout` sentinel hook that must never run; none can cause unreviewed code execution.
+Expected: the single current Skill bootstrap's detached/commit/dirty/scoped-untracked/trusted-checksum gates, private Git admin/worktree/checksum paths, repository checks, and validator pass before any plugin import. Negative acceptance cases are inherited from the Task 9 contract rather than reimplemented.
 
 - [ ] **Step 3: Inventory bounded normal targets**
 
@@ -1236,7 +1080,24 @@ chmod 700 "$TEST_CODEX_HOME" "$BLENDER_USER_RESOURCES" \
 CLEAN_PATH="$(dirname "$UV_BIN"):/usr/bin:/bin:/usr/sbin:/sbin"
 ~~~
 
-Run each command with all five explicit profile variables. First inspect and assert Blender-reported user/config/extensions plus every managed target are descendants of the declared disposable roots:
+First exercise the literal ordinary-profile contract with only HOME and PATH; explicitly remove CODEX_HOME and all three Blender overrides. The command must return one closed inspect JSON object, leave installer state absent, and report Blender factory-discovered roots below the disposable HOME:
+
+~~~bash
+ORDINARY_INSPECT_JSON="$EVIDENCE_DIR/ordinary-inspect.json"
+env -u CODEX_HOME -u BLENDER_USER_RESOURCES -u BLENDER_USER_CONFIG \
+  -u BLENDER_USER_EXTENSIONS HOME="$TEST_HOME" PATH="$CLEAN_PATH" \
+  "$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" \
+  --no-python-downloads --no-sync \
+  python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
+  "$PLUGIN_ROOT/scripts/install.py" inspect --bundle-root "$BUNDLE_ROOT" \
+  --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
+  --blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN" \
+  > "$ORDINARY_INSPECT_JSON"
+"$PYTHON_BIN" -I -B -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["command"]=="inspect" and type(p["exact"]) is bool' "$ORDINARY_INSPECT_JSON"
+test ! -e "$TEST_HOME/.local/state/blender-mcp-installer"
+~~~
+
+Then run the mutation acceptance with all five explicit profile variables. First inspect and assert Blender-reported user/config/extensions plus every managed target are descendants of the declared disposable roots:
 
 ~~~bash
 env HOME="$TEST_HOME" CODEX_HOME="$TEST_CODEX_HOME" \
@@ -1244,7 +1105,7 @@ env HOME="$TEST_HOME" CODEX_HOME="$TEST_CODEX_HOME" \
   BLENDER_USER_CONFIG="$BLENDER_USER_CONFIG" \
   BLENDER_USER_EXTENSIONS="$BLENDER_USER_EXTENSIONS" PATH="$CLEAN_PATH" \
   "$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" --no-python-downloads --no-sync \
-  python -I -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
+  python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
   "$PLUGIN_ROOT/scripts/install.py" inspect --bundle-root "$BUNDLE_ROOT" \
   --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
   --blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN"
@@ -1253,13 +1114,13 @@ env HOME="$TEST_HOME" CODEX_HOME="$TEST_CODEX_HOME" \
   BLENDER_USER_CONFIG="$BLENDER_USER_CONFIG" \
   BLENDER_USER_EXTENSIONS="$BLENDER_USER_EXTENSIONS" PATH="$CLEAN_PATH" \
   "$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" --no-python-downloads --no-sync \
-  python -I -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
+  python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
   "$PLUGIN_ROOT/scripts/install.py" install --bundle-root "$BUNDLE_ROOT" \
   --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
   --blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN" \
   --allow-extension-install --allow-online-access \
   --allow-localhost-bridge --approve-arbitrary-python > "$INSTALL_JSON"
-RECEIPT_PATH="$("$PYTHON_BIN" -I -c 'import json,sys; from pathlib import Path; p=json.load(open(sys.argv[1])); assert type(p) is dict and set(p)=={"command","changed","no_op","bundle_version","receipt","requires_blender_start"}; assert p["command"]=="install" and p["changed"] is True and p["no_op"] is False and p["requires_blender_start"] is True; r=Path(p["receipt"]); root=Path(sys.argv[2])/".local/state/blender-mcp-installer/receipts"; assert r.is_absolute() and r.parent==root and r.name.endswith(".json"); print(r)' "$INSTALL_JSON" "$TEST_HOME")"
+RECEIPT_PATH="$("$PYTHON_BIN" -I -B -c 'import json,sys; from pathlib import Path; p=json.load(open(sys.argv[1])); assert type(p) is dict and set(p)=={"command","changed","no_op","bundle_version","receipt","requires_blender_start"}; assert p["command"]=="install" and p["changed"] is True and p["no_op"] is False and p["requires_blender_start"] is True; r=Path(p["receipt"]); root=Path(sys.argv[2])/".local/state/blender-mcp-installer/receipts"; assert r.is_absolute() and r.parent==root and r.name.endswith(".json"); print(r)' "$INSTALL_JSON" "$TEST_HOME")"
 test -f "$RECEIPT_PATH"
 ~~~
 
@@ -1281,7 +1142,7 @@ env HOME="$TEST_HOME" CODEX_HOME="$TEST_CODEX_HOME" \
   BLENDER_USER_CONFIG="$BLENDER_USER_CONFIG" \
   BLENDER_USER_EXTENSIONS="$BLENDER_USER_EXTENSIONS" PATH="$CLEAN_PATH" \
   "$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" --no-python-downloads --no-sync \
-  python -I -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
+  python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
   "$PLUGIN_ROOT/scripts/install.py" verify --bundle-root "$BUNDLE_ROOT" \
   --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
   --blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN" --receipt "$RECEIPT_PATH"
@@ -1290,7 +1151,7 @@ env HOME="$TEST_HOME" CODEX_HOME="$TEST_CODEX_HOME" \
   BLENDER_USER_CONFIG="$BLENDER_USER_CONFIG" \
   BLENDER_USER_EXTENSIONS="$BLENDER_USER_EXTENSIONS" PATH="$CLEAN_PATH" \
   "$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" --no-python-downloads --no-sync \
-  python -I -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
+  python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
   "$PLUGIN_ROOT/scripts/install.py" install --bundle-root "$BUNDLE_ROOT" \
   --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
   --blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN" \
@@ -1306,7 +1167,7 @@ env HOME="$TEST_HOME" CODEX_HOME="$TEST_CODEX_HOME" \
   BLENDER_USER_CONFIG="$BLENDER_USER_CONFIG" \
   BLENDER_USER_EXTENSIONS="$BLENDER_USER_EXTENSIONS" PATH="$CLEAN_PATH" \
   "$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" --no-python-downloads --no-sync \
-  python -I -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
+  python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
   "$PLUGIN_ROOT/scripts/install.py" rollback --bundle-root "$BUNDLE_ROOT" \
   --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
   --blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN" --receipt "$RECEIPT_PATH"
@@ -1344,14 +1205,14 @@ env HOME="$CRASH_HOME" CODEX_HOME="$CRASH_CODEX_HOME" \
 CRASH_STATUS=$?
 set -e
 test "$CRASH_STATUS" -eq 70
-CRASH_RECEIPT_PATH="$("$PYTHON_BIN" -I -c 'import json,sys; from pathlib import Path; root=Path(sys.argv[1])/".local/state/blender-mcp-installer"; a=json.load(open(root/"active.json")); assert type(a) is dict and set(a)=={"schema_version","generation","install_id","receipt_basename"} and a["schema_version"]==1; r=root/"receipts"/a["receipt_basename"]; p=json.load(open(r)); assert p["status"]=="prepared"; xs=[x for x in p["actions"] if x["kind"]=="extension_tree"]; assert len(xs)==1 and xs[0]["state"]=="published"; print(r)' "$CRASH_HOME")"
+CRASH_RECEIPT_PATH="$("$PYTHON_BIN" -I -B -c 'import json,sys; from pathlib import Path; root=Path(sys.argv[1])/".local/state/blender-mcp-installer"; a=json.load(open(root/"active.json")); assert type(a) is dict and set(a)=={"schema_version","generation","install_id","receipt_basename"} and a["schema_version"]==1; r=root/"receipts"/a["receipt_basename"]; p=json.load(open(r)); assert p["status"]=="prepared"; xs=[x for x in p["actions"] if x["kind"]=="extension_tree"]; assert len(xs)==1 and xs[0]["state"]=="published"; print(r)' "$CRASH_HOME")"
 test -f "$CRASH_RECEIPT_PATH"
 env HOME="$CRASH_HOME" CODEX_HOME="$CRASH_CODEX_HOME" \
   BLENDER_USER_RESOURCES="$CRASH_BLENDER_USER_RESOURCES" \
   BLENDER_USER_CONFIG="$CRASH_BLENDER_USER_CONFIG" \
   BLENDER_USER_EXTENSIONS="$CRASH_BLENDER_USER_EXTENSIONS" PATH="$CLEAN_PATH" \
   "$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" --no-python-downloads --no-sync \
-  python -I -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
+  python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
   "$PLUGIN_ROOT/scripts/install.py" install --bundle-root "$BUNDLE_ROOT" \
   --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
   --blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN" \

@@ -4,7 +4,7 @@ Date: 2026-08-16
 
 Plan: `docs/superpowers/plans/2026-08-16-official-blender-mcp-distributable-codex-installer.md`
 
-Current plan SHA-256: `979d8b38a16848e55948c3471aa284dada89cbe49c90aa738c566c5018738be2`
+Current plan SHA-256: `da3a85433b11b05b6a32ec9e22b2965e5c6950765b402a0bc629848d15f9a18c`
 
 Initial frozen plan SHA-256: `fb69e31ef0445d38c2caeed277c69519f95ed19c5f067eabcd7e7733dc767d72`
 
@@ -224,3 +224,27 @@ the pinned distribution suite passed 617/617 and the exact crash matrix plus
 negative oracle probe passed 144/144. This direct documentation alignment is
 the simplified amendment process requested by the user and introduces no new
 runtime behavior.
+
+## Final execution-audit alignment
+
+The post-acceptance adversarial audit found one Critical and six Important
+boundary/documentation gaps. Three minimal remediation commits closed the
+runtime findings without adding a new subsystem:
+
+- `7218b802509a79fb134781e3886e1091ffa3d462` fixes the trust PATH, absolute
+  Git binding, and canonical symlinked uv validation.
+- `e6bf78a65ec30ea4cb127eb02771edf3713aac05` binds accepted Blender bytecode
+  to deterministic staged receipt provenance and makes read-only probes
+  bytecode-free.
+- `7e81cb7a8305cf5ac6389dffd8590fe4ace22879` supports ordinary HOME-only
+  profiles, root-owned local Python, factory-startup path discovery, and
+  before/after managed snapshots for live Blender inspection.
+
+The plan now treats the marked Skill trust, uv, and installer-command blocks
+as the sole executable operator workflow instead of retaining stale copies.
+It also records the exact tested Codex transport, Blender/uv version suffixes,
+MCP 1.28 initialize schemas, no-bytecode launchers, current isolated Python,
+ordinary-profile discovery, and extension bytecode provenance. Task 10 adds a
+blocking real disposable HOME-only inspect before its explicit-profile
+mutation flow. This amendment is documentation alignment to reviewed code and
+removes duplicated shell rather than introducing another implementation.
