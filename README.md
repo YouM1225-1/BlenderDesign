@@ -5,10 +5,6 @@
 - **官方 Blender MCP 分发**：为 Blender Lab 官方 MCP 提供经过固定版本、完整性校验和事务化回滚的 Codex 安装器。
 - **Phase 0 只读通道**：仓库自研的会话授权型 Blender Bridge，仅暴露状态、场景摘要和能力描述三个只读工具。
 
-仓库还包含一个 18W USB-C 电源适配器的 Blender 样例与渲染图，用于验证实际建模工作流。
-
-![A1720 18W USB-C Adapter](A1720_USB_Hero.png)
-
 ## 当前状态
 
 仓库中的主要产物如下：
@@ -18,7 +14,6 @@
 | 官方 Blender MCP 安装器 | 已打包并通过仓库验收 | macOS Apple Silicon、Blender `>=5.2.0,<5.3.0`、Python `3.13.13`、uv `0.12.2` |
 | 官方 MCP 工具目录 | 26 个工具 | 包含场景检查、UI 导航、文档查询、渲染和任意 Python 执行 |
 | 自研 Phase 0 通道 | 已实现并完成验收 | 只读、Unix Domain Socket、逐会话授权；Server 版本 `0.1.0` |
-| A1720 建模样例 | 已纳入仓库 | `A1720_18W_USB-C_Adapter.blend` 及两张 PNG 渲染图 |
 
 官方分发的精确上游提交、工具列表和产物哈希以
 [`plugins/blender-mcp-installer/artifacts/manifest.json`](plugins/blender-mcp-installer/artifacts/manifest.json)
