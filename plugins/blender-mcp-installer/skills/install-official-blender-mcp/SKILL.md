@@ -181,7 +181,6 @@ trap cleanup_trust_on_exit EXIT
 test -z "$("${GIT_SOURCE_VIEW[@]}" status --porcelain=v1 \
   --untracked-files=all -- .agents plugins/blender-mcp-installer \
   docs/distribute-official-blender-mcp.md \
-  docs/audits/2026-08-16-official-blender-mcp-distribution-acceptance.md \
   scripts/build_official_blender_mcp_distribution.py scripts/requirements)"
 "${GIT_PRIVATE[@]}" \
   worktree add --detach --no-checkout \

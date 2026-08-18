@@ -5,20 +5,15 @@
 - **官方 Blender MCP 分发**：为 Blender Lab 官方 MCP 提供经过固定版本、完整性校验和事务化回滚的 Codex 安装器。
 - **Phase 0 只读通道**：仓库自研的会话授权型 Blender Bridge，仅暴露状态、场景摘要和能力描述三个只读工具。
 
-仓库还包含一个 18W USB-C 电源适配器的 Blender 样例与渲染图，用于验证实际建模工作流。
-
-![A1720 18W USB-C Adapter](A1720_USB_Hero.png)
-
 ## 当前状态
 
-截至 2026-08-18，仓库中的主要产物如下：
+仓库中的主要产物如下：
 
 | 产物 | 状态 | 当前边界 |
 |---|---|---|
 | 官方 Blender MCP 安装器 | 已打包并通过仓库验收 | macOS Apple Silicon、Blender `>=5.2.0,<5.3.0`、Python `3.13.13`、uv `0.12.2` |
 | 官方 MCP 工具目录 | 26 个工具 | 包含场景检查、UI 导航、文档查询、渲染和任意 Python 执行 |
 | 自研 Phase 0 通道 | 已实现并完成验收 | 只读、Unix Domain Socket、逐会话授权；Server 版本 `0.1.0` |
-| A1720 建模样例 | 已纳入仓库 | `A1720_18W_USB-C_Adapter.blend` 及两张 PNG 渲染图 |
 
 官方分发的精确上游提交、工具列表和产物哈希以
 [`plugins/blender-mcp-installer/artifacts/manifest.json`](plugins/blender-mcp-installer/artifacts/manifest.json)
@@ -75,7 +70,7 @@ uv run --frozen blender-codex-server
 bash scripts/checks.sh
 ```
 
-该脚本依次执行依赖同步、Ruff、严格 mypy、协议 vendor 一致性、嵌套导入 smoke，以及 unit、contract 和 distribution 测试。当前脚本按仓库验证机配置使用 `/Users/yeminjie/.local/bin/uv`；在其他机器运行前需先使该路径可用或按本机环境调整脚本。
+该脚本依次执行依赖同步、Ruff、严格 mypy、协议 vendor 一致性、嵌套导入 smoke，以及 unit、contract 和 distribution 测试。uv 按 `UV_BIN`、`PATH`、`$HOME/.local/bin/uv` 的顺序解析。
 
 ## 仓库结构
 
@@ -89,17 +84,17 @@ plugins/blender-mcp-installer/ 官方 Blender MCP 的 Codex 插件、安装器�
 scripts/                       构建、vendor、审计和验证脚本
 smoke/                         Blender background/GUI/E2E smoke 工具
 tests/                         unit、contract 与 distribution 测试
-docs/                          规范、计划、安装手册、审计和机器证据
+docs/                          当前架构、安装、使用、验证和技术决策
 spikes/                        MCP SDK 与 Codex Host 的兼容性验证代码
 ```
 
 ## 关键文档
 
-- [文档导航与权威层级](docs/README.md)
-- [需求规格说明书](Blender-Codex-%E9%9C%80%E6%B1%82%E8%A7%84%E6%A0%BC%E8%AF%B4%E6%98%8E%E4%B9%A6-v1.md)
-- [Phase 0 验收报告](docs/audits/phase0-validation-report.md)
-- [官方 MCP 分发验收](docs/audits/2026-08-16-official-blender-mcp-distribution-acceptance.md)
-- [官方 MCP 最终认证](docs/audits/2026-08-17-official-blender-mcp-final-certification-v3.md)
-- [开发路线与历史状态](docs/ROADMAP.md)
+- [文档中心](docs/README.md)
+- [项目架构](docs/architecture.md)
+- [Phase 0 只读通道安装](docs/install.md)
+- [官方 Blender MCP 分发与安装](docs/distribute-official-blender-mcp.md)
+- [官方 Blender MCP 使用](docs/use-official-blender-mcp.md)
+- [验证说明](docs/validation.md)
 
-`docs/audits/` 与 `docs/audits/evidence/` 保留了不同 revision 的不可变审计和机器证据。阅读历史结论时，应以文件标注的提交、作用域和 superseded 状态为准，不要把旧快照当作当前实现。
+仓库只保留当前正式文档。历史计划、审计和实验结论通过 Git 历史追溯，不作为当前运行时输入。

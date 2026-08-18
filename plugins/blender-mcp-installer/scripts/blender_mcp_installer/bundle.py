@@ -435,7 +435,6 @@ def verify_distribution_checkout(
     scoped_dirs = (".agents/", "plugins/blender-mcp-installer/", "scripts/requirements/")
     scoped_files = (
         "docs/distribute-official-blender-mcp.md",
-        "docs/audits/2026-08-16-official-blender-mcp-distribution-acceptance.md",
         "scripts/build_official_blender_mcp_distribution.py",
     )
     for line in status.splitlines():

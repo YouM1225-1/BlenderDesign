@@ -1,435 +1,54 @@
-# Blender Lab 官方 MCP：安全建模运行手册
+# 官方 Blender MCP 使用
 
-状态：operational、non-normative
+本文适用于仓库当前 manifest 描述的官方 Blender MCP 分发。安装、验证和回滚必须使用 [`install-official-blender-mcp` skill](../plugins/blender-mcp-installer/skills/install-official-blender-mcp/SKILL.md)，不要使用旧源码 checkout 或手工拼接依赖。
 
-本仓库技术版本：`0.1.0`
+## 支持边界
 
-本手册只规定安装完成后的建模、验证和证据流程。安装、配置、更新与回滚请使用
-[`install-official-blender-mcp.md`](install-official-blender-mcp.md)，不要在此重复安装步骤。
+- macOS Apple Silicon；
+- Blender `>=5.2.0,<5.3.0`；
+- 本地 Python `3.13.13`；
+- uv `0.12.2`；
+- Bridge `localhost:9876`；
+- 工具目录与固定产物以 `plugins/blender-mcp-installer/artifacts/manifest.json` 为准。
 
-## 1. 边界与前置条件
+安装器不会启动或关闭 Blender，也不会打开或修改项目 `.blend` 文件。需要变更 Blender 配置、修复或回滚时，先保存工作并正常退出 Blender。
 
-只使用名为 `blender` 的 Blender Lab 官方 MCP，不调用本仓库的自定义 MCP Server。
+## 推荐工作流
 
-运行边界为：
+1. 使用安装 skill 的 `inspect` 检查当前状态。
+2. 如需安装，确认四项授权并执行一次 `install`。
+3. 用户正常启动选定的 Blender。
+4. 执行 `verify`，确认 Codex、Server、localhost bridge 和 Blender Extension 四层一致。
+5. 先调用只读 summary 工具了解场景，再执行导航、代码或渲染工具。
+6. 发生安装问题时保留 receipt；正常关闭 Blender 后按 receipt 回滚。
 
-- Blender `>=5.2`；`5.2.0` 是实测基线，更高版本必须重新通过本手册的运行时探测；
-- 官方源码固定在
-  `4309a39646e644261624bfcd2bca669b343b7621`，运行中不得更新或修改该 checkout；
-- Server 继续使用 Python 3.13 和 `mcp[cli]>=1.2.0,<2`；
-- `MCP_SOURCE_DIR`、`UV_BIN` 和有效 Server 参数从已验证的安装配置解析，不硬编码用户名；
-- 只操作新启动的 disposable factory scene，不打开、保存或覆盖用户 `.blend`；
-- 运行文件只写入当前 UID 所有、非 symlink、mode `0700` 的临时 run root。
+重复安装在目标状态完全一致时应为 no-op，不应重复修改 Codex 或 Blender 配置。
 
-开始前验证 checkout 的完整 commit、clean 状态和有效配置。live catalog、固定源码
-catalog 与 configured catalog 必须动态、逐名相等。不得把工具数量硬编码为 `26`；
-经批准更新后出现的新增工具，只有在三份 catalog 与结果表全部一致时才可接受。
+## 工具使用原则
 
-## 2. Shell 与 SDD 纪律
+- 优先使用 summary、对象详情和文档查询工具确认当前状态。
+- GUI 工具依赖当前 Blender 窗口、workspace 和 area；调用前先检查窗口布局。
+- `_for_cli` 工具读取磁盘上的 `.blend`，不包含 GUI 中尚未保存的修改。
+- `execute_blender_code` 修改当前打开场景；执行前明确选择、active object、mode 和保存边界。
+- `execute_blender_code_for_cli` 使用隔离快照做批处理，不应保存回源文件。
+- 渲染工具必须使用明确输出路径，并确认目录可写。
 
-所有使用 Bash 语法的命令——包括 fence、临时 loop、数组、`set --`、here-document
-和复制/校验命令——都使用 `/bin/bash -euo pipefail` 执行，不直接交给默认 zsh。
-zsh 的 `path` 是与 `PATH` 联动的特殊参数；循环变量使用
-`fixture_path` 等普通名称。
+## 安全边界
 
-SDD 的 brief 必须使用 helper 的第三个 `OUTFILE` 参数：
+完整工具目录包含任意 Python 执行。它能够访问当前用户可访问的文件和 Blender 数据，因此：
 
-```text
-scripts/task-brief PLAN_FILE TASK_NUMBER OUTFILE
-```
+- 不执行来源不明的 Python；
+- 不在生产 `.blend` 上试验破坏性脚本；
+- 不把 bridge 改为局域网地址或 `0.0.0.0`；
+- 不复制正常 Codex 凭据到测试 profile；
+- 不把安装成功等同于所有建模操作都安全或可撤销。
 
-不得把 helper stdout 重定向到它管理的 brief 文件。每次执行生成唯一
-`RUN_STEM`，brief 与 report 使用同一个 stem：
+## 故障处理
 
-```bash
-RUN_STEM="modeling-run-YYYYMMDD-HHMMSS-task-N"
-BRIEF=".superpowers/sdd/${RUN_STEM}-brief.md"
-REPORT=".superpowers/sdd/${RUN_STEM}-report.md"
+- Server 无法启动：重新执行 `inspect`，核对固定 Python、uv 和 manifest。
+- Bridge 不可用：确认 Blender 已正常启动、Extension 已启用且端口 9876 只有预期 listener。
+- GUI 工具找不到区域：先读取窗口布局，再切换 workspace 或 area。
+- 长任务超时：先确认 Blender 是否仍在计算；不要并发重试同一写操作。
+- 安装状态不一致：保留 receipt，正常关闭 Blender，然后使用 installer 的恢复或回滚路径。
 
-test ! -e "$BRIEF"
-test ! -e "$REPORT"
-/bin/bash "$TASK_BRIEF_HELPER" "$PLAN_FILE" "$TASK_NUMBER" "$BRIEF"
-test -s "$BRIEF"
-```
-
-dispatch 时显式传递该 `BRIEF` 和 `REPORT`。agent 完成后必须执行
-`test -s "$REPORT"`；不得把旧的通用 `task-N-report.md` 当成本次报告。
-
-仓库自身 gate 与后文官方 MCP source/config harness 是两条不同的环境边界。
-`scripts/checks.sh` 必须在 `PYTHONDONTWRITEBYTECODE` 后导出 `UV_NO_EDITABLE=1`，并在
-vendor generate 与 `--check` 都成功后执行：
-
-```bash
-"$UV_BIN" sync --frozen --python 3.13 --reinstall-package blender-codex
-```
-
-这样 tmp-cwd console entrypoint 与测试读取的是当次 vendor 生成后的
-site-packages package snapshot，不依赖 editable `.pth`。不得用 `chflags`、
-`PYTHONPATH` 或减少/跳过 369 个测试来规避 worktree 的 `UF_HIDDEN` sweep。
-该实施环境事件记为 `POSTPLAN-ENV-01`，仅用 prose 记录，不加入第 11 节的 24 个
-`MODEL-*` issue，也不写入 audit CLI 的 literal issue-ID 字段。
-
-## 3. Preflight 与精确写入范围
-
-启动 recorder 后、任何 Blender 写入前，验证：
-
-1. `127.0.0.1:9876` 恰有一个 Blender listener，并记录 PID；
-2. `bpy.data.filepath == ""`，当前是 unsaved factory scene；
-3. mode、factory object exact set、active/selected 状态和 `VIEW_3D` 均符合计划；
-4. 本次所有目标 collection、object、mesh、curve、material、camera、light、
-   image、library 与 sentinel 均不存在；
-5. fixture 和 run root 通过 `lstat`、UID、mode、普通文件/目录及 hash 检查。
-
-计划必须逐名列出允许创建或修改的 datablock，不能只用 `Lamp_*` 一类模式表示范围。
-允许的 Scene、World、camera、render 和 color-management 设置也必须逐项列出。
-factory 数据和 allowlist 之外的既有对象不得修改。
-
-每个 mutating phase 在第一次写入前重新断言：
-
-- 所有前置 phase 的 exact object/material/data/parent set；
-- 本 phase 新目标全部不存在；
-- filepath、sentinel、mode、collection 和 run-root 身份仍匹配；
-- 不存在意外 `.001` 名称。
-
-最终结构验收使用 exact set、data 名称、parent chain、collection membership、
-active/selected、library、missing-file 路径和明确排除 ground 后的数值 bounds。
-每个角点先转为 `mathutils.Vector(corner)`，再计算
-`obj.matrix_world @ Vector(corner)`。对已放置到世界坐标的对象设置 parent 时，先
-`world = obj.matrix_world.copy()`，赋值 parent，再恢复 `obj.matrix_world = world`，
-并立即断言世界矩阵不变。summary 只能交叉验证，不能替代 exact assertion。
-
-## 4. Locale 与场景身份
-
-不要按本地化 display name 查找 Blender 内置节点。必须按稳定 RNA type 查找，并
-断言唯一：
-
-- Principled shader：`node.type == "BSDF_PRINCIPLED"`；
-- World background：`node.type == "BACKGROUND"`。
-
-节点 input 也不得按 display name 或猜测的版本名查找。枚举 `node.inputs`，按唯一
-`NodeSocket.identifier` 查找并读回。Blender 5.2 Principled metallic 的 identifier
-是 `Metallic`，不是 `Metallic IOR Level`：
-
-```python
-if not __debug__:
-    raise SystemExit("STOP: 结构断言 payload 需要 assertions；不得设置 PYTHONOPTIMIZE")
-
-
-def unique_socket(node, identifier):
-    matches = [item for item in node.inputs if item.identifier == identifier]
-    assert len(matches) == 1
-    return matches[0]
-
-
-metallic = unique_socket(principled, "Metallic")
-background_color = unique_socket(background, "Color")
-background_strength = unique_socket(background, "Strength")
-metallic.default_value = 0.8
-background_color.default_value = (0.004, 0.006, 0.012, 1.0)
-background_strength.default_value = 0.18
-assert abs(metallic.default_value - 0.8) <= 1e-6
-assert all(
-    abs(actual - expected) <= 1e-6
-    for actual, expected in zip(
-        background_color.default_value,
-        (0.004, 0.006, 0.012, 1.0),
-    )
-)
-assert abs(background_strength.default_value - 0.18) <= 1e-6
-```
-
-每个带 `assert` 的 payload 都必须以上面的 `if not __debug__:` 守卫开头。`-O` 会
-整段剥除 `assert`，把结构验收静默降级成无操作；守卫让这种解释器直接拒绝运行。
-
-所有 RNA float readback 都使用 `1e-6` tolerance；禁止 decimal exact equality。
-World Background 的 `Color`/`Strength` 同样是 identifier，不得使用 display-name
-subscript lookup。
-
-由本次运行创建的名称必须使用计划中的固定 ASCII 名称。
-
-`bpy.data.is_dirty` 只记录为 observation，不参与场景身份或 phase precondition。
-场景身份由空 filepath、run sentinel、exact object/material/data set、parent chain、
-collection membership 和 active/selected 状态共同证明。
-
-## 5. Transactional phase 与恢复
-
-每个 mutating phase 视为一次事务。发生异常时必须按以下顺序处理：
-
-1. 立即写入失败 end event，保留原始 symptom；
-2. 在任何恢复动作前写入当时的 verbatim first hypothesis，不得事后改写；
-3. 记录是否已经产生 partial state；
-4. 不在原 session 中删除、补写或继续；
-5. 确认它仍是 unsaved disposable scene 后退出该 Blender GUI，不保存；
-6. 等待旧 listener 消失，重新启动 factory scene，并验证恰有一个新 listener；
-7. 完整重跑 preflight，再从 Phase 1 全量 replay 一次；
-8. recovery 使用新的 event ID，设置正整数 `attempt` 并引用 `recovery_of`。
-
-同一 recorder 内 linked recovery 的 literal issue-ID set 必须与原失败相同。若
-recovery 暴露独立 symptom 或不同 issue-ID，保留整个 journal 为 invalid evidence，
-discard unsaved scene，并用新 recorder PID、新 `clock_id`、`attempt=0` 全量重跑。
-不得改写 issue ID、拼接 recorder 或跨 clock 设置 `recovery_of`。
-
-同一失败再次出现时停止盲目重试，保留两次证据并进入根因分析。不得用 `.001`
-对象、局部删除或强制修改 dirty flag 掩盖 partial state。
-
-`same failure` 必须按 canonical recursive exception tree 判定：记录每个 exception/group
-的 module-qualified type、完整有界 message 和有序 child tree；不得只哈希顶层
-`ExceptionGroup` 摘要。direct MCP session 在请求 failure acknowledgement 前，必须先
-exclusive-create 并 fsync `direct-session-failure.json` 与 bounded
-`direct-session.stderr`，把 exception-tree SHA-256、stderr observed/retained bytes、
-digest、truncation 和 drain error 绑定进 acknowledgement identity。缺少这些证据的
-grouped exception 只能证明 controller fail-closed，不能证明两个底层失败相同。
-tree capture 以 root depth 0 计最多 16 条 parent→child 边（最多 17 个层级）、256 节点；超限必须显式记录 truncated，且不得据此声明
-leaf-complete 或 same failure。
-
-## 6. Interpreter、fixture 与文档查询 contract
-
-所有 source/config harness 使用解析后的绝对 `UV_BIN`、Python 3.13 和 Server
-实际依赖边界：
-
-```bash
-"$UV_BIN" run --quiet --no-project --python 3.13 \
-  --with 'mcp[cli]>=1.2.0,<2' \
-  --with-editable "$MCP_SOURCE_DIR/mcp" \
-  python -
-```
-
-命令在 `/bin/bash -euo pipefail` 下运行。执行后重新验证固定 checkout clean，
-且没有生成 `uv.lock`。
-
-每个将发送给 GUI/CLI execution tool 的完整 Python payload 都先 exclusive-create 为
-run root 下 native mode `0600` 的普通非 symlink 文件，再用同一 uv-managed Python
-3.13 预编译：
-
-```bash
-test -f "$PAYLOAD_FILE"
-test ! -L "$PAYLOAD_FILE"
-test "$(stat -f '%u' "$PAYLOAD_FILE")" = "$(id -u)"
-test "$(stat -f '%Lp' "$PAYLOAD_FILE")" = 600
-"$UV_BIN" run --quiet --no-project --python 3.13 \
-  python - "$PAYLOAD_FILE" <<'PY'
-from pathlib import Path
-import sys
-
-payload_path = Path(sys.argv[1])
-payload = payload_path.read_bytes()
-compile(payload, str(payload_path), "exec")
-print(f"PAYLOAD_COMPILE_GREEN bytes={len(payload)}")
-PY
-```
-
-发送给 tool 的 code 必须与该已编译文件 byte-for-byte 相同。CLI read-only probe
-先只返回 determinate `observations`（包括 raw 与 `bpy.path.abspath()` 后的 canonical
-path），controller 先持久化完整 response，再在 tool 外对 observation 做 exact
-assertion。不得在返回 observation 之前猜测 saved-path/list representation；否则一次
-blank assertion error 会同时丢失诊断值。语法失败也不得作为 MCP recovery 发送。
-
-断言返回字段前先读固定源码的响应 contract；官方 API 搜索结果字段是 `hits`，
-不得猜测为 `results`。Cylinder operator 的已验证查询为：
-
-```text
-bpy.ops.mesh primitive_cylinder_add
-```
-
-不要发送已知返回零结果的自然语言拆分形式。
-
-精确 member query 返回 `kind=partial, found=false` 是 determinate non-match，不是可把
-同一请求重试成 pass 的 transport failure；先原样保存该 response，再查询它的 owning
-type。`bpy.types.NodeSocket.identifier` 的固定 owning-type query 是
-`bpy.types.NodeSocket`，只接受 owning-type response 的 `found=true` 且
-`kind=exact`。不得把 member-level partial 改写成 found，也不得猜测另一个
-member path。
-
-Blender 保存时可能丢弃 zero-user image。需要在保存后仍存在的受控 missing-image
-fixture，保存前设置 `use_fake_user=True`，然后重新打开文件验证 image 和 missing
-路径。已有 fixture 保持不变；需要恢复时创建新的 derived fixture，并只对失败工具
-重试一次。
-
-library/image filepath 可能是 `//library_source.blend`。必须先调用
-`bpy.path.abspath(item.filepath)`，再交给 `Path(...).resolve()`；直接解析 `//`
-字符串会错误得到 `/library_source.blend`。
-
-## 7. Blender 5.2 与上游限制
-
-在 Phase 3 的其他写入前，从当前 Blender 运行时枚举 render engine，确认目标值
-存在，赋值后立即读回。Blender 5.2 的实测 EEVEE 值是 `BLENDER_EEVEE`。
-
-固定上游 thumbnail 实现仍包含旧的 `BLENDER_EEVEE_NEXT` 分支；该字符串不是
-Blender 5.2 的 render-engine 值。此分支在 5.2 上不会自动降低 EEVEE samples。
-调用 thumbnail 前后记录实际 engine、render samples、viewport samples 和耗时，
-但不修改固定上游源码。
-
-area 和 window screenshot 从第一次调用起都使用
-`size_limit_in_bytes=48_000`。更大的 base64 response 可能被当前非阻塞 bridge
-截断；48 KB 是运行规避措施，不代表上游传输问题已被仓库修复。返回值仍须验证为
-非空 PNG 和合理尺寸。
-
-## 8. Render scratch
-
-render 前从 Blender 读取 `bpy.app.tempdir` 并先做 `realpath`。安全检查区分两类路径：
-
-- canonical temp root 以上的系统祖先只要求正常解析为既有普通目录；不得要求它们
-  属于当前 UID，也不得创建、chmod 或替换它们；
-- canonical temp root 及本次使用的所有下级路径必须由当前 UID 所有，逐层
-  `lstat`，不得含 symlink。
-
-最终 scratch 固定为 canonical temp root 下的 `blender_mcp`。若它不存在，先记录
-absence，再只创建这一层 mode `0700` 目录；若已存在，则必须是当前 UID 所有的
-普通非 symlink 私有目录，否则停止。
-
-每次 render 使用包含所选 `attempt-000N`、call event ID 和 first/repeat identity 的
-唯一 basename。调用前分别对官方
-source target 和 run-root copy target 执行 `lstat`，两者都必须不存在；不能用
-`exists()` 代替，因为 broken symlink 也必须拒绝。
-
-调用后验证：
-
-1. 返回路径的 `realpath` 恰等于预期 source target；
-2. basename 和 canonical parent 恰好匹配；
-3. source 经 `lstat` 是当前 UID 所有、非 symlink、非空的普通文件；
-4. 文件头是 PNG magic；
-5. 记录 source 的 `sha256`；
-6. copy parent 已通过逐层 ownership/symlink 检查；
-7. 使用 exclusive-create 方式复制，不覆盖既有路径；
-8. copy 经同样的 `lstat`、PNG 和 ownership 检查；
-9. source 与 copy 的 `sha256` 完全相等；
-10. `bpy.data.filepath`、原 render filepath 和 unsaved 状态保持不变。
-
-render 失败但留下 partial file 时，不删除或复用它；记录路径、size、magic 和 hash，
-recovery 使用新的唯一 basename。
-
-## 9. 单一时钟与证据
-
-在读取 payload、catalog 或 Blender 状态前，启动
-`scripts/official_blender_mcp_audit.py record` 的一个长生命周期进程。一个 run
-只能有一个 recorder 和一个由它生成的 `clock_id`；不得为每个 event 启动新的
-Python 进程。
-
-使用私有 FIFO 保持 recorder stdin 打开：
-
-```bash
-umask 077
-JOURNAL="$RUN_ROOT/events.ndjson"
-EVENT_FIFO="$RUN_ROOT/events.fifo"
-
-test ! -e "$JOURNAL"
-test ! -e "$EVENT_FIFO"
-mkfifo -m 600 "$EVENT_FIFO"
-
-"$UV_BIN" run --quiet --no-project --python 3.13 \
-  python scripts/official_blender_mcp_audit.py \
-  record --output "$JOURNAL" <"$EVENT_FIFO" &
-RECORDER_PID=$!
-exec 9>"$EVENT_FIFO"
-```
-
-通过 FD 9 发送 JSON event。Task、stage 和每次 tool call 分别使用
-`scope=task|stage|call`、稳定 `event_id` 及恰好一对 `start`/`end`。唯一 Task start
-必须是首个 event，唯一 Task end 必须是末个 event，所有 stage/call 都位于其间。
-failure end event 必须在 recovery start event 之前包含非空 `symptom`、调用者原样
-提供的 `first_hypothesis` 和 literal issue IDs；deviation 与 linked recovery end 也必须
-有非空 literal issue IDs。记录 `attempt` 与 `recovery_of`；只有 tool response
-明确提供的内部计时才可记录为 Blender internal time；缺失时省略 `internal_ms` 键，
-不要写 `unavailable`（recorder 只接受 JSON number，且禁止任何额外键，字符串会使整轮
-journal 被判 invalid 且不得编辑后重验）。
-audit-recorder 的 start/end envelope 永远不是 MCP wall，也不得写入 `internal_ms`
-冒充 tool 内部耗时。
-
-实际 MCP dispatch wall 只能由同一个同步 controller 在直接
-`await ClientSession.call_tool(...)` 前后调用 `time.monotonic_ns()` 得出，并以
-`controller_dispatch_wall_ms` 与 tool name、ordinal、attempt、canonical arguments
-SHA-256、完整 `CallToolResult` SHA-256 一起写入独立 evidence record。若 direct
-controller timing 不可用，明确记录 `unavailable`，不得生成 server-compute duration。
-recorder envelope 与 direct controller wall 的差值不做相减归因；只有同一 controller
-显式测得的非-MCP orchestration phase 才可称为 `unattributed orchestration`。
-
-recorder 因 identity、issue-ID 或 recovery-chain 拒绝输入时，保留 journal、stderr、
-PID 和 `clock_id` 并将整轮标记 invalid；不得编辑后重验。下一轮使用新私有 root、
-recorder 和 factory scene。
-
-结束时先发送 Task end，关闭 FD，等待 recorder 正常退出，再运行 `validate`：
-
-```bash
-exec 9>&-
-wait "$RECORDER_PID"
-
-"$UV_BIN" run --quiet --no-project --python 3.13 \
-  python scripts/official_blender_mcp_audit.py validate \
-  --journal "$JOURNAL" \
-  --audit "$AUDIT_FILE" \
-  --live-catalog "$LIVE_CATALOG" \
-  --source-catalog "$SOURCE_CATALOG" \
-  --config-catalog "$CONFIG_CATALOG"
-```
-
-只有 recorder、direct-controller evidence validator 与 repository `validate` 都成功后
-才能报告 coverage、duration 或 recovery 结论。
-
-潜在异常阈值为：summary/docs/navigation `5,000 ms`、screenshot `10,000 ms`、
-thumbnail `30,000 ms`、viewport `60,000 ms`。首次成功调用超过对应阈值时，保留
-首次证据并执行一次同条件复测；render 复测必须换新 basename。未超过阈值不得仅为
-“看起来慢”而重试。
-
-## 10. Soft process diagnostic 与正常清理
-
-Task 前后各记录一次只读 `ps` snapshot，统计与当前 Codex/App Server 相关的
-uv launcher 和 `blender-mcp` child 数量及 RSS；同时记录
-`127.0.0.1:9876` 的唯一 listener。snapshot 只能用于比较 count/RSS delta，
-不能从进程数量反推每次 tool call 都启动了新 Server。
-
-运行中不得逐个终止 idle stdio Server；它们没有额外监听 `9876`，且单独终止可能
-破坏仍在使用的 session。等所有 agents、报告、journal 和 Git 工作都完成后，如需
-清理 retained pairs，正常退出并重新启动 Codex Desktop，然后重新记录 snapshot。
-
-`MODEL-RUN-10` 只得到 soft diagnostic 和正常 host-lifecycle 清理建议；现有证据
-不足以证明 root/subagent-session 因果映射。
-
-## 11. 问题处置清单
-
-下表恰好覆盖 approved audit 的 24 个唯一 issue ID。Disposition 说明未来运行中的
-责任边界，不改写历史证据。
-
-| Issue ID | Disposition | 规则 |
-|---|---|---|
-| `MODEL-SHELL-01` | `prevented_by_runbook` | 所有 Bash 语法显式 `/bin/bash` |
-| `MODEL-SDD-01` | `prevented_by_runbook` | helper 第三个 `OUTFILE`，禁止 stdout 覆盖 brief |
-| `MODEL-SDD-02` | `prevented_by_runbook` | run-scoped brief/report stem 与前后存在性检查 |
-| `MODEL-RUN-01` | `prevented_by_runbook` | 唯一 node type 与 `NodeSocket.identifier` |
-| `MODEL-RUN-02` | `prevented_by_runbook` | dirty 仅观察，exact structure 证明身份 |
-| `MODEL-RUN-03` | `prevented_by_audit` | 解析 exact table 和 literal issue IDs |
-| `MODEL-RUN-04` | `prevented_by_audit` | 单一 recorder、同一 clock ID 和成对事件 |
-| `MODEL-RUN-05` | `prevented_by_runbook` | 绝对 uv 与 Python 3.13 |
-| `MODEL-RUN-06` | `prevented_by_runbook` | fake-user fixture；先 `bpy.path.abspath` 再 canonicalize |
-| `MODEL-RUN-07` | `prevented_by_runbook` | 有效 editable dependencies 与源码确认响应字段 |
-| `MODEL-RUN-08` | `mitigated_only` | 48 KB screenshot cap；上游传输根因未改动 |
-| `MODEL-RUN-09` | `mitigated_only` | 安全创建最终 scratch parent；上游未自动创建 |
-| `MODEL-RUN-10` | `diagnostic_only` | 只记录 process delta 并正常退出 host |
-| `MODEL-RUN-11` | `future_prevention_only` | 未来 failure 必须先持久化 first hypothesis；历史缺口保留 |
-| `MODEL-PLAN-01` | `prevented_by_runbook` | 运行时发现并读回 `BLENDER_EEVEE` |
-| `MODEL-PLAN-02` | `prevented_by_runbook` | recorder identity、discard 和 full replay |
-| `MODEL-PLAN-03` | `prevented_by_runbook` | 精确声明 Scene/World/render/datablock 写入范围 |
-| `MODEL-PLAN-04` | `prevented_by_runbook` | world-preserving parent 与 Vector bounds |
-| `MODEL-PLAN-05` | `prevented_by_runbook_and_audit` | one-clock journal 与机器校验 |
-| `MODEL-PLAN-06` | `prevented_by_runbook` | 使用 source-proven operator query |
-| `MODEL-PLAN-07` | `prevented_by_audit` | 动态 catalog equality 和结果表 `Counter` |
-| `MODEL-PLAN-08` | `prevented_by_runbook` | canonical containment、lstat、unique absent target 和 hash |
-| `MODEL-PLAN-09` | `warning_only` | 记录 EEVEE/sample 兼容性，不修改固定上游 |
-| `MODEL-PLAN-10` | `prevented_by_runbook_and_audit` | immediate events、阈值复测、partial artifact 保留和验证 |
-
-`MODEL-RUN-08`、`MODEL-RUN-09` 只被规避；`MODEL-RUN-10` 只被观察；
-`MODEL-PLAN-09` 只记录兼容性警告。它们都不是仓库内修复。
-`MODEL-RUN-11` 只能预防未来证据缺口，不能补造已丢失的历史 hypothesis。
-
-## 12. 完成检查
-
-- [ ] 官方 source pin、SDK boundary、Blender version 和动态 catalog equality 通过；
-- [ ] recorder 在任何工作读取前启动，Task/stage/call events 全部成对；
-- [ ] 唯一 listener、factory scene、target absence 与 exact write allowlist 通过；
-- [ ] locale-safe node/socket、dirty observation 和 transactional recovery 已执行；
-- [ ] world-preserving parent、Vector bounds、recorder/recovery identity 已执行；
-- [ ] fixture、docs query、48 KB screenshot 与 Blender engine contract 通过；
-- [ ] render source/copy 的 absence、containment、lstat、PNG 和 hash 通过；
-- [ ] exact structural assertion 与所有官方工具结果通过；
-- [ ] `validate` 通过后才形成结论；
-- [ ] Task 前后 process snapshot 已记录，未进行 mid-run individual termination；
-- [ ] agents、reports、journal 和 Git 状态全部收口后再正常退出或重启 Codex Desktop。
+分发的信任模型和操作入口见[官方 Blender MCP 分发与安装](distribute-official-blender-mcp.md)。

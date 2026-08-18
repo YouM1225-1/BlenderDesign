@@ -1,49 +1,26 @@
-# BlenderDesign 文档导航与权威层级
+# 文档中心
 
-> 更新：2026-08-08 · 当前状态：隔离候选 worktree 中**基于 `main@6b936ad` 的未提交 r18 proposed 候选**；这些 r18 字节尚不在 main/HEAD。Phase 0 未执行，未生成正式 r18 attestation。r17 已 attested，但因 Task 3 空洞同输入测试的评审发现被 supersede；当前只认 B-7 r18 基线审计的精确 tuple。
+本目录只保留当前实现的正式文档。历史计划、审计过程、研究草稿和机器证据已从工作树移除；需要追溯时使用 Git 历史。
 
-本页是文档入口，不复制规范正文。发生冲突时按下表的权威层级处理；任何历史 capture、研究输入或单机测量都不能覆盖 live ROADMAP 与当前规范。
+## 使用文档
 
-## 当前审批入口
+- [项目架构](architecture.md)：两条 MCP 链路、组件关系与安全边界。
+- [Phase 0 只读通道安装](install.md)：安装 Blender Bridge 并注册自研 MCP Server。
+- [官方 Blender MCP 分发与安装](distribute-official-blender-mcp.md)：受审分发、信任边界、安装和回滚入口。
+- [官方 Blender MCP 使用](use-official-blender-mcp.md)：安装后的安全使用方式。
+- [验证说明](validation.md)：自动化门禁、手工验证与结论边界。
 
-| 角色 | 文件 | 状态与用法 |
-|---|---|---|
-| Live 状态与 Gate | [ROADMAP](ROADMAP.md) | 唯一 live 状态入口；当前由 B-7 阻断 Task 0 |
-| 需求合同 | [URS](../Blender-Codex-需求规格说明书-v1.md) | Normative v1.17 |
-| Phase 0 设计合同 | [design spec](superpowers/specs/2026-07-23-phase0-readonly-channel-design.md) | Normative v1.17 |
-| 执行输入 | [Phase 0 Plan](superpowers/plans/2026-07-23-phase0-readonly-channel.md) | r18 proposed；精确 tuple 批准并完成新的两提交 attestation 前不可执行 |
-| 当前基线审计 | [r18 Task 3 测试/来源修正审计](audits/2026-08-08-r18-topology-test-baseline-audit.md) | B-7 r18 当前审批证据；不等于实施结果 |
-| 上一候选审计 | [研究报告三融合审计](audits/2026-08-08-deep-research-report-3-integration-audit.md) | r17 已 attested、后被评审发现 supersede；只作历史追溯 |
-| 上一候选审计 | [r16/B-5 审计](audits/2026-08-08-r16-b5-adversarial-audit.md) | Approved but superseded；只作历史追溯 |
-| SDK 决策 | [MCP SDK v2 ADR](decisions/2026-08-07-mcp-sdk-v2-selection.md) | Accepted；本系统使用 `mcp>=2,<3` |
+## 技术决策
 
-## 文档分类
+- [MCP SDK v2](decisions/2026-08-07-mcp-sdk-v2-selection.md)：自研 Phase 0 Server 的 SDK 选择。
 
-| 分类 | 入口 | 解释 |
-|---|---|---|
-| r15/v8 不可变历史 capture | [closeout v3](audits/2026-08-07-closeout-v3.md) · [v8 provenance](audits/evidence/2026-08-08-phase0-closeout-v8-provenance.json) | 固定 `578f49e` 工作区并由 `e5ac559` 锚定；不追踪 live 文件 |
-| 官方 MCP 运行快照 | [重启后执行审计](audits/2026-08-08-roadmap-execution-and-post-restart-audit.md) · [A-4 transcript](audits/evidence/2026-08-08-official-blender-mcp-a4-transcript.ndjson) | 24 个非-render `ok`、2 个 render `not_called`；不证明 26 工具稳定或缺陷修复 |
-| 平台交接与测量 | [handoff](handoff/2026-08-07-platform-optimization-handoff.md) · [macOS 测量](measurements/2026-08-07-macos-platform-optimization.md) | 固定时点、单机数据；只有已进入 URS/Plan 的条款才是合同 |
-| 历史审计 | [audits/](audits/) | superseded 的“当前裁决”失效；当轮反例、发现来源和修订链继续有效 |
-| 机器证据 | [evidence 索引](audits/evidence/README.md) | 按 revision、scope、canonical/alias 解读；不得把隔离预检冒充 Phase 0 实施 |
-| 外部研究输入 | [report 2](research/deep-research-report-2.md) · [report 3](research/deep-research-report-3.md) | 正式归档但 non-normative；只能经独立审计后采纳 |
-| 验证工具 | [spikes](../spikes/README.md) | 兼容性/配置验证辅助，不是生产代码或 Plan 执行结果 |
+## 权威顺序
 
-## 可分发安装器
+发生冲突时按以下顺序处理：
 
-[Official Blender MCP distributable installer](distribute-official-blender-mcp.md)
-记录受审提交、Codex skill-only 插件、显式授权、验证与回滚流程。
+1. 代码、测试、`pyproject.toml` 和官方分发 `artifacts/manifest.json`；
+2. 插件运行时说明 `plugins/blender-mcp-installer/skills/install-official-blender-mcp/SKILL.md`；
+3. 本目录中的正式文档；
+4. Git 历史中的旧计划、审计和实验记录。
 
-## 历史审计保留策略
-
-以下报告已被后续裁决取代，但仍是 URS changelog、Plan 自审或 provenance 的来源，因此保留原路径，不物理去重：首轮 Plan 审计、Claude 修改复审、全仓复审、修复后审计、closeout v2、post-freeze 平台红队、handoff 融合审计与 r15/v8 独立核验。
-
-evidence 中部分 GUI smoke、vendor/artifact manifest 字节相同，但文件名承载 revision/run 身份；它们不是孤儿。兼容别名 `2026-08-07-phase0-closeout-v7-provenance.json` 也保留给仓库外消费者。真正的缓存、bytecode、`.DS_Store` 不属于证据，已清理并由 `.gitignore` 排除。
-
-## 批准与执行纪律
-
-1. 修改 Plan/URS/spec/ROADMAP 任一字节都会使 proposed tuple 失效。
-2. 项目所有者必须批准**完整且已知的** Plan/URS/spec/ROADMAP SHA 与结构/门禁计数；不能预批准未知哈希。
-3. 批准后先形成 `source_commit`，再从该 commit blobs 生成并单独提交 attestation。
-4. 只有 live/source blob/approved tuple 三方全等、祖先链成立且工作树 clean 后，才可执行 Task 0。
-5. Phase 0 进度写执行日志与最终 validation report，不改获批 Plan 的 checkbox。
+文档不得固定本机用户名、临时路径或已被新 manifest 取代的上游提交。版本、工具目录和产物哈希以当前 manifest 为准。

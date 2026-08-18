@@ -1967,6 +1967,8 @@ def test_provenance_ignores_ignored_untracked_python(monkeypatch):
     finally:
         ignored.unlink(missing_ok=True)
     assert str(ignored.relative_to(e2e.ROOT)) not in provenance["sources"]["files"]
+    assert {"pyproject.toml", "uv.lock"} <= set(provenance["sources"]["files"])
+    assert provenance["git"]["dirty"] is False
 
 
 def test_provenance_rejects_vendor_extra_or_content_drift(monkeypatch):
@@ -1986,11 +1988,7 @@ def test_provenance_rejects_vendor_extra_or_content_drift(monkeypatch):
         with pytest.raises(RuntimeError, match="clean Git worktree"):
             e2e._current_provenance(time.monotonic() + 1.0)
     monkeypatch.setattr(e2e, "_git_text", original_git_text)
-    required = {
-        e2e.PLAN_PATH, e2e.ATTESTATION_PATH,
-        e2e.ROOT / "pyproject.toml", e2e.ROOT / "uv.lock",
-        *e2e.APPROVED_DOCUMENTS.values(),
-    }
+    required = {e2e.ROOT / "pyproject.toml", e2e.ROOT / "uv.lock"}
     _clear_vendor_bytecode()
     try:
         extra.write_bytes(b"executable blind spot")
@@ -2044,44 +2042,3 @@ def test_audit_reader_rejects_fifo_and_oversize_without_blocking(
     monkeypatch.setattr(e2e, "MAX_AUDIT_FILE_BYTES", 4)
     with pytest.raises(ValueError, match="bounded regular file"):
         e2e._audit_rows(tmp_path, time.monotonic() + 0.5)
-
-
-@pytest.mark.parametrize("mutation", [
-    "document_drift", "gate_drift", "extra_key", "missing_key",
-    "bool_schema", "bool_checked",
-])
-def test_provenance_rejects_approved_tuple_drift(monkeypatch, mutation):
-    path = e2e.ATTESTATION_PATH
-    original_bytes = path.read_bytes()
-    attestation = json.loads(original_bytes)
-    approved = attestation["approved_tuple"]
-    if mutation == "document_drift":
-        approved["urs_sha256"] = "0" * 64
-    elif mutation == "gate_drift":
-        approved["unit_tests"] += 1
-    elif mutation == "extra_key":
-        approved["unexpected"] = 1
-    elif mutation == "missing_key":
-        del approved["plan_sha256"]
-    elif mutation == "bool_schema":
-        attestation["schema_version"] = True
-    else:
-        approved["checked_checkboxes"] = False
-    path.write_text(json.dumps(attestation))
-    original_git_text = e2e._git_text
-
-    def allow_fixture_edit(deadline, *args, **kwargs):
-        raw = original_git_text(deadline, *args, **kwargs)
-        if args == ("status", "--porcelain=v1", "--untracked-files=all"):
-            allowed = _PHASE_A_PATHS | {str(path.relative_to(e2e.ROOT))}
-            return _without_status_paths(raw, allowed)
-        return raw
-
-    monkeypatch.setattr(e2e, "_git_text", allow_fixture_edit)
-    monkeypatch.setattr(e2e, "BLENDER", "/bin/echo")
-    _clear_vendor_bytecode()
-    try:
-        with pytest.raises((AssertionError, ValueError)):
-            e2e._current_provenance(time.monotonic() + 10.0)
-    finally:
-        path.write_bytes(original_bytes)

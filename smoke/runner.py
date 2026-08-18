@@ -702,7 +702,8 @@ def _step() -> float | None:
                 ST["nfr_registry_marker"] = registry_marker
                 ST["nfr_registry_not_before_ns"] = registry_not_before_ns
                 command = [
-                    "/Users/yeminjie/.local/bin/uv", "run", "--frozen", "python",
+                    os.environ.get("UV_BIN", str(Path.home() / ".local/bin/uv")),
+                    "run", "--frozen", "python",
                     "smoke/e2e.py", "nfr", "--root", str(root),
                     "--instance", session.instance_id, "--output", NFR_OUT,
                     "--process-registry", str(process_dir),

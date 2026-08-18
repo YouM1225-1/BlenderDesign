@@ -17,7 +17,7 @@ from .contracts import Clock
 # 往返延迟几乎全部是「等下一次 tick」，不是代码效率问题。本机预检（Apple M4）：
 # IDLE=0.1 时 p50 约 60 ms，IDLE=0.02 时 p50 约 12 ms；代价是空转唤醒约增 4.4×。
 # CPU/电量影响依 workload 与电源状态而变，不能从一次空队列样本外推电池结论。
-# 更省电的迟滞方案已否决——见 docs/measurements/2026-08-07-macos-platform-optimization.md §3.1。
+# 20 ms keeps interactive latency low while still yielding between queue polls.
 IDLE_INTERVAL = 0.02
 BUSY_INTERVAL = 0.01
 MAX_SCENE_SUMMARY_TASKS = 2

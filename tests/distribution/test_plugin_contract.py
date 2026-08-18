@@ -898,7 +898,7 @@ def test_docs_state_security_side_effects_delivery_and_canary_limits() -> None:
 
 def test_docs_index_and_repository_checks_include_plugin_contract() -> None:
     assert (
-        "[Official Blender MCP distributable installer](distribute-official-blender-mcp.md)"
+        "[官方 Blender MCP 分发与安装](distribute-official-blender-mcp.md)"
         in (ROOT / "docs/README.md").read_text()
     )
     checks = (ROOT / "scripts/checks.sh").read_text()

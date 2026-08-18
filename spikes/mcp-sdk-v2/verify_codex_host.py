@@ -19,9 +19,10 @@ TOOL_NAMES = ["get_blender_status", "get_scene_summary", "describe_capabilities"
 PROTOCOL_PROBE = "get_negotiated_protocol"
 HOST_TOOL_NAMES = [*TOOL_NAMES, PROTOCOL_PROBE]
 HOST_PROTOCOL = "2025-06-18"
-UV = "/Users/yeminjie/.local/bin/uv"
+UV = os.environ.get("UV_BIN", str(Path.home() / ".local/bin/uv"))
 CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex"
-OFFICIAL_MCP = "/Users/yeminjie/blender_mcp/mcp"
+OFFICIAL_MCP = os.environ.get(
+    "OFFICIAL_MCP_ROOT", str(Path.home() / "blender_mcp/mcp"))
 BLEND_FILE = (
     "/Applications/Blender.app/Contents/Resources/5.2/scripts/startup/"
     "bl_app_templates_system/Storyboarding/startup.blend"
