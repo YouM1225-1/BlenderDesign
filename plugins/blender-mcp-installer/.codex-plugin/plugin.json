@@ -1,6 +1,6 @@
 {
   "name": "blender-mcp-installer",
-  "version": "1.0.0+codex.20260817154200",
+  "version": "1.0.0+codex.20260818022238",
   "description": "Install and verify the reviewed official Blender MCP distribution on macOS.",
   "author": {
     "name": "Blender Lab"

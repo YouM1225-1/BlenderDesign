@@ -64,7 +64,21 @@ def _open_verified_directory(parent_fd: int, name: str, uid: int | None) -> int:
     except OSError as exc:
         raise ValueError("unsafe directory component") from exc
     after = os.fstat(child_fd)
-    if not _stable(before, after, directory=True):
+    before_identity = (
+        stat.S_IFMT(before.st_mode),
+        before.st_dev,
+        before.st_ino,
+        before.st_uid,
+        stat.S_IMODE(before.st_mode),
+    )
+    after_identity = (
+        stat.S_IFMT(after.st_mode),
+        after.st_dev,
+        after.st_ino,
+        after.st_uid,
+        stat.S_IMODE(after.st_mode),
+    )
+    if before_identity != after_identity:
         os.close(child_fd)
         raise ValueError("directory component changed while opening")
     if uid is not None:

@@ -324,6 +324,11 @@ run_uv_bootstrap
 ```
 <!-- INSPECT_END -->
 
+Inspect reports the 13 inputs to `exact` in `checks`. `blender_checks` separately
+reports extension-file integrity and the Online Access, host, port, and autostart
+preference checks, so a managed preference drift can be diagnosed without weakening
+the exact gate.
+
 The operator has set a standing default-allow policy for these four capabilities:
 
 1. The installer may install and enable the reviewed Blender extension.

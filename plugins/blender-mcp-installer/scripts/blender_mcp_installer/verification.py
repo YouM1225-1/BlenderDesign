@@ -20,7 +20,7 @@ from .blender_adapter import (
     inspect_blender,
     load_extension_payload,
     probe_blender_lifecycle,
-    verify_blender_files,
+    verify_blender_payload,
 )
 from .bundle import ReleaseManifest, StagedBundle
 from .codex_adapter import (
@@ -41,6 +41,21 @@ _MAX_STDOUT = 1024 * 1024
 _MAX_STDERR = 64 * 1024
 _MCP_TIMEOUT = 30.0
 _VERSION = re.compile(r"[0-9][A-Za-z0-9.+-]*")
+EXACT_CHECK_NAMES = (
+    "runtime",
+    "extension_repository",
+    "extension_id",
+    "extension_version",
+    "extension_payload_digest",
+    "enablement",
+    "preferences",
+    "codex_policy",
+    "codex_namespace",
+    "codex_effective",
+    "active_generation",
+    "manifest_hash",
+    "recorded_blender_executable",
+)
 _UV_BUILD = re.compile(
     r"([0-9][A-Za-z0-9.+-]*) \([0-9a-f]{7,40} "
     r"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01]) "
@@ -275,6 +290,7 @@ class InstallationInspection:
     active_generation: bool
     manifest_hash: bool
     recorded_blender_executable: bool
+    extension_files: bool
     host: HostCapabilities
     blender_executable: Path
     runtime_command: tuple[str, ...]
@@ -288,23 +304,16 @@ class InstallationInspection:
 
     @property
     def exact(self) -> bool:
-        return all(
-            (
-                self.runtime,
-                self.extension_repository,
-                self.extension_id,
-                self.extension_version,
-                self.extension_payload_digest,
-                self.enablement,
-                self.preferences,
-                self.codex_policy,
-                self.codex_namespace,
-                self.codex_effective,
-                self.active_generation,
-                self.manifest_hash,
-                self.recorded_blender_executable,
-            )
-        )
+        return all(getattr(self, name) for name in EXACT_CHECK_NAMES)
+
+    @property
+    def preference_checks(self) -> dict[str, bool]:
+        return {
+            "online_access": self.blender_state.online_access is True,
+            "host": self.blender_state.host == "localhost",
+            "port": self.blender_state.port == 9876,
+            "autostart": self.blender_state.autostart is True,
+        }
 
 
 @dataclass(frozen=True)
@@ -831,29 +840,24 @@ def _inspect(
     if extension_provenance is not None and type(extension_provenance) is not TreeImage:
         raise InstallerError("invalid recorded extension provenance")
     try:
-        verify_blender_files(current_blender, expected_payload, extension_provenance)
-        blender_files_exact = True
+        verify_blender_payload(current_blender, expected_payload, extension_provenance)
+        extension_files = True
     except (OSError, ValueError, InstallerError):
-        blender_files_exact = False
+        extension_files = False
     runtime = runtime_state is not None and runtime_state.exact and profile_matches
-    extension_repository = (
-        current_blender.repository == manifest.extension["repository"] and blender_files_exact
-    )
-    extension_id = current_blender.manifest_id == manifest.extension["id"] and blender_files_exact
-    extension_version = (
-        current_blender.manifest_version == manifest.extension["version"] and blender_files_exact
-    )
+    extension_repository = current_blender.repository == manifest.extension["repository"]
+    extension_id = current_blender.manifest_id == manifest.extension["id"]
+    extension_version = current_blender.manifest_version == manifest.extension["version"]
     extension_payload_digest = (
         current_blender.canonical_payload_digest == expected_payload.canonical_digest
-        and blender_files_exact
+        and extension_files
     )
-    enablement = current_blender.enabled is True and blender_files_exact
+    enablement = current_blender.enabled is True
     preferences = (
         current_blender.online_access is True
         and current_blender.host == "localhost"
         and current_blender.port == 9876
         and current_blender.autostart is True
-        and blender_files_exact
     )
     launcher = None if runtime_state is None else runtime_state.launcher_path
     desired = None if launcher is None else desired_codex_values(launcher, profile, manifest.tools)
@@ -918,6 +922,7 @@ def _inspect(
         active_generation,
         manifest_hash,
         recorded_blender_executable,
+        extension_files,
         host,
         current_blender.executable,
         command,

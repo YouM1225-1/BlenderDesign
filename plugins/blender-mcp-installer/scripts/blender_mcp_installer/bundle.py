@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Iterator, Mapping, Protocol, Sequence
 
 
-UPSTREAM_COMMIT = "887205197f35a01cabaf7fb9f18ff5cd56b40a32"
+UPSTREAM_COMMIT = "6498c372e7d88d2accea800d4d187c310c520474"
 BUNDLE_VERSION = "1.0.0+" + UPSTREAM_COMMIT[:12]
 TOOLS = (
     "execute_blender_code",

@@ -390,6 +390,19 @@ def _normalize_zip(source: Path, target: Path, epoch: int) -> None:
             archive.writestr(info, content)
 
 
+def _validate_source_metadata(source: Path) -> None:
+    try:
+        project = tomllib.loads((source / "pyproject.toml").read_text()).get("project")
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError("unexpected source metadata") from exc
+    if type(project) is not dict or project.get("dependencies") != [
+        "docutils",
+        "mcp[cli]>=1.28.1,<3",
+        "pyyaml",
+    ]:
+        raise ValueError("unexpected source metadata")
+
+
 def _build_payloads(
     source: Path,
     blender_bin: Path,
@@ -397,6 +410,7 @@ def _build_payloads(
     output: Path,
     epoch: int,
 ) -> None:
+    _validate_source_metadata(source / "mcp")
     raw = output.parent / f"{output.name}-raw"
     raw.mkdir()
     build_env = sanitized_environment()
@@ -448,7 +462,8 @@ def _validate_wheel(wheel: Path) -> None:
         fields.get("Name") != ["blender-mcp"]
         or fields.get("Version") != ["1.0.0"]
         or fields.get("Requires-Python") != [">=3.10"]
-        or fields.get("Requires-Dist") != ["docutils", "mcp[cli]>=1.2.0", "pyyaml"]
+        or fields.get("Requires-Dist")
+        != ["docutils", "mcp[cli]<3,>=1.28.1", "pyyaml"]
         or "Root-Is-Purelib: true\n" not in wheel_metadata
         or "Tag: py3-none-any\n" not in wheel_metadata
         or entry_points != "[console_scripts]\nblender-mcp = blmcp:main\n"

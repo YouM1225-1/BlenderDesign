@@ -8,7 +8,7 @@ import sys
 import hashlib
 import time
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePath
 from types import SimpleNamespace
 
 import pytest
@@ -26,6 +26,7 @@ from blender_mcp_installer.filesystem import (
     NoOpFaultInjector,
     SafeRoot,
     StagedTree,
+    capture_file,
     create_deterministic_stage,
 )
 from blender_mcp_installer.model import TreeImage
@@ -460,7 +461,7 @@ def _installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, runner=object
         "load_extension_payload",
         lambda path: SimpleNamespace(canonical_digest=digest),
     )
-    monkeypatch.setattr(verification, "verify_blender_files", blender_files)
+    monkeypatch.setattr(verification, "verify_blender_payload", blender_files, raising=False)
     monkeypatch.setattr(
         verification,
         "_codex_checks",
@@ -565,6 +566,102 @@ def test_adapter_backed_exact_inspection_binds_receipt_and_all_authorities(
     assert controls["runtime_profile"].blender_path == roots.blender.executable
 
 
+def test_unrelated_userpref_rewrite_does_not_change_semantic_exactness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, _, _, receipt, receipt_path = _installed(
+        tmp_path, monkeypatch
+    )
+    with SafeRoot.open(
+        roots.blender.user_config, os.getuid(), roots.blender.user_config
+    ) as config:
+        recorded = capture_file(config, PurePath("userpref.blend"))
+    next(target for target in receipt["targets"] if target["role"] == "blender_userpref")[
+        "install_post"
+    ] = recorded.to_dict()
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True))
+    roots.userpref_target.write_bytes(
+        roots.userpref_target.read_bytes() + b"\nunrelated-preference-rewrite"
+    )
+
+    inspected = inspect_installation(bundle, roots, blender, host)
+
+    assert recorded.sha256 not in inspected.managed_images[2]
+    assert inspected.exact and inspected.preferences
+
+
+def test_online_access_drift_does_not_poison_unrelated_blender_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, controls, _, _, _ = _installed(tmp_path, monkeypatch)
+    controls["blender"] = replace(blender, online_access=False)
+
+    inspected = inspect_installation(bundle, roots, blender, host)
+
+    assert not inspected.exact and not inspected.preferences
+    assert all(
+        (
+            inspected.extension_repository,
+            inspected.extension_id,
+            inspected.extension_version,
+            inspected.extension_payload_digest,
+            inspected.enablement,
+        )
+    )
+
+
+def test_extension_file_drift_still_makes_inspection_inexact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, roots, blender, host, controls, _, _, _ = _installed(tmp_path, monkeypatch)
+    controls["blender_files"] = False
+
+    inspected = inspect_installation(bundle, roots, blender, host)
+
+    assert not inspected.extension_files
+    assert not inspected.extension_payload_digest
+    assert not inspected.exact
+
+
+@pytest.mark.parametrize(
+    ("changes", "failed_check", "failed_preference"),
+    [
+        (
+            {"repository": "foreign"},
+            "extension_repository",
+            None,
+        ),
+        ({"enabled": False}, "enablement", None),
+        ({"online_access": False}, "preferences", "online_access"),
+        ({"host": "foreign"}, "preferences", "host"),
+        ({"port": 1}, "preferences", "port"),
+        ({"autostart": False}, "preferences", "autostart"),
+    ],
+)
+def test_blender_semantic_drift_only_marks_its_own_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changes: dict[str, object],
+    failed_check: str,
+    failed_preference: str | None,
+) -> None:
+    bundle, roots, blender, host, controls, _, _, _ = _installed(tmp_path, monkeypatch)
+    changes = dict(changes)
+    if "repository" in changes:
+        changes["extension_root"] = blender.extensions_root / "foreign/mcp"
+    controls["blender"] = replace(blender, **changes)
+
+    inspected = inspect_installation(bundle, roots, blender, host)
+
+    failed = {name for name in verification.EXACT_CHECK_NAMES if not getattr(inspected, name)}
+    assert failed == {failed_check}
+    assert inspected.extension_files
+    failed_preferences = {
+        name for name, exact in inspected.preference_checks.items() if not exact
+    }
+    assert failed_preferences == ({failed_preference} if failed_preference else set())
+
+
 def test_installed_inspection_passes_recorded_extension_provenance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -577,7 +674,7 @@ def test_installed_inspection_passes_recorded_extension_provenance(
     seen: list[object] = []
     monkeypatch.setattr(
         verification,
-        "verify_blender_files",
+        "verify_blender_payload",
         lambda _state, _payload, provenance=None: seen.append(provenance),
     )
 
