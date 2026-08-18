@@ -1,5 +1,10 @@
 # Official Blender MCP final distribution certification v3
 
+> Historical certification for `6912a6f2f5c87ec0b0d40f7aa1a3cd5f958c4c56`.
+> Superseded by `2026-08-18-official-blender-mcp-final-integration-certification.md`.
+> Preserve this report as evidence; do not use its candidate as the current installer
+> authorization input.
+
 Status: **PASS**
 
 Certification date: 2026-08-17
