@@ -60,11 +60,14 @@ def _validate_response(name: str, response: Any) -> tuple[dict[str, Any] | None,
 async def main() -> None:
     env = os.environ.copy()
     env["BLENDER_PATH"] = "/Applications/Blender.app/Contents/MacOS/Blender"
+    uv = os.environ.get("UV_BIN", str(Path.home() / ".local/bin/uv"))
+    official_mcp = os.environ.get(
+        "OFFICIAL_MCP_ROOT", str(Path.home() / "blender_mcp/mcp"))
     params = StdioServerParameters(
-        command="/Users/yeminjie/.local/bin/uv",
+        command=uv,
         args=[
             "run", "--quiet", "--no-project", "--with", "mcp[cli]>=1.2.0,<2",
-            "--with-editable", "/Users/yeminjie/blender_mcp/mcp", "blender-mcp",
+            "--with-editable", official_mcp, "blender-mcp",
         ],
         env=env,
     )

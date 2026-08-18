@@ -14,8 +14,11 @@ test -z "$(find protocol bridge server smoke scripts tests \
 test -z "$(find protocol bridge server smoke scripts tests -type f \
   \( -name '*.pyc' -o -name '*.pyo' \) -print -quit)"
 
-# preflight（audit F-07/F-13）：当前非交互 PATH 不含 ~/.local/bin，使用已核实绝对路径
-UV_BIN=/Users/yeminjie/.local/bin/uv
+# Prefer an explicit runner, then PATH, then uv's default per-user install path.
+UV_BIN="${UV_BIN:-$(command -v uv || true)}"
+if test -z "$UV_BIN" && test -x "$HOME/.local/bin/uv"; then
+  UV_BIN="$HOME/.local/bin/uv"
+fi
 test -x "$UV_BIN" || { echo "FAIL: $UV_BIN 不可执行"; exit 1; }
 echo "toolchain: uv=$($UV_BIN --version 2>&1)"
 

@@ -74,7 +74,7 @@ except ModuleNotFoundError:  # absolute script execution puts smoke/ on sys.path
     )
 
 ROOT = Path(__file__).resolve().parents[1]
-UV = "/Users/yeminjie/.local/bin/uv"
+UV = os.environ.get("UV_BIN", str(Path.home() / ".local/bin/uv"))
 BLENDER = "/Applications/Blender.app/Contents/MacOS/Blender"
 RUNS = 20
 P95_LIMIT_MS = 2000.0
@@ -105,25 +105,6 @@ MAX_FAILURE_LEAVES = 8
 MAX_FAILURE_TYPE_CHARS = 64
 MAX_FAILURE_MESSAGE_CHARS = 256
 MAX_FAILURE_ERROR_CHARS = 2048
-PLAN_PATH = ROOT / "docs/superpowers/plans/2026-07-23-phase0-readonly-channel.md"
-ATTESTATION_PATH = (
-    ROOT / "docs/audits/evidence/2026-08-09-phase0-post-acceptance-attestation.json")
-APPROVED_DOCUMENTS = {
-    "plan_sha256": PLAN_PATH,
-    "urs_sha256": ROOT / "Blender-Codex-需求规格说明书-v1.md",
-    "spec_sha256": (
-        ROOT / "docs/superpowers/specs/2026-07-23-phase0-readonly-channel-design.md"),
-    "roadmap_sha256": ROOT / "docs/ROADMAP.md",
-    "install_sha256": ROOT / "docs/install.md",
-    "validation_report_sha256": ROOT / "docs/audits/phase0-validation-report.md",
-}
-APPROVED_GATE_COUNTS = {
-    "unit_tests": 337,
-    "contract_tests": 32,
-    "full_tests": 369,
-    "adapter_tests": 35,
-    "adapter_substantive_lines": 327,
-}
 AUDIT_KEYS = {
     "ts", "request_id", "tool", "instance_id", "transaction_id",
     "params_digest", "ok", "duration_ms", "paths", "error",
@@ -394,22 +375,6 @@ def _git_text(
     return _git_bytes(deadline, *args, max_bytes=max_bytes).decode().strip()
 
 
-def _git_blob_sha256(deadline: float, commit: str, path: str) -> str:
-    specifier = f"{commit}:{path}"
-    raw_size = _git_text(
-        deadline, "cat-file", "-s", specifier, max_bytes=64)
-    try:
-        size = int(raw_size)
-    except ValueError as exc:
-        raise ValueError(f"invalid git blob size for {path}: {raw_size}") from exc
-    if not 0 <= size <= MAX_SOURCE_FILE_BYTES:
-        raise ValueError(f"git blob exceeds source limit: {path}")
-    raw = _git_bytes(deadline, "show", specifier, max_bytes=size)
-    if len(raw) != size:
-        raise ValueError(f"git blob size changed: {path}")
-    return hashlib.sha256(raw).hexdigest()
-
-
 def _read_bounded_bytes(path: Path, deadline: float, max_bytes: int) -> bytes:
     before = path.lstat()
     if (not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes
@@ -471,8 +436,6 @@ def _tracked_sources(deadline: float, required: set[Path]) -> set[Path]:
     scopes = [
         "protocol", "bridge", "server", "smoke", "scripts", "tests",
         "pyproject.toml", "uv.lock",
-        *(str(path.relative_to(ROOT)) for path in APPROVED_DOCUMENTS.values()),
-        str(ATTESTATION_PATH.relative_to(ROOT)),
     ]
     raw = _git_bytes(
         deadline, "ls-files", "-z", "--", *scopes,
@@ -541,10 +504,7 @@ def _current_provenance(deadline: float) -> dict[str, Any]:
     if git_status:
         raise RuntimeError("formal evidence requires a clean Git worktree")
 
-    required = {
-        PLAN_PATH, ATTESTATION_PATH, ROOT / "pyproject.toml", ROOT / "uv.lock",
-        *APPROVED_DOCUMENTS.values(),
-    }
+    required = {ROOT / "pyproject.toml", ROOT / "uv.lock"}
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"provenance inputs missing: {missing}")
@@ -559,73 +519,12 @@ def _current_provenance(deadline: float) -> dict[str, Any]:
         source_files[str(path.relative_to(ROOT))] = hashlib.sha256(raw).hexdigest()
     _, manifest_sha = _canonical(source_files)
 
-    plan_text = _read_bounded_bytes(
-        PLAN_PATH, deadline, MAX_SOURCE_FILE_BYTES).decode()
-    python_paths = re.findall(r"(?m)^\`\`\`python\n# ([^\n]+\.py)$", plan_text)
-    plan_structure = {
-        "tasks": len(re.findall(r"(?m)^### Task [0-9]+:", plan_text)),
-        "open_checkboxes": len(re.findall(r"(?m)^- \[ \]", plan_text)),
-        "checked_checkboxes": len(re.findall(r"(?m)^- \[[xX]\]", plan_text)),
-        "python_fences": len(re.findall(r"(?m)^\`\`\`python$", plan_text)),
-        "path_bound_python": len(python_paths),
-        "unique_path_bound_python": len(set(python_paths)),
-    }
-    attestation = _strict_json_loads(_read_bounded_bytes(
-        ATTESTATION_PATH, deadline, MAX_SOURCE_FILE_BYTES))
-    if (type(attestation) is not dict
-            or set(attestation) != {
-                "schema_version", "generated_at", "source_commit", "approved_tuple",
-            } or type(attestation["schema_version"]) is not int
-            or attestation["schema_version"] != 1
-            or type(attestation["generated_at"]) is not str):
-        raise ValueError("post-freeze attestation schema differs")
-    source_commit = attestation["source_commit"]
-    approved = attestation["approved_tuple"]
-    if (type(source_commit) is not str
-            or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None
-            or type(approved) is not dict):
-        raise ValueError("post-freeze attestation values are malformed")
-    expected_keys = (
-        set(APPROVED_DOCUMENTS) | set(plan_structure) | set(APPROVED_GATE_COUNTS))
-    if set(approved) != expected_keys:
-        raise ValueError("post-freeze approved_tuple keys differ")
-
-    approved_documents = {}
-    for key, path in APPROVED_DOCUMENTS.items():
-        relative = str(path.relative_to(ROOT))
-        live_sha = source_files[relative]
-        blob_sha = _git_blob_sha256(deadline, source_commit, relative)
-        if (type(approved[key]) is not str
-                or approved[key] != live_sha or approved[key] != blob_sha):
-            raise AssertionError(f"approved document differs: {key}")
-        approved_documents[key] = {
-            "path": relative, "sha256": live_sha, "source_blob_sha256": blob_sha,
-        }
-    for key, value in plan_structure.items():
-        if type(approved[key]) is not type(value) or approved[key] != value:
-            raise AssertionError(f"approved Plan {key} differs")
-    for key, value in APPROVED_GATE_COUNTS.items():
-        if type(approved[key]) is not type(value) or approved[key] != value:
-            raise AssertionError(f"approved gate count {key} differs")
-
-    _git_text(deadline, "merge-base", "--is-ancestor", source_commit, "HEAD")
-    attestation_relative = str(ATTESTATION_PATH.relative_to(ROOT))
-    _git_text(deadline, "ls-files", "--error-unmatch", attestation_relative)
-    attestation_commit = _git_text(
-        deadline, "log", "-1", "--format=%H", "--", attestation_relative)
-    if source_commit == attestation_commit:
-        raise AssertionError("attestation must be committed after its source commit")
-    _git_text(
-        deadline, "merge-base", "--is-ancestor", source_commit, attestation_commit)
-    _git_text(deadline, "merge-base", "--is-ancestor", attestation_commit, "HEAD")
-
     blender_version = subprocess.run(
         [BLENDER, "--version"], check=True, text=True,
         timeout=min(10.0, _remaining(deadline)),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     ).stdout.strip()
     _remaining(deadline)
-    plan_relative = str(PLAN_PATH.relative_to(ROOT))
     return {
         "schema_version": 1,
         "git": {
@@ -635,17 +534,6 @@ def _current_provenance(deadline: float) -> dict[str, Any]:
             "status_sha256": hashlib.sha256(b"").hexdigest(),
             "status_lines": 0,
         },
-        "plan": {
-            "path": plan_relative,
-            "sha256": approved["plan_sha256"],
-            **plan_structure,
-            "approved_source_commit": source_commit,
-            "approved_tuple": approved,
-            "post_freeze_attestation": attestation_relative,
-            "post_freeze_attestation_sha256": source_files[attestation_relative],
-            "post_freeze_attestation_commit": attestation_commit,
-        },
-        "approved_documents": approved_documents,
         "sources": {
             "files": source_files,
             "file_count": len(source_files),

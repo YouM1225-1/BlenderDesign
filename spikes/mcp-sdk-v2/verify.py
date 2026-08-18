@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 from mcp import Client, StdioServerParameters
@@ -11,7 +12,7 @@ from server import mcp
 EXPECTED = {"get_blender_status", "get_scene_summary", "describe_capabilities"}
 LEGACY_PROTOCOL = "2025-11-25"
 MODERN_PROTOCOL = "2026-07-28"
-UV = "/Users/yeminjie/.local/bin/uv"
+UV = os.environ.get("UV_BIN", str(Path.home() / ".local/bin/uv"))
 READ_TIMEOUT_SECONDS = 10.0
 TOTAL_TIMEOUT_SECONDS = 240.0  # four sessions × bounded 10 s operations + startup
 
