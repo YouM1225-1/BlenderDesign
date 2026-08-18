@@ -543,9 +543,39 @@ def _metadata_wheel(path: Path, requirements: list[str]) -> Path:
     return path
 
 
+def _source_metadata(path: Path, requirement: str) -> Path:
+    path.mkdir(parents=True)
+    (path / "pyproject.toml").write_text(
+        "[project]\n"
+        'dependencies = ["docutils", '
+        + json.dumps(requirement)
+        + ', "pyyaml"]\n'
+    )
+    return path
+
+
+def test_builder_accepts_only_reviewed_source_mcp_range(tmp_path: Path) -> None:
+    builder._validate_source_metadata(
+        _source_metadata(tmp_path / "source", "mcp[cli]>=1.28.1,<3")
+    )
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    ["mcp[cli]<3,>=1.28.1", "mcp[cli]>=1.2.0", "mcp[cli]>=1.28.1"],
+)
+def test_builder_rejects_noncanonical_source_mcp_range(
+    tmp_path: Path, requirement: str
+) -> None:
+    with pytest.raises(ValueError, match="unexpected source metadata"):
+        builder._validate_source_metadata(
+            _source_metadata(tmp_path / "source", requirement)
+        )
+
+
 def test_wheel_metadata_accepts_reviewed_upstream_mcp_range(tmp_path: Path) -> None:
     wheel = _metadata_wheel(
-        tmp_path / "wheel.whl", ["docutils", "mcp[cli]>=1.28.1,<3", "pyyaml"]
+        tmp_path / "wheel.whl", ["docutils", "mcp[cli]<3,>=1.28.1", "pyyaml"]
     )
     builder._validate_wheel(wheel)
 
@@ -556,6 +586,7 @@ def test_wheel_metadata_accepts_reviewed_upstream_mcp_range(tmp_path: Path) -> N
         ["docutils", "mcp[cli]==1.28.1", "pyyaml"],
         ["docutils", "mcp[cli]>=1.2.0", "pyyaml"],
         ["docutils", "mcp[cli]>=1.28.1", "pyyaml"],
+        ["docutils", "mcp[cli]>=1.28.1,<3", "pyyaml"],
         ["docutils", "mcp[cli]>=1.28.1,<3", "pyyaml", "unexpected"],
     ],
 )
