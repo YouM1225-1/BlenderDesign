@@ -55,6 +55,26 @@ def test_arbitrary_cli_uses_private_snapshot() -> None:
     assert "not a sandbox for hostile Python" in source
 
 
+def test_private_snapshot_binds_live_file_identity_and_state() -> None:
+    source = _wheel_source("blmcp/tools_helpers/blender_cli.py")
+    for token in (
+        "source_stat.st_ctime_ns",
+        "os.path.samefile(str(state[\"filepath\"]), source)",
+        "use_live_snapshot",
+        "verify_clean_snapshot",
+        "Live blend-file changed before snapshot",
+    ):
+        assert token in source
+
+
+def test_wheel_has_one_mcp_version_compatibility_boundary() -> None:
+    source = _wheel_source("blmcp/mcp_compat.py")
+    assert 'importlib.import_module("mcp.server.mcpserver")' in source
+    assert 'importlib.import_module("mcp.server.fastmcp")' in source
+    assert "MCPServer" in source and "FastMCP" in source
+    assert "model_validate" in source
+
+
 def test_summary_cli_tools_read_disk_directly() -> None:
     names = (
         "get_blendfile_summary_datablocks.py",

@@ -545,7 +545,7 @@ def _metadata_wheel(path: Path, requirements: list[str]) -> Path:
 
 def test_wheel_metadata_accepts_reviewed_upstream_mcp_range(tmp_path: Path) -> None:
     wheel = _metadata_wheel(
-        tmp_path / "wheel.whl", ["docutils", "mcp[cli]>=1.2.0", "pyyaml"]
+        tmp_path / "wheel.whl", ["docutils", "mcp[cli]>=1.28.1,<3", "pyyaml"]
     )
     builder._validate_wheel(wheel)
 
@@ -554,7 +554,9 @@ def test_wheel_metadata_accepts_reviewed_upstream_mcp_range(tmp_path: Path) -> N
     "requirements",
     [
         ["docutils", "mcp[cli]==1.28.1", "pyyaml"],
-        ["docutils", "mcp[cli]>=1.2.0", "pyyaml", "unexpected"],
+        ["docutils", "mcp[cli]>=1.2.0", "pyyaml"],
+        ["docutils", "mcp[cli]>=1.28.1", "pyyaml"],
+        ["docutils", "mcp[cli]>=1.28.1,<3", "pyyaml", "unexpected"],
     ],
 )
 def test_wheel_metadata_rejects_unreviewed_dependencies(
