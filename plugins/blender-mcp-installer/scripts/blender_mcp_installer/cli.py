@@ -1510,8 +1510,20 @@ def _changed_install(context: _Context, fault: FaultInjector) -> dict[str, objec
                         runtime_stage,
                         context.host.runner,
                     )
-                except Exception:
+                except Exception as exc:
                     runtime_post = runtime_stage.capture()
+                    if runtime_post.state is not ImageState.PRESENT or (
+                        runtime_post.dev,
+                        runtime_post.ino,
+                        runtime_post.uid,
+                        runtime_post.mode,
+                    ) != (
+                        runtime_stage.image.dev,
+                        runtime_stage.image.ino,
+                        runtime_stage.image.uid,
+                        runtime_stage.image.mode,
+                    ):
+                        raise InstallerError("runtime stage identity changed") from exc
                     runtime_action = replace(
                         runtime_action,
                         state=ActionState.STAGED,

@@ -1014,6 +1014,41 @@ def test_runtime_stage_failure_is_automatically_rolled_back(
     assert not roots.bundle_stage(receipt.install_id).exists()
 
 
+def test_runtime_stage_failure_does_not_adopt_replaced_stage(
+    host: HostHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context, blender, roots = _install_context(host)
+    monkeypatch.setattr(cli, "_context", lambda _args: nullcontext(context))
+    monkeypatch.setattr(
+        cli,
+        "_inspection",
+        lambda _context: SimpleNamespace(exact=False, blender_state=blender),
+    )
+    monkeypatch.setattr(cli, "_lifecycle_closed", lambda _context: None)
+    replacement = b"foreign-runtime"
+
+    def replace_then_fail(_bundle, _uv, _python, _profile, stage, _runner):
+        stage.path.rename(stage.path.with_name(f"{stage.path.name}.original"))
+        stage.path.mkdir()
+        (stage.path / "foreign").write_bytes(replacement)
+        raise InstallerError("runtime metadata probe failed")
+
+    monkeypatch.setattr(cli, "stage_runtime", replace_then_fail)
+
+    with pytest.raises(InstallerError, match="installation recovery failed"):
+        cli.install(SimpleNamespace(_fault=NoOpFaultInjector()))
+
+    receipts = tuple(roots.receipts.glob("*.json"))
+    assert len(receipts) == 1
+    receipt = cli.load_receipt(receipts[0], roots)
+    assert receipt.status is ReceiptStatus.PREPARED
+    runtime_action = next(
+        action for action in receipt.actions if action.kind is ActionKind.RUNTIME_TREE
+    )
+    assert runtime_action.state is ActionState.PLANNED
+    assert (roots.runtime_stage(receipt.install_id) / "foreign").read_bytes() == replacement
+
+
 _BASELINE_EXTENSION_SOURCES = (
     "__init__.py",
     "capture_output.py",
