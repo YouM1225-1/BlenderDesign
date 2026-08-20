@@ -655,9 +655,7 @@ def test_install_entrypoint_contains_only_main_delegation() -> None:
     assert "blender_mcp_installer.cli import main" in path.read_text()
 
 
-def test_first_install_orchestrates_journaled_adapters(
-    host: HostHarness, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _install_context(host: HostHarness) -> tuple[cli._Context, BlenderState, InstallRoots]:
     manifest = parse_manifest((ARTIFACTS / "manifest.json").read_bytes())
     paths = BlenderPaths(
         host.blender,
@@ -696,14 +694,6 @@ def test_first_install_orchestrates_journaled_adapters(
         None,
         None,
     )
-    inspected_blender = replace(blender, online_access=True)
-    env = {
-        "HOME": str(host.home),
-        "CODEX_HOME": str(host.codex_home),
-        "BLENDER_USER_RESOURCES": str(host.resources),
-        "BLENDER_USER_CONFIG": str(host.config),
-        "BLENDER_USER_EXTENSIONS": str(host.extensions),
-    }
     capabilities = HostCapabilities(
         "Darwin",
         "arm64",
@@ -719,7 +709,13 @@ def test_first_install_orchestrates_journaled_adapters(
         host.codex,
         host.uv,
         Path(sys.executable),
-        env,
+        {
+            "HOME": str(host.home),
+            "CODEX_HOME": str(host.codex_home),
+            "BLENDER_USER_RESOURCES": str(host.resources),
+            "BLENDER_USER_CONFIG": str(host.config),
+            "BLENDER_USER_EXTENSIONS": str(host.extensions),
+        },
         lambda *_a, **_k: None,
     )
 
@@ -732,14 +728,25 @@ def test_first_install_orchestrates_journaled_adapters(
             (path / "payload").write_bytes(b"bundle")
             return StagedBundle(ARTIFACTS, manifest)
 
-    context = cli._Context(
-        Verified(),
-        StagedBundle(ARTIFACTS, manifest),
-        "2b799aff562693ce0b79e9df4737158b4b785e5c854e39673a289192adaf4a60",
-        capabilities,
+    return (
+        cli._Context(
+            Verified(),
+            StagedBundle(ARTIFACTS, manifest),
+            "2b799aff562693ce0b79e9df4737158b4b785e5c854e39673a289192adaf4a60",
+            capabilities,
+            blender,
+            roots,
+        ),
         blender,
         roots,
     )
+
+
+def test_first_install_orchestrates_journaled_adapters(
+    host: HostHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context, blender, roots = _install_context(host)
+    inspected_blender = replace(blender, online_access=True)
     monkeypatch.setattr(
         cli,
         "_inspection",
@@ -974,6 +981,37 @@ def test_first_install_orchestrates_journaled_adapters(
     assert not roots.extension_target.exists()
     assert not roots.userpref_target.exists()
     assert not roots.codex_config.exists()
+
+
+def test_runtime_stage_failure_is_automatically_rolled_back(
+    host: HostHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context, blender, roots = _install_context(host)
+    monkeypatch.setattr(cli, "_context", lambda _args: nullcontext(context))
+    monkeypatch.setattr(
+        cli,
+        "_inspection",
+        lambda _context: SimpleNamespace(exact=False, blender_state=blender),
+    )
+    monkeypatch.setattr(cli, "_lifecycle_closed", lambda _context: None)
+
+    def fail_runtime(_bundle, _uv, _python, _profile, stage, _runner):
+        (stage.path / "bin").mkdir()
+        (stage.path / "bin/python").write_bytes(b"partial-runtime")
+        raise InstallerError("runtime metadata probe failed")
+
+    monkeypatch.setattr(cli, "stage_runtime", fail_runtime)
+
+    with pytest.raises(InstallerError, match="runtime metadata probe failed"):
+        cli.install(SimpleNamespace(_fault=NoOpFaultInjector()))
+
+    receipts = tuple(roots.receipts.glob("*.json"))
+    assert len(receipts) == 1
+    receipt = cli.load_receipt(receipts[0], roots)
+    assert receipt.status is ReceiptStatus.ROLLED_BACK
+    assert not roots.active.exists()
+    assert not roots.runtime_stage(receipt.install_id).exists()
+    assert not roots.bundle_stage(receipt.install_id).exists()
 
 
 _BASELINE_EXTENSION_SOURCES = (

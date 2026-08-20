@@ -237,6 +237,10 @@ def test_real_host_reader_enforces_deadline(
         )
 
 
+def test_host_timeout_covers_measured_slow_mac_probes() -> None:
+    assert verification._HOST_TIMEOUT >= 20.0
+
+
 def test_probe_host_rejects_partial_or_escaping_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -36,7 +36,7 @@ from .runtime import verify_runtime
 
 _SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 _WAIT_TIMEOUT = 2.0
-_HOST_TIMEOUT = 5.0
+_HOST_TIMEOUT = 20.0
 _MAX_STDOUT = 1024 * 1024
 _MAX_STDERR = 64 * 1024
 _MCP_TIMEOUT = 30.0

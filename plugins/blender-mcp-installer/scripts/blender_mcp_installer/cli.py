@@ -1501,14 +1501,24 @@ def _changed_install(context: _Context, fault: FaultInjector) -> dict[str, objec
                     roots.blender.user_extensions,
                     roots.blender.executable,
                 )
-                runtime_post = stage_runtime(
-                    staged_bundle,
-                    context.host.uv_bin,
-                    context.host.python_bin,
-                    profile,
-                    runtime_stage,
-                    context.host.runner,
-                )
+                try:
+                    runtime_post = stage_runtime(
+                        staged_bundle,
+                        context.host.uv_bin,
+                        context.host.python_bin,
+                        profile,
+                        runtime_stage,
+                        context.host.runner,
+                    )
+                except Exception:
+                    runtime_post = runtime_stage.capture()
+                    runtime_action = replace(
+                        runtime_action,
+                        state=ActionState.STAGED,
+                        intended_post=runtime_post,
+                    )
+                    journal.action(runtime_action)
+                    raise
                 runtime_stage = runtime_stage.with_image(runtime_post)
                 runtime_action = replace(
                     runtime_action, state=ActionState.STAGED, intended_post=runtime_post
