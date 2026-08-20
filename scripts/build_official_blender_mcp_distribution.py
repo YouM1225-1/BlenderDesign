@@ -403,6 +403,23 @@ def _validate_source_metadata(source: Path) -> None:
         raise ValueError("unexpected source metadata")
 
 
+def _patch_blender_52_wheel(source: Path, target: Path) -> None:
+    member = "blmcp/tools/render_thumbnail_to_path_toolcode.py"
+    old = b'elif rd.engine == "BLENDER_EEVEE_NEXT":'
+    new = b'elif rd.engine == "BLENDER_EEVEE":'
+    with zipfile.ZipFile(source) as archive:
+        entries = [(item, archive.read(item)) for item in archive.infolist()]
+    names = [item.filename for item, _content in entries]
+    if names.count(member) != 1:
+        raise ValueError("unexpected thumbnail EEVEE source")
+    content = next(content for item, content in entries if item.filename == member)
+    if content.count(old) != 1 or new in content:
+        raise ValueError("unexpected thumbnail EEVEE source")
+    with zipfile.ZipFile(target, "w") as archive:
+        for item, content in entries:
+            archive.writestr(item, content.replace(old, new) if item.filename == member else content)
+
+
 def _build_payloads(
     source: Path,
     blender_bin: Path,
@@ -423,6 +440,8 @@ def _build_payloads(
     wheels = list(raw.glob("*.whl"))
     if len(wheels) != 1 or wheels[0].name != ARTIFACTS[0][1]:
         raise ValueError("unexpected wheel output")
+    patched_wheel = raw / f"patched-{wheels[0].name}"
+    _patch_blender_52_wheel(wheels[0], patched_wheel)
     raw_extension = raw / ARTIFACTS[1][1]
     _run(
         [
@@ -438,7 +457,7 @@ def _build_payloads(
         env=build_env,
     )
     output.mkdir()
-    _normalize_zip(wheels[0], output / ARTIFACTS[0][1], epoch)
+    _normalize_zip(patched_wheel, output / ARTIFACTS[0][1], epoch)
     _normalize_zip(raw_extension, output / ARTIFACTS[1][1], epoch)
     _run(validate_extension_command(blender_bin, output / ARTIFACTS[1][1]), env=build_env)
     shutil.rmtree(raw)

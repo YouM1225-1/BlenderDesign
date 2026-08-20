@@ -40,6 +40,44 @@ def test_bundle_version_is_derived_from_upstream_commit() -> None:
     assert BUNDLE_VERSION == "1.0.0+" + UPSTREAM_COMMIT[:12]
 
 
+def test_builder_patches_thumbnail_for_blender_52_eevee(tmp_path: Path) -> None:
+    source = tmp_path / "source.whl"
+    target = tmp_path / "target.whl"
+    with ZipFile(source, "w") as archive:
+        archive.writestr(
+            "blmcp/tools/render_thumbnail_to_path_toolcode.py",
+            'elif rd.engine == "BLENDER_EEVEE_NEXT":\n',
+        )
+
+    builder._patch_blender_52_wheel(source, target)
+
+    with ZipFile(target) as archive:
+        assert archive.read("blmcp/tools/render_thumbnail_to_path_toolcode.py") == (
+            b'elif rd.engine == "BLENDER_EEVEE":\n'
+        )
+
+
+def test_builder_rejects_unexpected_thumbnail_source(tmp_path: Path) -> None:
+    source = tmp_path / "source.whl"
+    with ZipFile(source, "w") as archive:
+        archive.writestr(
+            "blmcp/tools/render_thumbnail_to_path_toolcode.py",
+            'elif rd.engine == "BLENDER_EEVEE":\n',
+        )
+
+    with pytest.raises(ValueError, match="unexpected thumbnail EEVEE source"):
+        builder._patch_blender_52_wheel(source, tmp_path / "target.whl")
+
+
+def test_bundled_thumbnail_targets_blender_52_eevee() -> None:
+    wheel = ROOT / "plugins/blender-mcp-installer/artifacts" / ARTIFACTS[0][1]
+    with ZipFile(wheel) as archive:
+        source = archive.read("blmcp/tools/render_thumbnail_to_path_toolcode.py").decode()
+
+    assert 'elif rd.engine == "BLENDER_EEVEE":' in source
+    assert "BLENDER_EEVEE_NEXT" not in source
+
+
 def manifest() -> dict[str, object]:
     artifacts = [
         {"role": role, "filename": filename, "size": 1, "sha256": "a" * 64}
