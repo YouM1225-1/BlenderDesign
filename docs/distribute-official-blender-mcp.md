@@ -8,9 +8,13 @@ local STDIO and the Blender extension over localhost:9876.
 
 ## Trust and entrypoint
 
-EXPECTED_DISTRIBUTION_COMMIT comes from the reviewed repository or release channel,
-never from `manifest.json`. SHA-256 provides integrity, not authenticity; the reviewed
-immutable distribution commit is the authenticity boundary.
+EXPECTED_DISTRIBUTION_COMMIT comes from an independently authenticated repository or
+release channel, never from the archive, `manifest.json`, `PACKAGE.json`, an adjacent
+checksum, or any other file delivered with the archive. SHA-256 provides integrity, not authenticity.
+The reviewed immutable distribution commit is the authenticity boundary.
+For the portable package, resolve `refs/heads/main` over HTTPS directly from
+`https://github.com/YouM1225-1/BlenderDesign.git`, then require the extracted repository
+HEAD and the supplied expected commit to equal that independently obtained value.
 
 Before adding the repository marketplace or importing the plugin, follow the exact
 `TRUST_BOOTSTRAP` block in

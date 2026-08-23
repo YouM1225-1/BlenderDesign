@@ -1,0 +1,199 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=8F=B6=E6=95=8F=E6=8D=B7?= <yeminjie@Mac.localdomain>
+Date: Sun, 23 Aug 2026 18:55:48 +0800
+Subject: [PATCH 9/9] Bound chat client HTTP responses
+
+---
+ Makefile                   |  1 +
+ chat_client/chat_client.py | 52 ++++++++++++++++++++---
+ tests/test_chat_client.py  | 85 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 132 insertions(+), 6 deletions(-)
+ create mode 100644 tests/test_chat_client.py
+
+diff --git a/Makefile b/Makefile
+index de31f2d..c998c38 100644
+--- a/Makefile
++++ b/Makefile
+@@ -90,6 +90,7 @@ test:
+ 	$(PYTHON) tests/test_rst_search.py
+ 	$(PYTHON) tests/test_mcp_server.py
+ 	$(PYTHON) tests/test_transport_limits.py
++	$(PYTHON) tests/test_chat_client.py
+ 	$(PYTHON) tests/test_blender_mcp_with_blender.py
+ 
+ test_rst_parse:
+diff --git a/chat_client/chat_client.py b/chat_client/chat_client.py
+index c74c57f..9f875bc 100644
+--- a/chat_client/chat_client.py
++++ b/chat_client/chat_client.py
+@@ -30,6 +30,7 @@ import asyncio
+ import json
+ import os
+ import urllib.error
++import urllib.parse
+ import urllib.request
+ from typing import Any
+ 
+@@ -45,6 +46,49 @@ from mcp import (  # pylint: disable=import-error,no-name-in-module
+ # ---------------------------------------------------------------------------
+ # OpenAI API helpers
+ 
++_HTTP_TIMEOUT_SECONDS = 30
++_MAX_HTTP_RESPONSE_BYTES = 16 * 1024 * 1024
++
++
++class _HTTPRedirectHandler(urllib.request.HTTPRedirectHandler):
++    """Reject redirects before urllib opens a non-HTTP(S) target."""
++
++    def redirect_request(
++        self,
++        req: urllib.request.Request,
++        fp: Any,
++        code: int,
++        msg: str,
++        headers: Any,
++        newurl: str,
++    ) -> urllib.request.Request | None:
++        if urllib.parse.urlsplit(newurl).scheme not in {"http", "https"}:
++            raise ValueError("API redirect must use HTTP or HTTPS")
++        return super().redirect_request(req, fp, code, msg, headers, newurl)
++
++
++_HTTP_OPENER = urllib.request.build_opener(_HTTPRedirectHandler())
++
++
++def _read_json_response(req: urllib.request.Request) -> dict[str, Any]:
++    """Open an HTTP(S) request and parse one bounded JSON object."""
++    if urllib.parse.urlsplit(req.full_url).scheme not in {"http", "https"}:
++        raise ValueError("API URL must use HTTP or HTTPS")
++    # Bandit cannot infer the explicit scheme and redirect checks.
++    with _HTTP_OPENER.open(  # nosec B310
++        req,
++        timeout=_HTTP_TIMEOUT_SECONDS,
++    ) as resp:
++        if urllib.parse.urlsplit(resp.geturl()).scheme not in {"http", "https"}:
++            raise ValueError("API redirect must use HTTP or HTTPS")
++        raw = resp.read(_MAX_HTTP_RESPONSE_BYTES + 1)
++    if len(raw) > _MAX_HTTP_RESPONSE_BYTES:
++        raise ValueError("API response exceeds size limit")
++    result = json.loads(raw.decode())
++    if type(result) is not dict:
++        raise ValueError("API response must be a JSON object")
++    return result
++
+ def _api_chat_completions(
+     api_url: str,
+     messages: list[dict[str, Any]],
+@@ -67,9 +111,7 @@ def _api_chat_completions(
+         headers={"Content-Type": "application/json"},
+         method="POST",
+     )
+-    with urllib.request.urlopen(req) as resp:
+-        result: dict[str, Any] = json.loads(resp.read().decode())
+-        return result
++    return _read_json_response(req)
+ 
+ 
+ def _mcp_tools_to_openai(mcp_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+@@ -124,9 +166,7 @@ def _api_claude_messages(
+         },
+         method="POST",
+     )
+-    with urllib.request.urlopen(req) as resp:
+-        result: dict[str, Any] = json.loads(resp.read().decode())
+-        return result
++    return _read_json_response(req)
+ 
+ 
+ def _mcp_tools_to_claude(mcp_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+diff --git a/tests/test_chat_client.py b/tests/test_chat_client.py
+new file mode 100644
+index 0000000..1d7f36f
+--- /dev/null
++++ b/tests/test_chat_client.py
+@@ -0,0 +1,85 @@
++# SPDX-FileCopyrightText: 2026 Blender Authors
++#
++# SPDX-License-Identifier: GPL-3.0-or-later
++
++"""Tests for bounded chat-client HTTP responses."""
++
++__all__ = ()
++
++import unittest
++from unittest import mock
++import urllib.request
++from pathlib import Path
++import sys
++
++sys.path.insert(0, str(Path(__file__).parents[1]))
++
++from chat_client import chat_client
++
++
++class _Response:
++    def __init__(self, content: bytes, url: str = "https://example.invalid/result") -> None:
++        self.content = content
++        self.url = url
++        self.read_size: int | None = None
++
++    def __enter__(self) -> "_Response":
++        return self
++
++    def __exit__(self, *_args: object) -> None:
++        return None
++
++    def geturl(self) -> str:
++        return self.url
++
++    def read(self, size: int) -> bytes:
++        self.read_size = size
++        return self.content[:size]
++
++
++class TestHTTPResponse(unittest.TestCase):
++    def test_rejects_non_http_url_without_opening_it(self) -> None:
++        req = urllib.request.Request("file:///tmp/response.json")
++        with (
++            mock.patch.object(urllib.request, "urlopen") as urlopen,
++            self.assertRaisesRegex(ValueError, "HTTP or HTTPS"),
++        ):
++            chat_client._read_json_response(req)  # type: ignore[attr-defined]
++        urlopen.assert_not_called()
++
++    def test_bounds_response_and_sets_timeout(self) -> None:
++        response = _Response(b'{"ok": true}')
++        req = urllib.request.Request("https://example.invalid")
++        with mock.patch.object(chat_client._HTTP_OPENER, "open", return_value=response) as open_url:  # type: ignore[attr-defined]
++            result = chat_client._read_json_response(req)  # type: ignore[attr-defined]
++        self.assertEqual(result, {"ok": True})
++        self.assertEqual(response.read_size, chat_client._MAX_HTTP_RESPONSE_BYTES + 1)  # type: ignore[attr-defined]
++        open_url.assert_called_once_with(req, timeout=chat_client._HTTP_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
++
++    def test_rejects_oversized_response(self) -> None:
++        response = _Response(b"x" * (chat_client._MAX_HTTP_RESPONSE_BYTES + 1))  # type: ignore[attr-defined]
++        req = urllib.request.Request("https://example.invalid")
++        with (
++            mock.patch.object(chat_client._HTTP_OPENER, "open", return_value=response),  # type: ignore[attr-defined]
++            self.assertRaisesRegex(ValueError, "exceeds size limit"),
++        ):
++            chat_client._read_json_response(req)  # type: ignore[attr-defined]
++
++    def test_rejects_non_http_redirect(self) -> None:
++        response = _Response(b'{"ok": true}', "file:///tmp/response.json")
++        req = urllib.request.Request("https://example.invalid")
++        with (
++            mock.patch.object(chat_client._HTTP_OPENER, "open", return_value=response),  # type: ignore[attr-defined]
++            self.assertRaisesRegex(ValueError, "redirect"),
++        ):
++            chat_client._read_json_response(req)  # type: ignore[attr-defined]
++
++    def test_redirect_handler_rejects_non_http_before_opening_it(self) -> None:
++        handler = chat_client._HTTPRedirectHandler()  # type: ignore[attr-defined]
++        req = urllib.request.Request("https://example.invalid")
++        with self.assertRaisesRegex(ValueError, "redirect"):
++            handler.redirect_request(req, None, 302, "Found", {}, "file:///tmp/response.json")
++
++
++if __name__ == "__main__":
++    unittest.main()

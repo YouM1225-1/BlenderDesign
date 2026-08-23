@@ -1,12 +1,12 @@
-From a10404a70e9c3a0dbc54c205641fd49e1cd6baf6 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: BlenderDesign Certification <noreply@example.invalid>
 Date: Sun, 23 Aug 2026 17:18:16 +0800
-Subject: [PATCH] Harden server runtime and MCP compatibility
+Subject: [PATCH 1/9] Harden server runtime and MCP compatibility
 
 Restore bounded background execution, private snapshot identity checks, direct disk summaries, Retina scaling, 120 second I/O deadlines, and a single MCP 1.28/2.x compatibility boundary. Narrow source metadata to the reviewed SDK range while retaining the upstream screenshot JSON-envelope headroom fix.
 ---
- mcp/blmcp/__init__.py                         |  35 +-
- mcp/blmcp/mcp_compat.py                       |  77 +++
+ mcp/blmcp/__init__.py                         |  58 +-
+ mcp/blmcp/mcp_compat.py                       |  69 +++
  ..._template_backup_attrs_and_assign_multi.py |   3 +-
  .../tools/_template_backup_attrs_multi.py     |   3 +-
  ...ate_deferred_tool_check_for_file_output.py |   1 +
@@ -43,86 +43,99 @@ Restore bounded background execution, private snapshot identity checks, direct d
  mcp/blmcp/tools_helpers/rst_doc_search.py     |  12 +-
  mcp/blmcp/tools_helpers/rst_parse_docs.py     |  87 +--
  mcp/pyproject.toml                            |   2 +-
- 38 files changed, 906 insertions(+), 358 deletions(-)
+ 38 files changed, 878 insertions(+), 401 deletions(-)
  create mode 100644 mcp/blmcp/mcp_compat.py
 
 diff --git a/mcp/blmcp/__init__.py b/mcp/blmcp/__init__.py
-index 91273ca..7d58869 100644
+index 91273ca..2b3ad97 100644
 --- a/mcp/blmcp/__init__.py
 +++ b/mcp/blmcp/__init__.py
-@@ -19,7 +19,8 @@ import os
+@@ -19,37 +19,18 @@ import os
  import pkgutil
  
  import yaml
 -from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
-+
-+from blmcp.mcp_compat import MCP_V2, FastMCP, TransportSecuritySettings
  
- # NOTE(@ideasman42): this was written to support LLAMA-C++'s Web UI,
- # which is one of the nicer ways to run this locally.
-@@ -71,27 +72,27 @@ def main() -> int:
+-# NOTE(@ideasman42): this was written to support LLAMA-C++'s Web UI,
+-# which is one of the nicer ways to run this locally.
+-# It is not full HTTP support because there looks to be many options for this protocol.
+-# This could be disabled if it no longer serves its purpose - as most agents wont use STDIO.
+-_USE_HTTP_SUPPORT = True
+-
+-_TRANSPORTS = ("stdio", *(("http",) if _USE_HTTP_SUPPORT else ()))
++from blmcp.mcp_compat import FastMCP
  
-     transport = args.transport
-     if _USE_HTTP_SUPPORT and transport == "http":
+ 
+ def main() -> int:
+     parser = argparse.ArgumentParser(description="MCP server for Blender.")
+     parser.add_argument(
+         "--transport", "-t",
+-        choices=_TRANSPORTS,
++        choices=("stdio",),
+         default="stdio",
+         help="Transport protocol (default: stdio).",
+     )
+-    if _USE_HTTP_SUPPORT:
+-        parser.add_argument(
+-            "--host",
+-            default="127.0.0.1",
+-            help="Host to bind to for HTTP transports (default: 127.0.0.1).",
+-        )
+-        parser.add_argument(
+-            "--port", "-p",
+-            type=int,
+-            default=8000,
+-            help="Port to bind to for HTTP transports (default: 8000).",
+-        )
+     args = parser.parse_args()
+ 
+     # Load prompts.
+@@ -69,38 +50,5 @@ def main() -> int:
+         if hasattr(mod, "register"):
+             mod.register(mcp)
+ 
+-    transport = args.transport
+-    if _USE_HTTP_SUPPORT and transport == "http":
 -        # pylint: disable-next=import-error,no-name-in-module
 -        from mcp.server.fastmcp.server import TransportSecuritySettings  # type: ignore[attr-defined]
-         from starlette.applications import Starlette
-         from starlette.middleware.cors import CORSMiddleware
- 
-         transport = "streamable-http"
- 
+-        from starlette.applications import Starlette
+-        from starlette.middleware.cors import CORSMiddleware
+-
+-        transport = "streamable-http"
+-
 -        mcp.settings.host = args.host
 -        mcp.settings.port = args.port
 -        mcp.settings.streamable_http_path = "/"
 -        mcp.settings.stateless_http = True
 -        mcp.settings.transport_security = TransportSecuritySettings(
-+        transport_security = TransportSecuritySettings(
-             enable_dns_rebinding_protection=False,
-         )
-+        if not MCP_V2:
-+            mcp.settings.host = args.host
-+            mcp.settings.port = args.port
-+            mcp.settings.streamable_http_path = "/"
-+            mcp.settings.stateless_http = True
-+            mcp.settings.transport_security = transport_security
- 
-         # Add CORS middleware so browser-based clients
-         # (e.g. llama.cpp web UI) can connect without preflight failures.
-         _orig = mcp.streamable_http_app
- 
+-            enable_dns_rebinding_protection=False,
+-        )
+-
+-        # Add CORS middleware so browser-based clients
+-        # (e.g. llama.cpp web UI) can connect without preflight failures.
+-        _orig = mcp.streamable_http_app
+-
 -        def _app_with_cors() -> Starlette:
 -            app = _orig()
-+        def _app_with_cors(*app_args: object, **app_kwargs: object) -> Starlette:
-+            app: Starlette = _orig(*app_args, **app_kwargs)
-             app.add_middleware(
-                 CORSMiddleware,
-                 allow_origins=["*"],
-@@ -100,7 +101,17 @@ def main() -> int:
-             )
-             return app
- 
+-            app.add_middleware(
+-                CORSMiddleware,
+-                allow_origins=["*"],
+-                allow_methods=["*"],
+-                allow_headers=["*"],
+-            )
+-            return app
+-
 -        mcp.streamable_http_app = _app_with_cors  # type: ignore[method-assign]
-+        mcp.streamable_http_app = _app_with_cors
- 
+-
 -    mcp.run(transport=transport)
-+    if MCP_V2 and transport == "streamable-http":
-+        mcp.run(
-+            transport=transport,
-+            host=args.host,
-+            port=args.port,
-+            streamable_http_path="/",
-+            stateless_http=True,
-+            transport_security=transport_security,
-+        )
-+    else:
-+        mcp.run(transport=transport)
++    mcp.run(transport=args.transport)
      return 0
 diff --git a/mcp/blmcp/mcp_compat.py b/mcp/blmcp/mcp_compat.py
 new file mode 100644
-index 0000000..1d1dcf9
+index 0000000..871128e
 --- /dev/null
 +++ b/mcp/blmcp/mcp_compat.py
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,69 @@
 +# SPDX-FileCopyrightText: 2026 Blender Authors
 +#
 +# SPDX-License-Identifier: GPL-3.0-or-later
@@ -130,11 +143,9 @@ index 0000000..1d1dcf9
 +"""Compatibility boundary for the supported MCP SDK major versions."""
 +
 +__all__ = (
-+    "MCP_V2",
 +    "FastMCP",
 +    "Image",
 +    "MCPToolServer",
-+    "TransportSecuritySettings",
 +    "clean_doc",
 +    "tool_annotations",
 +)
@@ -163,18 +174,12 @@ index 0000000..1d1dcf9
 +        raise
 +
 +    _server_module = importlib.import_module("mcp.server.mcpserver")
-+    _security_module = importlib.import_module("mcp.server.transport_security")
 +    _FastMCP = _server_module.MCPServer
-+    _MCP_V2 = True
 +else:
-+    _security_module = importlib.import_module("mcp.server.fastmcp.server")
 +    _FastMCP = _server_module.FastMCP
-+    _MCP_V2 = False
 +
 +FastMCP = _FastMCP
 +Image = _server_module.Image
-+MCP_V2 = _MCP_V2
-+TransportSecuritySettings = _security_module.TransportSecuritySettings
 +
 +
 +def clean_doc(function: _ToolFunction) -> _ToolFunction:
@@ -2502,6 +2507,3 @@ index 1c88362..a90fb90 100644
      "pyyaml",
  ]
  
--- 
-2.50.1 (Apple Git-155)
-

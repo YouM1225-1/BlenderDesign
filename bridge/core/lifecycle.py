@@ -265,7 +265,7 @@ class BridgeSession:
         if len(str(p).encode()) <= MAX_SUN_PATH:
             return p, None
         digest = hashlib.sha256(session_dir.name.encode()).hexdigest()[:16]
-        short = Path("/tmp") / f"bcx-{digest}"
+        short = Path("/tmp") / f"bcx-{digest}"  # nosec B108
         if len(str(short / "bridge.sock").encode()) > MAX_SUN_PATH:
             raise OSError("no short Unix socket path available")
         return short / "bridge.sock", short

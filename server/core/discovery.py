@@ -763,7 +763,7 @@ class Discovery:
     @staticmethod
     def _fallback_dir(instance_id: str) -> Path | None:
         digest = hashlib.sha256(instance_id.encode()).hexdigest()[:16]
-        fallback = Path("/tmp") / f"bcx-{digest}"
+        fallback = Path("/tmp") / f"bcx-{digest}"  # nosec B108
         return fallback if len(str(fallback / "bridge.sock").encode()) <= 100 else None
 
     @staticmethod

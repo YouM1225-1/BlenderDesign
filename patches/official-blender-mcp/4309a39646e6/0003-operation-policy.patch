@@ -1,7 +1,7 @@
-From cdbd0549bdd4fc3dacdd71ecbb5ec93de2115a68 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: BlenderDesign Certification <noreply@example.invalid>
 Date: Sun, 23 Aug 2026 17:18:16 +0800
-Subject: [PATCH] Retain certified Blender operation policy
+Subject: [PATCH 3/9] Retain certified Blender operation policy
 
 Keep the reviewed live-versus-background routing guidance and visible staged-modeling progress contract that are present in the currently certified distribution.
 ---
@@ -47,6 +47,3 @@ index 78dc537..4c87ca3 100644
    Prefer operators (`bpy.ops`) for standard actions (adding primitives, applying modifiers,
    setting origins) - they handle defaults and context. Use the data API (`bpy.data`) for
    precise control or to avoid side effects.
--- 
-2.50.1 (Apple Git-155)
-

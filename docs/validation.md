@@ -13,7 +13,7 @@ bash scripts/checks.sh
 - frozen 依赖同步；
 - Ruff；
 - strict mypy；
-- 插件结构（提供 `PLUGIN_CREATOR_ROOT` 时）；
+- 插件结构（缺少官方插件验证器时失败）；
 - core/protocol 不导入 `bpy`；
 - protocol vendor 生成与一致性；
 - 嵌套导入 smoke；
@@ -21,6 +21,22 @@ bash scripts/checks.sh
 - 官方分发 installer 测试。
 
 脚本按 `UV_BIN`、`PATH`、`$HOME/.local/bin/uv` 的顺序解析 uv。
+插件验证器默认从 `$HOME/.codex/skills/.system/plugin-creator` 读取，也可通过
+`PLUGIN_CREATOR_ROOT` 指定。该检查不再跳过。
+
+正式发行门禁使用：
+
+```bash
+RELEASE=1 \
+OFFICIAL_MCP_SOURCE=/absolute/path/to/blender_mcp \
+BLENDER_BIN=/Applications/Blender.app/Contents/MacOS/Blender \
+bash scripts/checks.sh
+```
+
+该模式会确认固定提交仍是上游 HTTPS `main`，从提交对象重放完整补丁序列，分别用
+MCP SDK `1.28.1` 和 `2.0.0` 执行上游质量门禁及非 Blender 测试，运行 Bandit、
+detect-secrets 与 pip-audit，进行两次确定性构建，并逐字节比对仓库发行物。缺少任一
+输入、验证器或扫描器都会失败。
 
 ## Blender 验证
 
@@ -45,13 +61,9 @@ GUI、恢复和 100k 场景验证由 `smoke/runner.py` 与 `smoke/e2e.py` 提供
 - receipt、故障恢复、no-op 和 rollback；
 - managed launcher 与四层 live verification。
 
-对已安装 runtime 的定向回归可运行：
-
-```bash
-python3 scripts/verify_official_blender_mcp_runtime.py
-```
-
-该脚本读取当前用户安装目录，仅适用于已经安装且路径符合当前分发约定的环境。
+已安装 runtime 只通过安装器 skill 的 `verify` 命令验证；该命令使用固定 Python，
+并同时检查 Codex 策略、MCP 握手/工具目录和 Blender localhost 只读调用。安装器不会
+启动 Blender，必须由操作者正常启动后再运行现场验证。
 
 ## 结论边界
 

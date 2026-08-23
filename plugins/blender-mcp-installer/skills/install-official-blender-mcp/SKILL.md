@@ -9,8 +9,10 @@ Use only for the reviewed distribution. It is a delivery adapter, not another MC
 ## Hard boundaries
 
 - Support exactly Darwin arm64, Blender >=5.2.0,<5.3.0, local Python 3.13.13, uv 0.12.2, and localhost:9876.
-- Never import or run anything from the source checkout. SHA-256 provides integrity,
-  not authenticity. The reviewed immutable distribution commit is the authenticity boundary.
+- Never import or run anything from the source checkout. SHA-256 provides integrity, not authenticity.
+  The reviewed immutable distribution commit is the authenticity boundary.
+  Obtain it from an independently authenticated channel; never source it from the archive
+  or an adjacent checksum.
 - Keep the trust bootstrap, plugin add, and installer commands in one fail-fast shell
   session. A new session must repeat the bootstrap.
 - Use the private trusted worktree only for installer execution. Register the

@@ -201,7 +201,7 @@ def _patch_scenario(cli, root: Path, fixture_kind: str, preimage: str, point: st
     capabilities = HostCapabilities(
         "Darwin",
         "arm64",
-        "0.148.0-alpha.9",
+        "0.149.0-alpha.4.1",
         "0.12.2",
         "5.2.0",
         "3.13.13",
@@ -347,7 +347,7 @@ def _patch_scenario(cli, root: Path, fixture_kind: str, preimage: str, point: st
         and roots.active.exists()
     ):
         with roots.codex_config.open("a") as stream:
-            stream.write('\n[foreign_after]\nsecret = "SECRET-SENTINEL"\n')
+            stream.write('\n[foreign_after]\nsecret = "SECRET-SENTINEL"\n')  # pragma: allowlist secret
         semantic_marker.write_text("seeded\n")
 
 

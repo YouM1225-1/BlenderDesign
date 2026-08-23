@@ -1,7 +1,7 @@
-From 8573b252d32527b3467d914646f74624cde19c6e Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: BlenderDesign Certification <noreply@example.invalid>
 Date: Sun, 23 Aug 2026 17:49:29 +0800
-Subject: [PATCH] Bound interactive response memory
+Subject: [PATCH 7/9] Bound interactive response memory
 
 Cap captured output, serialized responses, and client receive buffers; reject oversized or unterminated live transport frames.
 ---
@@ -72,7 +72,7 @@ index 7d0e73b..f102a43 100644
  
  class CaptureOutput:
 diff --git a/addon/blender_mcp_addon/mcp_to_blender_server.py b/addon/blender_mcp_addon/mcp_to_blender_server.py
-index 125afbc..cc1c8ca 100644
+index abb194b..864e189 100644
 --- a/addon/blender_mcp_addon/mcp_to_blender_server.py
 +++ b/addon/blender_mcp_addon/mcp_to_blender_server.py
 @@ -125,6 +125,7 @@ def timer_idle_interval() -> float:

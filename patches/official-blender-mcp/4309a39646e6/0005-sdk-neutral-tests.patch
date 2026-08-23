@@ -1,7 +1,7 @@
-From 584f31f095fac0c986179cbf379aa2963b68440d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: BlenderDesign Certification <noreply@example.invalid>
 Date: Sun, 23 Aug 2026 17:30:43 +0800
-Subject: [PATCH] Make certification clients SDK-version neutral
+Subject: [PATCH 5/9] Make certification clients SDK-version neutral
 
 Read the MCP 1.28 camelCase and MCP 2.x snake_case result fields through one explicit test boundary so the same functional suite certifies both supported SDK generations.
 ---
@@ -10,10 +10,10 @@ Read the MCP 1.28 camelCase and MCP 2.x snake_case result fields through one exp
  2 files changed, 19 insertions(+), 4 deletions(-)
 
 diff --git a/tests/test_mcp_server.py b/tests/test_mcp_server.py
-index b26f37a..e18fb2c 100644
+index 6f12380..85a8fdc 100644
 --- a/tests/test_mcp_server.py
 +++ b/tests/test_mcp_server.py
-@@ -109,6 +109,13 @@ def _server_env() -> dict[str, str]:
+@@ -108,6 +108,13 @@ def _server_env() -> dict[str, str]:
      return env
  
  
@@ -27,7 +27,7 @@ index b26f37a..e18fb2c 100644
  def _query_server() -> dict[str, Any]:
      """
      Launch the MCP server, initialize, fetch metadata, and return it all.
-@@ -126,13 +133,17 @@ def _query_server() -> dict[str, Any]:
+@@ -125,13 +132,17 @@ def _query_server() -> dict[str, Any]:
                  init_result = await session.initialize()
                  tools_result = await session.list_tools()
                  return {
@@ -47,7 +47,7 @@ index b26f37a..e18fb2c 100644
                          }
                          for t in tools_result.tools
                      ],
-@@ -158,7 +169,7 @@ def _call_server_tool(name: str, arguments: dict[str, object]) -> dict[str, Any]
+@@ -157,7 +168,7 @@ def _call_server_tool(name: str, arguments: dict[str, object]) -> dict[str, Any]
              async with ClientSession(read, write) as session:
                  await session.initialize()
                  call_result = await session.call_tool(name, arguments)
@@ -73,6 +73,3 @@ index 8266a44..5290c9f 100644
                      }
                      for t in result.tools
                  ]
--- 
-2.50.1 (Apple Git-155)
-

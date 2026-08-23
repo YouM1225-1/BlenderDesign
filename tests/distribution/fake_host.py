@@ -184,7 +184,7 @@ def run_fake(tool: str, state_file: Path, commands: Path, argv: list[str]) -> in
     mutated: list[str] = []
     if tool == "codex":
         if argv == ["--version"]:
-            print("codex-cli 0.148.0-alpha.9")
+            print("codex-cli 0.149.0-alpha.4.1")
         elif argv in (
             ["mcp", "get", "--help"],
             ["plugin", "add", "--help"],

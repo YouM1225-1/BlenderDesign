@@ -12,43 +12,53 @@ from typing import Iterator, Mapping, Protocol, Sequence
 
 
 UPSTREAM_COMMIT = "4309a39646e644261624bfcd2bca669b343b7621"
-PATCHED_SOURCE_SHA256 = "123bde66df6efb6213ecf6981720cd20e4b27cb6ffdffc3e0b232033740fcdec"
-PATCH_README_SHA256 = "e64396b411bf8b34e57b36d10fc76224d23cd9878fb73695449ad04706ed25b7"
+PATCHED_SOURCE_SHA256 = "841e6e99951360518d0b6a52c8cbd2289d75f627d31f01a0547b30c0c2ba8b3b"
+PATCH_README_SHA256 = "16a0c4978f576219d2627a1589fe59a4e2c465ef827f38f44c01e67a6c831338"
 DOWNSTREAM_PATCHES = (
     (
         "0001-server-hardening.patch",
-        "0e6457d30ae810f0ad35dfb4319adae01f88d7d997604bd48c19b54a9a063aa8",
+        "3f925dd5d561527000cd151135a69949293c2d69f2155ed8dc037fb4a19dabf0",
         "Harden server runtime and MCP compatibility",
     ),
     (
         "0002-addon-transport-hardening.patch",
-        "bec6e59e2a1284814b57862144f9c5006d6f9e4c4b0615f9d64be4340b14151b",
+        "dc2f46a067fa8a239c4e184e701f44e54bb9ac3efd898e53c2f90aabaafcc344",
         "Harden interactive addon transport",
     ),
     (
         "0003-operation-policy.patch",
-        "e7be2016307d8c8e5867670aeb313716abfd93c9ba99bfe08fcde392f32493d6",
+        "c3ad53d5874ea84794559085dccd9a4d54f6019de47605597d6a47669b8e3901",
         "Retain certified Blender operation policy",
     ),
     (
         "0004-certification-tests.patch",
-        "00ec5c42a91cd4f07b2415f5750080009e8e95098f607432afb1a77bd0555234",
+        "e49e195a648d042ca4ad8a0c3e12d09a8d2503c065474ce3b03d260eb424f289",
         "Align upstream tests with certified behavior",
     ),
     (
         "0005-sdk-neutral-tests.patch",
-        "993c953a9944419108ad36fd888bbc285b07ebaf1472435ff9bd1b6d84fe2bda",
+        "83474bc90f444499b181354cb8d2cdba914efe6958b2907329261abcca7bd00d",
         "Make certification clients SDK-version neutral",
     ),
     (
         "0006-source-quality-gates.patch",
-        "c58b599b390cbd0de2def072f5b987c925b487f61662b35c0edf4e964850e07a",
+        "423c3b36261fde09c3b2df61af9c911cc91b8018e0bd2dd5bcf3bb679eccbf24",
         "Make upstream source checks self-contained",
     ),
     (
         "0007-bound-interactive-response-memory.patch",
-        "f8f87e108f3acaecbf28752cfe4dacb65fa25b61cfa9eb9d1f4a722c15292bcd",
+        "321c23c8d1ae232c8884d0c17e44259c827e6037be49098b90994d4caffdf89f",
         "Bound interactive response memory",
+    ),
+    (
+        "0008-blender-52-eevee.patch",
+        "b1a1812290ee8b40590a7b23e1bc544d59d30e40fac5dab4dd8f7c2fbf26abc1",
+        "Target Blender 5.2 EEVEE thumbnails",
+    ),
+    (
+        "0009-bound-chat-client-http.patch",
+        "a0c417189bc7a5677cc3a535cff074d15b1da739766040447945618319b317ee",
+        "Bound chat client HTTP responses",
     ),
 )
 BUNDLE_VERSION = "1.0.0+" + UPSTREAM_COMMIT[:12] + ".p" + PATCHED_SOURCE_SHA256[:12]
@@ -284,7 +294,7 @@ def parse_manifest(raw: bytes) -> ReleaseManifest:
         "uv": "0.12.2",
         "python": "3.13.13",
         "blender": "5.2.0",
-        "codex_tested": "0.148.0-alpha.9",
+        "codex_tested": "0.149.0-alpha.4.1",
         "index": "https://pypi.org/simple",
     }
     if any(build[key] != value for key, value in fixed_build.items()):

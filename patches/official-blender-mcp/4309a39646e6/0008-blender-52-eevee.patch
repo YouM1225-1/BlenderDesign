@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=8F=B6=E6=95=8F=E6=8D=B7?= <yeminjie@Mac.localdomain>
+Date: Sun, 23 Aug 2026 18:55:48 +0800
+Subject: [PATCH 8/9] Target Blender 5.2 EEVEE thumbnails
+
+---
+ mcp/blmcp/tools/render_thumbnail_to_path_toolcode.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mcp/blmcp/tools/render_thumbnail_to_path_toolcode.py b/mcp/blmcp/tools/render_thumbnail_to_path_toolcode.py
+index a41c96e..66e58fb 100644
+--- a/mcp/blmcp/tools/render_thumbnail_to_path_toolcode.py
++++ b/mcp/blmcp/tools/render_thumbnail_to_path_toolcode.py
+@@ -98,7 +98,7 @@ def main(params: Params) -> Result | Callable[[], dict[str, object] | None]:
+     ]
+     if rd.engine == "CYCLES":
+         obj_attrs.append((scene.cycles, {"samples": _THUMB_CYCLES_SAMPLES}))
+-    elif rd.engine == "BLENDER_EEVEE_NEXT":
++    elif rd.engine == "BLENDER_EEVEE":
+         obj_attrs.append((scene.eevee, {"taa_render_samples": _THUMB_EEVEE_SAMPLES}))
+ 
+     render_args = ('INVOKE_DEFAULT',) if use_deferred else ()

@@ -70,7 +70,7 @@ class HostRunner:
         self.records.append((args, cwd, dict(env)))
         if args[-1:] == ("--version",):
             values = {
-                "codex": "codex-cli 0.148.0-alpha.9\n",
+                "codex": "codex-cli 0.149.0-alpha.4.1\n",
                 "uv": "uv 0.12.2 (46ead6098 2026-08-05 aarch64-apple-darwin)\n",
                 "Blender": "Blender 5.2.0 LTS\n",
                 "python": "Python 3.13.13\n",
@@ -106,7 +106,7 @@ def _probe_env(tmp_path: Path) -> dict[str, str]:
         "BLENDER_USER_RESOURCES": str(resources),
         "BLENDER_USER_CONFIG": str(resources / "config"),
         "BLENDER_USER_EXTENSIONS": str(resources / "extensions"),
-        "SECRET": "not-forwarded",
+        "SECRET": "not-forwarded",  # pragma: allowlist secret
     }
 
 
@@ -123,7 +123,7 @@ def test_probe_host_uses_help_without_querying_unpublished_entry(
     assert host.supported
     assert host.platform_system == "Darwin" and host.platform_machine == "arm64"
     assert host.blender_version == "5.2.0"
-    assert host.codex_version == "0.148.0-alpha.9"
+    assert host.codex_version == "0.149.0-alpha.4.1"
     assert host.uv_version == "0.12.2" and host.python_version == "3.13.13"
     assert host.blender_arches == ("arm64", "x86_64")
     assert not any(call[-4:] == ("mcp", "get", "blender", "--json") for call in runner.calls)
@@ -161,7 +161,7 @@ def test_probe_host_uses_help_without_querying_unpublished_entry(
         ("Blender 5.2.0 stable\n", "Blender"),
         ("Blender 5.2.0 LTS extra\n", "Blender"),
         ("NotBlender 5.2.0 LTS\n", "Blender"),
-        ("codex-cli 0.148.0-alpha.9 LTS\n", "codex-cli"),
+        ("codex-cli 0.149.0-alpha.4.1 LTS\n", "codex-cli"),
         ("uv 0.12.2 LTS\n", "uv"),
         ("Python 3.13.13 LTS\n", "Python"),
         ("uv 0.12.2 (2026-08-05 aarch64-apple-darwin)\n", "uv"),
@@ -281,7 +281,7 @@ def test_probe_host_unsupported_json_retains_redacted_version_evidence(
     with pytest.raises(HostCapabilityError, match="unsupported host capabilities") as caught:
         probe_host(*bins, _probe_env(tmp_path), runner=runner)
 
-    assert caught.value.capabilities.codex_version == "0.148.0-alpha.9"
+    assert caught.value.capabilities.codex_version == "0.149.0-alpha.4.1"
     assert not caught.value.capabilities.codex_mcp_get_json
     assert "SECRET" not in str(caught.value)
 
@@ -344,7 +344,7 @@ def _host(roots, runner=object()) -> HostCapabilities:
     return HostCapabilities(
         "Darwin",
         "arm64",
-        "0.148.0-alpha.9",
+        "0.149.0-alpha.4.1",
         "0.12.2",
         "5.2.0",
         "3.13.13",

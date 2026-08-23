@@ -301,7 +301,7 @@ def test_documented_first_inspect_keeps_trusted_checkout_clean(tmp_path: Path) -
     codex.write_text(
         "#!/bin/sh\n"
         'case "$*" in\n'
-        '  --version) echo "codex-cli 0.148.0-alpha.9" ;;\n'
+        '  --version) echo "codex-cli 0.149.0-alpha.4.1" ;;\n'
         '  "mcp get --help") echo "usage: codex mcp get --json" ;;\n'
         '  "plugin marketplace add --help"|"plugin add --help") echo usage ;;\n'
         '  "mcp get blender --json") echo "{}" ;;\n'
@@ -890,10 +890,7 @@ def test_docs_state_security_side_effects_delivery_and_canary_limits() -> None:
         assert wording in combined
     assert "EXPECTED_DISTRIBUTION_COMMIT" in guide
     assert "manifest.json" in guide
-    assert (
-        "EXPECTED_DISTRIBUTION_COMMIT comes from the reviewed repository or release channel"
-        in guide
-    )
+    assert "EXPECTED_DISTRIBUTION_COMMIT comes from an independently authenticated" in guide
 
 
 def test_docs_index_and_repository_checks_include_plugin_contract() -> None:
@@ -905,7 +902,13 @@ def test_docs_index_and_repository_checks_include_plugin_contract() -> None:
     assert '"$UV_BIN" run --frozen pytest -q --ignore=tests/distribution' in checks
     assert '"$UV_BIN" run --frozen --with tomlkit==0.13.3' in checks
     assert "pytest tests/distribution -q" in checks
-    assert 'scripts/validate_plugin.py" plugins/blender-mcp-installer' in checks
+    assert 'python "$PLUGIN_VALIDATOR" plugins/blender-mcp-installer' in checks
+    assert "plugin validator: SKIP" not in checks
+    assert 'if test "${RELEASE:-0}" = 1' in checks
+    assert "bandit==1.9.4" in checks
+    assert "detect-secrets==1.5.0" in checks
+    assert "pip-audit==2.10.1" in checks
+    assert "mcp[cli]==$sdk" in checks
 
 
 def _fake_marketplace_codex(tmp_path: Path) -> Path:

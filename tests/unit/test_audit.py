@@ -101,7 +101,9 @@ def test_huge_params_use_fixed_bounded_digest_without_full_dumps(
     assert "sensitive" not in path.read_text()
 
     aggregate = {f"aggregate-secret-{index:05d}": "" for index in range(4_096)}
-    huge_secret = "huge-secret-" + "x" * (audit_module.MAX_AUDIT_PARAMS_BYTES * 128)
+    huge_secret = "huge-secret-" + "x" * (  # pragma: allowlist secret
+        audit_module.MAX_AUDIT_PARAMS_BYTES * 128
+    )
     huge_key = {huge_secret: None}
     huge_value = {"value": huge_secret}
     invalid_unicode = {"value": "invalid-secret-\ud800"}
@@ -174,7 +176,7 @@ def test_huge_params_use_fixed_bounded_digest_without_full_dumps(
 def test_deep_and_unencodable_params_use_bounded_sentinel(tmp_path):
     import server.core.audit as audit_module
 
-    deep = {"secret": "must-not-leak"}
+    deep = {"secret": "must-not-leak"}  # pragma: allowlist secret
     for _ in range(audit_module.MAX_AUDIT_PARAMS_DEPTH + 1_000):
         deep = {"x": deep}
     log = AuditLog(tmp_path / "logs")

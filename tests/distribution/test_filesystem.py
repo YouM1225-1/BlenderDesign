@@ -166,7 +166,7 @@ def _receipt(roots: InstallRoots, secret: str | None = None) -> dict[str, object
             "blender_user_resources": str(roots.blender.user_resources),
             "blender_user_config": str(roots.blender.user_config),
             "blender_user_extensions": str(roots.blender.user_extensions),
-            "codex_version": "0.148.0-alpha.9",
+            "codex_version": "0.149.0-alpha.4.1",
             "uv_version": "0.12.2",
             "python_version": "3.13.13",
         },

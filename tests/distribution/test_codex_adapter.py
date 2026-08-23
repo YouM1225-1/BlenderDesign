@@ -44,7 +44,7 @@ from blender_mcp_installer.model import FileImage  # noqa: E402
 
 
 TOOLS = ("one", "two", "execute_blender_code")
-SECRET = "TASK4_SECRET_SENTINEL_DO_NOT_LEAK"
+SECRET = "TASK4_SECRET_SENTINEL_DO_NOT_LEAK"  # pragma: allowlist secret
 
 
 class CrashAt:

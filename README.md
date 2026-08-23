@@ -70,7 +70,7 @@ uv run --frozen blender-codex-server
 bash scripts/checks.sh
 ```
 
-该脚本依次执行依赖同步、Ruff、严格 mypy、协议 vendor 一致性、嵌套导入 smoke，以及 unit、contract 和 distribution 测试。uv 按 `UV_BIN`、`PATH`、`$HOME/.local/bin/uv` 的顺序解析。
+该脚本依次执行依赖同步、Ruff、严格 mypy、插件结构校验、协议 vendor 一致性、嵌套导入 smoke，以及 unit、contract 和 distribution 测试。uv 按 `UV_BIN`、`PATH`、`$HOME/.local/bin/uv` 的顺序解析。正式发布使用 `RELEASE=1`，额外执行上游双 SDK 门禁、依赖/secret/安全扫描与发行物重建比对。
 
 ## 仓库结构
 
@@ -81,11 +81,10 @@ bridge/blender/                Blender Extension 的 UI、driver 与场景读取
 server/core/                   discovery、配置、审计和 Bridge client
 server/mcp/                    Phase 0 MCP SDK v2 adapter
 plugins/blender-mcp-installer/ 官方 Blender MCP 的 Codex 插件、安装器与固定产物
-scripts/                       构建、vendor、审计和验证脚本
+scripts/                       构建、vendor 和验证脚本
 smoke/                         Blender background/GUI/E2E smoke 工具
 tests/                         unit、contract 与 distribution 测试
 docs/                          当前架构、安装、使用、验证和技术决策
-spikes/                        MCP SDK 与 Codex Host 的兼容性验证代码
 ```
 
 ## 关键文档

@@ -118,7 +118,7 @@ def test_inspect_reports_exact_and_blender_subchecks(
         platform_system="Darwin",
         platform_machine="arm64",
         blender_version="5.2.0",
-        codex_version="0.148.0-alpha.9",
+        codex_version="0.149.0-alpha.4.1",
         uv_version="0.12.2",
         python_version="3.13.13",
     )
@@ -625,7 +625,7 @@ def test_each_missing_consent_fails_without_installer_owned_write(
 def test_expected_and_unexpected_errors_are_json_and_redacted(
     host: HostHarness, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    secret = "SECRET-SENTINEL"
+    secret = "SECRET-SENTINEL"  # pragma: allowlist secret
 
     def expected(_args: object) -> dict[str, object]:
         raise InstallerError(secret)
@@ -697,7 +697,7 @@ def _install_context(host: HostHarness) -> tuple[cli._Context, BlenderState, Ins
     capabilities = HostCapabilities(
         "Darwin",
         "arm64",
-        "0.148.0-alpha.9",
+        "0.149.0-alpha.4.1",
         "0.12.2",
         "5.2.0",
         "3.13.13",
@@ -1182,7 +1182,7 @@ def _extension_rollback_fixture(
             "blender_user_resources": str(roots.blender.user_resources),
             "blender_user_config": str(roots.blender.user_config),
             "blender_user_extensions": str(roots.blender.user_extensions),
-            "codex_version": "0.148.0-alpha.9",
+            "codex_version": "0.149.0-alpha.4.1",
             "uv_version": "0.12.2",
             "python_version": "3.13.13",
         },
@@ -2079,7 +2079,9 @@ def test_closed_fault_matrix_exits_70_then_fresh_process_recovers_exactly(
         semantic_marker = scenario / ".semantic-seeded"
         if not semantic_marker.exists():
             with Path(codex_action["target_path"]).open("a") as stream:
-                stream.write('\n[foreign_after]\nsecret = "SECRET-SENTINEL"\n')
+                stream.write(
+                    '\n[foreign_after]\nsecret = "SECRET-SENTINEL"\n'  # pragma: allowlist secret
+                )
             semantic_marker.write_text("seeded\n")
         before_semantic_target = _captured(Path(codex_action["target_path"]), tree=False)
 

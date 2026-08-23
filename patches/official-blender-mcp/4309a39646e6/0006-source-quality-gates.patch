@@ -1,14 +1,17 @@
-From e465d66a4abad31b4be5a6487660e79526222cd9 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: BlenderDesign Certification <noreply@example.invalid>
 Date: Sun, 23 Aug 2026 17:35:52 +0800
-Subject: [PATCH] Make upstream source checks self-contained
+Subject: [PATCH 6/9] Make upstream source checks self-contained
 
 Apply the current Ruff mechanical fixes to the example client, route its MCP result fields through the SDK compatibility boundary, install the declared lint/docutils typing tools, and point Mypy at the existing project configuration.
 ---
- Makefile                   |  2 +-
- chat_client/chat_client.py | 44 +++++++++++++++++++++++---------------
- mcp/requirements_dev.txt   |  2 ++
- 3 files changed, 30 insertions(+), 18 deletions(-)
+ Makefile                                      |  2 +-
+ .../mcp_to_blender_server.py                  |  2 +-
+ chat_client/chat_client.py                    | 44 ++++++++++++-------
+ ..._blendfile_summary_usage_guess_toolcode.py |  2 +-
+ mcp/blmcp/tools_helpers/rst_doc_search.py     |  2 +-
+ mcp/requirements_dev.txt                      |  2 +
+ 6 files changed, 33 insertions(+), 21 deletions(-)
 
 diff --git a/Makefile b/Makefile
 index 57f7b24..ab85a33 100644
@@ -23,6 +26,19 @@ index 57f7b24..ab85a33 100644
  		{ echo "mypy: found errors"; exit 1; }
  
  check_pylint:
+diff --git a/addon/blender_mcp_addon/mcp_to_blender_server.py b/addon/blender_mcp_addon/mcp_to_blender_server.py
+index 125afbc..abb194b 100644
+--- a/addon/blender_mcp_addon/mcp_to_blender_server.py
++++ b/addon/blender_mcp_addon/mcp_to_blender_server.py
+@@ -241,7 +241,7 @@ def _execute_code(
+     namespace: dict[str, object] = {"result": {}}
+     with CaptureOutput() as captured, WeakSandboxForLLM():
+         try:
+-            exec(code, namespace)  # noqa: S102 - this tool intentionally executes user code.
++            exec(code, namespace)  # noqa: S102  # nosec B102
+         except Exception:  # pylint: disable=broad-exception-caught
+             response: dict[str, object] = {"status": "error", "message": traceback.format_exc()}
+             if captured.stdout:
 diff --git a/chat_client/chat_client.py b/chat_client/chat_client.py
 index c93558e..c74c57f 100644
 --- a/chat_client/chat_client.py
@@ -162,6 +178,32 @@ index c93558e..c74c57f 100644
  
                      if done:
                          break
+diff --git a/mcp/blmcp/tools/get_blendfile_summary_usage_guess_toolcode.py b/mcp/blmcp/tools/get_blendfile_summary_usage_guess_toolcode.py
+index 36270ed..262e721 100644
+--- a/mcp/blmcp/tools/get_blendfile_summary_usage_guess_toolcode.py
++++ b/mcp/blmcp/tools/get_blendfile_summary_usage_guess_toolcode.py
+@@ -73,7 +73,7 @@ def _usage_probability_for_rendering(data: Any, scene: Any) -> tuple[str, dict[s
+     signals: list[tuple[float, float]] = []
+     signals.append((float(scene.render.engine not in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE")), 0.5))
+     # Blender's default output paths, indicating no intentional render setup.
+-    default_paths = ("/tmp/", "/tmp\\", "")
++    default_paths = ("/tmp/", "/tmp\\", "")  # nosec B108
+     signals.append((float(scene.render.filepath not in default_paths), 0.8))
+     node_tree = getattr(scene, "node_tree", None)
+     signals.append((
+diff --git a/mcp/blmcp/tools_helpers/rst_doc_search.py b/mcp/blmcp/tools_helpers/rst_doc_search.py
+index 997d501..42d62ea 100644
+--- a/mcp/blmcp/tools_helpers/rst_doc_search.py
++++ b/mcp/blmcp/tools_helpers/rst_doc_search.py
+@@ -75,7 +75,7 @@ def with_doc(doc: str) -> Callable[[Callable[..., object]], Callable[..., object
+     return decorate
+ 
+ 
+-from blmcp.tools_helpers.rst_parse_docs import (
++from blmcp.tools_helpers.rst_parse_docs import (  # noqa: E402
+     data_dir,
+     split_paragraphs_with_sections_for_path,
+     split_paragraphs_with_sections_from_text,
 diff --git a/mcp/requirements_dev.txt b/mcp/requirements_dev.txt
 index 32444e4..f5a97ce 100644
 --- a/mcp/requirements_dev.txt
@@ -174,6 +216,3 @@ index 32444e4..f5a97ce 100644
 +types-docutils
  types-PyYAML
  vulture
--- 
-2.50.1 (Apple Git-155)
-

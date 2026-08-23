@@ -131,35 +131,6 @@ def test_builder_rejects_patch_against_wrong_base(tmp_path: Path) -> None:
         builder._apply_downstream_patches(source, (patch,))
 
 
-def test_builder_patches_thumbnail_for_blender_52_eevee(tmp_path: Path) -> None:
-    source = tmp_path / "source.whl"
-    target = tmp_path / "target.whl"
-    with ZipFile(source, "w") as archive:
-        archive.writestr(
-            "blmcp/tools/render_thumbnail_to_path_toolcode.py",
-            'elif rd.engine == "BLENDER_EEVEE_NEXT":\n',
-        )
-
-    builder._patch_blender_52_wheel(source, target)
-
-    with ZipFile(target) as archive:
-        assert archive.read("blmcp/tools/render_thumbnail_to_path_toolcode.py") == (
-            b'elif rd.engine == "BLENDER_EEVEE":\n'
-        )
-
-
-def test_builder_rejects_unexpected_thumbnail_source(tmp_path: Path) -> None:
-    source = tmp_path / "source.whl"
-    with ZipFile(source, "w") as archive:
-        archive.writestr(
-            "blmcp/tools/render_thumbnail_to_path_toolcode.py",
-            'elif rd.engine == "BLENDER_EEVEE":\n',
-        )
-
-    with pytest.raises(ValueError, match="unexpected thumbnail EEVEE source"):
-        builder._patch_blender_52_wheel(source, tmp_path / "target.whl")
-
-
 def test_bundled_thumbnail_targets_blender_52_eevee() -> None:
     wheel = ROOT / "plugins/blender-mcp-installer/artifacts" / ARTIFACTS[0][1]
     with ZipFile(wheel) as archive:
@@ -167,6 +138,22 @@ def test_bundled_thumbnail_targets_blender_52_eevee() -> None:
 
     assert 'elif rd.engine == "BLENDER_EEVEE":' in source
     assert "BLENDER_EEVEE_NEXT" not in source
+
+
+def test_builder_uses_system_git_and_fixed_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "hostile-git-ran"
+    fake_git = tmp_path / "git"
+    fake_git.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 99\n")
+    fake_git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+
+    completed = builder._run(builder._git_command("--version"))
+
+    assert completed.stdout.startswith("git version")
+    assert not marker.exists()
+    assert builder.sanitized_environment()["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 def manifest() -> dict[str, object]:
@@ -204,7 +191,7 @@ def manifest() -> dict[str, object]:
             "uv": "0.12.2",
             "python": "3.13.13",
             "blender": "5.2.0",
-            "codex_tested": "0.148.0-alpha.9",
+            "codex_tested": "0.149.0-alpha.4.1",
             "backend": {"name": "setuptools", "version": "83.0.0"},
             "index": "https://pypi.org/simple",
         },
@@ -665,7 +652,7 @@ def test_builder_sanitizes_probe_environment() -> None:
             "SERVICE_API_TOKEN": "secret",
         }
     )
-    assert env["PATH"] == "/usr/bin:/bin"
+    assert env["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
     assert env["BLENDER_MCP_HOST"] == "localhost"
     assert env["BLENDER_MCP_PORT"] == "9876"
     assert env["UV_DEFAULT_INDEX"] == "https://pypi.org/simple"

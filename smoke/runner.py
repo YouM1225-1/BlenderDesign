@@ -37,7 +37,7 @@ from smoke.process_registry import (  # noqa: E402
     signal_live_records,
 )
 
-OUT = os.environ.get("BLENDERCODEX_SMOKE_OUT", "/tmp/bcx_smoke.json")
+OUT = os.environ.get("BLENDERCODEX_SMOKE_OUT", "/tmp/bcx_smoke.json")  # nosec B108
 NFR_OUT = os.environ.get("BLENDERCODEX_NFR_OUT")
 RECOVERY_READY = os.environ.get("BLENDERCODEX_RECOVERY_READY")
 RECOVERY_STOP = os.environ.get("BLENDERCODEX_RECOVERY_STOP")
