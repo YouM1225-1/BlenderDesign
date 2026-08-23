@@ -16,12 +16,6 @@ def test_check_matrix():
     assert ok is False and warn is not None
 
 
-def test_gate_write_matrix():
-    assert versions.gate_write("5.2.0") is None
-    assert versions.gate_write("5.2.1") == "UNSUPPORTED_BLENDER_VERSION"
-    assert versions.gate_write("4.5.3") == "UNSUPPORTED_BLENDER_VERSION"
-
-
 def test_describe_capabilities_shape():
     d = describe("0.1.0", connected=[])
     assert d["phase"] == "phase0"

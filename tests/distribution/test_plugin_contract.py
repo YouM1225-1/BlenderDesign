@@ -697,12 +697,12 @@ def test_uv_bootstrap_is_local_only_and_repeated_before_every_command() -> None:
 def _python_31313() -> Path:
     candidate = (ROOT / ".venv/bin/python").resolve()
     if not candidate.is_file() or not os.access(candidate, os.X_OK):
-        pytest.skip("the certified Python 3.13.13 is unavailable")
+        pytest.fail("the certified Python 3.13.13 is unavailable")
     version = subprocess.run(
         [candidate, "--version"], check=True, capture_output=True, text=True
     ).stdout.strip()
     if version != "Python 3.13.13":
-        pytest.skip(f"the certified Python changed: {version}")
+        pytest.fail(f"the certified Python changed: {version}")
     return candidate
 
 

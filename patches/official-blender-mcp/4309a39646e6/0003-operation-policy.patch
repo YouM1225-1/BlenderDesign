@@ -1,0 +1,52 @@
+From cdbd0549bdd4fc3dacdd71ecbb5ec93de2115a68 Mon Sep 17 00:00:00 2001
+From: BlenderDesign Certification <noreply@example.invalid>
+Date: Sun, 23 Aug 2026 17:18:16 +0800
+Subject: [PATCH] Retain certified Blender operation policy
+
+Keep the reviewed live-versus-background routing guidance and visible staged-modeling progress contract that are present in the currently certified distribution.
+---
+ mcp/blmcp/data/prompts.yml | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/mcp/blmcp/data/prompts.yml b/mcp/blmcp/data/prompts.yml
+index 78dc537..4c87ca3 100644
+--- a/mcp/blmcp/data/prompts.yml
++++ b/mcp/blmcp/data/prompts.yml
+@@ -21,11 +21,34 @@ initial_instructions: |
+ 
+   # Executing Code
+ 
++  ## Background and Live Routing
++
++  Use the `_for_cli` summary tools by default when the caller supplies a saved
++  `.blend` path and on-disk state is sufficient. Use `execute_blender_code_for_cli` for disposable batch work that must not modify the current open scene. Background
++  Blender has startup overhead and no window, area, or other interactive UI context.
++
++  Use live tools when unsaved state or UI context is required. Only use `execute_blender_code` to modify the current open scene. A `_for_cli` summary reads
++  the file on disk; its live counterpart reads the connected Blender instance.
++
+   The `execute_blender_code` tool runs Python code via `bpy` in the connected Blender instance.
+ 
+   The `execute_blender_code` tool is a last resort, if there are other tools that provide
+   the functionality you need, use those instead.
+ 
++  # Visible Modeling Progress
++
++  For user-facing modeling or scene-building requests, create each distinct model part in
++  its own visible stage by default. Use a separate MCP tool call for each part, then let
++  Blender redraw and inspect the visible result before creating the next part.
++
++  After each stage, show the user the visible result (normally a viewport screenshot) and
++  a concise progress update, then continue automatically without waiting for user confirmation.
++  Only pause between stages when the user explicitly asks to review or approve each stage.
++
++  Do not create multiple model parts in one `execute_blender_code` call unless the user
++  explicitly asks for a one-shot or batch operation. Apply materials, assemble parts, and
++  perform the final visual audit in separate visible stages after the geometry parts.
++
+   Prefer operators (`bpy.ops`) for standard actions (adding primitives, applying modifiers,
+   setting origins) - they handle defaults and context. Use the data API (`bpy.data`) for
+   precise control or to avoid side effects.
+-- 
+2.50.1 (Apple Git-155)
+

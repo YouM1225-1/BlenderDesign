@@ -1,0 +1,217 @@
+From 18cb9a904a0fcf2418113d034913bcfc93f41d13 Mon Sep 17 00:00:00 2001
+From: BlenderDesign Certification <noreply@example.invalid>
+Date: Sun, 23 Aug 2026 17:26:45 +0800
+Subject: [PATCH] Align upstream tests with certified behavior
+
+Refresh the frozen tool-description catalog after the reviewed hardening changes and make the HTTP transport test exercise the explicit MCP 1.28/2.x compatibility boundary.
+---
+ tests/test_mcp_server.py   | 39 +++++++++++++++++++----------
+ tests/test_tool_listing.py | 50 ++++++++++++++++++++++++++++----------
+ 2 files changed, 63 insertions(+), 26 deletions(-)
+
+diff --git a/tests/test_mcp_server.py b/tests/test_mcp_server.py
+index ad70774..b26f37a 100644
+--- a/tests/test_mcp_server.py
++++ b/tests/test_mcp_server.py
+@@ -681,8 +681,6 @@ class TestMainConfiguration(unittest.TestCase):
+         mcp_instance.settings = types.SimpleNamespace()
+         mcp_instance.streamable_http_app = mock.Mock(return_value=fake_app)
+ 
+-        fastmcp_server_mod = types.ModuleType("mcp.server.fastmcp.server")
+-        fastmcp_server_mod.TransportSecuritySettings = FakeTransportSecuritySettings
+         starlette_apps_mod = types.ModuleType("starlette.applications")
+         starlette_apps_mod.Starlette = object
+         starlette_cors_mod = types.ModuleType("starlette.middleware.cors")
+@@ -695,11 +693,15 @@ class TestMainConfiguration(unittest.TestCase):
+                 ["blmcp", "--transport", "http", "--host", "0.0.0.0", "--port", "8123"],
+             ),
+             mock.patch.object(blmcp, "FastMCP", return_value=mcp_instance),
++            mock.patch.object(
++                blmcp,
++                "TransportSecuritySettings",
++                FakeTransportSecuritySettings,
++            ),
+             mock.patch.object(blmcp.pkgutil, "iter_modules", return_value=[]),
+             mock.patch.dict(
+                 sys.modules,
+                 {
+-                    "mcp.server.fastmcp.server": fastmcp_server_mod,
+                     "starlette.applications": starlette_apps_mod,
+                     "starlette.middleware.cors": starlette_cors_mod,
+                 },
+@@ -708,19 +710,30 @@ class TestMainConfiguration(unittest.TestCase):
+             result = blmcp.main()
+ 
+         self.assertEqual(result, 0)
+-        self.assertEqual(mcp_instance.settings.host, "0.0.0.0")
+-        self.assertEqual(mcp_instance.settings.port, 8123)
+-        self.assertEqual(mcp_instance.settings.streamable_http_path, "/")
+-        self.assertTrue(mcp_instance.settings.stateless_http)
+-        self.assertIsInstance(
+-            mcp_instance.settings.transport_security,
+-            FakeTransportSecuritySettings,
+-        )
++        if blmcp.MCP_V2:
++            mcp_instance.run.assert_called_once_with(
++                transport="streamable-http",
++                host="0.0.0.0",
++                port=8123,
++                streamable_http_path="/",
++                stateless_http=True,
++                transport_security=mock.ANY,
++            )
++            transport_security = mcp_instance.run.call_args.kwargs[
++                "transport_security"
++            ]
++        else:
++            self.assertEqual(mcp_instance.settings.host, "0.0.0.0")
++            self.assertEqual(mcp_instance.settings.port, 8123)
++            self.assertEqual(mcp_instance.settings.streamable_http_path, "/")
++            self.assertTrue(mcp_instance.settings.stateless_http)
++            mcp_instance.run.assert_called_once_with(transport="streamable-http")
++            transport_security = mcp_instance.settings.transport_security
++        self.assertIsInstance(transport_security, FakeTransportSecuritySettings)
+         self.assertEqual(
+-            mcp_instance.settings.transport_security.kwargs,
++            transport_security.kwargs,
+             {"enable_dns_rebinding_protection": False},
+         )
+-        mcp_instance.run.assert_called_once_with(transport="streamable-http")
+ 
+         app = mcp_instance.streamable_http_app()
+         self.assertIs(app, fake_app)
+diff --git a/tests/test_tool_listing.py b/tests/test_tool_listing.py
+index 649526b..8266a44 100644
+--- a/tests/test_tool_listing.py
++++ b/tests/test_tool_listing.py
+@@ -31,6 +31,8 @@ EXPECTED_TOOLS = [
+         "Execute Python code in the connected Blender instance.\n"
+         "\n"
+         "The code runs in Blender's Python environment with full access to ``bpy``.\n"
++        "For user-facing modeling, execute each distinct part in a separate tool call,\n"
++        "show the visible result, and continue automatically without waiting for confirmation.\n"
+         "To return data, assign a JSON-serialisable dict to a variable named ``result``.\n"
+         "Deferred completion via ``check_is_finished`` is only supported by the\n"
+         "interactive addon server, and is rejected in background mode.\n",
+@@ -51,9 +53,15 @@ EXPECTED_TOOLS = [
+     {
+         "name": "execute_blender_code_for_cli",
+         "description": "\n"
+-        "Execute Python code in a background Blender process.\n"
++        "Execute arbitrary Python code in a background Blender process using a\n"
++        "disposable private snapshot; this prevents accidental source saves but\n"
++        "does not sandbox hostile code.\n"
+         "\n"
+-        "Opens *blend_file* with ``blender --background`` and runs *code*.\n"
++        "The supplied blend file is first copied through Blender into a disposable\n"
++        "snapshot. Saving inside the supplied code writes that snapshot, not the\n"
++        "source file. If the same file is open and dirty in the connected Blender,\n"
++        "creating the snapshot invokes Blender save handlers. This prevents\n"
++        "accidental source saves; it is not a sandbox for hostile Python.\n"
+         "Assign a dict to ``result`` to return data.\n",
+         "inputSchema": {
+             "properties": {
+@@ -87,7 +95,8 @@ EXPECTED_TOOLS = [
+     {
+         "name": "get_blendfile_summary_datablocks_for_cli",
+         "description": "\n"
+-        "Return a data-block summary by opening *blend_file* in background Blender.\n",
++        "Return a data-block summary by opening *blend_file* in background Blender.\n"
++        "This reads the on-disk file and does not include unsaved changes from a running Blender instance.\n",
+         "inputSchema": {
+             "properties": {
+                 "blend_file": {
+@@ -116,7 +125,8 @@ EXPECTED_TOOLS = [
+     {
+         "name": "get_blendfile_summary_missing_files_for_cli",
+         "description": "\n"
+-        "Report missing file references by opening *blend_file* in background Blender.\n",
++        "Report missing file references by opening *blend_file* in background Blender.\n"
++        "This reads the on-disk file and does not include unsaved changes from a running Blender instance.\n",
+         "inputSchema": {
+             "properties": {
+                 "blend_file": {
+@@ -144,7 +154,8 @@ EXPECTED_TOOLS = [
+     {
+         "name": "get_blendfile_summary_of_linked_libraries_for_cli",
+         "description": "\n"
+-        "Return linked-library info by opening *blend_file* in background Blender.\n",
++        "Return linked-library info by opening *blend_file* in background Blender.\n"
++        "This reads the on-disk file and does not include unsaved changes from a running Blender instance.\n",
+         "inputSchema": {
+             "properties": {
+                 "blend_file": {
+@@ -172,7 +183,8 @@ EXPECTED_TOOLS = [
+     {
+         "name": "get_blendfile_summary_path_info_for_cli",
+         "description": "\n"
+-        "Return path info by opening *blend_file* in background Blender.\n",
++        "Return path info by opening *blend_file* in background Blender.\n"
++        "This reads the on-disk file and does not include unsaved changes from a running Blender instance.\n",
+         "inputSchema": {
+             "properties": {
+                 "blend_file": {
+@@ -200,7 +212,8 @@ EXPECTED_TOOLS = [
+     {
+         "name": "get_blendfile_summary_usage_guess_for_cli",
+         "description": "\n"
+-        "Guess use-cases by opening *blend_file* in background Blender.\n",
++        "Guess use-cases by opening *blend_file* in background Blender.\n"
++        "This reads the on-disk file and does not include unsaved changes from a running Blender instance.\n",
+         "inputSchema": {
+             "properties": {
+                 "blend_file": {
+@@ -495,7 +508,9 @@ EXPECTED_TOOLS = [
+     {
+         "name": "render_thumbnail_to_path",
+         "description": "\n"
+-        "Render a small, low-quality thumbnail to *output_path* (temporarily overrides settings).\n",
++        "Render a small, low-quality thumbnail in the Blender MCP scratch directory\n"
++        "(temporarily overrides settings).\n"
++        "Only the basename of *output_path* is used; the result returns the actual path.\n",
+         "inputSchema": {
+             "properties": {
+                 "output_path": {
+@@ -513,7 +528,8 @@ EXPECTED_TOOLS = [
+     {
+         "name": "render_viewport_to_path",
+         "description": "\n"
+-        "Render the current scene to *output_path* using current render settings.\n",
++        "Render the current scene in the Blender MCP scratch directory using current render settings.\n"
++        "Only the basename of *output_path* is used; the result returns the actual path.\n",
+         "inputSchema": {
+             "properties": {
+                 "output_path": {
+@@ -575,8 +591,12 @@ EXPECTED_TOOLS = [
+                 },
+                 "index": {
+                     "anyOf": [
+-                        {"type": "integer"},
+-                        {"type": "null"}
++                        {
++                            "type": "integer"
++                        },
++                        {
++                            "type": "null"
++                        }
+                     ],
+                     "default": None,
+                     "title": "Index"
+@@ -636,8 +656,12 @@ EXPECTED_TOOLS = [
+                 },
+                 "index": {
+                     "anyOf": [
+-                        {"type": "integer"},
+-                        {"type": "null"}
++                        {
++                            "type": "integer"
++                        },
++                        {
++                            "type": "null"
++                        }
+                     ],
+                     "default": None,
+                     "title": "Index"
+-- 
+2.50.1 (Apple Git-155)
+

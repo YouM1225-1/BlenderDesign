@@ -13,6 +13,9 @@ sys.path.insert(0, str(PLUGIN / "scripts"))
 
 from blender_mcp_installer.bundle import (  # noqa: E402
     BUNDLE_VERSION,
+    DOWNSTREAM_PATCHES,
+    PATCH_README_SHA256,
+    PATCHED_SOURCE_SHA256,
     UPSTREAM_COMMIT,
 )
 
@@ -23,10 +26,24 @@ def _wheel_source(name: str) -> str:
         return archive.read(name).decode("utf-8")
 
 
+def _extension_source(name: str) -> str:
+    extension = ARTIFACTS / "mcp-1.0.0.zip"
+    with ZipFile(extension) as archive:
+        return archive.read(name).decode("utf-8")
+
+
 def test_manifest_matches_reviewed_upstream_pin() -> None:
     manifest = json.loads((ARTIFACTS / "manifest.json").read_text())
     assert manifest["upstream"]["commit"] == UPSTREAM_COMMIT
     assert manifest["bundle_version"] == BUNDLE_VERSION
+    assert manifest["downstream"] == {
+        "source_tree_sha256": PATCHED_SOURCE_SHA256,
+        "readme_sha256": PATCH_README_SHA256,
+        "patches": [
+            {"filename": filename, "sha256": digest, "summary": summary}
+            for filename, digest, summary in DOWNSTREAM_PATCHES
+        ],
+    }
 
 
 def test_wheel_uses_bounded_result_file_and_process_group() -> None:
@@ -37,9 +54,9 @@ def test_wheel_uses_bounded_result_file_and_process_group() -> None:
         "_MAX_RESULT_BYTES = 10 * 1024 * 1024",
         "_MAX_STDOUT_BYTES = 1024 * 1024",
         "_MAX_STDERR_BYTES = 1024 * 1024",
-        "start_new_session=(os.name == \"posix\")",
+        'start_new_session=(os.name == "posix")',
         "private_blend_for_cli",
-        "TemporaryDirectory(prefix=\".blmcp-job-\"",
+        'TemporaryDirectory(prefix=".blmcp-job-"',
     ):
         assert token in source
 
@@ -47,10 +64,7 @@ def test_wheel_uses_bounded_result_file_and_process_group() -> None:
 def test_arbitrary_cli_uses_private_snapshot() -> None:
     source = _wheel_source("blmcp/tools/execute_blender_code.py")
     assert "deadline = time.monotonic() + _CLI_TIMEOUT" in source
-    assert (
-        "with private_blend_for_cli(blend_file, deadline=deadline) as private_path:"
-        in source
-    )
+    assert "with private_blend_for_cli(blend_file, deadline=deadline) as private_path:" in source
     assert "run_blender_cli(private_path, code, deadline=deadline)" in source
     assert "not a sandbox for hostile Python" in source
 
@@ -59,7 +73,7 @@ def test_private_snapshot_binds_live_file_identity_and_state() -> None:
     source = _wheel_source("blmcp/tools_helpers/blender_cli.py")
     for token in (
         "source_stat.st_ctime_ns",
-        "os.path.samefile(str(state[\"filepath\"]), source)",
+        'os.path.samefile(str(state["filepath"]), source)',
         "use_live_snapshot",
         "verify_clean_snapshot",
         "Live blend-file changed before snapshot",
@@ -90,9 +104,7 @@ def test_summary_cli_tools_read_disk_directly() -> None:
 
 
 def test_retina_scale_precedes_small_file_return() -> None:
-    source = _wheel_source(
-        "blmcp/tools/_template_image_downscale_to_size_limit.py"
-    )
+    source = _wheel_source("blmcp/tools/_template_image_downscale_to_size_limit.py")
     scale = source.index("coordinate_size = (")
     fast_return = source.index("if im.size == coordinate_size and source_fits:")
     assert scale < fast_return
@@ -109,3 +121,36 @@ def test_inner_timeouts_are_120_seconds() -> None:
     connection = _wheel_source("blmcp/tools_helpers/connection.py")
     assert "_CLI_TIMEOUT = 120.0" in cli
     assert "_TIMEOUT = 120.0" in connection
+
+
+def test_upstream_screenshot_envelope_fix_is_retained() -> None:
+    for name in (
+        "get_screenshot_of_area_as_image_toolcode.py",
+        "get_screenshot_of_window_as_image_toolcode.py",
+    ):
+        source = _wheel_source("blmcp/tools/" + name)
+        assert "# Subtract 2048 for 2 KiB headroom for JSON envelope." in source
+        assert "((1_048_576 - 2048) * 3) // 4" in source
+
+
+def test_interactive_extension_has_bounded_fair_nonblocking_transport() -> None:
+    source = _extension_source("mcp_to_blender_server.py")
+    for token in (
+        "_MAX_CLIENTS = 16",
+        "_ACCEPT_BUDGET_PER_POLL = _LISTEN_BACKLOG",
+        "_SEND_BUDGET_PER_POLL = 256 * 1024",
+        "def _flush_client_response(",
+        "response_offset",
+        "connection_count",
+        "_MAX_RESPONSE_BYTES = 10 * 1024 * 1024",
+        "Response exceeds {:d} byte limit",
+    ):
+        assert token in source
+
+    capture = _extension_source("capture_output.py")
+    assert "_MAX_CAPTURE_CHARS = 1024 * 1024" in capture
+    assert "[output truncated at {:d} characters]" in capture
+
+    connection = _wheel_source("blmcp/tools_helpers/connection.py")
+    assert "_MAX_RESPONSE_BYTES = 10 * 1024 * 1024" in connection
+    assert "missing the null-byte delimiter" in connection

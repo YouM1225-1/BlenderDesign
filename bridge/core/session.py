@@ -63,13 +63,3 @@ def write_session_file(path: Path, data: dict[str, Any], *, dir_fd: int | None =
     finally:
         if owns_fd:
             os.close(fd)
-
-
-def read_session_file(path: Path) -> dict[str, Any]:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
-        raise ValueError(f"bad session file: {error}") from error
-    if not isinstance(raw, dict):
-        raise ValueError("session file must be an object")
-    return raw

@@ -914,13 +914,6 @@ def _sample_text_total(records: list[dict[str, Any]]) -> int:
     return sum(sizes)
 
 
-def _require_exact_measurement_results(value: object) -> dict[str, dict[str, Any]]:
-    if (type(value) is not dict or set(value) != set(EXPECTED_TOOLS)
-            or any(type(record) is not dict for record in value.values())):
-        raise AssertionError("measurement result tool set differs")
-    return cast(dict[str, dict[str, Any]], value)
-
-
 def _verify_measurement_record(
     record: dict[str, Any],
     arguments: dict[str, object],
@@ -1107,6 +1100,13 @@ async def _run_nfr(
         raise AssertionError("live/offline ordered catalog baseline differs")
     _verify_catalog_baseline(live_catalog)
     _verify_catalog_baseline(offline_catalog)
+    _verify_measurement_record(
+        status, status_args, lambda value: _validate_status(value, instance_id)
+    )
+    _verify_measurement_record(
+        scene, scene_args, lambda value: _validate_scene(value, instance_id)
+    )
+    _verify_measurement_record(capabilities, capabilities_args, _validate_capabilities)
     sample_result_bytes = _sample_result_total(list(results.values()))
     sample_text_bytes = _sample_text_total(list(results.values()))
     failures = [

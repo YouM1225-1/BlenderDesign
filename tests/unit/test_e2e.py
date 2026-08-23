@@ -1589,10 +1589,6 @@ async def test_catalog_baseline_rejects_malformed_or_consistently_drifted_catalo
 
 
 def test_sample_preimage_limit_is_global_across_three_tools(monkeypatch):
-    exact = {name: {} for name in e2e.EXPECTED_TOOLS}
-    assert e2e._require_exact_measurement_results(exact) == exact
-    with pytest.raises(AssertionError, match="tool set differs"):
-        e2e._require_exact_measurement_results({**exact, "extra": {}})
     monkeypatch.setattr(e2e, "MAX_SAMPLE_RESULTS_BYTES", 5)
     records = [
         {"sample_results": [{"result_bytes": 2}]},
@@ -1953,14 +1949,24 @@ def test_provenance_ignores_ignored_untracked_python(monkeypatch):
     ignored.write_text("must not enter the source manifest")
     monkeypatch.setattr(e2e, "BLENDER", "/bin/echo")
     original_git_text = e2e._git_text
+    original_git_bytes = e2e._git_bytes
 
-    def allow_phase_a_edits(deadline, *args, **kwargs):
-        raw = original_git_text(deadline, *args, **kwargs)
+    def clean_status(deadline, *args, **kwargs):
         if args == ("status", "--porcelain=v1", "--untracked-files=all"):
-            return _without_status_paths(raw, _PHASE_A_PATHS)
+            return ""
+        return original_git_text(deadline, *args, **kwargs)
+
+    def existing_sources(deadline, *args, **kwargs):
+        raw = original_git_bytes(deadline, *args, **kwargs)
+        if args[:3] == ("ls-files", "-z", "--"):
+            paths = (path for path in raw.rstrip(b"\0").split(b"\0") if path)
+            return b"\0".join(
+                path for path in paths if (e2e.ROOT / path.decode()).is_file()
+            ) + b"\0"
         return raw
 
-    monkeypatch.setattr(e2e, "_git_text", allow_phase_a_edits)
+    monkeypatch.setattr(e2e, "_git_text", clean_status)
+    monkeypatch.setattr(e2e, "_git_bytes", existing_sources)
     _clear_vendor_bytecode()
     try:
         provenance = e2e._current_provenance(time.monotonic() + 10.0)

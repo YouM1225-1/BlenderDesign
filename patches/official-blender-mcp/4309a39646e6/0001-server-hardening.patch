@@ -1,0 +1,2507 @@
+From a10404a70e9c3a0dbc54c205641fd49e1cd6baf6 Mon Sep 17 00:00:00 2001
+From: BlenderDesign Certification <noreply@example.invalid>
+Date: Sun, 23 Aug 2026 17:18:16 +0800
+Subject: [PATCH] Harden server runtime and MCP compatibility
+
+Restore bounded background execution, private snapshot identity checks, direct disk summaries, Retina scaling, 120 second I/O deadlines, and a single MCP 1.28/2.x compatibility boundary. Narrow source metadata to the reviewed SDK range while retaining the upstream screenshot JSON-envelope headroom fix.
+---
+ mcp/blmcp/__init__.py                         |  35 +-
+ mcp/blmcp/mcp_compat.py                       |  77 +++
+ ..._template_backup_attrs_and_assign_multi.py |   3 +-
+ .../tools/_template_backup_attrs_multi.py     |   3 +-
+ ...ate_deferred_tool_check_for_file_output.py |   1 +
+ ..._template_image_downscale_to_size_limit.py |  38 +-
+ mcp/blmcp/tools/execute_blender_code.py       |  44 +-
+ .../tools/get_blendfile_summary_datablocks.py |  22 +-
+ ...t_blendfile_summary_datablocks_toolcode.py |   2 +-
+ .../get_blendfile_summary_missing_files.py    |  22 +-
+ ...t_blendfile_summary_of_linked_libraries.py |  22 +-
+ ...le_summary_of_linked_libraries_toolcode.py |   2 +-
+ .../tools/get_blendfile_summary_path_info.py  |  22 +-
+ ...et_blendfile_summary_path_info_toolcode.py |   1 -
+ .../get_blendfile_summary_usage_guess.py      |  22 +-
+ mcp/blmcp/tools/get_object_detail_summary.py  |  13 +-
+ mcp/blmcp/tools/get_objects_summary.py        |  11 +-
+ mcp/blmcp/tools/get_python_api_docs.py        |  12 +-
+ .../tools/get_screenshot_of_area_as_image.py  |  12 +-
+ ...et_screenshot_of_area_as_image_toolcode.py |   5 +-
+ .../get_screenshot_of_window_as_image.py      |  12 +-
+ ..._screenshot_of_window_as_image_toolcode.py |   5 +-
+ .../tools/get_screenshot_of_window_as_json.py |  11 +-
+ mcp/blmcp/tools/jump_to_tab_by_name.py        |  13 +-
+ mcp/blmcp/tools/jump_to_tab_by_space_type.py  |  13 +-
+ .../tools/jump_to_view3d_object_by_name.py    |  13 +-
+ .../jump_to_view3d_object_data_by_name.py     |  13 +-
+ mcp/blmcp/tools/render_thumbnail_to_path.py   |  17 +-
+ .../render_thumbnail_to_path_toolcode.py      |   3 +
+ mcp/blmcp/tools/render_viewport_to_path.py    |  16 +-
+ .../tools/render_viewport_to_path_toolcode.py |   2 +
+ mcp/blmcp/tools/search_api_docs.py            |  11 +-
+ mcp/blmcp/tools/search_manual_docs.py         |  11 +-
+ mcp/blmcp/tools_helpers/blender_cli.py        | 568 ++++++++++++++----
+ mcp/blmcp/tools_helpers/connection.py         |  86 ++-
+ mcp/blmcp/tools_helpers/rst_doc_search.py     |  12 +-
+ mcp/blmcp/tools_helpers/rst_parse_docs.py     |  87 +--
+ mcp/pyproject.toml                            |   2 +-
+ 38 files changed, 906 insertions(+), 358 deletions(-)
+ create mode 100644 mcp/blmcp/mcp_compat.py
+
+diff --git a/mcp/blmcp/__init__.py b/mcp/blmcp/__init__.py
+index 91273ca..7d58869 100644
+--- a/mcp/blmcp/__init__.py
++++ b/mcp/blmcp/__init__.py
+@@ -19,7 +19,8 @@ import os
+ import pkgutil
+ 
+ import yaml
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
++
++from blmcp.mcp_compat import MCP_V2, FastMCP, TransportSecuritySettings
+ 
+ # NOTE(@ideasman42): this was written to support LLAMA-C++'s Web UI,
+ # which is one of the nicer ways to run this locally.
+@@ -71,27 +72,27 @@ def main() -> int:
+ 
+     transport = args.transport
+     if _USE_HTTP_SUPPORT and transport == "http":
+-        # pylint: disable-next=import-error,no-name-in-module
+-        from mcp.server.fastmcp.server import TransportSecuritySettings  # type: ignore[attr-defined]
+         from starlette.applications import Starlette
+         from starlette.middleware.cors import CORSMiddleware
+ 
+         transport = "streamable-http"
+ 
+-        mcp.settings.host = args.host
+-        mcp.settings.port = args.port
+-        mcp.settings.streamable_http_path = "/"
+-        mcp.settings.stateless_http = True
+-        mcp.settings.transport_security = TransportSecuritySettings(
++        transport_security = TransportSecuritySettings(
+             enable_dns_rebinding_protection=False,
+         )
++        if not MCP_V2:
++            mcp.settings.host = args.host
++            mcp.settings.port = args.port
++            mcp.settings.streamable_http_path = "/"
++            mcp.settings.stateless_http = True
++            mcp.settings.transport_security = transport_security
+ 
+         # Add CORS middleware so browser-based clients
+         # (e.g. llama.cpp web UI) can connect without preflight failures.
+         _orig = mcp.streamable_http_app
+ 
+-        def _app_with_cors() -> Starlette:
+-            app = _orig()
++        def _app_with_cors(*app_args: object, **app_kwargs: object) -> Starlette:
++            app: Starlette = _orig(*app_args, **app_kwargs)
+             app.add_middleware(
+                 CORSMiddleware,
+                 allow_origins=["*"],
+@@ -100,7 +101,17 @@ def main() -> int:
+             )
+             return app
+ 
+-        mcp.streamable_http_app = _app_with_cors  # type: ignore[method-assign]
++        mcp.streamable_http_app = _app_with_cors
+ 
+-    mcp.run(transport=transport)
++    if MCP_V2 and transport == "streamable-http":
++        mcp.run(
++            transport=transport,
++            host=args.host,
++            port=args.port,
++            streamable_http_path="/",
++            stateless_http=True,
++            transport_security=transport_security,
++        )
++    else:
++        mcp.run(transport=transport)
+     return 0
+diff --git a/mcp/blmcp/mcp_compat.py b/mcp/blmcp/mcp_compat.py
+new file mode 100644
+index 0000000..1d1dcf9
+--- /dev/null
++++ b/mcp/blmcp/mcp_compat.py
+@@ -0,0 +1,77 @@
++# SPDX-FileCopyrightText: 2026 Blender Authors
++#
++# SPDX-License-Identifier: GPL-3.0-or-later
++
++"""Compatibility boundary for the supported MCP SDK major versions."""
++
++__all__ = (
++    "MCP_V2",
++    "FastMCP",
++    "Image",
++    "MCPToolServer",
++    "TransportSecuritySettings",
++    "clean_doc",
++    "tool_annotations",
++)
++
++import importlib
++import inspect
++from collections.abc import Callable
++from typing import Protocol, TypeVar
++
++_ToolFunction = TypeVar("_ToolFunction", bound=Callable[..., object])
++
++
++class MCPToolServer(Protocol):
++    """The typed subset tool modules use from either MCP server class."""
++
++    def tool(
++        self,
++        **_kwargs: object,
++    ) -> Callable[[_ToolFunction], _ToolFunction]: ...
++
++
++try:
++    _server_module = importlib.import_module("mcp.server.fastmcp")
++except ModuleNotFoundError as ex:
++    if ex.name != "mcp.server.fastmcp":
++        raise
++
++    _server_module = importlib.import_module("mcp.server.mcpserver")
++    _security_module = importlib.import_module("mcp.server.transport_security")
++    _FastMCP = _server_module.MCPServer
++    _MCP_V2 = True
++else:
++    _security_module = importlib.import_module("mcp.server.fastmcp.server")
++    _FastMCP = _server_module.FastMCP
++    _MCP_V2 = False
++
++FastMCP = _FastMCP
++Image = _server_module.Image
++MCP_V2 = _MCP_V2
++TransportSecuritySettings = _security_module.TransportSecuritySettings
++
++
++def clean_doc(function: _ToolFunction) -> _ToolFunction:
++    """Make nested tool docstrings stable across supported Python versions."""
++    doc = inspect.cleandoc(function.__doc__ or "")
++    function.__doc__ = "\n{:s}\n".format(doc) if doc else ""
++    return function
++
++
++def tool_annotations(
++    *,
++    title: str,
++    read_only: bool | None = None,
++    destructive: bool | None = None,
++) -> object:
++    """Create tool annotations through field aliases shared by both SDK versions."""
++    data: dict[str, object] = {"title": title}
++    if read_only is not None:
++        data["readOnlyHint"] = read_only
++    if destructive is not None:
++        data["destructiveHint"] = destructive
++
++    types_module = importlib.import_module("mcp.types")
++    value: object = types_module.ToolAnnotations.model_validate(data)
++    return value
+diff --git a/mcp/blmcp/tools/_template_backup_attrs_and_assign_multi.py b/mcp/blmcp/tools/_template_backup_attrs_and_assign_multi.py
+index 6cb5acb..b7139ea 100644
+--- a/mcp/blmcp/tools/_template_backup_attrs_and_assign_multi.py
++++ b/mcp/blmcp/tools/_template_backup_attrs_and_assign_multi.py
+@@ -3,11 +3,12 @@
+ # SPDX-License-Identifier: GPL-3.0-or-later
+ 
+ # Inline `_backup_attrs_and_assign_multi`.
++# pylint: disable=missing-module-docstring
+ 
+ __all__ = ()
+ 
+ import contextlib
+-from typing import Generator
++from collections.abc import Generator
+ 
+ 
+ @contextlib.contextmanager
+diff --git a/mcp/blmcp/tools/_template_backup_attrs_multi.py b/mcp/blmcp/tools/_template_backup_attrs_multi.py
+index 016b63e..cfc622a 100644
+--- a/mcp/blmcp/tools/_template_backup_attrs_multi.py
++++ b/mcp/blmcp/tools/_template_backup_attrs_multi.py
+@@ -3,11 +3,12 @@
+ # SPDX-License-Identifier: GPL-3.0-or-later
+ 
+ # Inline `_backup_attrs_multi`.
++# pylint: disable=missing-module-docstring
+ 
+ __all__ = ()
+ 
+ import contextlib
+-from typing import Generator
++from collections.abc import Generator
+ 
+ 
+ @contextlib.contextmanager
+diff --git a/mcp/blmcp/tools/_template_deferred_tool_check_for_file_output.py b/mcp/blmcp/tools/_template_deferred_tool_check_for_file_output.py
+index e3ca22f..b4abebd 100644
+--- a/mcp/blmcp/tools/_template_deferred_tool_check_for_file_output.py
++++ b/mcp/blmcp/tools/_template_deferred_tool_check_for_file_output.py
+@@ -3,6 +3,7 @@
+ # SPDX-License-Identifier: GPL-3.0-or-later
+ 
+ # Inline `_deferred_tool_check_for_file_output`.
++# pylint: disable=missing-module-docstring
+ 
+ __all__ = ()
+ 
+diff --git a/mcp/blmcp/tools/_template_image_downscale_to_size_limit.py b/mcp/blmcp/tools/_template_image_downscale_to_size_limit.py
+index 55cebb7..49703ea 100644
+--- a/mcp/blmcp/tools/_template_image_downscale_to_size_limit.py
++++ b/mcp/blmcp/tools/_template_image_downscale_to_size_limit.py
+@@ -3,42 +3,58 @@
+ # SPDX-License-Identifier: GPL-3.0-or-later
+ 
+ # Inline `_image_downscale_to_size_limit`.
++# pylint: disable=missing-module-docstring
+ 
+ __all__ = ()
+ 
+ 
+ def _image_downscale_to_size_limit(
+         tmpdir: str, filepath: str,
++        coordinate_size: tuple[int, int],
+         size_limit_in_bytes: int,
+         size_tolerance_in_bytes: int = 0,
+ ) -> bytes:
+     """
+     Downscale *filepath* for HiDPI and to stay under *size_limit_in_bytes*.
+ 
++    *coordinate_size* is the extent of the Blender coordinate space represented
++    by the screenshot. The output uses one image pixel per coordinate unit.
++    Window and area coordinate spaces can differ, so UI scale preferences are
++    not a valid substitute for the size supplied by the screenshot caller.
++
+     *size_tolerance_in_bytes* defines an acceptable margin below the limit.
+     Once a result fits within ``size_limit - tolerance``, the search stops
+     instead of continuing to find the least-downscaled option.
+ 
+     Returns the image file contents as bytes.
+     """
++    # pylint: disable=too-many-nested-blocks
+     import os
+ 
+-    # Early out: if the file already fits, no processing needed.
+-    if os.path.getsize(filepath) <= size_limit_in_bytes:
+-        with open(filepath, "rb") as fh:
+-            return fh.read()
+-
+     import imbuf  # type: ignore[import-not-found]  # pylint: disable=import-error,no-name-in-module
+-    from bpy import context  # pylint: disable=import-error,no-name-in-module
+ 
++    source_fits = os.path.getsize(filepath) <= size_limit_in_bytes
+     filepath_out = os.path.join(tmpdir, "downscaled.png")
+     im = imbuf.load(filepath)
+ 
+-    # Downscale HiDPI images to logical pixel size.
+-    pixel_size = context.preferences.system.pixel_size
+-    if pixel_size > 1.0:
+-        w, h = im.size
+-        im.resize((round(w / pixel_size), round(h / pixel_size)), method='BILINEAR')
++    # Blender's coordinate extents are already integer-rounded. Use them
++    # directly so image pixels and caller coordinates share the same rounding.
++    coordinate_size = (
++        max(1, coordinate_size[0]),
++        max(1, coordinate_size[1]),
++    )
++    if im.size == coordinate_size and source_fits:
++        try:
++            with open(filepath, "rb") as fh:
++                return fh.read()
++        finally:
++            im.free()
++
++    if im.size != coordinate_size:
++        im.resize(
++            coordinate_size,
++            method="BILINEAR",
++        )
+ 
+     def _write_and_read(im_buf: "imbuf.types.ImBuf") -> bytes:
+         imbuf.write(im_buf, filepath=filepath_out)
+diff --git a/mcp/blmcp/tools/execute_blender_code.py b/mcp/blmcp/tools/execute_blender_code.py
+index fac9bd7..d69ea3c 100644
+--- a/mcp/blmcp/tools/execute_blender_code.py
++++ b/mcp/blmcp/tools/execute_blender_code.py
+@@ -8,24 +8,32 @@ __all__ = (
+     "register",
+ )
+ 
+-from blmcp.tools_helpers.blender_cli import run_blender_cli, synced_blend_for_cli
++import time
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
++from blmcp.tools_helpers.blender_cli import (
++    _CLI_TIMEOUT,
++    private_blend_for_cli,
++    run_blender_cli,
++)
+ from blmcp.tools_helpers.connection import send_code
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Execute Python Code",
+-            destructiveHint=True,
++            destructive=True,
+         )
+     )
++    @clean_doc
+     def execute_blender_code(code: str) -> dict[str, object]:
+         """
+         Execute Python code in the connected Blender instance.
+ 
+         The code runs in Blender's Python environment with full access to ``bpy``.
++        For user-facing modeling, execute each distinct part in a separate tool call,
++        show the visible result, and continue automatically without waiting for confirmation.
+         To return data, assign a JSON-serialisable dict to a variable named ``result``.
+         Deferred completion via ``check_is_finished`` is only supported by the
+         interactive addon server, and is rejected in background mode.
+@@ -35,21 +43,31 @@ def register(mcp: FastMCP) -> None:
+         return send_code(code, strict_json=False)
+ 
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Execute Python Code for Command-Line",
+-            destructiveHint=True,
++            destructive=True,
+         )
+     )
++    @clean_doc
+     def execute_blender_code_for_cli(blend_file: str, code: str) -> dict[str, object]:
+         """
+-        Execute Python code in a background Blender process.
++        Execute arbitrary Python code in a background Blender process using a
++        disposable private snapshot; this prevents accidental source saves but
++        does not sandbox hostile code.
+ 
+-        Opens *blend_file* with ``blender --background`` and runs *code*.
++        The supplied blend file is first copied through Blender into a disposable
++        snapshot. Saving inside the supplied code writes that snapshot, not the
++        source file. If the same file is open and dirty in the connected Blender,
++        creating the snapshot invokes Blender save handlers. This prevents
++        accidental source saves; it is not a sandbox for hostile Python.
+         Assign a dict to ``result`` to return data.
+         """
+         # LLM-generated code may return non-JSON-serializable values
+         # (e.g. Blender objects), handled by `run_blender_cli` via `default=repr`.
+-        with synced_blend_for_cli(blend_file) as synced_path:
+-            value = run_blender_cli(synced_path, code)
+-            assert isinstance(value, dict), "Expected dict from `run_blender_cli`, got {!r}".format(type(value))
++        deadline = time.monotonic() + _CLI_TIMEOUT
++        with private_blend_for_cli(blend_file, deadline=deadline) as private_path:
++            value = run_blender_cli(private_path, code, deadline=deadline)
++            assert isinstance(value, dict), (
++                "Expected dict from `run_blender_cli`, got {!r}".format(type(value))
++            )
+             return value
+diff --git a/mcp/blmcp/tools/get_blendfile_summary_datablocks.py b/mcp/blmcp/tools/get_blendfile_summary_datablocks.py
+index 05a4baf..06149ab 100644
+--- a/mcp/blmcp/tools/get_blendfile_summary_datablocks.py
++++ b/mcp/blmcp/tools/get_blendfile_summary_datablocks.py
+@@ -8,26 +8,27 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+-from blmcp.tools_helpers.blender_cli import run_blender_cli, synced_blend_for_cli
++from blmcp.tools_helpers.blender_cli import run_blender_cli
+ from blmcp.tools_helpers.connection import send_code
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Blend-File Data-blocks Summary",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def get_blendfile_summary_datablocks() -> dict[str, object]:
+         """
+         Return a summary of the blend file: data-block counts, active workspace, and render engine.
+@@ -35,14 +36,15 @@ def register(mcp: FastMCP) -> None:
+         return send_code(toolcode_format_call(_TOOL_CALL, None), strict_json=True)
+ 
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Blend-File Data-blocks Summary for Command-Line",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def get_blendfile_summary_datablocks_for_cli(blend_file: str) -> dict[str, object]:
+         """
+         Return a data-block summary by opening *blend_file* in background Blender.
++        This reads the on-disk file and does not include unsaved changes from a running Blender instance.
+         """
+-        with synced_blend_for_cli(blend_file) as synced_path:
+-            return run_blender_cli(synced_path, toolcode_format_call(_TOOL_CALL, None))
++        return run_blender_cli(blend_file, toolcode_format_call(_TOOL_CALL, None))
+diff --git a/mcp/blmcp/tools/get_blendfile_summary_datablocks_toolcode.py b/mcp/blmcp/tools/get_blendfile_summary_datablocks_toolcode.py
+index 4882a92..47bd64c 100644
+--- a/mcp/blmcp/tools/get_blendfile_summary_datablocks_toolcode.py
++++ b/mcp/blmcp/tools/get_blendfile_summary_datablocks_toolcode.py
+@@ -35,7 +35,7 @@ def main(params: None) -> Result:
+                 n = len(val)  # type: ignore[arg-type]
+                 if n > 0:
+                     counts[attr] = n
+-            except Exception:  # pylint: disable=broad-exception-caught
++            except Exception:  # noqa: S110  # pylint: disable=broad-exception-caught
+                 # Some `bpy.data` attributes look like collections but
+                 # raise when accessed (e.g. during undo). Safe to skip.
+                 pass
+diff --git a/mcp/blmcp/tools/get_blendfile_summary_missing_files.py b/mcp/blmcp/tools/get_blendfile_summary_missing_files.py
+index e033d0e..4d308ed 100644
+--- a/mcp/blmcp/tools/get_blendfile_summary_missing_files.py
++++ b/mcp/blmcp/tools/get_blendfile_summary_missing_files.py
+@@ -8,26 +8,27 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+-from blmcp.tools_helpers.blender_cli import run_blender_cli, synced_blend_for_cli
++from blmcp.tools_helpers.blender_cli import run_blender_cli
+ from blmcp.tools_helpers.connection import send_code
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Blend-File Missing Files Summary",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def get_blendfile_summary_missing_files() -> dict[str, object]:
+         """
+         Report external file references that are missing from disk
+@@ -36,14 +37,15 @@ def register(mcp: FastMCP) -> None:
+         return send_code(toolcode_format_call(_TOOL_CALL, None), strict_json=True)
+ 
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Blend-File Missing Files Summary for Command-Line",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def get_blendfile_summary_missing_files_for_cli(blend_file: str) -> dict[str, object]:
+         """
+         Report missing file references by opening *blend_file* in background Blender.
++        This reads the on-disk file and does not include unsaved changes from a running Blender instance.
+         """
+-        with synced_blend_for_cli(blend_file) as synced_path:
+-            return run_blender_cli(synced_path, toolcode_format_call(_TOOL_CALL, None))
++        return run_blender_cli(blend_file, toolcode_format_call(_TOOL_CALL, None))
+diff --git a/mcp/blmcp/tools/get_blendfile_summary_of_linked_libraries.py b/mcp/blmcp/tools/get_blendfile_summary_of_linked_libraries.py
+index 19166b5..68071fa 100644
+--- a/mcp/blmcp/tools/get_blendfile_summary_of_linked_libraries.py
++++ b/mcp/blmcp/tools/get_blendfile_summary_of_linked_libraries.py
+@@ -8,26 +8,27 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+-from blmcp.tools_helpers.blender_cli import run_blender_cli, synced_blend_for_cli
++from blmcp.tools_helpers.blender_cli import run_blender_cli
+ from blmcp.tools_helpers.connection import send_code
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Blend-File Linked Library Summary",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def get_blendfile_summary_of_linked_libraries() -> dict[str, object]:
+         """
+         Return a tree of directly and indirectly linked library files.
+@@ -35,14 +36,15 @@ def register(mcp: FastMCP) -> None:
+         return send_code(toolcode_format_call(_TOOL_CALL, None), strict_json=True)
+ 
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Blend-File Linked Library Summary for Command-Line",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def get_blendfile_summary_of_linked_libraries_for_cli(blend_file: str) -> dict[str, object]:
+         """
+         Return linked-library info by opening *blend_file* in background Blender.
++        This reads the on-disk file and does not include unsaved changes from a running Blender instance.
+         """
+-        with synced_blend_for_cli(blend_file) as synced_path:
+-            return run_blender_cli(synced_path, toolcode_format_call(_TOOL_CALL, None))
++        return run_blender_cli(blend_file, toolcode_format_call(_TOOL_CALL, None))
+diff --git a/mcp/blmcp/tools/get_blendfile_summary_of_linked_libraries_toolcode.py b/mcp/blmcp/tools/get_blendfile_summary_of_linked_libraries_toolcode.py
+index 6b73ebe..913f3cf 100644
+--- a/mcp/blmcp/tools/get_blendfile_summary_of_linked_libraries_toolcode.py
++++ b/mcp/blmcp/tools/get_blendfile_summary_of_linked_libraries_toolcode.py
+@@ -43,7 +43,7 @@ def main(params: None) -> Result:
+                 for item in collection:  # type: ignore[union-attr]
+                     if hasattr(item, "library") and item.library == lib:
+                         count += 1
+-            except Exception:  # pylint: disable=broad-exception-caught
++            except Exception:  # noqa: S110  # pylint: disable=broad-exception-caught
+                 # Some `bpy.data` attributes look iterable but raise
+                 # when traversed. Safe to skip for counting purposes.
+                 pass
+diff --git a/mcp/blmcp/tools/get_blendfile_summary_path_info.py b/mcp/blmcp/tools/get_blendfile_summary_path_info.py
+index 7e78a62..84befdb 100644
+--- a/mcp/blmcp/tools/get_blendfile_summary_path_info.py
++++ b/mcp/blmcp/tools/get_blendfile_summary_path_info.py
+@@ -8,26 +8,27 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+-from blmcp.tools_helpers.blender_cli import run_blender_cli, synced_blend_for_cli
++from blmcp.tools_helpers.blender_cli import run_blender_cli
+ from blmcp.tools_helpers.connection import send_code
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Blend-File Path Info Summary",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def get_blendfile_summary_path_info() -> dict[str, object]:
+         """
+         Simple/fast access to the blend file's path, save status, age, and backups.
+@@ -35,14 +36,15 @@ def register(mcp: FastMCP) -> None:
+         return send_code(toolcode_format_call(_TOOL_CALL, None), strict_json=True)
+ 
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Blend-File Path Info Summary for Command-Line",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def get_blendfile_summary_path_info_for_cli(blend_file: str) -> dict[str, object]:
+         """
+         Return path info by opening *blend_file* in background Blender.
++        This reads the on-disk file and does not include unsaved changes from a running Blender instance.
+         """
+-        with synced_blend_for_cli(blend_file) as synced_path:
+-            return run_blender_cli(synced_path, toolcode_format_call(_TOOL_CALL, None))
++        return run_blender_cli(blend_file, toolcode_format_call(_TOOL_CALL, None))
+diff --git a/mcp/blmcp/tools/get_blendfile_summary_path_info_toolcode.py b/mcp/blmcp/tools/get_blendfile_summary_path_info_toolcode.py
+index 8d30fdd..78c7f3e 100644
+--- a/mcp/blmcp/tools/get_blendfile_summary_path_info_toolcode.py
++++ b/mcp/blmcp/tools/get_blendfile_summary_path_info_toolcode.py
+@@ -15,7 +15,6 @@ import os
+ import time
+ from typing import NamedTuple
+ 
+-
+ # Blender appends a number (1-32) to the file path for each backup.
+ _MAX_BACKUPS = 32
+ 
+diff --git a/mcp/blmcp/tools/get_blendfile_summary_usage_guess.py b/mcp/blmcp/tools/get_blendfile_summary_usage_guess.py
+index c407fd9..a34fa49 100644
+--- a/mcp/blmcp/tools/get_blendfile_summary_usage_guess.py
++++ b/mcp/blmcp/tools/get_blendfile_summary_usage_guess.py
+@@ -8,26 +8,27 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+-from blmcp.tools_helpers.blender_cli import run_blender_cli, synced_blend_for_cli
++from blmcp.tools_helpers.blender_cli import run_blender_cli
+ from blmcp.tools_helpers.connection import send_code
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Blend-File Usage Summary",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def get_blendfile_summary_usage_guess() -> dict[str, object]:
+         """
+         Guess the primary use-cases of the current blend file (scored 0-100 with certainty).
+@@ -35,14 +36,15 @@ def register(mcp: FastMCP) -> None:
+         return send_code(toolcode_format_call(_TOOL_CALL, None), strict_json=True)
+ 
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Blend-File Usage Summary for Command-Line",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def get_blendfile_summary_usage_guess_for_cli(blend_file: str) -> dict[str, object]:
+         """
+         Guess use-cases by opening *blend_file* in background Blender.
++        This reads the on-disk file and does not include unsaved changes from a running Blender instance.
+         """
+-        with synced_blend_for_cli(blend_file) as synced_path:
+-            return run_blender_cli(synced_path, toolcode_format_call(_TOOL_CALL, None))
++        return run_blender_cli(blend_file, toolcode_format_call(_TOOL_CALL, None))
+diff --git a/mcp/blmcp/tools/get_object_detail_summary.py b/mcp/blmcp/tools/get_object_detail_summary.py
+index ebe0e72..5969339 100644
+--- a/mcp/blmcp/tools/get_object_detail_summary.py
++++ b/mcp/blmcp/tools/get_object_detail_summary.py
+@@ -8,26 +8,27 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
++from blmcp.tools.get_object_detail_summary_toolcode import Params
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+ from blmcp.tools_helpers.connection import send_code
+-from blmcp.tools.get_object_detail_summary_toolcode import Params
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Object Detail Summary",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def get_object_detail_summary(
+         name: str,
+     ) -> dict[str, object]:
+diff --git a/mcp/blmcp/tools/get_objects_summary.py b/mcp/blmcp/tools/get_objects_summary.py
+index 3e0e3d6..0c5a69b 100644
+--- a/mcp/blmcp/tools/get_objects_summary.py
++++ b/mcp/blmcp/tools/get_objects_summary.py
+@@ -8,25 +8,26 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+ from blmcp.tools_helpers.connection import send_code
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Objects Summary",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def get_objects_summary() -> dict[str, object]:
+         """
+         Return the scene's collection hierarchy and their objects.
+diff --git a/mcp/blmcp/tools/get_python_api_docs.py b/mcp/blmcp/tools/get_python_api_docs.py
+index 4d599e5..c1d7201 100644
+--- a/mcp/blmcp/tools/get_python_api_docs.py
++++ b/mcp/blmcp/tools/get_python_api_docs.py
+@@ -11,15 +11,13 @@ __all__ = (
+ import difflib
+ import os
+ 
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
+ from blmcp.tools_helpers.rst_parse_docs import (
+     data_dir,
+     doctree_for_path,
+     find_definition_in_doctree,
+     list_doctree_definitions,
+ )
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+-
+ 
+ _DOC_EXT = ".rst"
+ 
+@@ -360,13 +358,15 @@ def _collect_examples(content: str, api_path: str) -> list[dict[str, str]]:
+ # Tool registration.
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Python API Docs",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
++    # pylint: disable-next=too-many-return-statements
+     def get_python_api_docs(identifier: str) -> dict[str, object]:
+         """
+         Return the Blender Python API docs for *identifier*, or list
+diff --git a/mcp/blmcp/tools/get_screenshot_of_area_as_image.py b/mcp/blmcp/tools/get_screenshot_of_area_as_image.py
+index ecce11a..078e9b3 100644
+--- a/mcp/blmcp/tools/get_screenshot_of_area_as_image.py
++++ b/mcp/blmcp/tools/get_screenshot_of_area_as_image.py
+@@ -10,26 +10,26 @@ __all__ = (
+ 
+ import base64
+ 
++from blmcp.mcp_compat import Image, MCPToolServer, clean_doc, tool_annotations
++from blmcp.tools.get_screenshot_of_area_as_image_toolcode import AreaUIType, Params
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+ from blmcp.tools_helpers.connection import send_code
+-from blmcp.tools.get_screenshot_of_area_as_image_toolcode import AreaUIType, Params
+-from mcp.server.fastmcp import FastMCP, Image  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Area Screenshot",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def get_screenshot_of_area_as_image(
+         area_ui_type: AreaUIType,
+         size_limit_in_bytes: int = 0,
+diff --git a/mcp/blmcp/tools/get_screenshot_of_area_as_image_toolcode.py b/mcp/blmcp/tools/get_screenshot_of_area_as_image_toolcode.py
+index 69ebd5d..87d8833 100644
+--- a/mcp/blmcp/tools/get_screenshot_of_area_as_image_toolcode.py
++++ b/mcp/blmcp/tools/get_screenshot_of_area_as_image_toolcode.py
+@@ -66,8 +66,10 @@ class Result(NamedTuple):
+ 
+ # @include_begin: _template_image_downscale_to_size_limit.py
+ def _image_downscale_to_size_limit(
+-        tmpdir: str, filepath: str, size_limit_in_bytes: int, size_tolerance_in_bytes: int = 0,
++        tmpdir: str, filepath: str, coordinate_size: tuple[int, int],
++        size_limit_in_bytes: int, size_tolerance_in_bytes: int = 0,
+ ) -> bytes:
++    # pylint: disable=unused-argument
+     return b''
+ # @include_end
+ 
+@@ -113,6 +115,7 @@ def main(params: Params) -> Result:
+ 
+         image_data = _image_downscale_to_size_limit(
+             tmpdir, filepath_screenshot,
++            coordinate_size=(area.width, area.height),
+             size_limit_in_bytes=size_limit,
+             size_tolerance_in_bytes=size_limit // 16,
+         )
+diff --git a/mcp/blmcp/tools/get_screenshot_of_window_as_image.py b/mcp/blmcp/tools/get_screenshot_of_window_as_image.py
+index bdc655b..d9820e4 100644
+--- a/mcp/blmcp/tools/get_screenshot_of_window_as_image.py
++++ b/mcp/blmcp/tools/get_screenshot_of_window_as_image.py
+@@ -10,26 +10,26 @@ __all__ = (
+ 
+ import base64
+ 
++from blmcp.mcp_compat import Image, MCPToolServer, clean_doc, tool_annotations
++from blmcp.tools.get_screenshot_of_window_as_image_toolcode import Params
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+ from blmcp.tools_helpers.connection import send_code
+-from blmcp.tools.get_screenshot_of_window_as_image_toolcode import Params
+-from mcp.server.fastmcp import FastMCP, Image  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Window Screenshot",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def get_screenshot_of_window_as_image(
+         size_limit_in_bytes: int = 0,
+     ) -> Image:
+diff --git a/mcp/blmcp/tools/get_screenshot_of_window_as_image_toolcode.py b/mcp/blmcp/tools/get_screenshot_of_window_as_image_toolcode.py
+index a8c7324..ca547eb 100644
+--- a/mcp/blmcp/tools/get_screenshot_of_window_as_image_toolcode.py
++++ b/mcp/blmcp/tools/get_screenshot_of_window_as_image_toolcode.py
+@@ -36,8 +36,10 @@ class Result(NamedTuple):
+ 
+ # @include_begin: _template_image_downscale_to_size_limit.py
+ def _image_downscale_to_size_limit(
+-        tmpdir: str, filepath: str, size_limit_in_bytes: int, size_tolerance_in_bytes: int = 0,
++        tmpdir: str, filepath: str, coordinate_size: tuple[int, int],
++        size_limit_in_bytes: int, size_tolerance_in_bytes: int = 0,
+ ) -> bytes:
++    # pylint: disable=unused-argument
+     return b''
+ # @include_end
+ 
+@@ -64,6 +66,7 @@ def main(params: Params) -> Result:
+ 
+         image_data = _image_downscale_to_size_limit(
+             tmpdir, filepath_screenshot,
++            coordinate_size=(window.width, window.height),
+             size_limit_in_bytes=size_limit,
+             size_tolerance_in_bytes=size_limit // 16,
+         )
+diff --git a/mcp/blmcp/tools/get_screenshot_of_window_as_json.py b/mcp/blmcp/tools/get_screenshot_of_window_as_json.py
+index 045562a..c84d4fd 100644
+--- a/mcp/blmcp/tools/get_screenshot_of_window_as_json.py
++++ b/mcp/blmcp/tools/get_screenshot_of_window_as_json.py
+@@ -8,25 +8,26 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+ from blmcp.tools_helpers.connection import send_code
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Get Screenshot as JSON",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def get_screenshot_of_window_as_json() -> dict[str, object]:
+         """
+         Return a JSON description of the Blender window layout, areas, active object, and selection.
+diff --git a/mcp/blmcp/tools/jump_to_tab_by_name.py b/mcp/blmcp/tools/jump_to_tab_by_name.py
+index 128f58c..b079348 100644
+--- a/mcp/blmcp/tools/jump_to_tab_by_name.py
++++ b/mcp/blmcp/tools/jump_to_tab_by_name.py
+@@ -8,26 +8,27 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
++from blmcp.tools.jump_to_tab_by_name_toolcode import Params
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+ from blmcp.tools_helpers.connection import send_code
+-from blmcp.tools.jump_to_tab_by_name_toolcode import Params
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Switch to Workspace",
+-            destructiveHint=True,
++            destructive=True,
+         )
+     )
++    @clean_doc
+     def jump_to_tab_by_name(name: str) -> dict[str, object]:
+         """
+         Switch the active workspace tab to *name*.
+diff --git a/mcp/blmcp/tools/jump_to_tab_by_space_type.py b/mcp/blmcp/tools/jump_to_tab_by_space_type.py
+index a7cff2a..239556b 100644
+--- a/mcp/blmcp/tools/jump_to_tab_by_space_type.py
++++ b/mcp/blmcp/tools/jump_to_tab_by_space_type.py
+@@ -8,26 +8,27 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
++from blmcp.tools.jump_to_tab_by_space_type_toolcode import Params
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+ from blmcp.tools_helpers.connection import send_code
+-from blmcp.tools.jump_to_tab_by_space_type_toolcode import Params
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Switch to Matching Workspace",
+-            destructiveHint=True,
++            destructive=True,
+         )
+     )
++    @clean_doc
+     def jump_to_tab_by_space_type(
+         space_type: str,
+         allow_edits: bool = False,
+diff --git a/mcp/blmcp/tools/jump_to_view3d_object_by_name.py b/mcp/blmcp/tools/jump_to_view3d_object_by_name.py
+index 6627599..ee049f6 100644
+--- a/mcp/blmcp/tools/jump_to_view3d_object_by_name.py
++++ b/mcp/blmcp/tools/jump_to_view3d_object_by_name.py
+@@ -8,26 +8,27 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
++from blmcp.tools.jump_to_view3d_object_by_name_toolcode import Params
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+ from blmcp.tools_helpers.connection import send_code
+-from blmcp.tools.jump_to_view3d_object_by_name_toolcode import Params
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Focus on Object",
+-            destructiveHint=True,
++            destructive=True,
+         )
+     )
++    @clean_doc
+     def jump_to_view3d_object_by_name(
+         name: str,
+         allow_edits: bool = False,
+diff --git a/mcp/blmcp/tools/jump_to_view3d_object_data_by_name.py b/mcp/blmcp/tools/jump_to_view3d_object_data_by_name.py
+index 94fb4bf..ea4f5a6 100644
+--- a/mcp/blmcp/tools/jump_to_view3d_object_data_by_name.py
++++ b/mcp/blmcp/tools/jump_to_view3d_object_data_by_name.py
+@@ -8,26 +8,27 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
++from blmcp.tools.jump_to_view3d_object_data_by_name_toolcode import Params
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+ from blmcp.tools_helpers.connection import send_code
+-from blmcp.tools.jump_to_view3d_object_data_by_name_toolcode import Params
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Focus on Object Data",
+-            destructiveHint=True,
++            destructive=True,
+         )
+     )
++    @clean_doc
+     def jump_to_view3d_object_data_by_name(
+         name: str,
+         allow_edits: bool = False,
+diff --git a/mcp/blmcp/tools/render_thumbnail_to_path.py b/mcp/blmcp/tools/render_thumbnail_to_path.py
+index d55643c..eea78d6 100644
+--- a/mcp/blmcp/tools/render_thumbnail_to_path.py
++++ b/mcp/blmcp/tools/render_thumbnail_to_path.py
+@@ -8,29 +8,32 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
++from blmcp.tools.render_thumbnail_to_path_toolcode import Params
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+ from blmcp.tools_helpers.connection import send_code
+-from blmcp.tools.render_thumbnail_to_path_toolcode import Params
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Render Thumbnail to Path",
+-            destructiveHint=True,
++            destructive=True,
+         )
+     )
++    @clean_doc
+     def render_thumbnail_to_path(output_path: str) -> dict[str, object]:
+         """
+-        Render a small, low-quality thumbnail to *output_path* (temporarily overrides settings).
++        Render a small, low-quality thumbnail in the Blender MCP scratch directory
++        (temporarily overrides settings).
++        Only the basename of *output_path* is used; the result returns the actual path.
+         """
+         p = Params(output_path=output_path)
+         code = toolcode_format_call(_TOOL_CALL, p)
+diff --git a/mcp/blmcp/tools/render_thumbnail_to_path_toolcode.py b/mcp/blmcp/tools/render_thumbnail_to_path_toolcode.py
+index 018bbf4..a41c96e 100644
+--- a/mcp/blmcp/tools/render_thumbnail_to_path_toolcode.py
++++ b/mcp/blmcp/tools/render_thumbnail_to_path_toolcode.py
+@@ -41,6 +41,7 @@ class Result(NamedTuple):
+ def _backup_attrs_and_assign_multi(
+         *obj_attrs: tuple[object, dict[str, object]],
+ ) -> typing.Generator[None, None, None]:
++    # pylint: disable=unused-argument
+     yield
+ # @include_end
+ 
+@@ -51,12 +52,14 @@ def _deferred_tool_check_for_file_output(
+         output_path: str,
+         restore_attrs: list[tuple[object, str, object]] | None = None,
+ ) -> Callable[[], dict[str, object] | None]:
++    # pylint: disable=unused-argument
+     return lambda: None
+ # @include_end
+ 
+ 
+ def main(params: Params) -> Result | Callable[[], dict[str, object] | None]:
+     import os
++
+     import bpy  # pylint: disable=import-error,no-name-in-module
+ 
+     use_deferred = not bpy.app.background
+diff --git a/mcp/blmcp/tools/render_viewport_to_path.py b/mcp/blmcp/tools/render_viewport_to_path.py
+index ce32441..ae67795 100644
+--- a/mcp/blmcp/tools/render_viewport_to_path.py
++++ b/mcp/blmcp/tools/render_viewport_to_path.py
+@@ -8,29 +8,31 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
++from blmcp.tools.render_viewport_to_path_toolcode import Params
+ from blmcp.tools_helpers import (
+     toolcode_format_call,
+     toolcode_load_from_filepath,
+     toolcode_wrap_with_calling_convention,
+ )
+ from blmcp.tools_helpers.connection import send_code
+-from blmcp.tools.render_viewport_to_path_toolcode import Params
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ _TOOL_CALL = toolcode_wrap_with_calling_convention(toolcode_load_from_filepath(__file__))
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Render Viewport to Path",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     def render_viewport_to_path(output_path: str) -> dict[str, object]:
+         """
+-        Render the current scene to *output_path* using current render settings.
++        Render the current scene in the Blender MCP scratch directory using current render settings.
++        Only the basename of *output_path* is used; the result returns the actual path.
+         """
+         p = Params(output_path=output_path)
+         code = toolcode_format_call(_TOOL_CALL, p)
+diff --git a/mcp/blmcp/tools/render_viewport_to_path_toolcode.py b/mcp/blmcp/tools/render_viewport_to_path_toolcode.py
+index 12f21a8..8ea0bb9 100644
+--- a/mcp/blmcp/tools/render_viewport_to_path_toolcode.py
++++ b/mcp/blmcp/tools/render_viewport_to_path_toolcode.py
+@@ -32,12 +32,14 @@ def _deferred_tool_check_for_file_output(
+         output_path: str,
+         restore_attrs: list[tuple[object, str, object]] | None = None,
+ ) -> Callable[[], dict[str, object] | None]:
++    # pylint: disable=unused-argument
+     return lambda: None
+ # @include_end
+ 
+ 
+ def main(params: Params) -> Result | Callable[[], dict[str, object] | None]:
+     import os
++
+     import bpy  # pylint: disable=import-error,no-name-in-module
+ 
+     use_deferred = not bpy.app.background
+diff --git a/mcp/blmcp/tools/search_api_docs.py b/mcp/blmcp/tools/search_api_docs.py
+index 4269403..c518248 100644
+--- a/mcp/blmcp/tools/search_api_docs.py
++++ b/mcp/blmcp/tools/search_api_docs.py
+@@ -8,22 +8,23 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
+ from blmcp.tools_helpers.rst_doc_search import (
+     SEARCH_TOOL_DESCRIPTION,
+     search,
+     with_doc,
+ )
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Search API Docs",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     @with_doc(SEARCH_TOOL_DESCRIPTION.format(scope_name="Python API reference"))
+     def search_api_docs(
+         query: str,
+diff --git a/mcp/blmcp/tools/search_manual_docs.py b/mcp/blmcp/tools/search_manual_docs.py
+index b016477..8850006 100644
+--- a/mcp/blmcp/tools/search_manual_docs.py
++++ b/mcp/blmcp/tools/search_manual_docs.py
+@@ -8,22 +8,23 @@ __all__ = (
+     "register",
+ )
+ 
++
++from blmcp.mcp_compat import MCPToolServer, clean_doc, tool_annotations
+ from blmcp.tools_helpers.rst_doc_search import (
+     SEARCH_TOOL_DESCRIPTION,
+     search,
+     with_doc,
+ )
+-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error,no-name-in-module
+-from mcp.types import ToolAnnotations  # pylint: disable=import-error,no-name-in-module
+ 
+ 
+-def register(mcp: FastMCP) -> None:
++def register(mcp: MCPToolServer) -> None:
+     @mcp.tool(
+-        annotations=ToolAnnotations(
++        annotations=tool_annotations(
+             title="Search User Manual",
+-            readOnlyHint=True,
++            read_only=True,
+         )
+     )
++    @clean_doc
+     @with_doc(SEARCH_TOOL_DESCRIPTION.format(scope_name="user manual"))
+     def search_manual_docs(
+         query: str,
+diff --git a/mcp/blmcp/tools_helpers/blender_cli.py b/mcp/blmcp/tools_helpers/blender_cli.py
+index 66a4535..06153d8 100644
+--- a/mcp/blmcp/tools_helpers/blender_cli.py
++++ b/mcp/blmcp/tools_helpers/blender_cli.py
+@@ -7,161 +7,503 @@ Run tool-code via ``blender --background``.
+ """
+ 
+ __all__ = (
++    "private_blend_for_cli",
+     "run_blender_cli",
+-    "synced_blend_for_cli",
+ )
+ 
+ import contextlib
+ import json
+-import logging
+ import os
++import signal
+ import subprocess
++import tempfile
++import threading
++import time
+ from collections.abc import Generator
++from typing import BinaryIO, NamedTuple
+ 
+-from blmcp.tools_helpers.connection import send_code
++from blmcp.tools_helpers.connection import BlenderUnavailableError, send_code
+ 
+-_log = logging.getLogger(__name__)
+-
+-_RESULT_PREFIX = "__BLMCP_RESULT__"
+-_ERROR_PREFIX = "__BLMCP_ERROR__"
+ _CLI_TIMEOUT = 120.0
+-_MAX_NUMBERED_PATHS = 10000
++_MAX_RESULT_BYTES = 10 * 1024 * 1024
++_MAX_STDOUT_BYTES = 1024 * 1024
++_MAX_STDERR_BYTES = 1024 * 1024
++_TERMINATE_GRACE_SECONDS = 2.0
++_READ_CHUNK_BYTES = 64 * 1024
++
++
++class _ProcessResult(NamedTuple):
++    returncode: int
++    stdout: str
++    stderr: str
+ 
+ 
+ def _get_blender_path() -> str:
+     return os.environ.get("BLENDER_PATH", "blender")
+ 
+ 
+-def run_blender_cli(
+-    blend_file: str,
+-    code: str,
+-    timeout: float = _CLI_TIMEOUT,
+-) -> dict[str, object]:
+-    """
+-    Run Python code inside ``blender --background``.
++def _remaining_deadline(deadline: float) -> float:
++    remaining = deadline - time.monotonic()
++    if remaining <= 0.0:
++        raise RuntimeError("Blender CLI deadline expired")
++    return remaining
+ 
+-    *blend_file* is the path to the ``.blend`` file to open.
+-    *code* is executed via ``exec()`` and should assign to ``result``.
+ 
+-    Returns the JSON-de-serialized ``result`` value.
+-    """
+-    blender = _get_blender_path()
++def _validate_blend_file(blend_file: str) -> str:
++    if not blend_file.strip():
++        raise ValueError("blend_file must not be empty")
++    path = os.path.realpath(os.path.abspath(os.path.expanduser(blend_file)))
++    if not os.path.exists(path):
++        raise ValueError("blend_file does not exist: {:s}".format(path))
++    if not os.path.isfile(path):
++        raise ValueError("blend_file is not a file: {:s}".format(path))
++    if not path.lower().endswith(".blend"):
++        raise ValueError("blend_file must end with .blend: {:s}".format(path))
++    return path
++
+ 
+-    wrapper = (
+-        "import json\n"
++def _wrapper_code(code: str, result_path: str) -> str:
++    return (
++        "import json, os\n"
+         "try:\n"
+-        "    _ns = {{'result': {{}}}}\n"
+-        "    exec({!r}, _ns)\n"
++        "    _ns = {'result': {}}\n"
++        "    exec(" + repr(code) + ", _ns)\n"
+         "    _result = _ns['result']\n"
+         "    if not isinstance(_result, dict):\n"
+-        "        raise TypeError(\n"
+-        "            'The `result` variable must be a dict, not ' +\n"
+-        "            type(_result).__name__ +\n"
+-        "            '. Wrap your return value: `result = {{\"key\": value}}`')\n"
+-        # This only executes arbitrary (LLM-generated) code, not regular tools,
+-        # so use `default=repr` (equivalent to `strict_json=False`).
+-        '    print("{:s}" + json.dumps(_result, default=repr))\n'
+-        "except Exception as ex:\n"
+-        '    print("{:s}" + json.dumps(str(ex)))\n'
+-    ).format(code, _RESULT_PREFIX, _ERROR_PREFIX)
++        "        raise TypeError('The `result` variable must be a dict, not ' + "
++        "type(_result).__name__)\n"
++        "    _encoded = json.dumps({'ok': True, 'result': _result}, "
++        "default=repr).encode('utf-8')\n"
++        "except Exception as _ex:\n"
++        "    _encoded = json.dumps({'ok': False, 'error': str(_ex)}).encode('utf-8')\n"
++        "if len(_encoded) > " + str(_MAX_RESULT_BYTES) + ":\n"
++        "    _encoded = json.dumps({'ok': False, 'error': "
++        "'Result exceeds " + str(_MAX_RESULT_BYTES) + " byte limit'}).encode('utf-8')\n"
++        "with open(" + repr(result_path) + ", 'xb') as _fh:\n"
++        "    _fh.write(_encoded)\n"
++        "    _fh.flush()\n"
++        "    os.fsync(_fh.fileno())\n"
++    )
+ 
++
++def _drain_stream(
++    stream: BinaryIO,
++    limit: int,
++    chunks: list[bytes],
++    overflow: threading.Event,
++) -> None:
++    total = 0
++    while chunk := stream.read(_READ_CHUNK_BYTES):
++        remaining = limit - total
++        if remaining > 0:
++            chunks.append(chunk[:remaining])
++        total += len(chunk)
++        if total > limit:
++            overflow.set()
++
++
++def _process_exited(proc: "subprocess.Popen[bytes]") -> bool:
++    if proc.poll() is not None:
++        return True
+     try:
+-        proc = subprocess.run(
+-            [blender, "--background", blend_file, "--python-expr", wrapper],
+-            capture_output=True,
+-            text=True,
+-            timeout=timeout,
+-            check=False,
++        proc.wait(timeout=0.1)
++    except subprocess.TimeoutExpired:
++        return False
++    return True
++
++
++def _signal_process_group_until(
++    proc: "subprocess.Popen[bytes]",
++    sig: int,
++    deadline: float,
++) -> bool:
++    signaled = False
++    while True:
++        if not signaled:
++            try:
++                os.killpg(proc.pid, sig)
++            except PermissionError:
++                pass
++            except ProcessLookupError:
++                if _process_exited(proc):
++                    return True
++            else:
++                signaled = True
++        proc.poll()
++        try:
++            os.killpg(proc.pid, 0)
++        except PermissionError:
++            # Darwin can report EPERM briefly while a terminated group disappears.
++            pass
++        except ProcessLookupError:
++            if _process_exited(proc):
++                return True
++        if time.monotonic() >= deadline:
++            return False
++        time.sleep(0.02)
++
++
++def _terminate_process_group(proc: "subprocess.Popen[bytes]") -> None:
++    if os.name == "posix":
++        if _signal_process_group_until(
++            proc,
++            signal.SIGTERM,
++            time.monotonic() + _TERMINATE_GRACE_SECONDS,
++        ):
++            return
++        if _signal_process_group_until(
++            proc,
++            signal.SIGKILL,
++            time.monotonic() + _TERMINATE_GRACE_SECONDS,
++        ):
++            return
++        raise RuntimeError("Blender process-group termination could not be confirmed")
++    if proc.poll() is None:
++        proc.terminate()
++        try:
++            proc.wait(timeout=_TERMINATE_GRACE_SECONDS)
++        except subprocess.TimeoutExpired:
++            proc.kill()
++            proc.wait()
++
++
++def _run_process(argv: list[str], timeout: float) -> _ProcessResult:
++    deadline = time.monotonic() + timeout
++    try:
++        proc = subprocess.Popen(  # pylint: disable=consider-using-with
++            argv,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            start_new_session=(os.name == "posix"),
+         )
+-    except subprocess.TimeoutExpired as ex:
+-        raise RuntimeError("Blender CLI timed out after {:.0f}s".format(timeout)) from ex
+     except FileNotFoundError as ex:
+         raise RuntimeError(
+             "Blender executable not found at '{:s}'. "
+-            "Set the BLENDER_PATH environment variable to the correct path.".format(blender)
++            "Set BLENDER_PATH to the correct path.".format(argv[0])
+         ) from ex
+-
+-    for line in proc.stdout.splitlines():
+-        if line.startswith(_RESULT_PREFIX):
+-            result = json.loads(line[len(_RESULT_PREFIX):])
+-            if not isinstance(result, dict):
+-                raise TypeError("Expected dict from Blender CLI, got {!r}".format(type(result)))
+-            return result
+-        if line.startswith(_ERROR_PREFIX):
+-            raise RuntimeError("Blender error: {:s}".format(json.loads(line[len(_ERROR_PREFIX):])))
+-
+-    raise RuntimeError(
+-        "No result marker in Blender output.\nstdout: {:s}\nstderr: {:s}".format(proc.stdout, proc.stderr)
++    assert proc.stdout is not None
++    assert proc.stderr is not None
++    stdout_chunks: list[bytes] = []
++    stderr_chunks: list[bytes] = []
++    stdout_overflow = threading.Event()
++    stderr_overflow = threading.Event()
++    readers = (
++        threading.Thread(
++            target=_drain_stream,
++            args=(proc.stdout, _MAX_STDOUT_BYTES, stdout_chunks, stdout_overflow),
++            daemon=True,
++        ),
++        threading.Thread(
++            target=_drain_stream,
++            args=(proc.stderr, _MAX_STDERR_BYTES, stderr_chunks, stderr_overflow),
++            daemon=True,
++        ),
+     )
++    for reader in readers:
++        reader.start()
++    failure: str | None = None
++    termination_error: RuntimeError | None = None
++    termination_attempted = False
++    while proc.poll() is None:
++        if stdout_overflow.is_set():
++            failure = "stdout exceeds {:d} byte limit".format(_MAX_STDOUT_BYTES)
++            break
++        if stderr_overflow.is_set():
++            failure = "stderr exceeds {:d} byte limit".format(_MAX_STDERR_BYTES)
++            break
++        if time.monotonic() >= deadline:
++            failure = "Blender CLI timed out after {:.0f}s".format(timeout)
++            break
++        time.sleep(0.02)
++    if failure is not None:
++        termination_attempted = True
++        try:
++            _terminate_process_group(proc)
++        except RuntimeError as ex:
++            termination_error = ex
++    for reader in readers:
++        reader.join(timeout=0.1)
++    readers_alive = any(reader.is_alive() for reader in readers)
++    if readers_alive:
++        termination_attempted = True
++        try:
++            _terminate_process_group(proc)
++        except RuntimeError as ex:
++            termination_error = ex
++        else:
++            termination_error = None
++        for reader in readers:
++            reader.join(timeout=_TERMINATE_GRACE_SECONDS)
++        readers_alive = any(reader.is_alive() for reader in readers)
++    if readers_alive:
++        for stream in (proc.stdout, proc.stderr):
++            if not stream.closed:
++                with contextlib.suppress(OSError):
++                    os.close(stream.fileno())
++    for stream in (proc.stdout, proc.stderr):
++        with contextlib.suppress(OSError):
++            stream.close()
++    if readers_alive:
++        for reader in readers:
++            reader.join(timeout=0.1)
++        readers_alive = any(reader.is_alive() for reader in readers)
++    if failure is None and stdout_overflow.is_set():
++        failure = "stdout exceeds {:d} byte limit".format(_MAX_STDOUT_BYTES)
++    if failure is None and stderr_overflow.is_set():
++        failure = "stderr exceeds {:d} byte limit".format(_MAX_STDERR_BYTES)
++    if failure is not None and not termination_attempted:
++        try:
++            _terminate_process_group(proc)
++        except RuntimeError as ex:
++            termination_error = ex
++    if readers_alive:
++        raise RuntimeError("Blender output reader did not terminate")
++    if termination_error is not None:
++        raise termination_error
++    stdout = b"".join(stdout_chunks).decode("utf-8", errors="replace")
++    stderr = b"".join(stderr_chunks).decode("utf-8", errors="replace")
++    if failure is not None:
++        raise RuntimeError(failure)
++    assert proc.returncode is not None
++    return _ProcessResult(proc.returncode, stdout, stderr)
+ 
+ 
+-def _numbered_blend_path(filepath: str) -> str:
+-    """
+-    Return an unused path like ``/path/to/file_mcp_0001.blend``.
++def run_blender_cli(
++    blend_file: str,
++    code: str,
++    timeout: float = _CLI_TIMEOUT,
++    *,
++    deadline: float | None = None,
++) -> dict[str, object]:
+     """
+-    base, ext = os.path.splitext(filepath)
+-    for i in range(1, _MAX_NUMBERED_PATHS):
+-        candidate = "{:s}_mcp_{:04d}{:s}".format(base, i, ext)
+-        if not os.path.exists(candidate):
+-            return candidate
+-    raise RuntimeError("Could not find an unused numbered path for '{:s}'".format(filepath))
+-
++    Run Python code inside ``blender --background``.
+ 
+-@contextlib.contextmanager
+-def synced_blend_for_cli(blend_file: str) -> Generator[str, None, None]:
+-    """
+-    Context manager that ensures *blend_file* reflects unsaved changes.
++    *blend_file* is the path to the ``.blend`` file to open.
++    *code* is executed via ``exec()`` and should assign to ``result``.
+ 
+-    When a running Blender instance has the same file open with unsaved
+-    modifications, a numbered copy is saved and yielded. The copy is
+-    deleted on exit. When no instance is reachable or the file is clean,
+-    *blend_file* is yielded unchanged.
++    Returns the JSON-de-serialized ``result`` value.
+     """
+-    temp_path: str | None = None
+-    try:
+-        try:
+-            response = send_code(
+-                "import bpy, os\n"
+-                "result = {\"is_dirty\": bpy.data.is_dirty, \"filepath\": bpy.data.filepath}\n",
+-                strict_json=True,
++    timeout_deadline = time.monotonic() + timeout
++    if deadline is None:
++        deadline = timeout_deadline
++    else:
++        deadline = min(deadline, timeout_deadline)
++    blender = _get_blender_path()
++    validated_blend = _validate_blend_file(blend_file)
++    with tempfile.TemporaryDirectory(prefix="blmcp-result-") as result_dir:
++        result_path = os.path.join(result_dir, "result.json")
++        wrapper = _wrapper_code(code, result_path)
++        proc = _run_process(
++            [blender, "--background", validated_blend, "--python-expr", wrapper],
++            _remaining_deadline(deadline),
++        )
++        _remaining_deadline(deadline)
++        if proc.returncode != 0:
++            raise RuntimeError(
++                "Blender CLI exited with status {:d}: {:s}".format(
++                    proc.returncode, proc.stderr[-4096:]
++                )
+             )
+-        except ConnectionError:
+-            # No running Blender instance, use the on-disk file as-is.
+-            yield blend_file
+-            return
+-
+-        if response.get("status") != "ok":
+-            raise RuntimeError(str(response.get("message", "Unknown error")))
+-        result = response["result"]
+-        assert isinstance(result, dict)
+-        is_dirty = result.get("is_dirty", False)
+-        blender_filepath = str(result.get("filepath", ""))
+-
+-        # Compare normalized paths to see if this is the same file.
++        if not os.path.isfile(result_path):
++            raise RuntimeError("Blender CLI exited without a result envelope")
++        if os.path.getsize(result_path) > _MAX_RESULT_BYTES:
++            raise RuntimeError(
++                "Blender result exceeds {:d} byte limit".format(_MAX_RESULT_BYTES)
++            )
++        with open(result_path, encoding="utf-8") as fh:
++            envelope = json.load(fh)
+         if (
+-            not blender_filepath
+-            or os.path.realpath(blend_file) != os.path.realpath(blender_filepath)
++            isinstance(envelope, dict)
++            and set(envelope) == {"ok", "error"}
++            and envelope.get("ok") is False
++            and isinstance(envelope.get("error"), str)
+         ):
+-            yield blend_file
+-            return
++            raise RuntimeError("Blender error: {:s}".format(envelope["error"]))
++        if (
++            not isinstance(envelope, dict)
++            or set(envelope) != {"ok", "result"}
++            or envelope.get("ok") is not True
++        ):
++            raise RuntimeError("Invalid Blender result envelope")
++        result = envelope["result"]
++        if not isinstance(result, dict):
++            raise RuntimeError("Blender result is not a dictionary")  # noqa: TRY004
++        _remaining_deadline(deadline)
++        return result
+ 
+-        if not is_dirty:
+-            yield blend_file
+-            return
+ 
+-        # Dirty file, save a numbered copy.
+-        temp_path = _numbered_blend_path(blend_file)
+-        save_response = send_code(
++@contextlib.contextmanager
++def private_blend_for_cli(
++    blend_file: str,
++    *,
++    deadline: float | None = None,
++) -> Generator[str, None, None]:
++    if deadline is None:
++        deadline = time.monotonic() + _CLI_TIMEOUT
++    source = _validate_blend_file(blend_file)
++    source_parent = os.path.dirname(source)
++    source_stat = os.stat(source)
++    source_identity = (
++        source_stat.st_dev,
++        source_stat.st_ino,
++        source_stat.st_size,
++        source_stat.st_mtime_ns,
++        source_stat.st_ctime_ns,
++    )
++    state: dict[str, object] | None = None
++    try:
++        response = send_code(
+             "import bpy\n"
+-            "bpy.ops.wm.save_as_mainfile(filepath={!r}, copy=True)\n".format(temp_path),
++            "result = {'filepath': bpy.data.filepath, "
++            "'is_dirty': bpy.data.is_dirty}\n",
+             strict_json=True,
++            deadline=deadline,
+         )
+-        if save_response.get("status") != "ok":
+-            raise RuntimeError(str(save_response.get("message", "Unknown error")))
+-        yield temp_path
+-    finally:
+-        if temp_path is not None:
+-            try:
+-                os.remove(temp_path)
+-            except OSError as ex:
+-                _log.warning("Failed to remove temporary file '{:s}': {:s}".format(temp_path, str(ex)))
++        if response.get("status") != "ok":
++            raise RuntimeError(str(response.get("message", "Live state probe failed")))
++        raw_state = response.get("result")
++        if (
++            not isinstance(raw_state, dict)
++            or set(raw_state) != {"filepath", "is_dirty"}
++            or not isinstance(raw_state["filepath"], str)
++            or not isinstance(raw_state["is_dirty"], bool)
++        ):
++            raise RuntimeError("Invalid live state result")
++        state = raw_state
++    except BlenderUnavailableError:
++        pass
++    live_matches = False
++    if state is not None and state["filepath"]:
++        try:
++            live_matches = os.path.samefile(str(state["filepath"]), source)
++        except OSError as ex:
++            raise RuntimeError(
++                "Could not verify live blend-file identity: {:s}".format(str(ex))
++            ) from ex
++    use_live_snapshot = bool(
++        state is not None and live_matches and state["is_dirty"] is True
++    )
++    verify_clean_snapshot = bool(
++        state is not None and live_matches and state["is_dirty"] is False
++    )
++    _remaining_deadline(deadline)
++    job_parent = (
++        os.path.dirname(str(state["filepath"]))
++        if use_live_snapshot and state is not None
++        else source_parent
++    )
++    try:
++        temp = tempfile.TemporaryDirectory(prefix=".blmcp-job-", dir=job_parent)
++    except OSError as ex:
++        if use_live_snapshot:
++            raise RuntimeError(
++                "Could not create private snapshot beside live blend file"
++            ) from ex
++        temp = tempfile.TemporaryDirectory(prefix="blmcp-job-")
++    with temp as job_dir:
++        private_path = os.path.join(job_dir, os.path.basename(source))
++        _remaining_deadline(deadline)
++        if use_live_snapshot:
++            assert state is not None
++            live_filepath = str(state["filepath"])
++            live_is_dirty = bool(state["is_dirty"])
++            response = send_code(
++                "import bpy, os\n"
++                "filepath = bpy.data.filepath\n"
++                "is_dirty = bpy.data.is_dirty\n"
++                "file_stat = os.stat(filepath) if filepath else None\n"
++                "file_identity = ((file_stat.st_dev, file_stat.st_ino, "
++                "file_stat.st_size, file_stat.st_mtime_ns, file_stat.st_ctime_ns) "
++                "if file_stat is not None else None)\n"
++                "matches = bool(filepath == " + repr(live_filepath)
++                + " and os.path.samefile(filepath, " + repr(source) + ")"
++                " and file_identity == " + repr(source_identity) + ")\n"
++                "saved = False\n"
++                "if is_dirty == " + repr(live_is_dirty) + " and matches:\n"
++                "    status = bpy.ops.wm.save_as_mainfile("
++                "filepath=" + repr(private_path) + ", copy=True, "
++                "check_existing=False, relative_remap=True)\n"
++                "    saved = 'FINISHED' in status\n"
++                "result = {'filepath': filepath, 'is_dirty': is_dirty, "
++                "'matches': matches, 'saved': saved}\n",
++                strict_json=True,
++                deadline=deadline,
++            )
++            if response.get("status") != "ok":
++                raise RuntimeError(str(response.get("message", "Live snapshot failed")))
++            raw_result = response.get("result")
++            if not isinstance(raw_result, dict) or set(raw_result) != {
++                "filepath", "is_dirty", "matches", "saved",
++            }:
++                raise RuntimeError("Invalid live snapshot result")
++            if not (
++                isinstance(raw_result["filepath"], str)
++                and isinstance(raw_result["is_dirty"], bool)
++                and isinstance(raw_result["matches"], bool)
++                and isinstance(raw_result["saved"], bool)
++            ):
++                raise RuntimeError("Invalid live snapshot result")
++            if (
++                raw_result["filepath"] != live_filepath
++                or raw_result["is_dirty"] is not live_is_dirty
++                or raw_result["matches"] is not True
++            ):
++                raise RuntimeError("Live blend-file changed before snapshot")
++            if raw_result["saved"] is not True:
++                raise RuntimeError("Live snapshot save failed")
++        if not use_live_snapshot:
++            snapshot_code = (
++                "import bpy\n"
++                "status = bpy.ops.wm.save_as_mainfile("
++                "filepath=" + repr(private_path) + ", copy=True, "
++                "check_existing=False, relative_remap=True)\n"
++                "result = {'saved': 'FINISHED' in status}\n"
++            )
++            value = run_blender_cli(source, snapshot_code, deadline=deadline)
++            if value.get("saved") is not True:
++                raise RuntimeError("Background snapshot save failed")
++            if verify_clean_snapshot:
++                assert state is not None
++                _remaining_deadline(deadline)
++                live_filepath = str(state["filepath"])
++                response = send_code(
++                    "import bpy, os\n"
++                    "filepath = bpy.data.filepath\n"
++                    "is_dirty = bpy.data.is_dirty\n"
++                    "file_stat = os.stat(filepath) if filepath else None\n"
++                    "file_identity = ((file_stat.st_dev, file_stat.st_ino, "
++                    "file_stat.st_size, file_stat.st_mtime_ns, "
++                    "file_stat.st_ctime_ns) "
++                    "if file_stat is not None else None)\n"
++                    "matches = bool(filepath == " + repr(live_filepath)
++                    + " and os.path.samefile(filepath, " + repr(source) + ")"
++                    " and file_identity == " + repr(source_identity) + ")\n"
++                    "result = {'filepath': filepath, 'is_dirty': is_dirty, "
++                    "'matches': matches}\n",
++                    strict_json=True,
++                    deadline=deadline,
++                )
++                if response.get("status") != "ok":
++                    raise RuntimeError(
++                        str(response.get("message", "Live state recheck failed"))
++                    )
++                raw_result = response.get("result")
++                if not isinstance(raw_result, dict) or set(raw_result) != {
++                    "filepath", "is_dirty", "matches",
++                }:
++                    raise RuntimeError("Invalid live state recheck result")
++                if not (
++                    isinstance(raw_result["filepath"], str)
++                    and isinstance(raw_result["is_dirty"], bool)
++                    and isinstance(raw_result["matches"], bool)
++                ):
++                    raise RuntimeError("Invalid live state recheck result")
++                if (
++                    raw_result["filepath"] != live_filepath
++                    or raw_result["is_dirty"] is not False
++                    or raw_result["matches"] is not True
++                ):
++                    raise RuntimeError("Live blend-file changed before snapshot")
++        if not os.path.isfile(private_path):
++            raise RuntimeError("Snapshot was not created: {:s}".format(private_path))
++        yield private_path
+diff --git a/mcp/blmcp/tools_helpers/connection.py b/mcp/blmcp/tools_helpers/connection.py
+index 7f70186..a73ca29 100644
+--- a/mcp/blmcp/tools_helpers/connection.py
++++ b/mcp/blmcp/tools_helpers/connection.py
+@@ -9,6 +9,7 @@ Used by MCP "tools" that send-code to the Blender add-on.
+ """
+ 
+ __all__ = (
++    "BlenderUnavailableError",
+     "get_connection_params",
+     "send_code",
+ )
+@@ -16,20 +17,37 @@ __all__ = (
+ import json
+ import os
+ import socket
++import time
+ 
+ _DEFAULT_HOST = "localhost"
+ _DEFAULT_PORT = 9876
+-_TIMEOUT = 300.0
++_TIMEOUT = 120.0
+ _RECV_BUFFER_SIZE = 65536
+ 
+ 
++class BlenderUnavailableError(ConnectionError):
++    """Raised when the Blender socket server cannot be reached."""
++
++
+ def get_connection_params() -> tuple[str, int]:
+     host = os.environ.get("BLENDER_MCP_HOST", _DEFAULT_HOST)
+     port = int(os.environ.get("BLENDER_MCP_PORT", str(_DEFAULT_PORT)))
+     return host, port
+ 
+ 
+-def send_code(code: str, strict_json: bool) -> dict[str, object]:
++def _remaining_timeout(deadline: float) -> float:
++    remaining = deadline - time.monotonic()
++    if remaining <= 0.0:
++        raise TimeoutError
++    return remaining
++
++
++def send_code(
++    code: str,
++    strict_json: bool,
++    *,
++    deadline: float | None = None,
++) -> dict[str, object]:
+     """
+     Send Python code to the Blender add-on socket server for execution.
+ 
+@@ -38,47 +56,59 @@ def send_code(code: str, strict_json: bool) -> dict[str, object]:
+     ``message`` (on error), and optionally ``stdout``/``stderr``
+     captured during execution.
+ 
+-    Raises ``ConnectionError`` when Blender is unreachable or
+-    returns an invalid response.
++    Raises ``BlenderUnavailableError`` when Blender is unreachable and
++    ``ConnectionError`` when a reachable server returns an invalid response.
+     """
+     host, port = get_connection_params()
++    if deadline is None:
++        deadline = time.monotonic() + _TIMEOUT
+     request = json.dumps({
+         "type": "execute",
+         "code": code,
+         "strict_json": strict_json,
+     }) + "\0"
+ 
+-    try:
+-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+-            sock.settimeout(_TIMEOUT)
++    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
++        try:
++            sock.settimeout(_remaining_timeout(deadline))
+             sock.connect((host, port))
++        except TimeoutError as ex:
++            raise BlenderUnavailableError(
++                "Blender connection timed out at {:s}:{:d}".format(host, port)
++            ) from ex
++        except OSError as ex:
++            raise BlenderUnavailableError(
++                "Cannot connect to Blender at {:s}:{:d}: {:s}. "
++                "Ensure Blender is running with the MCP addon enabled and the server started.".format(
++                    host, port, str(ex),
++                )
++            ) from ex
++
++        try:
++            sock.settimeout(_remaining_timeout(deadline))
+             sock.sendall(request.encode("utf-8"))
+ 
+             # Read response until the null byte delimiter.
+             buf = bytearray()
+             while True:
++                sock.settimeout(_remaining_timeout(deadline))
+                 chunk = sock.recv(_RECV_BUFFER_SIZE)
+                 if not chunk:
+                     break
+                 buf.extend(chunk)
+                 if b"\0" in buf:
+                     break
+-    except ConnectionRefusedError as ex:
+-        raise ConnectionError(
+-            "Cannot connect to Blender at {:s}:{:d}. "
+-            "Ensure Blender is running with the MCP addon enabled and the server started.".format(host, port)
+-        ) from ex
+-    except socket.timeout as ex:
+-        raise ConnectionError(
+-            "Blender connection timed out at {:s}:{:d}".format(host, port)
+-        ) from ex
+-    except OSError as ex:
+-        # NOTE: intentionally not catching `Exception` here.
+-        # Callers use `ConnectionError` to trigger a fallback path;
+-        # a broader catch would mask real bugs as connection failures.
+-        raise ConnectionError(
+-            "Socket error communicating with Blender at {:s}:{:d}: {:s}".format(host, port, str(ex))
+-        ) from ex
++            _remaining_timeout(deadline)
++        except TimeoutError as ex:
++            raise ConnectionError(
++                "Blender response timed out at {:s}:{:d}".format(host, port)
++            ) from ex
++        except OSError as ex:
++            raise ConnectionError(
++                "Socket error after connecting to Blender at {:s}:{:d}: {:s}".format(
++                    host, port, str(ex),
++                )
++            ) from ex
+ 
+     if not buf:
+         raise ConnectionError("Empty response from Blender")
+@@ -91,4 +121,14 @@ def send_code(code: str, strict_json: bool) -> dict[str, object]:
+         raise ConnectionError(
+             "Invalid response from Blender at {:s}:{:d}: {:s}".format(host, port, str(ex))
+         ) from ex
++    if not isinstance(response, dict):
++        raise ConnectionError(
++            "Invalid response from Blender at {:s}:{:d}: expected a JSON object".format(host, port)
++        )
++    try:
++        _remaining_timeout(deadline)
++    except TimeoutError as ex:
++        raise ConnectionError(
++            "Blender response timed out at {:s}:{:d}".format(host, port)
++        ) from ex
+     return response
+diff --git a/mcp/blmcp/tools_helpers/rst_doc_search.py b/mcp/blmcp/tools_helpers/rst_doc_search.py
+index 10a1142..997d501 100644
+--- a/mcp/blmcp/tools_helpers/rst_doc_search.py
++++ b/mcp/blmcp/tools_helpers/rst_doc_search.py
+@@ -21,8 +21,8 @@ __all__ = (
+ import math
+ import os
+ import re
+-from typing import Callable, Iterator
+-
++from collections.abc import Callable, Iterator
++from typing import cast
+ 
+ # Shared description template for the search_*_docs tools. Both
+ # tools have identical user-facing semantics; only the corpus
+@@ -403,7 +403,7 @@ def search(
+             # endpoint. A section transition always starts a fresh
+             # hit so the breadcrumb and title bonus reflect exactly
+             # the scope of the merged cluster.
+-            hits[-1]["score"] += tfidf_score  # type: ignore[operator]
++            hits[-1]["score"] = cast(float, hits[-1]["score"]) + tfidf_score
+             last_idx = idx
+             continue
+         lo = max(0, idx - context)
+@@ -431,10 +431,10 @@ def search(
+     # score an integer in the response as LLM consumers expect
+     # while avoiding per-fold rounding drift.
+     for hit in hits:
+-        hit["score"] = int(round(hit["score"]))  # type: ignore[arg-type]
++        hit["score"] = round(cast(float, hit["score"]))
+ 
+     # Python's sort is stable, so equal-count hits preserve walk order.
+-    hits.sort(key=lambda h: -h["score"])  # type: ignore[operator,return-value]
++    hits.sort(key=lambda h: -cast(float, h["score"]))
+ 
+     truncated = len(hits) > max_results
+     if truncated:
+@@ -460,7 +460,7 @@ def search(
+             return {"hits": [], "truncated": False}
+         hit = dict(hits[index])
+         rel_for_expand = str(hit["path"])
+-        seed_idx = int(hit["_seed_idx"])  # type: ignore[arg-type]
++        seed_idx = cast(int, hit["_seed_idx"])
+         # Reconstruct the absolute path the same way iter_rst_paths
+         # produces it, so the cache key matches and the fetch is a
+         # hit rather than a re-parse.
+diff --git a/mcp/blmcp/tools_helpers/rst_parse_docs.py b/mcp/blmcp/tools_helpers/rst_parse_docs.py
+index ba874be..78577e5 100644
+--- a/mcp/blmcp/tools_helpers/rst_parse_docs.py
++++ b/mcp/blmcp/tools_helpers/rst_parse_docs.py
+@@ -34,16 +34,18 @@ import collections
+ import io
+ import os
+ from collections.abc import (
++    Callable,
+     Iterable,
+     Iterator,
+ )
++from typing import Any, ClassVar, TypeGuard, cast
+ 
+ import docutils  # pylint: disable=import-error
+ import docutils.parsers.rst  # pylint: disable=import-error
+ import docutils.utils  # pylint: disable=import-error
+ from docutils.parsers.rst import directives, roles  # pylint: disable=import-error
+ 
+-_DocTree = object
++_DocTree = docutils.nodes.document
+ 
+ 
+ def data_dir() -> str:
+@@ -57,9 +59,9 @@ def data_dir() -> str:
+ # Directive and role stubs.
+ 
+ def _directive_ignore(
+-        name, arguments, options, content, lineno,
+-        content_offset, block_text, state, state_machine,
+-):
++        _name: Any, _arguments: Any, _options: Any, content: Any, _lineno: Any,
++        _content_offset: Any, _block_text: Any, _state: Any, _state_machine: Any,
++) -> list[docutils.nodes.Node]:
+     """
+     Used to explicitly mark as doctest blocks things that otherwise
+     wouldn't look like doctest blocks.
+@@ -70,20 +72,20 @@ def _directive_ignore(
+     return [docutils.nodes.doctest_block(text, text, codeblock=True)]
+ 
+ 
+-_directive_ignore.content = True
++_directive_ignore.content = True  # type: ignore[attr-defined]
+ 
+ 
+ def _directive_ignore_recursive(
+-        name, arguments, options, content, lineno,
+-        content_offset, block_text, state, state_machine,
+-):
++        _name: Any, _arguments: Any, _options: Any, _content: Any, _lineno: Any,
++        _content_offset: Any, _block_text: Any, _state: Any, _state_machine: Any,
++) -> list[docutils.nodes.Node]:
+     """
+     Ignore everything under this directive (use with care!)
+     """
+     return []
+ 
+ 
+-_directive_ignore_recursive.content = True
++_directive_ignore_recursive.content = True  # type: ignore[attr-defined]
+ 
+ 
+ class _DirectivePreserve(docutils.parsers.rst.Directive):
+@@ -99,7 +101,7 @@ class _DirectivePreserve(docutils.parsers.rst.Directive):
+     has_content = True
+     option_spec = None
+ 
+-    def run(self):
++    def run(self) -> list[docutils.nodes.Node]:
+         container = docutils.nodes.container()
+         container["directive_name"] = self.name
+         args_str = " ".join(self.arguments) if self.arguments else ""
+@@ -123,7 +125,7 @@ class _DirectiveLiteralInclude(_DirectivePreserve):
+     ``get_python_api_docs``) can honour ``:lines:`` slicing - the base
+     class's ``option_spec = None`` drops them on the floor.
+     """
+-    option_spec = {
++    option_spec: ClassVar[dict[str, Callable[[str | None], str | None]]] = {  # type: ignore[assignment]
+         "lines": directives.unchanged,
+         "language": directives.unchanged,
+         "dedent": directives.unchanged,
+@@ -146,7 +148,7 @@ class _DirectiveLiteralInclude(_DirectivePreserve):
+         "force": directives.flag,
+     }
+ 
+-    def run(self):
++    def run(self) -> list[docutils.nodes.Node]:
+         container = docutils.nodes.container()
+         container["directive_name"] = self.name
+         args_str = " ".join(self.arguments) if self.arguments else ""
+@@ -175,9 +177,9 @@ class _RoleIgnore(docutils.nodes.Inline, docutils.nodes.TextElement):
+ 
+ 
+ def _role_ignore(
+-        name, rawtext, text, lineno, inliner,
+-        options=None, content=None,
+-):
++        _name: Any, _rawtext: Any, text: str, lineno: int, inliner: Any,
++        options: dict[str, Any] | None = None, content: list[str] | None = None,
++) -> tuple[list[docutils.nodes.Node], list[docutils.nodes.system_message]]:
+     if options is None:
+         options = {}
+     if content is None:
+@@ -237,7 +239,7 @@ def _register_stubs() -> None:
+             "versionchanged",
+             "warning",
+     ):
+-        directives.register_directive(name, _directive_ignore)
++        directives.register_directive(name, _directive_ignore)  # type: ignore[arg-type]
+ 
+     # Navigation-only directives: drop entirely.
+     for name in (
+@@ -261,7 +263,7 @@ def _register_stubs() -> None:
+             "vimeo",
+             "youtube",
+     ):
+-        directives.register_directive(name, _directive_ignore_recursive)
++        directives.register_directive(name, _directive_ignore_recursive)  # type: ignore[arg-type]
+ 
+     # Preserve the visible text of every role we encounter - identifiers
+     # inside cross-references like `:class:`bpy.types.BlendData` are
+@@ -293,7 +295,7 @@ def _register_stubs() -> None:
+             "ref",
+             "term",
+     ):
+-        roles.register_local_role(name, _role_ignore)
++        roles.register_local_role(name, _role_ignore)  # type: ignore[arg-type]
+ 
+ 
+ _register_stubs()
+@@ -303,7 +305,7 @@ _register_stubs()
+ # Parsing and paragraph walking.
+ 
+ 
+-def _default_settings(*, strict: bool = False):
++def _default_settings(*, strict: bool = False) -> Any:
+     """
+     Build a silent docutils settings object suitable for parsing
+     Sphinx-flavoured RST in bulk: warnings go to a per-call sink, the
+@@ -325,8 +327,8 @@ def _default_settings(*, strict: bool = False):
+     process-global buffer.
+     """
+     # pylint: disable-next=import-outside-toplevel
+-    from docutils.frontend import get_default_settings  # type: ignore[import]
+-    settings = get_default_settings(docutils.parsers.rst.Parser)
++    from docutils.frontend import get_default_settings
++    settings = get_default_settings(docutils.parsers.rst.Parser)  # type: ignore[arg-type]
+     settings.tab_width = 3
+     settings.pep_references = False
+     settings.rfc_references = False
+@@ -344,14 +346,16 @@ def _default_settings(*, strict: bool = False):
+     return settings
+ 
+ 
+-def _rst_to_doctree(text: str, filename: str = "<input>", *, strict: bool = False):
++def _rst_to_doctree(
++        text: str, filename: str = "<input>", *, strict: bool = False,
++) -> _DocTree:
+     parser = docutils.parsers.rst.Parser()
+     doc = docutils.utils.new_document(filename, _default_settings(strict=strict))
+     parser.parse(text, doc)
+     return doc
+ 
+ 
+-def _render_field_list(node) -> str:
++def _render_field_list(node: docutils.nodes.Element) -> str:
+     parts: list[str] = []
+     for field in node.children:
+         if not isinstance(field, docutils.nodes.field):
+@@ -367,7 +371,7 @@ def _render_field_list(node) -> str:
+     return "\n".join(parts)
+ 
+ 
+-def _node_text(node) -> str:
++def _node_text(node: docutils.nodes.Node) -> str:
+     """
+     Return a string representation of *node* suitable for inclusion in
+     a paragraph. Rawsource is preferred where present; field lists are
+@@ -375,20 +379,22 @@ def _node_text(node) -> str:
+     """
+     if isinstance(node, docutils.nodes.field_list):
+         return _render_field_list(node)
+-    raw = getattr(node, "rawsource", "")
++    raw = cast(str, getattr(node, "rawsource", ""))
+     if raw:
+         return raw
+     return node.astext()
+ 
+ 
+-def _is_directive_container(node) -> bool:
++def _is_directive_container(
++        node: docutils.nodes.Node,
++) -> TypeGuard[docutils.nodes.container]:
+     return (
+         isinstance(node, docutils.nodes.container) and
+         node.get("directive_name") is not None
+     )
+ 
+ 
+-def _walk_paragraphs(doctree):
++def _walk_paragraphs(doctree: docutils.nodes.Node) -> Iterator[str]:
+     """
+     Yield paragraph strings from a document tree.
+ 
+@@ -400,7 +406,7 @@ def _walk_paragraphs(doctree):
+     """
+     pending_titles: list[str] = []
+ 
+-    def _flush_with_pending(text: str):
++    def _flush_with_pending(text: str) -> str:
+         nonlocal pending_titles
+         if pending_titles:
+             out = "\n\n".join(pending_titles + [text])
+@@ -408,7 +414,7 @@ def _walk_paragraphs(doctree):
+             return out
+         return text
+ 
+-    def _emit(node):
++    def _emit(node: docutils.nodes.Node) -> Iterator[str]:
+         nonlocal pending_titles
+         if isinstance(node, (docutils.nodes.document, docutils.nodes.section)):
+             for child in node.children:
+@@ -421,7 +427,7 @@ def _walk_paragraphs(doctree):
+             return
+         if _is_directive_container(node):
+             prelude_parts: list[str] = []
+-            nested: list = []
++            nested: list[docutils.nodes.Node] = []
+             for child in node.children:
+                 if _is_directive_container(child):
+                     nested.append(child)
+@@ -512,7 +518,7 @@ def split_paragraphs_for_path(path: str) -> list[str]:
+ 
+ 
+ def _walk_paragraphs_with_sections(
+-        doctree,
++        doctree: docutils.nodes.Node,
+ ) -> Iterator[tuple[str, tuple[str, ...]]]:
+     """
+     Yield ``(text, section_stack)`` per paragraph.
+@@ -535,7 +541,7 @@ def _walk_paragraphs_with_sections(
+             return out
+         return text
+ 
+-    def _emit(node):
++    def _emit(node: docutils.nodes.Node) -> Iterator[tuple[str, tuple[str, ...]]]:
+         nonlocal pending_titles
+         if isinstance(node, docutils.nodes.document):
+             for child in node.children:
+@@ -573,7 +579,7 @@ def _walk_paragraphs_with_sections(
+             return
+         if _is_directive_container(node):
+             prelude_parts: list[str] = []
+-            nested: list = []
++            nested: list[docutils.nodes.Node] = []
+             for child in node.children:
+                 if _is_directive_container(child):
+                     nested.append(child)
+@@ -692,6 +698,7 @@ def _iter_parse_doctrees(
+ 
+     # pylint: disable-next=import-outside-toplevel
+     import itertools
++
+     # pylint: disable-next=import-outside-toplevel
+     from concurrent.futures import ProcessPoolExecutor
+     # `chunksize=1` (also the default) gives finest-grained load
+@@ -742,7 +749,7 @@ def iter_doctrees_for_paths(
+ # Intra-file definition lookup.
+ 
+ 
+-def _container_signature_name(container) -> str | None:
++def _container_signature_name(container: docutils.nodes.Element) -> str | None:
+     """
+     Return the identifier defined by an API-preserving directive
+     container, or ``None`` if the first child isn't a signature block.
+@@ -767,7 +774,7 @@ def _container_signature_name(container) -> str | None:
+     return rest.split("(", 1)[0].strip() or None
+ 
+ 
+-def find_definition_in_doctree(doctree, name: str) -> str | None:
++def find_definition_in_doctree(doctree: _DocTree, name: str) -> str | None:
+     """
+     Search *doctree* for an API-defining directive whose signature
+     defines *name*, and return its rendered RST block or ``None``.
+@@ -815,7 +822,7 @@ _DEFINITION_DIRECTIVES = frozenset({
+ })
+ 
+ 
+-def list_doctree_definitions(doctree) -> list[str]:
++def list_doctree_definitions(doctree: _DocTree) -> list[str]:
+     """
+     Return the sorted, deduplicated top-level API definition
+     identifiers in *doctree* - every container emitted by
+@@ -832,8 +839,8 @@ def list_doctree_definitions(doctree) -> list[str]:
+     """
+     names: set[str] = set()
+ 
+-    def _walk(node):
+-        for child in node.children:
++    def _walk(node: docutils.nodes.Node) -> None:
++        for child in getattr(node, "children", ()):
+             if _is_directive_container(child):
+                 if child.get("directive_name") in _DEFINITION_DIRECTIVES:
+                     name = _container_signature_name(child)
+@@ -847,12 +854,12 @@ def list_doctree_definitions(doctree) -> list[str]:
+     return sorted(names)
+ 
+ 
+-def _find_definition(node, parts: list[str]) -> str | None:
++def _find_definition(node: docutils.nodes.Node, parts: list[str]) -> str | None:
+     if not parts:
+         return None
+     head = parts[0]
+     rest = parts[1:]
+-    for child in node.children:
++    for child in getattr(node, "children", ()):
+         if _is_directive_container(child):
+             if _container_signature_name(child) != head:
+                 continue
+diff --git a/mcp/pyproject.toml b/mcp/pyproject.toml
+index 1c88362..a90fb90 100644
+--- a/mcp/pyproject.toml
++++ b/mcp/pyproject.toml
+@@ -9,7 +9,7 @@ description = "MCP server for Blender"
+ requires-python = ">=3.10"
+ dependencies = [
+     "docutils",
+-    "mcp[cli]>=1.2.0",
++    "mcp[cli]>=1.28.1,<3",
+     "pyyaml",
+ ]
+ 
+-- 
+2.50.1 (Apple Git-155)
+

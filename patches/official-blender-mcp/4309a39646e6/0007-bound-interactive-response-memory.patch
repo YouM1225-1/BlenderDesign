@@ -1,0 +1,265 @@
+From 8573b252d32527b3467d914646f74624cde19c6e Mon Sep 17 00:00:00 2001
+From: BlenderDesign Certification <noreply@example.invalid>
+Date: Sun, 23 Aug 2026 17:49:29 +0800
+Subject: [PATCH] Bound interactive response memory
+
+Cap captured output, serialized responses, and client receive buffers; reject oversized or unterminated live transport frames.
+---
+ Makefile                                      |   1 +
+ addon/blender_mcp_addon/capture_output.py     |  14 ++-
+ .../mcp_to_blender_server.py                  |   9 +-
+ mcp/blmcp/tools_helpers/connection.py         |  22 +++-
+ tests/test_transport_limits.py                | 106 ++++++++++++++++++
+ 5 files changed, 147 insertions(+), 5 deletions(-)
+ create mode 100644 tests/test_transport_limits.py
+
+diff --git a/Makefile b/Makefile
+index ab85a33..de31f2d 100644
+--- a/Makefile
++++ b/Makefile
+@@ -89,6 +89,7 @@ test:
+ 	$(PYTHON) tests/test_rst_parse.py
+ 	$(PYTHON) tests/test_rst_search.py
+ 	$(PYTHON) tests/test_mcp_server.py
++	$(PYTHON) tests/test_transport_limits.py
+ 	$(PYTHON) tests/test_blender_mcp_with_blender.py
+ 
+ test_rst_parse:
+diff --git a/addon/blender_mcp_addon/capture_output.py b/addon/blender_mcp_addon/capture_output.py
+index 7d0e73b..f102a43 100644
+--- a/addon/blender_mcp_addon/capture_output.py
++++ b/addon/blender_mcp_addon/capture_output.py
+@@ -17,6 +17,8 @@ import sys
+ from typing import IO, TypeVar
+ 
+ _CaptureOutputT = TypeVar("_CaptureOutputT", bound="CaptureOutput")
++_MAX_CAPTURE_CHARS = 1024 * 1024
++_TRUNCATED = "\n[output truncated at {:d} characters]".format(_MAX_CAPTURE_CHARS)
+ 
+ 
+ class _Tee(io.TextIOBase):
+@@ -24,22 +26,30 @@ class _Tee(io.TextIOBase):
+     __slots__ = (
+         "_buffer",
+         "_original",
++        "_truncated",
+     )
+ 
+     def __init__(self, original: IO[str]) -> None:
+         self._buffer = io.StringIO()
+         self._original = original
++        self._truncated = False
+ 
+     def write(self, s: str) -> int:
+         self._original.write(s)
+-        return self._buffer.write(s)
++        remaining = _MAX_CAPTURE_CHARS - self._buffer.tell()
++        if remaining > 0:
++            self._buffer.write(s[:remaining])
++        if len(s) > remaining:
++            self._truncated = True
++        return len(s)
+ 
+     def flush(self) -> None:
+         self._original.flush()
+         self._buffer.flush()
+ 
+     def getvalue(self) -> str:
+-        return self._buffer.getvalue()
++        value = self._buffer.getvalue()
++        return value + _TRUNCATED if self._truncated else value
+ 
+ 
+ class CaptureOutput:
+diff --git a/addon/blender_mcp_addon/mcp_to_blender_server.py b/addon/blender_mcp_addon/mcp_to_blender_server.py
+index 125afbc..cc1c8ca 100644
+--- a/addon/blender_mcp_addon/mcp_to_blender_server.py
++++ b/addon/blender_mcp_addon/mcp_to_blender_server.py
+@@ -125,6 +125,7 @@ def timer_idle_interval() -> float:
+ use_log: bool = False
+ 
+ _MAX_REQUEST_BYTES = 10 * 1024 * 1024  # 10 MiB.
++_MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # 10 MiB, excluding the delimiter.
+ # Maximum number of queued incoming connections.
+ _LISTEN_BACKLOG = 5
+ _MAX_CLIENTS = 16
+@@ -217,7 +218,13 @@ def _encode_response(response: dict[str, object]) -> bytes:
+     """
+     Serialize a response dict as null-byte-delimited JSON bytes.
+     """
+-    return (json.dumps(response) + "\0").encode("utf-8")
++    encoded = json.dumps(response).encode("utf-8")
++    if len(encoded) > _MAX_RESPONSE_BYTES:
++        encoded = json.dumps({
++            "status": "error",
++            "message": "Response exceeds {:d} byte limit".format(_MAX_RESPONSE_BYTES),
++        }).encode("utf-8")
++    return encoded + b"\0"
+ 
+ 
+ def _execute_code(
+diff --git a/mcp/blmcp/tools_helpers/connection.py b/mcp/blmcp/tools_helpers/connection.py
+index a73ca29..48ec0a3 100644
+--- a/mcp/blmcp/tools_helpers/connection.py
++++ b/mcp/blmcp/tools_helpers/connection.py
+@@ -23,6 +23,7 @@ _DEFAULT_HOST = "localhost"
+ _DEFAULT_PORT = 9876
+ _TIMEOUT = 120.0
+ _RECV_BUFFER_SIZE = 65536
++_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+ 
+ 
+ class BlenderUnavailableError(ConnectionError):
+@@ -96,13 +97,28 @@ def send_code(
+                 if not chunk:
+                     break
+                 buf.extend(chunk)
+-                if b"\0" in buf:
++                delimiter = buf.find(b"\0")
++                if delimiter >= 0:
++                    if delimiter > _MAX_RESPONSE_BYTES:
++                        raise ConnectionError(
++                            "Blender response exceeds {:d} byte limit".format(
++                                _MAX_RESPONSE_BYTES
++                            )
++                        )
+                     break
++                if len(buf) > _MAX_RESPONSE_BYTES:
++                    raise ConnectionError(
++                        "Blender response exceeds {:d} byte limit".format(
++                            _MAX_RESPONSE_BYTES
++                        )
++                    )
+             _remaining_timeout(deadline)
+         except TimeoutError as ex:
+             raise ConnectionError(
+                 "Blender response timed out at {:s}:{:d}".format(host, port)
+             ) from ex
++        except ConnectionError:
++            raise
+         except OSError as ex:
+             raise ConnectionError(
+                 "Socket error after connecting to Blender at {:s}:{:d}: {:s}".format(
+@@ -114,7 +130,9 @@ def send_code(
+         raise ConnectionError("Empty response from Blender")
+ 
+     # Parse only up to the first null byte delimiter.
+-    line, _sep, _rest = buf.partition(b"\0")
++    line, sep, _rest = buf.partition(b"\0")
++    if not sep:
++        raise ConnectionError("Blender response is missing the null-byte delimiter")
+     try:
+         response: dict[str, object] = json.loads(line.decode("utf-8"))
+     except (json.JSONDecodeError, UnicodeDecodeError) as ex:
+diff --git a/tests/test_transport_limits.py b/tests/test_transport_limits.py
+new file mode 100644
+index 0000000..5e6cbce
+--- /dev/null
++++ b/tests/test_transport_limits.py
+@@ -0,0 +1,106 @@
++# SPDX-FileCopyrightText: 2026 Blender Authors
++#
++# SPDX-License-Identifier: GPL-3.0-or-later
++
++from __future__ import annotations
++
++import importlib.util
++import io
++import json
++import unittest
++from pathlib import Path
++from types import ModuleType
++from typing import Self
++from unittest import mock
++
++from blmcp.tools_helpers import connection
++
++ROOT = Path(__file__).parents[1]
++
++
++def _load(name: str, path: Path) -> ModuleType:
++    spec = importlib.util.spec_from_file_location(name, path)
++    assert spec is not None and spec.loader is not None
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++class _Sink(io.TextIOBase):
++    def write(self, value: str) -> int:
++        return len(value)
++
++
++class _Socket:
++    def __init__(self, chunks: list[bytes]) -> None:
++        self._chunks = chunks
++
++    def __enter__(self) -> Self:
++        return self
++
++    def __exit__(self, *_args: object) -> None:
++        pass
++
++    def settimeout(self, _timeout: float) -> None:
++        pass
++
++    def connect(self, _address: tuple[str, int]) -> None:
++        pass
++
++    def sendall(self, _request: bytes) -> None:
++        pass
++
++    def recv(self, _size: int) -> bytes:
++        return self._chunks.pop(0)
++
++
++class TestTransportLimits(unittest.TestCase):
++    def test_addon_bounds_captured_output_and_serialized_response(self) -> None:
++        capture = _load(
++            "capture_output_for_test",
++            ROOT / "addon/blender_mcp_addon/capture_output.py",
++        )
++        with mock.patch.object(capture, "_MAX_CAPTURE_CHARS", 8):
++            tee = capture._Tee(_Sink())
++            self.assertEqual(tee.write("0123456789"), 10)
++            self.assertTrue(tee.getvalue().startswith("01234567\n[output truncated"))
++
++        server = _load(
++            "mcp_to_blender_server_for_test",
++            ROOT / "addon/blender_mcp_addon/mcp_to_blender_server.py",
++        )
++        with mock.patch.object(server, "_MAX_RESPONSE_BYTES", 128):
++            encoded = server._encode_response({"status": "ok", "result": "x" * 256})
++        self.assertTrue(encoded.endswith(b"\0"))
++        self.assertLessEqual(len(encoded), 129)
++        self.assertEqual(json.loads(encoded[:-1])["status"], "error")
++
++    def test_client_rejects_oversized_or_unframed_response(self) -> None:
++        with (
++            mock.patch.object(connection, "_MAX_RESPONSE_BYTES", 32),
++            mock.patch.object(
++                connection.socket,
++                "socket",
++                side_effect=lambda *_args: _Socket([b"x" * 33]),
++            ),
++            self.assertRaisesRegex(ConnectionError, "exceeds 32 byte limit"),
++        ):
++            connection.send_code("result = {}", strict_json=True)
++
++        with (
++            mock.patch.object(
++                connection.socket,
++                "socket",
++                side_effect=lambda *_args: _Socket(
++                    [b'{"status":"ok","result":{}}', b""]
++                ),
++            ),
++            self.assertRaisesRegex(
++                ConnectionError, "missing the null-byte delimiter"
++            ),
++        ):
++            connection.send_code("result = {}", strict_json=True)
++
++
++if __name__ == "__main__":
++    unittest.main()

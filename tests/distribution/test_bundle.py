@@ -19,6 +19,9 @@ sys.path.insert(0, str(ROOT / "plugins/blender-mcp-installer/scripts"))
 from blender_mcp_installer.bundle import (  # noqa: E402
     ARTIFACTS,
     BUNDLE_VERSION,
+    DOWNSTREAM_PATCHES,
+    PATCH_README_SHA256,
+    PATCHED_SOURCE_SHA256,
     TOOLS,
     UPSTREAM_COMMIT,
     open_verified_bundle,
@@ -37,7 +40,95 @@ COMMIT = UPSTREAM_COMMIT
 
 def test_bundle_version_is_derived_from_upstream_commit() -> None:
     assert len(UPSTREAM_COMMIT) == 40
-    assert BUNDLE_VERSION == "1.0.0+" + UPSTREAM_COMMIT[:12]
+    assert BUNDLE_VERSION == ("1.0.0+" + UPSTREAM_COMMIT[:12] + ".p" + PATCHED_SOURCE_SHA256[:12])
+
+
+def test_downstream_patch_files_match_trusted_digests() -> None:
+    patch_dir = ROOT / "patches/official-blender-mcp" / UPSTREAM_COMMIT[:12]
+    assert {path.name for path in patch_dir.iterdir()} == {
+        "README.md",
+        *(item[0] for item in DOWNSTREAM_PATCHES),
+    }
+    readme = (patch_dir / "README.md").read_text()
+    for filename, digest, summary in DOWNSTREAM_PATCHES:
+        assert hashlib.sha256((patch_dir / filename).read_bytes()).hexdigest() == digest
+        assert filename in readme
+        assert digest in readme
+        assert summary in (patch_dir / filename).read_text()
+    assert hashlib.sha256((patch_dir / "README.md").read_bytes()).hexdigest() == PATCH_README_SHA256
+
+
+def test_builder_rejects_changed_downstream_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    patch_dir = tmp_path / "patches"
+    shutil.copytree(builder.PATCH_DIR, patch_dir)
+    first = patch_dir / DOWNSTREAM_PATCHES[0][0]
+    first.write_bytes(first.read_bytes() + b"\n")
+    monkeypatch.setattr(builder, "PATCH_DIR", patch_dir)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with pytest.raises(ValueError, match="downstream patch hash mismatch"):
+        builder._stage_downstream_patches(workspace)
+
+
+def test_builder_rejects_changed_downstream_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    patch_dir = tmp_path / "patches"
+    shutil.copytree(builder.PATCH_DIR, patch_dir)
+    readme = patch_dir / "README.md"
+    readme.write_bytes(readme.read_bytes() + b"\n")
+    monkeypatch.setattr(builder, "PATCH_DIR", patch_dir)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with pytest.raises(ValueError, match="patch summary hash mismatch"):
+        builder._stage_downstream_patches(workspace)
+
+
+def test_builder_applies_patch_and_binds_result_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "value.txt").write_text("old\n")
+    patch = tmp_path / "change.patch"
+    patch.write_text(
+        "diff --git a/value.txt b/value.txt\n"
+        "--- a/value.txt\n"
+        "+++ b/value.txt\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    expected = hashlib.sha256()
+    expected.update(b"value.txt\0-")
+    expected.update(hashlib.sha256(b"new\n").digest())
+    monkeypatch.setattr(builder, "PATCHED_SOURCE_SHA256", expected.hexdigest())
+
+    builder._apply_downstream_patches(source, (patch,))
+
+    assert (source / "value.txt").read_text() == "new\n"
+
+
+def test_builder_rejects_patch_against_wrong_base(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "value.txt").write_text("unexpected\n")
+    patch = tmp_path / "change.patch"
+    patch.write_text(
+        "diff --git a/value.txt b/value.txt\n"
+        "--- a/value.txt\n"
+        "+++ b/value.txt\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    with pytest.raises(RuntimeError, match="patch does not apply"):
+        builder._apply_downstream_patches(source, (patch,))
 
 
 def test_builder_patches_thumbnail_for_blender_52_eevee(tmp_path: Path) -> None:
@@ -84,12 +175,20 @@ def manifest() -> dict[str, object]:
         for role, filename in ARTIFACTS
     ]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "bundle_version": BUNDLE_VERSION,
         "platform": {"system": "Darwin", "machine": "arm64"},
         "upstream": {
             "url": "https://projects.blender.org/lab/blender_mcp.git",
             "commit": COMMIT,
+        },
+        "downstream": {
+            "source_tree_sha256": PATCHED_SOURCE_SHA256,
+            "readme_sha256": PATCH_README_SHA256,
+            "patches": [
+                {"filename": filename, "sha256": digest, "summary": summary}
+                for filename, digest, summary in DOWNSTREAM_PATCHES
+            ],
         },
         "python": {"runtime_minor": "3.13", "build_tested": "3.13.13"},
         "blender": {
@@ -106,7 +205,7 @@ def manifest() -> dict[str, object]:
             "python": "3.13.13",
             "blender": "5.2.0",
             "codex_tested": "0.148.0-alpha.9",
-            "backend": {"name": "setuptools", "version": "80.9.0"},
+            "backend": {"name": "setuptools", "version": "83.0.0"},
             "index": "https://pypi.org/simple",
         },
         "tools": list(TOOLS),
@@ -118,7 +217,16 @@ def raw(value: dict[str, object]) -> bytes:
     return json.dumps(value).encode()
 
 
-@pytest.mark.parametrize("where,key", [(None, "extra"), (None, "tools"), ("server", "extra")])
+@pytest.mark.parametrize(
+    "where,key",
+    [
+        (None, "extra"),
+        (None, "tools"),
+        (None, "downstream"),
+        ("downstream", "patches"),
+        ("server", "extra"),
+    ],
+)
 def test_manifest_rejects_unknown_or_missing_keys(where: str | None, key: str) -> None:
     value = manifest()
     target = value if where is None else value[where]
@@ -127,6 +235,27 @@ def test_manifest_rejects_unknown_or_missing_keys(where: str | None, key: str) -
         target.pop(key)
     else:
         target[key] = "x"
+    with pytest.raises(ValueError):
+        parse_manifest(raw(value))
+
+
+@pytest.mark.parametrize("mutation", ["tree", "readme", "filename", "digest", "summary", "order"])
+def test_manifest_rejects_changed_downstream_proof(mutation: str) -> None:
+    value = manifest()
+    downstream = value["downstream"]
+    assert isinstance(downstream, dict)
+    patches = downstream["patches"]
+    assert isinstance(patches, list)
+    if mutation == "tree":
+        downstream["source_tree_sha256"] = "0" * 64
+    elif mutation == "readme":
+        downstream["readme_sha256"] = "0" * 64
+    elif mutation == "order":
+        patches.reverse()
+    else:
+        patch = patches[0]
+        assert isinstance(patch, dict)
+        patch["sha256" if mutation == "digest" else mutation] = "changed"
     with pytest.raises(ValueError):
         parse_manifest(raw(value))
 
@@ -151,7 +280,9 @@ def test_manifest_rejects_bad_names_roles_and_traversal(field: str, value: str) 
         parse_manifest(raw(data))
 
 
-@pytest.mark.parametrize("mutation", ["version", "catalog", "order", "float_port", "bool_epoch"])
+@pytest.mark.parametrize(
+    "mutation", ["version", "catalog", "order", "float_port", "bool_epoch", "backend"]
+)
 def test_manifest_requires_fixed_versions_and_catalog(mutation: str) -> None:
     data = manifest()
     if mutation == "version":
@@ -162,6 +293,8 @@ def test_manifest_requires_fixed_versions_and_catalog(mutation: str) -> None:
         data["bridge"]["port"] = 9876.0
     elif mutation == "bool_epoch":
         data["build"]["source_date_epoch"] = True
+    elif mutation == "backend":
+        data["build"]["backend"]["version"] = "82.0.0"
     else:
         data["artifacts"].reverse()
     with pytest.raises(ValueError):
@@ -244,7 +377,9 @@ def test_checkout_rejects_ignored_scoped_untracked_file(tmp_path: Path) -> None:
         verify_distribution_checkout(bundle, commit, _git)
 
 
-def test_checkout_ignores_redirected_git_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_checkout_ignores_redirected_git_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     bundle, commit = _checkout(tmp_path)
     hostile = tmp_path / "hostile"
     hostile.mkdir()
@@ -261,9 +396,7 @@ def test_checkout_supports_real_subprocess_runner_without_console_output(
     assert capfd.readouterr() == ("", "")
 
 
-def test_checkout_ignores_hostile_path_git(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_checkout_ignores_hostile_path_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bundle, commit = _checkout(tmp_path)
     hostile_bin = tmp_path / "hostile-bin"
     hostile_bin.mkdir()
@@ -337,7 +470,9 @@ def test_checkout_clears_git_config_and_disables_external_status_hooks(
 
 
 @pytest.mark.parametrize("target", ["SHA256SUMS", "blender_mcp-1.0.0-py3-none-any.whl"])
-def test_payload_and_working_checksum_tamper_fails_against_commit_bytes(tmp_path: Path, target: str) -> None:
+def test_payload_and_working_checksum_tamper_fails_against_commit_bytes(
+    tmp_path: Path, target: str
+) -> None:
     bundle, commit = _checkout(tmp_path)
     (bundle / target).write_bytes(b"tamper")
     with pytest.raises(ValueError):
@@ -388,7 +523,9 @@ def test_runtime_lock_is_fully_pinned_and_hashed(lock: str) -> None:
         validate_runtime_lock(lock.encode())
 
 
-def test_builder_uses_two_fresh_git_archives(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_builder_uses_two_fresh_git_archives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source = tmp_path / "source"
     source.mkdir()
     _git(["git", "init", "-q"], source)
@@ -443,11 +580,7 @@ def test_builder_ignores_upstream_replacement_and_source_info_attributes(
     monkeypatch.setattr(builder, "UPSTREAM_COMMIT", reviewed)
     clean_roots, _epoch = builder._extract_two_archives(source, clean_workspace)
     clean_trees = [
-        {
-            path.relative_to(root): path.read_bytes()
-            for path in root.rglob("*")
-            if path.is_file()
-        }
+        {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
         for root in clean_roots
     ]
     hostile_template = tmp_path / "hostile-template"
@@ -461,11 +594,7 @@ def test_builder_ignores_upstream_replacement_and_source_info_attributes(
     workspace.mkdir()
     roots, _epoch = builder._extract_two_archives(source, workspace)
     hostile_trees = [
-        {
-            path.relative_to(root): path.read_bytes()
-            for path in root.rglob("*")
-            if path.is_file()
-        }
+        {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
         for root in roots
     ]
     assert hostile_trees == clean_trees
@@ -528,12 +657,19 @@ def test_builder_sanitizes_probe_environment() -> None:
     from scripts.build_official_blender_mcp_distribution import sanitized_environment
 
     env = sanitized_environment(
-        {"BLENDER_MCP_HOST": "evil", "UV_INDEX_URL": "evil", "PIP_INDEX_URL": "evil"}
+        {
+            "PATH": "/usr/bin:/bin",
+            "BLENDER_MCP_HOST": "evil",
+            "UV_INDEX_URL": "evil",
+            "PIP_INDEX_URL": "evil",
+            "SERVICE_API_TOKEN": "secret",
+        }
     )
+    assert env["PATH"] == "/usr/bin:/bin"
     assert env["BLENDER_MCP_HOST"] == "localhost"
     assert env["BLENDER_MCP_PORT"] == "9876"
     assert env["UV_DEFAULT_INDEX"] == "https://pypi.org/simple"
-    assert "UV_INDEX_URL" not in env and "PIP_INDEX_URL" not in env
+    assert not {"UV_INDEX_URL", "PIP_INDEX_URL", "SERVICE_API_TOKEN"} & env.keys()
 
 
 def test_locked_install_uses_single_supported_uv_argv(
@@ -557,7 +693,9 @@ def test_locked_install_uses_single_supported_uv_argv(
 def test_normalized_extension_is_revalidated() -> None:
     from scripts.build_official_blender_mcp_distribution import validate_extension_command
 
-    assert validate_extension_command(Path("blender"), Path("normalized.zip"))[-1] == "normalized.zip"
+    assert (
+        validate_extension_command(Path("blender"), Path("normalized.zip"))[-1] == "normalized.zip"
+    )
 
 
 def _metadata_wheel(path: Path, requirements: list[str]) -> Path:
@@ -584,37 +722,26 @@ def _metadata_wheel(path: Path, requirements: list[str]) -> Path:
 def _source_metadata(path: Path, requirement: str) -> Path:
     path.mkdir(parents=True)
     (path / "pyproject.toml").write_text(
-        "[project]\n"
-        'dependencies = ["docutils", '
-        + json.dumps(requirement)
-        + ', "pyyaml"]\n'
+        '[project]\ndependencies = ["docutils", ' + json.dumps(requirement) + ', "pyyaml"]\n'
     )
     return path
 
 
 def test_builder_accepts_only_reviewed_source_mcp_range(tmp_path: Path) -> None:
-    builder._validate_source_metadata(
-        _source_metadata(tmp_path / "source", "mcp[cli]>=1.28.1,<3")
-    )
+    builder._validate_source_metadata(_source_metadata(tmp_path / "source", "mcp[cli]>=1.28.1,<3"))
 
 
 @pytest.mark.parametrize(
     "requirement",
     ["mcp[cli]<3,>=1.28.1", "mcp[cli]>=1.2.0", "mcp[cli]>=1.28.1"],
 )
-def test_builder_rejects_noncanonical_source_mcp_range(
-    tmp_path: Path, requirement: str
-) -> None:
+def test_builder_rejects_noncanonical_source_mcp_range(tmp_path: Path, requirement: str) -> None:
     with pytest.raises(ValueError, match="unexpected source metadata"):
-        builder._validate_source_metadata(
-            _source_metadata(tmp_path / "source", requirement)
-        )
+        builder._validate_source_metadata(_source_metadata(tmp_path / "source", requirement))
 
 
 def test_wheel_metadata_accepts_reviewed_upstream_mcp_range(tmp_path: Path) -> None:
-    wheel = _metadata_wheel(
-        tmp_path / "wheel.whl", ["docutils", "mcp[cli]<3,>=1.28.1", "pyyaml"]
-    )
+    wheel = _metadata_wheel(tmp_path / "wheel.whl", ["docutils", "mcp[cli]<3,>=1.28.1", "pyyaml"])
     builder._validate_wheel(wheel)
 
 
@@ -636,7 +763,9 @@ def test_wheel_metadata_rejects_unreviewed_dependencies(
         builder._validate_wheel(wheel)
 
 
-def test_publish_keeps_last_good_output_on_gate_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_publish_keeps_last_good_output_on_gate_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     output = tmp_path / "artifacts"
     output.mkdir()
     (output / "marker").write_text("last-good")
@@ -726,7 +855,9 @@ def test_candidate_is_fsynced_before_first_publication_rename(
         assert required <= synced
         real_rename(source, target)
 
-    monkeypatch.setattr(builder, "_extract_two_archives", lambda source, workspace: ((output, output), 1))
+    monkeypatch.setattr(
+        builder, "_extract_two_archives", lambda source, workspace: ((output, output), 1)
+    )
     monkeypatch.setattr(builder, "_build_candidate", build_candidate)
     monkeypatch.setattr(os, "fsync", record_fsync)
     monkeypatch.setattr(os, "rename", checked_rename)

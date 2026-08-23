@@ -1,0 +1,621 @@
+From 741008e628df3e66541953bfa91b3dc7b2cbf101 Mon Sep 17 00:00:00 2001
+From: BlenderDesign Certification <noreply@example.invalid>
+Date: Sun, 23 Aug 2026 17:18:16 +0800
+Subject: [PATCH] Harden interactive addon transport
+
+Restore bounded client accounting, fair accept/write budgets, chunked non-blocking responses, deferred JSON normalization, and defensive socket cleanup for the interactive Blender add-on.
+---
+ addon/blender_mcp_addon/__init__.py           |   4 +-
+ addon/blender_mcp_addon/capture_output.py     |  11 +-
+ addon/blender_mcp_addon/cli.py                |   3 +-
+ addon/blender_mcp_addon/deferred_tool.py      |  72 ++++----
+ .../blender_mcp_addon/execute_interactive.py  |   2 +-
+ .../mcp_to_blender_server.py                  | 166 +++++++++++++-----
+ addon/blender_mcp_addon/weak_sandbox.py       |  35 ++--
+ 7 files changed, 199 insertions(+), 94 deletions(-)
+
+diff --git a/addon/blender_mcp_addon/__init__.py b/addon/blender_mcp_addon/__init__.py
+index 804871c..8b66894 100644
+--- a/addon/blender_mcp_addon/__init__.py
++++ b/addon/blender_mcp_addon/__init__.py
+@@ -12,12 +12,14 @@ __all__ = (
+ )
+ 
+ import bpy  # pylint: disable=import-error
++
++# pylint: disable-next=import-error
+ from bpy.props import (
+     BoolProperty,
+     FloatProperty,
+     IntProperty,
+     StringProperty,
+-)  # pylint: disable=import-error
++)
+ 
+ from . import mcp_to_blender_server
+ 
+diff --git a/addon/blender_mcp_addon/capture_output.py b/addon/blender_mcp_addon/capture_output.py
+index 28601f5..7d0e73b 100644
+--- a/addon/blender_mcp_addon/capture_output.py
++++ b/addon/blender_mcp_addon/capture_output.py
+@@ -14,7 +14,9 @@ __all__ = (
+ 
+ import io
+ import sys
+-from typing import IO, Self
++from typing import IO, TypeVar
++
++_CaptureOutputT = TypeVar("_CaptureOutputT", bound="CaptureOutput")
+ 
+ 
+ class _Tee(io.TextIOBase):
+@@ -47,6 +49,11 @@ class CaptureOutput:
+     Output is forwarded to the original streams in real time
+     and also stored for retrieval via :meth:`stdout` and :meth:`stderr`.
+     """
++    _original_out: IO[str]
++    _original_err: IO[str]
++    _tee_out: _Tee
++    _tee_err: _Tee
++
+     __slots__ = (
+         "_tee_out",
+         "_tee_err",
+@@ -54,7 +61,7 @@ class CaptureOutput:
+         "_original_err",
+     )
+ 
+-    def __enter__(self) -> Self:
++    def __enter__(self: _CaptureOutputT) -> _CaptureOutputT:  # noqa: PYI019
+         self._original_out = sys.stdout
+         self._original_err = sys.stderr
+         self._tee_out = _Tee(self._original_out)
+diff --git a/addon/blender_mcp_addon/cli.py b/addon/blender_mcp_addon/cli.py
+index ba64e7d..0df34f3 100644
+--- a/addon/blender_mcp_addon/cli.py
++++ b/addon/blender_mcp_addon/cli.py
+@@ -14,8 +14,7 @@ __all__ = (
+ 
+ import argparse
+ 
+-from . import execute_blocking
+-from . import mcp_to_blender_server
++from . import execute_blocking, mcp_to_blender_server
+ 
+ 
+ def cli_execute(argv: list[str]) -> int:
+diff --git a/addon/blender_mcp_addon/deferred_tool.py b/addon/blender_mcp_addon/deferred_tool.py
+index aa4a76f..7345b88 100644
+--- a/addon/blender_mcp_addon/deferred_tool.py
++++ b/addon/blender_mcp_addon/deferred_tool.py
+@@ -31,14 +31,17 @@ import time
+ import traceback
+ from collections.abc import Callable
+ 
+-from .mcp_to_blender_server import _encode_response
++from .mcp_to_blender_server import (  # pylint: disable=cyclic-import
++    _close_connection,
++    _queue_response_for_connection,
++)
+ 
+ # Total wall-time in seconds allowed for a background task (e.g. rendering) to complete.
+ # When exceeded, an error response is sent and the connection is closed.
+ # The background task itself continues to run in Blender.
+ # One hour is long for what should typically be an interactive experience,
+ # but renders can take a long time and it's not desirable for them to simply give up.
+-_DEFERRED_TIMEOUT = (60.0 * 60.0)
++_DEFERRED_TIMEOUT = 60.0 * 60.0
+ 
+ 
+ class _DeferredClient:
+@@ -75,19 +78,21 @@ class _DeferredClient:
+ _deferred_clients: list[_DeferredClient] = []
+ 
+ 
+-def _send_and_close(dc: _DeferredClient, response: dict[str, object]) -> None:
+-    try:
+-        dc.conn.sendall(_encode_response(response))
+-    except OSError:
+-        pass
+-    try:
+-        dc.conn.close()
+-    except OSError:
+-        pass
++def _queue_and_remove(dc: _DeferredClient, response: dict[str, object]) -> None:
+     try:
+         _deferred_clients.remove(dc)
+     except ValueError:
+         pass
++    try:
++        _queue_response_for_connection(dc.conn, response)
++    except Exception:  # pylint: disable=broad-exception-caught
++        try:
++            _queue_response_for_connection(dc.conn, {
++                "status": "error",
++                "message": traceback.format_exc(),
++            })
++        except Exception:  # pylint: disable=broad-exception-caught
++            _close_connection(dc.conn)
+ 
+ 
+ def _is_disconnected(conn: socket.socket) -> bool:
+@@ -128,10 +133,7 @@ def poll() -> bool:
+     for dc in _deferred_clients[:]:
+         # Check for client disconnection.
+         if _is_disconnected(dc.conn):
+-            try:
+-                dc.conn.close()
+-            except OSError:
+-                pass
++            _close_connection(dc.conn)
+             try:
+                 _deferred_clients.remove(dc)
+             except ValueError:
+@@ -141,7 +143,7 @@ def poll() -> bool:
+ 
+         # Check for timeout.
+         if time.monotonic() > dc.deadline:
+-            _send_and_close(dc, {
++            _queue_and_remove(dc, {
+                 "status": "error",
+                 "message": "Deferred operation timed out after {:.0f} seconds".format(_DEFERRED_TIMEOUT),
+             })
+@@ -152,7 +154,7 @@ def poll() -> bool:
+         try:
+             result = dc.check_fn()
+         except Exception:  # pylint: disable=broad-exception-caught
+-            _send_and_close(dc, {
++            _queue_and_remove(dc, {
+                 "status": "error",
+                 "message": traceback.format_exc(),
+             })
+@@ -164,7 +166,7 @@ def poll() -> bool:
+             continue
+ 
+         if not isinstance(result, dict):
+-            _send_and_close(dc, {
++            _queue_and_remove(dc, {
+                 "status": "error",
+                 "message": "check_is_finished must return None or dict, not {:s}".format(
+                     type(result).__name__,
+@@ -173,17 +175,24 @@ def poll() -> bool:
+             did_work = True
+             continue
+ 
+-        # Validate JSON serializability when strict_json is set.
+-        if dc.strict_json:
+-            try:
++        # Match synchronous result handling before handing the response to the writer.
++        try:
++            if dc.strict_json:
+                 json.dumps(result)
+-            except (TypeError, ValueError) as ex:
+-                _send_and_close(dc, {
+-                    "status": "error",
+-                    "message": "Deferred result is not JSON-serializable: {:s}".format(str(ex)),
+-                })
+-                did_work = True
+-                continue
++            else:
++                result = json.loads(json.dumps(result, default=repr))
++        except Exception as ex:  # pylint: disable=broad-exception-caught
++            prefix = "Deferred result is not JSON-serializable"
++            try:
++                message = "{:s}: {:s}".format(prefix, str(ex))
++            except Exception:  # pylint: disable=broad-exception-caught
++                message = prefix
++            _queue_and_remove(dc, {
++                "status": "error",
++                "message": message,
++            })
++            did_work = True
++            continue
+ 
+         # Build the final response with the standard envelope.
+         response: dict[str, object] = {"status": "ok", "result": result}
+@@ -191,7 +200,7 @@ def poll() -> bool:
+             response["stdout"] = dc.stdout
+         if dc.stderr:
+             response["stderr"] = dc.stderr
+-        _send_and_close(dc, response)
++        _queue_and_remove(dc, response)
+         did_work = True
+ 
+     return did_work
+@@ -209,8 +218,5 @@ def close_all() -> None:
+     Close all deferred client connections without sending responses.
+     """
+     for dc in _deferred_clients:
+-        try:
+-            dc.conn.close()
+-        except OSError:
+-            pass
++        _close_connection(dc.conn)
+     _deferred_clients.clear()
+diff --git a/addon/blender_mcp_addon/execute_interactive.py b/addon/blender_mcp_addon/execute_interactive.py
+index d70189b..f1396bd 100644
+--- a/addon/blender_mcp_addon/execute_interactive.py
++++ b/addon/blender_mcp_addon/execute_interactive.py
+@@ -28,8 +28,8 @@ def run() -> float | None:
+     try:
+         did_work = mcp_to_blender_server.poll()
+     except Exception:  # pylint: disable=broad-exception-caught
+-        import traceback
+         import sys
++        import traceback
+         print(
+             "Error: unhandled exception in the MCP server timer.\n"
+             "This may be a bug in Blender-MCP, as errors should not be raised at this point, continuing:\n"
+diff --git a/addon/blender_mcp_addon/mcp_to_blender_server.py b/addon/blender_mcp_addon/mcp_to_blender_server.py
+index 7c44995..125afbc 100644
+--- a/addon/blender_mcp_addon/mcp_to_blender_server.py
++++ b/addon/blender_mcp_addon/mcp_to_blender_server.py
+@@ -127,7 +127,11 @@ use_log: bool = False
+ _MAX_REQUEST_BYTES = 10 * 1024 * 1024  # 10 MiB.
+ # Maximum number of queued incoming connections.
+ _LISTEN_BACKLOG = 5
++_MAX_CLIENTS = 16
++_ACCEPT_BUDGET_PER_POLL = _LISTEN_BACKLOG
+ _RECV_BUFFER_SIZE = 4096
++_SEND_CHUNK_SIZE = 256 * 1024
++_SEND_BUDGET_PER_POLL = 256 * 1024
+ # Seconds before a client that has not sent a complete request is closed.
+ _CLIENT_TIMEOUT = 10.0
+ # How often `poll_blocking` checks for shutdown.
+@@ -152,6 +156,8 @@ class _Client:
+     __slots__ = (
+         "conn",
+         "buffer",
++        "response",
++        "response_offset",
+         "timeout",
+     )
+ 
+@@ -159,6 +165,9 @@ class _Client:
+         self.conn: socket.socket = conn
+         # Accumulates data until the null-byte delimiter is received.
+         self.buffer: bytearray = bytearray()
++        # A single encoded response waiting for non-blocking writes.
++        self.response: bytes | None = None
++        self.response_offset: int = 0
+         # Poll ticks remaining before this client is evicted.
+         self.timeout: int = _timer.client_timeout_countdown
+ 
+@@ -174,13 +183,18 @@ class _State:
+     __slots__ = (
+         "sock",
+         "clients",
++        "connection_count",
++        "service_cursor",
+     )
+ 
+     def __init__(self) -> None:
+         # The listening socket, or `None` when not running.
+         self.sock: socket.socket | None = None
+-        # Connected clients that have not yet sent a complete request.
++        # Connected clients receiving a request or a queued response.
+         self.clients: list[_Client] = []
++        # Includes clients temporarily owned by deferred_tool.
++        self.connection_count: int = 0
++        self.service_cursor: int = 0
+ 
+ 
+ _state = _State()
+@@ -227,7 +241,7 @@ def _execute_code(
+     namespace: dict[str, object] = {"result": {}}
+     with CaptureOutput() as captured, WeakSandboxForLLM():
+         try:
+-            exec(code, namespace)
++            exec(code, namespace)  # noqa: S102 - this tool intentionally executes user code.
+         except Exception:  # pylint: disable=broad-exception-caught
+             response: dict[str, object] = {"status": "error", "message": traceback.format_exc()}
+             if captured.stdout:
+@@ -339,16 +353,70 @@ def _close_client(client: _Client) -> None:
+     """
+     Close a client connection and remove it from the active list.
+     """
+-    try:
+-        client.conn.close()
+-    except Exception:  # pylint: disable=broad-exception-caught
+-        pass
++    client.buffer.clear()
++    client.response = None
++    client.response_offset = 0
++    _close_connection(client.conn)
+     try:
+         _state.clients.remove(client)
+     except ValueError:
+         pass
+ 
+ 
++def _close_connection(conn: socket.socket) -> None:
++    """Close one accepted interactive connection and release its slot."""
++    _close_socket(conn)
++    _state.connection_count = max(0, _state.connection_count - 1)
++
++
++def _close_socket(conn: socket.socket) -> None:
++    """Close a socket without changing accepted-connection accounting."""
++    try:
++        conn.close()
++    except OSError:
++        pass
++
++
++def _queue_response(client: _Client, response: dict[str, object]) -> None:
++    """Queue one response for non-blocking writes."""
++    client.buffer.clear()
++    client.response = _encode_response(response)
++    client.response_offset = 0
++    client.timeout = _timer.client_timeout_countdown
++
++
++def _queue_response_for_connection(
++        conn: socket.socket, response: dict[str, object],
++) -> None:
++    """Return a deferred connection to the main non-blocking write queue."""
++    client = _Client(conn)
++    _queue_response(client, response)
++    _state.clients.append(client)
++
++
++def _flush_client_response(client: _Client, send_budget: int) -> int:
++    """Write within one client's budget, returning the byte count sent."""
++    assert client.response is not None
++    chunk = client.response[
++        client.response_offset:client.response_offset + min(_SEND_CHUNK_SIZE, send_budget)
++    ]
++    try:
++        sent = client.conn.send(chunk)
++    except BlockingIOError:
++        return 0
++    except OSError:
++        _close_client(client)
++        return 0
++    if sent <= 0:
++        _close_client(client)
++        return 0
++    client.response_offset += sent
++    client.timeout = _timer.client_timeout_countdown
++    if client.response_offset == len(client.response):
++        _close_client(client)
++    return sent
++
++
+ # ---------------------------------------------------------------------------
+ # Polling (called from the execution modules).
+ 
+@@ -358,15 +426,23 @@ def _accept_clients() -> None:
+     """
+     if _state.sock is None:
+         return
+-    while True:
++    for _index in range(_ACCEPT_BUDGET_PER_POLL):
+         try:
+             conn, _addr = _state.sock.accept()
+-            conn.setblocking(False)
+-            _state.clients.append(_Client(conn))
+         except BlockingIOError:
+             break
+         except OSError:
+             break
++        if _state.connection_count >= _MAX_CLIENTS:
++            _close_socket(conn)
++            continue
++        try:
++            conn.setblocking(False)
++        except OSError:
++            _close_socket(conn)
++            continue
++        _state.clients.append(_Client(conn))
++        _state.connection_count += 1
+ 
+ 
+ def _service_clients() -> bool:
+@@ -376,20 +452,36 @@ def _service_clients() -> bool:
+     Return ``True`` if at least one request was executed.
+     """
+     did_work = False
+-    # Iterate over a copy since clients may be removed during the loop.
+-    for client in _state.clients[:]:
++    send_budget = _SEND_BUDGET_PER_POLL
++    clients = _state.clients[:]
++    if clients:
++        cursor_start = _state.service_cursor % len(clients)
++        clients = clients[cursor_start:] + clients[:cursor_start]
++        _state.service_cursor = (cursor_start + 1) % len(clients)
++    else:
++        _state.service_cursor = 0
++
++    # Iterate over a rotated copy since clients may be removed during the loop.
++    for client in clients:
++        if client.response is not None:
++            did_work = True
++            if send_budget > 0:
++                sent = _flush_client_response(client, send_budget)
++                send_budget -= sent
++                if sent == 0 and client in _state.clients:
++                    client.timeout -= 1
++                    if client.timeout <= 0:
++                        _close_client(client)
++            continue
++
+         # Evict clients that have not sent a complete request in time.
+         client.timeout -= 1
+         if client.timeout <= 0:
+-            try:
+-                err: dict[str, object] = {
+-                    "status": "error",
+-                    "message": "Client timed out",
+-                }
+-                client.conn.sendall(_encode_response(err))
+-            except OSError:
+-                pass
+-            _close_client(client)
++            _queue_response(client, {
++                "status": "error",
++                "message": "Client timed out",
++            })
++            did_work = True
+             continue
+ 
+         try:
+@@ -410,15 +502,11 @@ def _service_clients() -> bool:
+ 
+         # Guard against unbounded input from a misbehaving client.
+         if len(client.buffer) > _MAX_REQUEST_BYTES:
+-            try:
+-                err = {
+-                    "status": "error",
+-                    "message": "Request exceeds {:d} byte limit".format(_MAX_REQUEST_BYTES),
+-                }
+-                client.conn.sendall(_encode_response(err))
+-            except OSError:
+-                pass
+-            _close_client(client)
++            _queue_response(client, {
++                "status": "error",
++                "message": "Request exceeds {:d} byte limit".format(_MAX_REQUEST_BYTES),
++            })
++            did_work = True
+             continue
+ 
+         if b"\0" not in client.buffer:
+@@ -449,11 +537,7 @@ def _service_clients() -> bool:
+             except ValueError:
+                 pass
+         else:
+-            try:
+-                client.conn.sendall(_encode_response(exec_result.response))
+-            except OSError:
+-                pass
+-            _close_client(client)
++            _queue_response(client, exec_result.response)
+         did_work = True
+ 
+     return did_work
+@@ -511,7 +595,7 @@ def _handle_blocking_client(conn: socket.socket) -> bool:
+             exec_result = _ExecResult({"status": "error", "message": traceback.format_exc()})
+         conn.sendall(_encode_response(exec_result.response))
+         return True
+-    except socket.timeout:
++    except TimeoutError:
+         try:
+             err = {"status": "error", "message": "Client timed out"}
+             conn.sendall(_encode_response(err))
+@@ -595,17 +679,15 @@ def stop() -> None:
+     if sock is not None:
+         try:
+             sock.close()
+-        except Exception:  # pylint: disable=broad-exception-caught
++        except Exception:  # noqa: S110  # pylint: disable=broad-exception-caught
+             pass
+ 
+-    for client in _state.clients:
+-        try:
+-            client.conn.close()
+-        except Exception:  # pylint: disable=broad-exception-caught
+-            pass
+-    _state.clients.clear()
++    for client in _state.clients[:]:
++        _close_client(client)
+ 
+     deferred_tool.close_all()
++    _state.connection_count = 0
++    _state.service_cursor = 0
+ 
+ 
+ def is_running() -> bool:
+diff --git a/addon/blender_mcp_addon/weak_sandbox.py b/addon/blender_mcp_addon/weak_sandbox.py
+index 8514dd7..e1c32f4 100644
+--- a/addon/blender_mcp_addon/weak_sandbox.py
++++ b/addon/blender_mcp_addon/weak_sandbox.py
+@@ -23,10 +23,12 @@ __all__ = (
+ )
+ 
+ import sys
+-from typing import Any, Self
++from typing import Any, TypeVar
+ 
++_WeakSandboxT = TypeVar("_WeakSandboxT", bound="WeakSandboxForLLM")
+ 
+-def _blocked_exit(*args: object, **kwargs: object) -> None:  # noqa: ARG001
++
++def _blocked_exit(*args: object, **kwargs: object) -> None:
+     raise RuntimeError("sys.exit() is not allowed in LLM-generated code")
+ 
+ 
+@@ -57,15 +59,19 @@ _BLOCKED_OPS: tuple[tuple[str, str], ...] = (
+     ("wm.quit_blender", "Terminates the Blender process, use bpy.app.quit() if you must"),
+     (
+         "wm.read_factory_settings",
+-        "Resets all user preferences and startup file, "
+-        "use bpy.ops.wm.read_homefile() or "
+-        "bpy.ops.wm.read_homefile(use_empty=True, use_factory_startup=True) instead",
++        (
++            "Resets all user preferences and startup file, "
++            "use bpy.ops.wm.read_homefile() or "
++            "bpy.ops.wm.read_homefile(use_empty=True, use_factory_startup=True) instead"
++        ),
+     ),
+     (
+         "wm.read_factory_userpref",
+-        "Resets all user preferences, "
+-        "use bpy.ops.wm.read_homefile() or "
+-        "bpy.ops.wm.read_homefile(use_empty=True, use_factory_startup=True) instead",
++        (
++            "Resets all user preferences, "
++            "use bpy.ops.wm.read_homefile() or "
++            "bpy.ops.wm.read_homefile(use_empty=True, use_factory_startup=True) instead"
++        ),
+     ),
+     ("wm.read_userpref", "May reset user preferences disabling this add-on, avoid calling"),
+ )
+@@ -75,6 +81,9 @@ _BLOCKED_OPS_SET: frozenset[str] = frozenset(op for op, _reason in _BLOCKED_OPS)
+ 
+ class WeakSandboxForLLM:
+     """Context manager wrapping ``exec()`` of LLM-generated code."""
++    _store_attrs: list[tuple[object, str, object]]
++    _store_ops: tuple[Any, Any]
++
+     __slots__ = (
+         "_store_attrs",
+         "_store_ops",
+@@ -107,9 +116,9 @@ class WeakSandboxForLLM:
+ 
+         Returns ``(bpy_ops_module, original_function)`` for later restore.
+         """
+-        import bpy.ops as _bpy_ops  # noqa: WPS433
++        import bpy.ops as _bpy_ops  # noqa: WPS433  # pylint: disable=import-error
+ 
+-        original = _bpy_ops._op_create_function
++        original = _bpy_ops._op_create_function  # pylint: disable=protected-access
+ 
+         def _filtered_op_create_function(module: str, func: str) -> Any:
+             key = "{:s}.{:s}".format(module, func)
+@@ -133,19 +142,19 @@ class WeakSandboxForLLM:
+                 return _blocked
+             return original(module, func)
+ 
+-        _bpy_ops._op_create_function = _filtered_op_create_function
++        _bpy_ops._op_create_function = _filtered_op_create_function  # pylint: disable=protected-access
+         return (_bpy_ops, original)
+ 
+     @staticmethod
+     def ops_blocked_restore(saved: tuple[Any, Any]) -> None:
+         """Restore the original ``_op_create_function``."""
+         bpy_ops_module, original = saved
+-        bpy_ops_module._op_create_function = original
++        bpy_ops_module._op_create_function = original  # pylint: disable=protected-access
+ 
+     # -------------------------------------------------------------------------
+     # Context manager
+ 
+-    def __enter__(self) -> Self:
++    def __enter__(self: _WeakSandboxT) -> _WeakSandboxT:  # noqa: PYI019
+         self._store_attrs = self.override_store()
+         self._store_ops = self.ops_blocked_store()
+         return self
+-- 
+2.50.1 (Apple Git-155)
+

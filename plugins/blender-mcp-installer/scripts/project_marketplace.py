@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -99,7 +100,7 @@ def _prepare_roots(home: Path, codex_home: Path) -> tuple[Path, Path]:
 
 
 @contextmanager
-def _codex_lock(codex_home: Path):
+def _codex_lock(codex_home: Path) -> Iterator[None]:
     lock_path = codex_home / ".blender-mcp-marketplace.lock"
     descriptor = os.open(
         lock_path,

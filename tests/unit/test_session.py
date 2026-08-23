@@ -4,7 +4,7 @@ import stat
 
 import pytest
 
-from bridge.core.session import SessionAuth, read_session_file, write_session_file
+from bridge.core.session import SessionAuth, write_session_file
 
 
 def test_generate_token_length_and_uniqueness():
@@ -27,7 +27,7 @@ def test_write_session_file_is_0600_and_atomic(tmp_path):
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
     assert json.loads(p.read_text()) == {"a": 1}
     write_session_file(p, {"a": 2})
-    assert read_session_file(p) == {"a": 2}
+    assert json.loads(p.read_text()) == {"a": 2}
     assert list(tmp_path.iterdir()) == [p]
 
 
@@ -105,20 +105,3 @@ def test_preexisting_temporary_file_is_preserved(tmp_path, monkeypatch):
     with pytest.raises(OSError, match="fchmod failed"):
         write_session_file(path, {"a": 1})
     assert temporary.read_text() == "replacement"
-
-
-def test_read_session_file_rejects_corrupt(tmp_path):
-    p = tmp_path / "session.json"
-    p.write_text("{not json")
-    with pytest.raises(ValueError):
-        read_session_file(p)
-    p.write_text("[1,2]")
-    with pytest.raises(ValueError):
-        read_session_file(p)
-
-
-def test_read_session_file_rejects_excessive_json_nesting(tmp_path):
-    path = tmp_path / "session.json"
-    path.write_text('{"x":' + "[" * 10_000 + "0" + "]" * 10_000 + "}")
-    with pytest.raises(ValueError):
-        read_session_file(path)

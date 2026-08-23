@@ -4,6 +4,7 @@ cd "$(dirname "$0")/.."
 export PYTHONDONTWRITEBYTECODE=1
 export UV_NO_EDITABLE=1
 PWD_ROOT="$PWD"
+PYTHON_VERSION="3.13.13"
 
 find protocol bridge server smoke scripts tests -type d -name __pycache__ \
   -prune -exec rm -rf '{}' +
@@ -22,7 +23,7 @@ fi
 test -x "$UV_BIN" || { echo "FAIL: $UV_BIN 不可执行"; exit 1; }
 echo "toolchain: uv=$($UV_BIN --version 2>&1)"
 
-"$UV_BIN" sync --frozen --python 3.13  # ADR：锁定依赖与解释器，禁止隐式升级
+"$UV_BIN" sync --frozen --python "$PYTHON_VERSION"  # ADR：锁定依赖与解释器，禁止隐式升级
 
 # venv 健康探针：iCloud「桌面与文稿」同步会给点开头的条目打 UF_HIDDEN，.venv 内的
 # .pth 随之变 hidden，CPython 的 site.addsitedir 直接跳过 → editable 安装失效，
@@ -33,8 +34,14 @@ if ! (cd / && "$PWD_ROOT/.venv/bin/python" -c "import server" 2>/dev/null); then
   echo "  修复：chflags -R nohidden .venv"
   exit 1
 fi
-"$UV_BIN" run --frozen ruff check protocol bridge server tests scripts smoke
+"$UV_BIN" run --frozen ruff check \
+  protocol bridge server tests scripts smoke plugins/blender-mcp-installer/scripts
 "$UV_BIN" run --frozen mypy
+"$UV_BIN" run --frozen mypy --strict --ignore-missing-imports --follow-imports=skip \
+  plugins/blender-mcp-installer/scripts/blender_mcp_installer/__init__.py \
+  plugins/blender-mcp-installer/scripts/blender_mcp_installer/codex_adapter.py \
+  plugins/blender-mcp-installer/scripts/install.py \
+  plugins/blender-mcp-installer/scripts/project_marketplace.py
 if test -n "${PLUGIN_CREATOR_ROOT:-}"; then
   python3 "$PLUGIN_CREATOR_ROOT/scripts/validate_plugin.py" plugins/blender-mcp-installer
 else
@@ -46,8 +53,20 @@ if grep -rnE '^[[:space:]]*(import bpy|from bpy)' bridge/core protocol --include
 fi
 "$UV_BIN" run --frozen python scripts/vendor_protocol.py            # 生成
 "$UV_BIN" run --frozen python scripts/vendor_protocol.py --check    # 检查 2
-"$UV_BIN" sync --frozen --python 3.13 --reinstall-package blender-codex
+"$UV_BIN" sync --frozen --python "$PYTHON_VERSION" --reinstall-package blender-codex
 "$UV_BIN" run --frozen python scripts/nested_import_smoke.py        # 检查 3
+SDIST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/blender-codex-sdist.XXXXXX")"
+trap 'rm -rf "$SDIST_DIR"' EXIT
+"$UV_BIN" build --sdist --no-build-logs --out-dir "$SDIST_DIR"
+SDIST="$(find "$SDIST_DIR" -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
+test -n "$SDIST"
+UNEXPECTED_SDIST="$(tar -tzf "$SDIST" | sed 's|^[^/]*/||' | \
+  grep -Ev '^$|^(\.gitignore|PKG-INFO|pyproject.toml|(bridge|protocol|server)/.*)$' || true)"
+if test -n "$UNEXPECTED_SDIST"; then
+  echo "FAIL: sdist 包含白名单外文件"
+  echo "$UNEXPECTED_SDIST"
+  exit 1
+fi
 "$UV_BIN" run --frozen pytest -q --ignore=tests/distribution         # L1 + L2
 "$UV_BIN" run --frozen --with tomlkit==0.13.3 \
   pytest tests/distribution -q                                       # distributable

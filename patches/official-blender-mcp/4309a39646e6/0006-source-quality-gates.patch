@@ -1,0 +1,179 @@
+From e465d66a4abad31b4be5a6487660e79526222cd9 Mon Sep 17 00:00:00 2001
+From: BlenderDesign Certification <noreply@example.invalid>
+Date: Sun, 23 Aug 2026 17:35:52 +0800
+Subject: [PATCH] Make upstream source checks self-contained
+
+Apply the current Ruff mechanical fixes to the example client, route its MCP result fields through the SDK compatibility boundary, install the declared lint/docutils typing tools, and point Mypy at the existing project configuration.
+---
+ Makefile                   |  2 +-
+ chat_client/chat_client.py | 44 +++++++++++++++++++++++---------------
+ mcp/requirements_dev.txt   |  2 ++
+ 3 files changed, 30 insertions(+), 18 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 57f7b24..ab85a33 100644
+--- a/Makefile
++++ b/Makefile
+@@ -116,7 +116,7 @@ check_ascii:
+ 	@$(PYTHON) _misc/check_ascii.py
+ 
+ check_mypy:
+-	@! $(PYTHON) -m mypy --exclude 'data/api/examples/' $(PYTHON_SOURCE_DIRS_TO_CHECK) 2>&1 | grep -v '^stubs/' | grep ': error:' || \
++	@! $(PYTHON) -m mypy --config-file mcp/pyproject.toml --exclude 'data/api/examples/' $(PYTHON_SOURCE_DIRS_TO_CHECK) 2>&1 | grep -v '^stubs/' | grep ': error:' || \
+ 		{ echo "mypy: found errors"; exit 1; }
+ 
+ check_pylint:
+diff --git a/chat_client/chat_client.py b/chat_client/chat_client.py
+index c93558e..c74c57f 100644
+--- a/chat_client/chat_client.py
++++ b/chat_client/chat_client.py
+@@ -31,12 +31,16 @@ import json
+ import os
+ import urllib.error
+ import urllib.request
+-
+ from typing import Any
+ 
+-from mcp import ClientSession, StdioServerParameters  # pylint: disable=import-error,no-name-in-module
+-from mcp.client.stdio import stdio_client  # pylint: disable=import-error,no-name-in-module
++from mcp.client.stdio import (
++    stdio_client,  # pylint: disable=import-error,no-name-in-module
++)
+ 
++from mcp import (  # pylint: disable=import-error,no-name-in-module
++    ClientSession,
++    StdioServerParameters,
++)
+ 
+ # ---------------------------------------------------------------------------
+ # OpenAI API helpers
+@@ -58,7 +62,7 @@ def _api_chat_completions(
+ 
+     data = json.dumps(body).encode()
+     req = urllib.request.Request(
+-        "{:s}/v1/chat/completions".format(api_url),
++        f"{api_url:s}/v1/chat/completions",
+         data=data,
+         headers={"Content-Type": "application/json"},
+         method="POST",
+@@ -111,7 +115,7 @@ def _api_claude_messages(
+ 
+     data = json.dumps(body).encode()
+     req = urllib.request.Request(
+-        "{:s}/v1/messages".format(api_url),
++        f"{api_url:s}/v1/messages",
+         data=data,
+         headers={
+             "content-type": "application/json",
+@@ -197,6 +201,12 @@ def _process_claude_response(response: dict[str, Any]) -> _ResponseTuple:
+ # ---------------------------------------------------------------------------
+ # MCP tool invocation
+ 
++def _sdk_field(value: object, camel_case: str, snake_case: str) -> Any:
++    try:
++        return getattr(value, camel_case)
++    except AttributeError:
++        return getattr(value, snake_case)
++
+ async def _call_tool(
+     session: ClientSession,
+     name: str,
+@@ -211,10 +221,10 @@ async def _call_tool(
+         elif item.type == "image":
+             parts.append("[image]")
+         else:
+-            parts.append("[{:s}]".format(item.type))
++            parts.append(f"[{item.type:s}]")
+     text = "\n".join(parts)
+-    if result.isError:
+-        return "ERROR: {:s}".format(text)
++    if _sdk_field(result, "isError", "is_error"):
++        return f"ERROR: {text:s}"
+     return text
+ 
+ 
+@@ -246,7 +256,7 @@ async def _run(
+     parts = server_command.split()
+     params = StdioServerParameters(command=parts[0], args=parts[1:], env=env or None)
+ 
+-    async with stdio_client(params) as (read, write):
++    async with stdio_client(params) as (read, write):  # noqa: SIM117
+         async with ClientSession(read, write) as session:
+             init_result = await session.initialize()
+             instructions = init_result.instructions or ""
+@@ -256,7 +266,7 @@ async def _run(
+                 {
+                     "name": t.name,
+                     "description": t.description or "",
+-                    "inputSchema": t.inputSchema,
++                    "inputSchema": _sdk_field(t, "inputSchema", "input_schema"),
+                 }
+                 for t in tools_result.tools
+             ]
+@@ -268,12 +278,12 @@ async def _run(
+ 
+             if non_interactive:
+                 print(
+-                    "Connected to MCP server ({:d} tools).".format(len(mcp_tools))
++                    f"Connected to MCP server ({len(mcp_tools):d} tools)."
+                 )
+             else:
+                 print(
+-                    "Connected to MCP server ({:d} tools). "
+-                    "Type your message or Ctrl-D to quit.".format(len(mcp_tools))
++                    f"Connected to MCP server ({len(mcp_tools):d} tools). "
++                    "Type your message or Ctrl-D to quit."
+                 )
+ 
+             # Conversation history.
+@@ -327,7 +337,7 @@ async def _run(
+                                 claude_opts,
+                             )
+                     except urllib.error.URLError as ex:
+-                        print("HTTP error: {:s}".format(str(ex)))
++                        print(f"HTTP error: {ex!s:s}")
+                         break
+ 
+                     if provider == "openai":
+@@ -345,7 +355,7 @@ async def _run(
+                     if tool_calls:
+                         if provider == "openai":
+                             for tc_id, tc_name, tc_args in tool_calls:
+-                                print("  -> calling {:s}".format(tc_name))
++                                print(f"  -> calling {tc_name:s}")
+                                 result_text = await _call_tool(
+                                     session, tc_name, tc_args,
+                                 )
+@@ -357,7 +367,7 @@ async def _run(
+                         else:
+                             tool_results: list[dict[str, Any]] = []
+                             for tc_id, tc_name, tc_args in tool_calls:
+-                                print("  -> calling {:s}".format(tc_name))
++                                print(f"  -> calling {tc_name:s}")
+                                 result_text = await _call_tool(
+                                     session, tc_name, tc_args,
+                                 )
+@@ -375,7 +385,7 @@ async def _run(
+ 
+                     # Plain assistant reply.
+                     if text:
+-                        print("\n{:s}".format(text))
++                        print(f"\n{text:s}")
+ 
+                     if done:
+                         break
+diff --git a/mcp/requirements_dev.txt b/mcp/requirements_dev.txt
+index 32444e4..f5a97ce 100644
+--- a/mcp/requirements_dev.txt
++++ b/mcp/requirements_dev.txt
+@@ -2,5 +2,7 @@
+ autopep8
+ mypy
+ pylint
++ruff
++types-docutils
+ types-PyYAML
+ vulture
+-- 
+2.50.1 (Apple Git-155)
+

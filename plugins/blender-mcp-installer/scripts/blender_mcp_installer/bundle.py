@@ -11,8 +11,47 @@ from pathlib import Path
 from typing import Iterator, Mapping, Protocol, Sequence
 
 
-UPSTREAM_COMMIT = "9e5275c124df44c4a1cbcba2451fdd8d32ad8780"
-BUNDLE_VERSION = "1.0.0+" + UPSTREAM_COMMIT[:12]
+UPSTREAM_COMMIT = "4309a39646e644261624bfcd2bca669b343b7621"
+PATCHED_SOURCE_SHA256 = "123bde66df6efb6213ecf6981720cd20e4b27cb6ffdffc3e0b232033740fcdec"
+PATCH_README_SHA256 = "e64396b411bf8b34e57b36d10fc76224d23cd9878fb73695449ad04706ed25b7"
+DOWNSTREAM_PATCHES = (
+    (
+        "0001-server-hardening.patch",
+        "0e6457d30ae810f0ad35dfb4319adae01f88d7d997604bd48c19b54a9a063aa8",
+        "Harden server runtime and MCP compatibility",
+    ),
+    (
+        "0002-addon-transport-hardening.patch",
+        "bec6e59e2a1284814b57862144f9c5006d6f9e4c4b0615f9d64be4340b14151b",
+        "Harden interactive addon transport",
+    ),
+    (
+        "0003-operation-policy.patch",
+        "e7be2016307d8c8e5867670aeb313716abfd93c9ba99bfe08fcde392f32493d6",
+        "Retain certified Blender operation policy",
+    ),
+    (
+        "0004-certification-tests.patch",
+        "00ec5c42a91cd4f07b2415f5750080009e8e95098f607432afb1a77bd0555234",
+        "Align upstream tests with certified behavior",
+    ),
+    (
+        "0005-sdk-neutral-tests.patch",
+        "993c953a9944419108ad36fd888bbc285b07ebaf1472435ff9bd1b6d84fe2bda",
+        "Make certification clients SDK-version neutral",
+    ),
+    (
+        "0006-source-quality-gates.patch",
+        "c58b599b390cbd0de2def072f5b987c925b487f61662b35c0edf4e964850e07a",
+        "Make upstream source checks self-contained",
+    ),
+    (
+        "0007-bound-interactive-response-memory.patch",
+        "f8f87e108f3acaecbf28752cfe4dacb65fa25b61cfa9eb9d1f4a722c15292bcd",
+        "Bound interactive response memory",
+    ),
+)
+BUNDLE_VERSION = "1.0.0+" + UPSTREAM_COMMIT[:12] + ".p" + PATCHED_SOURCE_SHA256[:12]
 TOOLS = (
     "execute_blender_code",
     "execute_blender_code_for_cli",
@@ -66,9 +105,7 @@ _LOCK_STANZA = re.compile(
 
 
 class Runner(Protocol):
-    def __call__(
-        self, argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]
-    ) -> object: ...
+    def __call__(self, argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> object: ...
 
 
 class _GitRunner(Protocol):
@@ -96,6 +133,7 @@ class ReleaseManifest:
     bundle_version: str
     platform: Mapping[str, object]
     upstream: Mapping[str, object]
+    downstream: Mapping[str, object]
     python: Mapping[str, object]
     blender: Mapping[str, object]
     server: Mapping[str, object]
@@ -153,7 +191,10 @@ def _keys(value: object, expected: tuple[str, ...], label: str) -> dict[str, obj
 
 def _fixed(value: object, expected: dict[str, object], label: str) -> dict[str, object]:
     parsed = _keys(value, tuple(expected), label)
-    if any(type(parsed[key]) is not type(fixed) or parsed[key] != fixed for key, fixed in expected.items()):
+    if any(
+        type(parsed[key]) is not type(fixed) or parsed[key] != fixed
+        for key, fixed in expected.items()
+    ):
         raise ValueError(f"invalid {label}")
     return parsed
 
@@ -161,7 +202,9 @@ def _fixed(value: object, expected: dict[str, object], label: str) -> dict[str, 
 def parse_manifest(raw: bytes) -> ReleaseManifest:
     try:
         data = json.loads(
-            raw.decode("utf-8"), object_pairs_hook=_object, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value))
+            raw.decode("utf-8"),
+            object_pairs_hook=_object,
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
         )
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError("invalid manifest JSON") from exc
@@ -172,6 +215,7 @@ def parse_manifest(raw: bytes) -> ReleaseManifest:
             "bundle_version",
             "platform",
             "upstream",
+            "downstream",
             "python",
             "blender",
             "server",
@@ -183,7 +227,7 @@ def parse_manifest(raw: bytes) -> ReleaseManifest:
         ),
         "manifest",
     )
-    if type(top["schema_version"]) is not int or top["schema_version"] != 2:
+    if type(top["schema_version"]) is not int or top["schema_version"] != 3:
         raise ValueError("invalid schema_version")
     if top["bundle_version"] != BUNDLE_VERSION:
         raise ValueError("invalid bundle_version")
@@ -196,9 +240,23 @@ def parse_manifest(raw: bytes) -> ReleaseManifest:
         },
         "upstream",
     )
-    python = _fixed(
-        top["python"], {"runtime_minor": "3.13", "build_tested": "3.13.13"}, "python"
+    downstream = _keys(
+        top["downstream"],
+        ("source_tree_sha256", "readme_sha256", "patches"),
+        "downstream",
     )
+    if downstream["source_tree_sha256"] != PATCHED_SOURCE_SHA256:
+        raise ValueError("invalid patched source tree")
+    if downstream["readme_sha256"] != PATCH_README_SHA256:
+        raise ValueError("invalid downstream patch summary")
+    raw_patches = downstream["patches"]
+    if type(raw_patches) is not list or len(raw_patches) != len(DOWNSTREAM_PATCHES):
+        raise ValueError("invalid downstream patches")
+    for raw_patch, expected_patch in zip(raw_patches, DOWNSTREAM_PATCHES, strict=True):
+        patch = _keys(raw_patch, ("filename", "sha256", "summary"), "patch")
+        if tuple(patch[key] for key in ("filename", "sha256", "summary")) != expected_patch:
+            raise ValueError("invalid downstream patch")
+    python = _fixed(top["python"], {"runtime_minor": "3.13", "build_tested": "3.13.13"}, "python")
     blender = _fixed(
         top["blender"],
         {"minimum": "5.2.0", "maximum_exclusive": "5.3.0", "tested": "5.2.0"},
@@ -231,7 +289,11 @@ def parse_manifest(raw: bytes) -> ReleaseManifest:
     }
     if any(build[key] != value for key, value in fixed_build.items()):
         raise ValueError("invalid build versions")
-    _fixed(build["backend"], {"name": "setuptools", "version": "80.9.0"}, "backend")
+    _fixed(
+        build["backend"],
+        {"name": "setuptools", "version": "83.0.0"},
+        "backend",
+    )
     if type(top["tools"]) is not list or tuple(top["tools"]) != TOOLS:
         raise ValueError("invalid tool catalog")
     raw_artifacts = top["artifacts"]
@@ -243,7 +305,12 @@ def parse_manifest(raw: bytes) -> ReleaseManifest:
     for raw_artifact, expected in zip(raw_artifacts, ARTIFACTS, strict=True):
         item = _keys(raw_artifact, ("role", "filename", "size", "sha256"), "artifact")
         role, filename = item["role"], item["filename"]
-        if (role, filename) != expected or role in roles or filename in names:
+        if (
+            type(role) is not str
+            or (role, filename) != expected
+            or role in roles
+            or filename in names
+        ):
             raise ValueError("invalid artifact role or filename")
         if (
             type(filename) is not str
@@ -262,10 +329,11 @@ def parse_manifest(raw: bytes) -> ReleaseManifest:
         names.add(filename)
         artifacts.append(Artifact(role, filename, size, digest))
     return ReleaseManifest(
-        2,
+        3,
         top["bundle_version"],
         platform,
         upstream,
+        downstream,
         python,
         blender,
         server,
@@ -394,12 +462,17 @@ def verify_distribution_checkout(
         raise ValueError("expected commit must be 40 lowercase hex characters")
     env = dict(os.environ)
     for key in tuple(env):
-        if key in GIT_REDIRECTS or key.startswith("GIT_CONFIG_") or key in {
-            "GIT_REPLACE_REF_BASE",
-            "GIT_ATTR_NOSYSTEM",
-            "GIT_EXTERNAL_DIFF",
-            "GIT_DIFF_OPTS",
-        }:
+        if (
+            key in GIT_REDIRECTS
+            or key.startswith("GIT_CONFIG_")
+            or key
+            in {
+                "GIT_REPLACE_REF_BASE",
+                "GIT_ATTR_NOSYSTEM",
+                "GIT_EXTERNAL_DIFF",
+                "GIT_DIFF_OPTS",
+            }
+        ):
             env.pop(key)
     env.update(
         {
@@ -417,7 +490,11 @@ def verify_distribution_checkout(
     if bundle_root != expected_bundle:
         raise ValueError("bundle root is not the committed artifact directory")
     head = _git(runner, ["git", "rev-parse", "HEAD"], repository_root, env).decode().strip()
-    branch = _git(runner, ["git", "rev-parse", "--abbrev-ref", "HEAD"], repository_root, env).decode().strip()
+    branch = (
+        _git(runner, ["git", "rev-parse", "--abbrev-ref", "HEAD"], repository_root, env)
+        .decode()
+        .strip()
+    )
     if head != expected_commit or branch != "HEAD":
         raise ValueError("checkout is not detached at the expected commit")
     status = _git(
@@ -526,7 +603,10 @@ def open_verified_bundle(checkout: TrustedCheckout) -> Iterator[VerifiedBundle]:
         for name in CHECKSUM_FILES:
             fd, file_stat = files[name]
             content = os.pread(fd, file_stat.st_size, 0)
-            if len(content) != file_stat.st_size or hashlib.sha256(content).hexdigest() != checksums[name]:
+            if (
+                len(content) != file_stat.st_size
+                or hashlib.sha256(content).hexdigest() != checksums[name]
+            ):
                 raise ValueError(f"opened artifact checksum mismatch: {name}")
             opened[name] = content
         manifest = parse_manifest(opened["manifest.json"])

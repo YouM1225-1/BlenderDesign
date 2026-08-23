@@ -24,6 +24,9 @@ sys.path.insert(0, str(PLUGIN_SCRIPTS))
 from blender_mcp_installer.bundle import (  # noqa: E402
     ARTIFACTS,
     BUNDLE_VERSION,
+    DOWNSTREAM_PATCHES,
+    PATCH_README_SHA256,
+    PATCHED_SOURCE_SHA256,
     TOOLS,
     UPSTREAM_COMMIT,
     ReleaseManifest,
@@ -37,52 +40,27 @@ BUILD_INPUT = ROOT / "scripts/requirements/official-blender-mcp-build.in"
 BUILD_LOCK = ROOT / "scripts/requirements/official-blender-mcp-build.lock"
 RUNTIME_INPUT = ROOT / "scripts/requirements/official-blender-mcp-runtime.in"
 RUNTIME_LOCK = ROOT / "plugins/blender-mcp-installer/artifacts/runtime-requirements.lock"
-REMOVE_ENV = {
-    "BLENDER_MCP_HOST",
-    "BLENDER_MCP_PORT",
-    "UV_INDEX",
-    "UV_INDEX_URL",
-    "UV_EXTRA_INDEX_URL",
-    "UV_DEFAULT_INDEX",
-    "UV_FIND_LINKS",
-    "UV_CONSTRAINT",
-    "UV_BUILD_CONSTRAINT",
-    "UV_OVERRIDE",
-    "UV_NO_INDEX",
-    "PIP_INDEX_URL",
-    "PIP_EXTRA_INDEX_URL",
-    "PIP_FIND_LINKS",
-    "PIP_CONSTRAINT",
-    "PIP_REQUIRE_VIRTUALENV",
-    "PYTHONPATH",
-    "PYTHONHOME",
-    "VIRTUAL_ENV",
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_COMMON_DIR",
-    "GIT_CEILING_DIRECTORIES",
-    "GIT_TEMPLATE_DIR",
+PATCH_DIR = ROOT / "patches/official-blender-mcp" / UPSTREAM_COMMIT[:12]
+PASSTHROUGH_ENV = {
+    "LANG",
+    "PATH",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "TZ",
 }
 
 
 def sanitized_environment(base: dict[str, str] | None = None) -> dict[str, str]:
-    env = dict(os.environ if base is None else base)
-    for key in tuple(env):
-        if (
-            key in REMOVE_ENV
-            or key.startswith(("UV_", "PIP_", "GIT_CONFIG_"))
-            or key
-            in {
-                "GIT_REPLACE_REF_BASE",
-                "GIT_ATTR_NOSYSTEM",
-                "GIT_EXTERNAL_DIFF",
-                "GIT_DIFF_OPTS",
-            }
-        ):
-            env.pop(key)
+    supplied = os.environ if base is None else base
+    env = {
+        key: value
+        for key, value in supplied.items()
+        if key in PASSTHROUGH_ENV or key.startswith("LC_")
+    }
     env.update(
         {
             "BLENDER_MCP_HOST": "localhost",
@@ -153,9 +131,7 @@ def _copy_object_directory(
 ) -> None:
     before = os.fstat(source_fd)
     names = tuple(sorted(os.listdir(source_fd)))
-    entries = [
-        (name, os.stat(name, dir_fd=source_fd, follow_symlinks=False)) for name in names
-    ]
+    entries = [(name, os.stat(name, dir_fd=source_fd, follow_symlinks=False)) for name in names]
     for name, metadata in entries:
         child_relative = relative / name
         if child_relative.as_posix() in {"info/alternates", "info/http-alternates"}:
@@ -206,7 +182,10 @@ def _copy_object_directory(
         else:
             raise ValueError(f"unsafe upstream Git object-store entry: {child_relative}")
     after = os.fstat(source_fd)
-    if _source_identity(after) != _source_identity(before) or tuple(sorted(os.listdir(source_fd))) != names:
+    if (
+        _source_identity(after) != _source_identity(before)
+        or tuple(sorted(os.listdir(source_fd))) != names
+    ):
         raise ValueError(f"source object store changed during copy: {relative or '.'}")
 
 
@@ -217,9 +196,7 @@ def _copy_object_store(source: Path, target: Path) -> None:
         raise ValueError("upstream Git object store root is missing") from exc
     if not stat.S_ISDIR(root_metadata.st_mode):
         raise ValueError("upstream Git object store root must be a real directory")
-    source_fd = os.open(
-        source, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
-    )
+    source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
     try:
         if _source_identity(os.fstat(source_fd)) != _source_identity(root_metadata):
             raise ValueError("source object store changed during copy: root")
@@ -246,9 +223,7 @@ def _extract_two_archives(source: Path, workspace: Path) -> tuple[tuple[Path, Pa
     empty_template.mkdir(mode=0o700)
     os.chmod(empty_template, 0o700)
     _run(
-        _git_command(
-            "init", "--bare", f"--template={empty_template}", str(isolated)
-        ),
+        _git_command("init", "--bare", f"--template={empty_template}", str(isolated)),
         env=env,
     )
     _copy_object_store(source_objects, isolated / "objects")
@@ -265,9 +240,7 @@ def _extract_two_archives(source: Path, workspace: Path) -> tuple[tuple[Path, Pa
             env=env,
         )
     epoch_text = _run(
-        _git_command(
-            f"--git-dir={isolated}", "show", "-s", "--format=%ct", UPSTREAM_COMMIT
-        ),
+        _git_command(f"--git-dir={isolated}", "show", "-s", "--format=%ct", UPSTREAM_COMMIT),
         env=env,
     ).stdout.strip()
     if not epoch_text.isdigit() or int(epoch_text) <= 0:
@@ -277,6 +250,61 @@ def _extract_two_archives(source: Path, workspace: Path) -> tuple[tuple[Path, Pa
         with tarfile.open(archive) as source_tar:
             source_tar.extractall(root, filter="data")
     return roots, int(epoch_text)
+
+
+def _source_tree_sha256(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        metadata = path.lstat()
+        if stat.S_ISDIR(metadata.st_mode):
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"unsupported patched source entry: {path.relative_to(root)}")
+        relative = path.relative_to(root).as_posix().encode()
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(b"x" if metadata.st_mode & 0o111 else b"-")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def _stage_downstream_patches(workspace: Path) -> tuple[Path, ...]:
+    expected_names = {"README.md", *(item[0] for item in DOWNSTREAM_PATCHES)}
+    if {path.name for path in PATCH_DIR.iterdir()} != expected_names:
+        raise ValueError("downstream patch directory has missing or extra files")
+    readme_hash = hashlib.sha256((PATCH_DIR / "README.md").read_bytes()).hexdigest()
+    if readme_hash != PATCH_README_SHA256:
+        raise ValueError("downstream patch summary hash mismatch")
+    staged = workspace / "downstream-patches"
+    staged.mkdir(mode=0o700)
+    result = []
+    for filename, expected_hash, _summary in DOWNSTREAM_PATCHES:
+        content = (PATCH_DIR / filename).read_bytes()
+        if hashlib.sha256(content).hexdigest() != expected_hash:
+            raise ValueError(f"downstream patch hash mismatch: {filename}")
+        target = staged / filename
+        target.write_bytes(content)
+        os.chmod(target, 0o600)
+        result.append(target)
+    return tuple(result)
+
+
+def _apply_downstream_patches(source: Path, patches: tuple[Path, ...]) -> None:
+    env = sanitized_environment()
+    for patch in patches:
+        _run(
+            _git_command("apply", "--check", "--whitespace=error-all", str(patch)),
+            cwd=source,
+            env=env,
+        )
+        _run(
+            _git_command("apply", "--whitespace=error-all", str(patch)),
+            cwd=source,
+            env=env,
+        )
+    actual = _source_tree_sha256(source)
+    if actual != PATCHED_SOURCE_SHA256:
+        raise ValueError(f"unexpected patched source tree: {actual}")
 
 
 def _compile_lock(
@@ -326,9 +354,7 @@ def _verify_locks(uv_bin: Path, workspace: Path) -> None:
 
 
 def _create_venv(uv_bin: Path, path: Path) -> Path:
-    _run(
-        [str(uv_bin), "venv", "--python", "3.13.13", "--no-python-downloads", str(path)]
-    )
+    _run([str(uv_bin), "venv", "--python", "3.13.13", "--no-python-downloads", str(path)])
     return path / "bin/python"
 
 
@@ -367,7 +393,14 @@ def _safe_zip_name(name: str) -> PurePosixPath:
 
 def _normalize_zip(source: Path, target: Path, epoch: int) -> None:
     timestamp = datetime.fromtimestamp(max(epoch, 315532800), UTC)
-    date_time = (timestamp.year, timestamp.month, timestamp.day, timestamp.hour, timestamp.minute, timestamp.second // 2 * 2)
+    date_time = (
+        timestamp.year,
+        timestamp.month,
+        timestamp.day,
+        timestamp.hour,
+        timestamp.minute,
+        timestamp.second // 2 * 2,
+    )
     entries: list[tuple[str, bytes, bool]] = []
     with zipfile.ZipFile(source) as archive:
         for item in archive.infolist():
@@ -386,7 +419,9 @@ def _normalize_zip(source: Path, target: Path, epoch: int) -> None:
             info = zipfile.ZipInfo(name, date_time)
             info.create_system = 3
             info.compress_type = zipfile.ZIP_STORED if is_dir else zipfile.ZIP_DEFLATED
-            info.external_attr = ((stat.S_IFDIR | 0o755) if is_dir else (stat.S_IFREG | 0o644)) << 16
+            info.external_attr = (
+                (stat.S_IFDIR | 0o755) if is_dir else (stat.S_IFREG | 0o644)
+            ) << 16
             archive.writestr(info, content)
 
 
@@ -417,7 +452,9 @@ def _patch_blender_52_wheel(source: Path, target: Path) -> None:
         raise ValueError("unexpected thumbnail EEVEE source")
     with zipfile.ZipFile(target, "w") as archive:
         for item, content in entries:
-            archive.writestr(item, content.replace(old, new) if item.filename == member else content)
+            archive.writestr(
+                item, content.replace(old, new) if item.filename == member else content
+            )
 
 
 def _build_payloads(
@@ -465,7 +502,9 @@ def _build_payloads(
 
 def _validate_wheel(wheel: Path) -> None:
     with zipfile.ZipFile(wheel) as archive:
-        metadata_names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+        metadata_names = [
+            name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+        ]
         if len(metadata_names) != 1:
             raise ValueError("wheel metadata is missing or duplicated")
         metadata = archive.read(metadata_names[0]).decode()
@@ -481,8 +520,7 @@ def _validate_wheel(wheel: Path) -> None:
         fields.get("Name") != ["blender-mcp"]
         or fields.get("Version") != ["1.0.0"]
         or fields.get("Requires-Python") != [">=3.10"]
-        or fields.get("Requires-Dist")
-        != ["docutils", "mcp[cli]<3,>=1.28.1", "pyyaml"]
+        or fields.get("Requires-Dist") != ["docutils", "mcp[cli]<3,>=1.28.1", "pyyaml"]
         or "Root-Is-Purelib: true\n" not in wheel_metadata
         or "Tag: py3-none-any\n" not in wheel_metadata
         or entry_points != "[console_scripts]\nblender-mcp = blmcp:main\n"
@@ -507,7 +545,7 @@ def _probe_versions(uv_bin: Path, blender_bin: Path, python: Path) -> None:
     if not _run([str(blender_bin), "--version"]).stdout.startswith("Blender 5.2.0 LTS"):
         raise ValueError("Blender version is not 5.2.0 LTS")
     probe = "import importlib.metadata as m, json, platform; print(json.dumps([platform.python_version(), m.version('setuptools')]))"
-    if json.loads(_run([str(python), "-I", "-c", probe]).stdout) != ["3.13.13", "80.9.0"]:
+    if json.loads(_run([str(python), "-I", "-c", probe]).stdout) != ["3.13.13", "83.0.0"]:
         raise ValueError("Python or setuptools build version is unexpected")
 
 
@@ -545,12 +583,20 @@ def _manifest(epoch: int, output: Path) -> ReleaseManifest:
             }
         )
     value = {
-        "schema_version": 2,
+        "schema_version": 3,
         "bundle_version": BUNDLE_VERSION,
         "platform": {"system": "Darwin", "machine": "arm64"},
         "upstream": {
             "url": "https://projects.blender.org/lab/blender_mcp.git",
             "commit": UPSTREAM_COMMIT,
+        },
+        "downstream": {
+            "source_tree_sha256": PATCHED_SOURCE_SHA256,
+            "readme_sha256": PATCH_README_SHA256,
+            "patches": [
+                {"filename": filename, "sha256": digest, "summary": summary}
+                for filename, digest, summary in DOWNSTREAM_PATCHES
+            ],
         },
         "python": {"runtime_minor": "3.13", "build_tested": "3.13.13"},
         "blender": {"minimum": "5.2.0", "maximum_exclusive": "5.3.0", "tested": "5.2.0"},
@@ -563,13 +609,16 @@ def _manifest(epoch: int, output: Path) -> ReleaseManifest:
             "python": "3.13.13",
             "blender": "5.2.0",
             "codex_tested": "0.148.0-alpha.9",
-            "backend": {"name": "setuptools", "version": "80.9.0"},
+            "backend": {"name": "setuptools", "version": "83.0.0"},
             "index": INDEX,
         },
         "tools": list(TOOLS),
         "artifacts": artifacts,
     }
-    raw = json.dumps(value, sort_keys=False, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
+    raw = (
+        json.dumps(value, sort_keys=False, separators=(",", ":"), ensure_ascii=True).encode()
+        + b"\n"
+    )
     (output / "manifest.json").write_bytes(raw)
     return parse_manifest(raw)
 
@@ -619,6 +668,9 @@ def _build_candidate(
     workspace: Path,
     epoch: int,
 ) -> ReleaseManifest:
+    patches = _stage_downstream_patches(workspace)
+    for source_root in source_roots:
+        _apply_downstream_patches(source_root, patches)
     _verify_locks(uv_bin, workspace / "lock-check")
     build_python = _create_venv(uv_bin, workspace / "build-runtime")
     _install_lock(uv_bin, build_python, BUILD_LOCK)
@@ -704,7 +756,7 @@ def build_distribution(
             shutil.rmtree(recovery)
             _fsync_directory(output_dir.parent)
         print("tools=26")
-        print("uv=0.12.2 python=3.13.13 blender=5.2.0 setuptools=80.9.0")
+        print("uv=0.12.2 python=3.13.13 blender=5.2.0 setuptools=83.0.0")
         return manifest
     except Exception:
         if candidate.exists():
