@@ -135,7 +135,7 @@ def decide(
     # 不能按源码书写顺序 early-return —— 那样 "isolation 不足 + 子进程崩溃" 会报
     # isolation_insufficient(优先级 12)而不是 tool_crashed(优先级 2)。
     for item in infra_failures:
-        if item not in fc.FAILURE_FAMILIES:
+        if item not in fc.INFRA_FAMILIES:
             raise AcceptanceFailure(
                 "runner_internal_error", f"unknown infra failure family: {item!r}")
     triggered: list[str] = list(infra_failures)

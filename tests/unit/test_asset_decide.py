@@ -303,6 +303,25 @@ def test_invalid_infra_failure_family_is_rejected(tmp_path):
     assert caught.value.code == "runner_internal_error"
 
 
+def test_check_failed_cannot_be_declared_as_infra_failure(tmp_path):
+    """check_failed 只能由 decide() 自己从真实 outcomes 算出,不能由 coordinator 声明。"""
+    contract = _contract(tmp_path)
+    with pytest.raises(AcceptanceFailure) as caught:
+        decide(contract=contract, outcomes=_all_pass(contract),
+               actual_files={"summary"}, expected_files={"summary"},
+               achieved_grade="local-trusted", infra_failures=["check_failed"])
+    assert caught.value.code == "runner_internal_error"
+
+
+def test_valid_infra_families_work_normally(tmp_path):
+    """确认合法的 infra family(如 stale_result_file)仍照常工作。"""
+    contract = _contract(tmp_path)
+    verdict = decide(contract=contract, outcomes=_all_pass(contract),
+                    actual_files={"summary"}, expected_files={"summary"},
+                    achieved_grade="local-trusted", infra_failures=["stale_result_file"])
+    assert verdict.failure_code == "stale_result_file"
+
+
 def test_invalid_artifact_kind_is_rejected(tmp_path):
     """contract.raw 可变;artifact_kind 被篡改成非法值时 checks_for_kind 会静默缩小 expected_ids,必须 fail-closed。"""
     contract = _contract(tmp_path)

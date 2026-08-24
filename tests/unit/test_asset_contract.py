@@ -332,3 +332,33 @@ def test_required_isolation_grade_non_string_is_rejected(tmp_path):
     with pytest.raises(AcceptanceFailure) as caught:
         load_contract(path, candidate_root=tmp_path / "candidate")
     assert caught.value.code == "contract_invalid"
+
+
+def test_artifact_kind_deleted_from_raw_is_rejected(tmp_path):
+    """contract.raw 可变,frozen=True 只冻结字段引用;artifact_kind 被删后读属性必须 fail-closed,不是裸 KeyError。"""
+    path = _write(tmp_path, _valid())
+    contract = load_contract(path, candidate_root=tmp_path / "candidate")
+    del contract.raw["artifact_kind"]
+    with pytest.raises(AcceptanceFailure) as caught:
+        _ = contract.artifact_kind
+    assert caught.value.code == "contract_invalid"
+
+
+def test_na_check_ids_deleted_from_raw_is_rejected(tmp_path):
+    """contract.raw 可变;na_check_ids 被删后读属性必须 fail-closed,不是裸 KeyError。"""
+    path = _write(tmp_path, _valid())
+    contract = load_contract(path, candidate_root=tmp_path / "candidate")
+    del contract.raw["na_check_ids"]
+    with pytest.raises(AcceptanceFailure) as caught:
+        _ = contract.na_check_ids
+    assert caught.value.code == "contract_invalid"
+
+
+def test_required_isolation_grade_deleted_from_raw_is_rejected(tmp_path):
+    """contract.raw 可变;required_isolation_grade 被删后读属性必须 fail-closed,不是裸 KeyError。"""
+    path = _write(tmp_path, _valid())
+    contract = load_contract(path, candidate_root=tmp_path / "candidate")
+    del contract.raw["required_isolation_grade"]
+    with pytest.raises(AcceptanceFailure) as caught:
+        _ = contract.required_isolation_grade
+    assert caught.value.code == "contract_invalid"

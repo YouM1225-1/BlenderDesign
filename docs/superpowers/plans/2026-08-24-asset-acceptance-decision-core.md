@@ -946,6 +946,36 @@ def test_tools_non_dict_entry_is_rejected(tmp_path):
     with pytest.raises(AcceptanceFailure) as caught:
         load_contract(path, candidate_root=tmp_path / "candidate")
     assert caught.value.code == "contract_invalid"
+
+
+def test_artifact_kind_deleted_from_raw_is_rejected(tmp_path):
+    """contract.raw 可变,frozen=True 只冻结字段引用;artifact_kind 被删后读属性必须 fail-closed,不是裸 KeyError。"""
+    path = _write(tmp_path, _valid())
+    contract = load_contract(path, candidate_root=tmp_path / "candidate")
+    del contract.raw["artifact_kind"]
+    with pytest.raises(AcceptanceFailure) as caught:
+        _ = contract.artifact_kind
+    assert caught.value.code == "contract_invalid"
+
+
+def test_na_check_ids_deleted_from_raw_is_rejected(tmp_path):
+    """contract.raw 可变;na_check_ids 被删后读属性必须 fail-closed,不是裸 KeyError。"""
+    path = _write(tmp_path, _valid())
+    contract = load_contract(path, candidate_root=tmp_path / "candidate")
+    del contract.raw["na_check_ids"]
+    with pytest.raises(AcceptanceFailure) as caught:
+        _ = contract.na_check_ids
+    assert caught.value.code == "contract_invalid"
+
+
+def test_required_isolation_grade_deleted_from_raw_is_rejected(tmp_path):
+    """contract.raw 可变;required_isolation_grade 被删后读属性必须 fail-closed,不是裸 KeyError。"""
+    path = _write(tmp_path, _valid())
+    contract = load_contract(path, candidate_root=tmp_path / "candidate")
+    del contract.raw["required_isolation_grade"]
+    with pytest.raises(AcceptanceFailure) as caught:
+        _ = contract.required_isolation_grade
+    assert caught.value.code == "contract_invalid"
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -1122,7 +1152,7 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `uv run --frozen pytest tests/unit/test_asset_contract.py -q`
-Expected: `38 passed`
+Expected: `41 passed`(38 个原有 + 3 个新增缺失字段守卫)
 
 - [ ] **Step 5: 提交**
 
@@ -1453,6 +1483,25 @@ def test_invalid_infra_failure_family_is_rejected(tmp_path):
     assert caught.value.code == "runner_internal_error"
 
 
+def test_check_failed_cannot_be_declared_as_infra_failure(tmp_path):
+    """check_failed 只能由 decide() 自己从真实 outcomes 算出,不能由 coordinator 声明。"""
+    contract = _contract(tmp_path)
+    with pytest.raises(AcceptanceFailure) as caught:
+        decide(contract=contract, outcomes=_all_pass(contract),
+               actual_files={"summary"}, expected_files={"summary"},
+               achieved_grade="local-trusted", infra_failures=["check_failed"])
+    assert caught.value.code == "runner_internal_error"
+
+
+def test_valid_infra_families_work_normally(tmp_path):
+    """确认合法的 infra family(如 stale_result_file)仍照常工作。"""
+    contract = _contract(tmp_path)
+    verdict = decide(contract=contract, outcomes=_all_pass(contract),
+                    actual_files={"summary"}, expected_files={"summary"},
+                    achieved_grade="local-trusted", infra_failures=["stale_result_file"])
+    assert verdict.failure_code == "stale_result_file"
+
+
 def test_invalid_artifact_kind_is_rejected(tmp_path):
     """contract.raw 可变;artifact_kind 被篡改成非法值时 checks_for_kind 会静默缩小 expected_ids,必须 fail-closed。"""
     contract = _contract(tmp_path)
@@ -1698,7 +1747,7 @@ def decide(
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `uv run --frozen pytest tests/unit/test_asset_decide.py -q`
-Expected: `31 passed`
+Expected: `34 passed`(31 个原有 + 3 个新增 check_failed 与 INFRA_FAMILIES 守卫)
 
 - [ ] **Step 5: 跑完整门禁**
 

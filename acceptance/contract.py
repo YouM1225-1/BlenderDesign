@@ -44,15 +44,24 @@ class Contract:
 
     @property
     def artifact_kind(self) -> str:
-        return str(self.raw["artifact_kind"])
+        try:
+            return str(self.raw["artifact_kind"])
+        except KeyError as exc:
+            raise _fail(f"missing required field: {exc}") from exc
 
     @property
     def na_check_ids(self) -> tuple[str, ...]:
-        return tuple(self.raw["na_check_ids"])
+        try:
+            return tuple(self.raw["na_check_ids"])
+        except KeyError as exc:
+            raise _fail(f"missing required field: {exc}") from exc
 
     @property
     def required_isolation_grade(self) -> str:
-        return str(self.raw["required_isolation_grade"])
+        try:
+            return str(self.raw["required_isolation_grade"])
+        except KeyError as exc:
+            raise _fail(f"missing required field: {exc}") from exc
 
     def allowlisted(self, check_id: str, code: str, tool_id: str, version: str) -> bool:
         target = {"check_id": check_id, "warning_code": code,
