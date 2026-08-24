@@ -9,6 +9,7 @@ from acceptance.contract import Contract
 from acceptance.primitives import AcceptanceFailure
 
 _GRADE_ORDER = {"local-trusted": 0, "isolated": 1, "attested": 2}
+_VALID_SEVERITIES = frozenset({"error", "warning", "info"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +63,10 @@ def aggregate(
             "expected_set_mismatch", f"unknown check id: {check_id}")
     dispositioned: list[Finding] = []
     for item in findings:
+        if item.severity not in _VALID_SEVERITIES:
+            raise AcceptanceFailure(
+                "tool_output_invalid",
+                f"unknown finding severity: {item.severity!r}")
         accepted = (
             item.severity == "warning"
             and tool_id is not None
@@ -128,6 +133,10 @@ def decide(
 
     if achieved_grade not in _GRADE_ORDER:
         raise AcceptanceFailure("contract_invalid", f"unknown grade: {achieved_grade}")
+    if contract.required_isolation_grade not in _GRADE_ORDER:
+        raise AcceptanceFailure(
+            "contract_invalid",
+            f"unknown required_isolation_grade: {contract.required_isolation_grade}")
     if _GRADE_ORDER[achieved_grade] < _GRADE_ORDER[contract.required_isolation_grade]:
         triggered.append("isolation_insufficient")
 

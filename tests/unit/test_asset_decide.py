@@ -223,3 +223,63 @@ def test_zero_checks_is_rejected(tmp_path):
                      actual_files={"summary"}, expected_files={"summary"},
                      achieved_grade="local-trusted", infra_failures=[])
     assert verdict.failure_code == "zero_checks_collected"
+
+
+@pytest.mark.parametrize("bad_severity", ["CRITICAL", ""])
+def test_invalid_severity_is_rejected(tmp_path, bad_severity):
+    """fail-closed:非法 severity(非 error/warning/info)必须拒绝,不能被静默当通过。"""
+    finding = Finding(code="x", severity=bad_severity, pointer=None, offset=None, detail=None)
+    with pytest.raises(AcceptanceFailure) as caught:
+        _agg(_contract(tmp_path), [finding])
+    assert caught.value.code == "tool_output_invalid"
+
+
+def test_invalid_required_isolation_grade_is_rejected(tmp_path):
+    """contract.raw 可变,frozen 只冻结字段引用;损坏的 grade 必须 fail-closed,不是裸 KeyError。"""
+    contract = _contract(tmp_path)
+    contract.raw["required_isolation_grade"] = "totally-bogus-grade"
+    with pytest.raises(AcceptanceFailure) as caught:
+        decide(contract=contract, outcomes=_all_pass(contract),
+               actual_files={"summary"}, expected_files={"summary"},
+               achieved_grade="local-trusted", infra_failures=[])
+    assert caught.value.code == "contract_invalid"
+
+
+def test_failed_check_ids_sorted_by_registry_order(tmp_path):
+    """按注册表 sort_key(stage, order, id)排序,不是字典序:dependency 字典序在前但 order 更大。"""
+    contract = _contract(tmp_path)
+    dependency_id = "r2.dependency.all_present"
+    outcomes = _all_pass(contract)
+    by_id = {o.id: i for i, o in enumerate(outcomes)}
+    for check_id in (CHECK, dependency_id):
+        outcomes[by_id[check_id]] = aggregate(
+            check_id, [_err()], contract=contract, tool_id=None, tool_version=None,
+            source_truncated=False, terminal=None)
+    verdict = decide(contract=contract, outcomes=outcomes,
+                     actual_files={"summary"}, expected_files={"summary"},
+                     achieved_grade="local-trusted", infra_failures=[])
+    assert verdict.failure_code == "check_failed"
+    assert verdict.failed_check_ids == [CHECK, dependency_id]
+
+
+def test_duplicate_check_id_is_expected_set_mismatch(tmp_path):
+    contract = _contract(tmp_path)
+    outcomes = _all_pass(contract)
+    outcomes.append(outcomes[0])   # 重复 check id,而非未知 id
+    verdict = decide(contract=contract, outcomes=outcomes,
+                     actual_files={"summary"}, expected_files={"summary"},
+                     achieved_grade="local-trusted", infra_failures=[])
+    assert verdict.failure_code == "expected_set_mismatch"
+
+
+def test_crash_outranks_missing(tmp_path):
+    contract = _contract(tmp_path)
+    outcomes = _all_pass(contract)
+    outcomes[0] = aggregate(outcomes[0].id, [], contract=contract, tool_id=None,
+                            tool_version=None, source_truncated=False, terminal="Crash")
+    outcomes[1] = aggregate(outcomes[1].id, [], contract=contract, tool_id=None,
+                            tool_version=None, source_truncated=False, terminal="Missing")
+    verdict = decide(contract=contract, outcomes=outcomes,
+                     actual_files={"summary"}, expected_files={"summary"},
+                     achieved_grade="local-trusted", infra_failures=[])
+    assert verdict.failure_code == "tool_crashed"   # 优先级 2 高于 evidence_missing 的 9
