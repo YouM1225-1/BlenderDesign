@@ -1,0 +1,103 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from acceptance import check_registry as reg
+from acceptance.contract import load_contract
+from acceptance.primitives import AcceptanceFailure
+
+
+def _valid(kind: str = "blend_native") -> dict[str, object]:
+    checks = [
+        {"id": c.id, "impl": c.impl, "order": c.order}
+        for c in sorted(reg.checks_for_kind(kind), key=reg.sort_key)
+    ]
+    return {
+        "schema_version": 1,
+        "contract_id": "pilot-001",
+        "artifact_kind": kind,
+        "profile": "static_render",
+        "required_isolation_grade": "local-trusted",
+        "input": {"path": "asset.blend", "sha256": "0" * 64, "bytes": 1024},
+        "export": None,
+        "checks": checks,
+        "na_check_ids": list(reg.na_check_ids(kind)),
+        "warning_allowlist": [],
+        "visual_thresholds": {"macos-arm64-workbench-metal-apple_m4":
+                              {"fail": 0.016, "failpercent": 1.0}},
+        "platform_blocklist": [],
+        "texture_colorspace": {"base_color": "sRGB", "data": "Non-Color"},
+        "tolerated_unknown_types": [],
+        "validator_config_path": None,
+        "budget": {"max_triangles": 1000000, "max_materials": 64, "max_images": 64,
+                   "max_image_bytes": 33554432, "max_file_bytes": 536870912,
+                   "vertex_split_ratio_max": 4.0},
+        "projection": {"preserved": [], "transformed": [], "lost": []},
+        "tools": [{"id": "blender", "version": "5.2.0", "sha256": "1" * 64,
+                   "path": "/Applications/Blender.app/Contents/MacOS/Blender"}],
+        "limits": {"cpu_seconds": 600, "address_space_bytes": 8589934592,
+                   "open_files": 256, "file_size_bytes": 1073741824},
+        "golden": None,
+    }
+
+
+def _write(tmp_path: Path, value: object) -> Path:
+    path = tmp_path / "contract.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    return path
+
+
+def test_valid_contract_loads_and_has_stable_digest(tmp_path):
+    path = _write(tmp_path, _valid())
+    first = load_contract(path, candidate_root=tmp_path / "candidate")
+    second = load_contract(path, candidate_root=tmp_path / "candidate")
+    assert first.digest == second.digest
+    assert first.artifact_kind == "blend_native"
+
+
+def test_unknown_top_level_field_is_rejected(tmp_path):
+    bad = _valid() | {"surprise": 1}
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_na_set_must_equal_derived_set(tmp_path):
+    bad = _valid()
+    bad["na_check_ids"] = bad["na_check_ids"][:-1]
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_checks_must_be_in_total_order(tmp_path):
+    bad = _valid()
+    checks = list(bad["checks"])
+    checks[0], checks[1] = checks[1], checks[0]
+    bad["checks"] = checks
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_contract_inside_candidate_root_is_rejected(tmp_path):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    path = _write(candidate, _valid())
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=candidate)
+    assert caught.value.code == "contract_invalid"
+
+
+def test_interchange_projection_union_must_be_p01_to_p14(tmp_path):
+    value = _valid("interchange")
+    value["export"] = {"format": "glb", "preset": {}}
+    value["projection"] = {"preserved": ["p01_object_count"], "transformed": [], "lost": []}
+    path = _write(tmp_path, value)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
