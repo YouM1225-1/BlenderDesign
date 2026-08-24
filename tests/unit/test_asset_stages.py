@@ -56,6 +56,17 @@ def test_r1_rejects_oversized_input(tmp_path):
     assert [f.code for f in findings["r1.input.size_within_limit"]] == ["input_too_large"]
 
 
+def test_r5_all_pass_when_no_drift(tmp_path):
+    contract = _contract(tmp_path)
+    manifest = [{"id": "summary", "path": "summary.json", "bytes": 1,
+                 "sha256": "a" * 64, "actual_sha256": "a" * 64}]
+    findings = stages.run_r5(contract, evidence_manifest=manifest,
+                             recomputed_digest=contract.digest)
+    assert set(findings) == {"r5.evidence.manifest_closed", "r5.evidence.hashes_match",
+                             "r5.contract.digest_stable"}
+    assert all(v == [] for v in findings.values())
+
+
 def test_r5_detects_digest_drift(tmp_path):
     contract = _contract(tmp_path)
     findings = stages.run_r5(contract, evidence_manifest=[], recomputed_digest="deadbeef")

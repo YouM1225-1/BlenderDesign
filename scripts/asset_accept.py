@@ -6,6 +6,7 @@ import argparse
 import datetime
 import hashlib
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -57,7 +58,17 @@ def _acceptance_provenance() -> tuple[str, list[dict[str, str]]]:
 
 
 def _input_digest(path: Path) -> str:
-    """输入不存在或不可读时返回哨兵值,使 provenance 形状恒定,判定交给 R1 的 check。"""
+    """输入不存在、不可读或不是普通文件时返回哨兵值,使 provenance 形状恒定,判定交给
+    R1 的 check。读取前先 lstat() 确认是普通文件——FIFO 等特殊文件必须在 read_bytes()
+    之前拦下,否则在没有写入方时会无限阻塞在 I/O 等待里;一个 fail-closed 的验收工具
+    永久挂起比崩溃更糟(它既不给结论也不释放)。
+    """
+    try:
+        info = path.lstat()
+    except OSError:
+        return _UNREADABLE_DIGEST
+    if not stat.S_ISREG(info.st_mode):
+        return _UNREADABLE_DIGEST
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:

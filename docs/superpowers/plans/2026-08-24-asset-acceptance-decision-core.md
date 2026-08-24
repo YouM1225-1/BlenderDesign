@@ -2059,6 +2059,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
+import stat
 import sys
 from pathlib import Path
 
@@ -2109,7 +2110,17 @@ def _acceptance_provenance() -> tuple[str, list[dict[str, str]]]:
 
 
 def _input_digest(path: Path) -> str:
-    """输入不存在或不可读时返回哨兵值,使 provenance 形状恒定,判定交给 R1 的 check。"""
+    """输入不存在、不可读或不是普通文件时返回哨兵值,使 provenance 形状恒定,判定交给
+    R1 的 check。读取前先 lstat() 确认是普通文件——FIFO 等特殊文件必须在 read_bytes()
+    之前拦下,否则在没有写入方时会无限阻塞在 I/O 等待里;一个 fail-closed 的验收工具
+    永久挂起比崩溃更糟(它既不给结论也不释放)。
+    """
+    try:
+        info = path.lstat()
+    except OSError:
+        return _UNREADABLE_DIGEST
+    if not stat.S_ISREG(info.st_mode):
+        return _UNREADABLE_DIGEST
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
@@ -2304,6 +2315,17 @@ def test_r1_rejects_oversized_input(tmp_path):
     assert [f.code for f in findings["r1.input.size_within_limit"]] == ["input_too_large"]
 
 
+def test_r5_all_pass_when_no_drift(tmp_path):
+    contract = _contract(tmp_path)
+    manifest = [{"id": "summary", "path": "summary.json", "bytes": 1,
+                 "sha256": "a" * 64, "actual_sha256": "a" * 64}]
+    findings = stages.run_r5(contract, evidence_manifest=manifest,
+                             recomputed_digest=contract.digest)
+    assert set(findings) == {"r5.evidence.manifest_closed", "r5.evidence.hashes_match",
+                             "r5.contract.digest_stable"}
+    assert all(v == [] for v in findings.values())
+
+
 def test_r5_detects_digest_drift(tmp_path):
     contract = _contract(tmp_path)
     findings = stages.run_r5(contract, evidence_manifest=[], recomputed_digest="deadbeef")
@@ -2406,7 +2428,7 @@ def run_r5(
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `uv run --frozen pytest tests/unit/test_asset_stages.py -q`
-Expected: `7 passed`
+Expected: `7 passed`(审查轮补了 `run_r5` 的正向测试后为 `8 passed`)
 
 - [ ] **Step 5: 把 9 条接进 coordinator**
 
@@ -2453,25 +2475,48 @@ def _present_tools(contract: Contract) -> set[str]:
 
 - [ ] **Step 6: 更新 Task 7 的测试期望**
 
-`tests/unit/test_asset_accept.py` 的 `test_missing_input_is_reported_not_crashed` 现在会同时命中 `r1.input.digest_recorded`;把断言改为:
+`tests/unit/test_asset_accept.py` 的 `test_missing_input_is_reported_not_crashed` 现在会同时命中 `r1.input.digest_recorded`;把断言改为(原有的"`r2./r3./r4./r5.` 前缀且非 N/A 必须全 `NotTested`"回归守卫,在 r5 三条接入后**不能整条删除**——正确做法是把前缀元组收窄成 `("r2.", "r3.", "r4.")`,下方已是审查轮改正后的最终版本):
 
 ```python
     assert summary["failure_code"] == "check_failed"
     assert "r1.input.digest_recorded" in summary["failed_check_ids"]
+    # 回归守卫:R2-R4 尚未接入,必须仍是 NotTested——防止将来某个任务过早把它们标成已测。
+    assert all(c["raw_status"] == "NotTested"
+               for c in summary["checks"]
+               if c["id"].startswith(("r2.", "r3.", "r4."))
+               and c["raw_status"] != "NotApplicableByContract")
 ```
 
-并新增一条正向测试:
+并新增一条正向测试(审查轮改正:断言收窄到"9 条已接线 check 全绿",而不只看 `r1.*`——否则 r0/r5 悄悄失败时这条"正向路径"测试也测不出来):
 
 ```python
 def test_real_input_reaches_r2_not_tested_boundary(tmp_path):
     asset = _input_path(tmp_path)
     asset.write_bytes(b"BLENDER-fake")
     _, summary = _run(tmp_path)
-    r1 = [c for c in summary["checks"] if c["id"].startswith("r1.")]
-    assert all(c["effective_status"] == "Pass" for c in r1)
+    wired = [c for c in summary["checks"] if c["id"].startswith(("r0.", "r1.", "r5."))]
+    assert len(wired) == 9
+    assert all(c["effective_status"] == "Pass" for c in wired)
     # R2 起尚未接入 → NotTested → 整体仍 fail-closed
     assert summary["failure_code"] in {"check_failed", "runner_internal_error"}
 ```
+
+**审查轮补充(可移植性 + FIFO 挂起回归)**:`_valid()` 锁定的工具 `path` 是这台开发机上真实存在的 `/Applications/Blender.app/...`;`_present_tools()` 一接入 R0,`ALL CHECKS PASSED` 就变成了"这台机器 `/Applications` 内容"的属性而不是代码的属性(全局约束要求默认 `pytest` 不得依赖 Blender)。修法:加一个 autouse fixture,让"不关心 R0 工具锁定"的测试默认工具"已装",不碰真实文件系统;专门测"工具缺失"路径的测试在自己的测试体内再次 `monkeypatch` 覆盖这个默认值:
+
+```python
+@pytest.fixture(autouse=True)
+def _tools_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(asset_accept, "_present_tools", lambda contract: {"acceptance", "blender"})
+
+
+def test_missing_tool_fails_r0_contract_tools_locked(tmp_path, monkeypatch):
+    monkeypatch.setattr(asset_accept, "_present_tools", lambda contract: set())
+    code, summary = _run(tmp_path)
+    assert code == 1
+    assert "r0.contract.tools_locked" in summary["failed_check_ids"]
+```
+
+另外,`_input_digest()`(定义见 Task 7 Step 4)在 `load_contract`/`run_r1` 之前对 `args.input` 做无条件 `read_bytes()`;`--input` 指向一个没有写入方的 FIFO 会让 `main()` 永久挂起在不可中断的 I/O 等待里(fail-closed 的验收工具永久挂起比崩溃更糟)。修法已并入 Task 7 Step 4 的 `_input_digest()`:读取前先 `lstat()` 确认是普通文件,非普通文件直接返回哨兵值,把判定交给对同一路径立即返回的 `run_r1`。回归测试 `test_input_fifo_is_reported_not_hung` 用 `os.mkfifo()` 建一个没有写入方的 FIFO 作为 `--input`,断言 `main()` 秒回(而不是真的等它挂起)、`input_digest` 是哨兵值、`r1.input.no_link_or_device` 报 `input_not_regular_file`。
 
 - [ ] **Step 7: 跑完整门禁并提交**
 
