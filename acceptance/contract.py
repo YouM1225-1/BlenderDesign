@@ -90,9 +90,9 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
     kind = value["artifact_kind"]
     if type(kind) is not str or kind not in _KINDS:
         raise _fail(f"artifact_kind must be one of {sorted(_KINDS)}")
-    if value["profile"] != "static_render":
+    if type(value["profile"]) is not str or value["profile"] != "static_render":
         raise _fail("profile must be static_render in P0")
-    if value["required_isolation_grade"] not in _GRADES:
+    if type(value["required_isolation_grade"]) is not str or value["required_isolation_grade"] not in _GRADES:
         raise _fail(f"required_isolation_grade must be one of {list(_GRADES)}")
 
     expected_specs = sorted(reg.checks_for_kind(kind), key=reg.sort_key)
@@ -107,6 +107,18 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
         raise _fail("na_check_ids must be a list")
     if list(value["na_check_ids"]) != list(reg.na_check_ids(kind)):
         raise _fail("na_check_ids must equal the derived not-applicable set")
+
+    warning_allowlist = value["warning_allowlist"]
+    if type(warning_allowlist) is not list:
+        raise _fail("warning_allowlist must be a list")
+    for entry in warning_allowlist:
+        if type(entry) is not dict:
+            raise _fail("warning_allowlist entries must be objects")
+        if set(entry) != {"check_id", "warning_code", "tool_id", "tool_version"}:
+            raise _fail("warning_allowlist entries must have check_id/warning_code/tool_id/tool_version")
+        for key in ("check_id", "warning_code", "tool_id", "tool_version"):
+            if type(entry[key]) is not str:
+                raise _fail(f"warning_allowlist entries[].{key} must be a string")
 
     projection = value["projection"]
     if type(projection) is not dict:

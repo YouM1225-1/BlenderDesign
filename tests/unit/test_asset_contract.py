@@ -246,3 +246,89 @@ def test_artifact_kind_dict_is_rejected(tmp_path):
     with pytest.raises(AcceptanceFailure) as caught:
         load_contract(path, candidate_root=tmp_path / "candidate")
     assert caught.value.code == "contract_invalid"
+
+
+def test_warning_allowlist_not_list_is_rejected(tmp_path):
+    bad = _valid()
+    bad["warning_allowlist"] = None
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+@pytest.mark.parametrize("not_list", [5, 1.5, True, {}])
+def test_warning_allowlist_scalar_is_rejected(tmp_path, not_list):
+    bad = _valid()
+    bad["warning_allowlist"] = not_list
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_warning_allowlist_entry_non_dict_is_rejected(tmp_path):
+    bad = _valid()
+    bad["warning_allowlist"] = [5]
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_warning_allowlist_entry_missing_key_is_rejected(tmp_path):
+    bad = _valid()
+    bad["warning_allowlist"] = [{"check_id": "foo", "warning_code": "bar", "tool_id": "baz"}]
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_warning_allowlist_entry_extra_key_is_rejected(tmp_path):
+    bad = _valid()
+    bad["warning_allowlist"] = [{"check_id": "foo", "warning_code": "bar", "tool_id": "baz",
+                                 "tool_version": "1.0", "extra": "field"}]
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+@pytest.mark.parametrize("key", ["check_id", "warning_code", "tool_id", "tool_version"])
+def test_warning_allowlist_entry_non_string_value_is_rejected(tmp_path, key):
+    bad = _valid()
+    entry = {"check_id": "foo", "warning_code": "bar", "tool_id": "baz", "tool_version": "1.0"}
+    entry[key] = 123
+    bad["warning_allowlist"] = [entry]
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_warning_allowlist_valid_entry_loads(tmp_path):
+    good = _valid()
+    good["warning_allowlist"] = [{"check_id": "foo", "warning_code": "bar", "tool_id": "baz",
+                                   "tool_version": "1.0"}]
+    path = _write(tmp_path, good)
+    contract = load_contract(path, candidate_root=tmp_path / "candidate")
+    assert contract.allowlisted("foo", "bar", "baz", "1.0")
+
+
+def test_profile_non_string_is_rejected(tmp_path):
+    bad = _valid()
+    bad["profile"] = 123
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_required_isolation_grade_non_string_is_rejected(tmp_path):
+    bad = _valid()
+    bad["required_isolation_grade"] = 123
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"

@@ -1110,14 +1110,19 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
   `tools` 的每个元素还需 `type(tool) is not dict`。
 - `path.resolve(strict=True)` 在合同文件不存在时抛裸 `FileNotFoundError`,需要把它纳入合同加载
   的异常处理块,改为 `contract_invalid` 拒绝。
-- Step 1 的测试块与上面 Step 3 的实现同步更新,新增 14 条测试(4 类此前零覆盖的既有 guard、
-  candidate_root 恰好等于合同路径的等值分支、以及上述四处修复各一条回归测试),测试总数由
-  6 增至 21(含 1 个 `schema_version` 别名值的 parametrize,贡献 2 个 case)。
+- `warning_allowlist` 未被校验,在 `Contract.allowlisted()` 中被迭代而无类型守卫,导致类型错
+  时抛裸 `TypeError`。改为必须是 list,每个元素必须是 dict,元素键集必须恰好是
+  `{"check_id", "warning_code", "tool_id", "tool_version"}`,各值必须是 str。
+- `profile` 与 `required_isolation_grade` 原先在使用前无类型检查,虽然后续比较/成员检查通常能捕获
+  类型错(但不保证),改为加上前置 `type(...) is not str` 检查。
+- Step 1 的测试块与上面 Step 3 的实现同步更新,新增 31 条测试(含 3 个 parametrize:
+  `schema_version` 别名 2 个、`warning_allowlist` 非 list 4 个、`warning_allowlist` 条目值非 str 4 个),
+  测试总数由 6 增至 38(含上述 parametrize 共 10 个额外 case,另 21 个普通测试 + 7 个新增校验测试)。
 
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `uv run --frozen pytest tests/unit/test_asset_contract.py -q`
-Expected: `23 passed`
+Expected: `38 passed`
 
 - [ ] **Step 5: 提交**
 
