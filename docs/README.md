@@ -1,6 +1,6 @@
 # 文档中心
 
-本目录只保留当前实现的正式文档。历史计划、审计过程、研究草稿和机器证据已从工作树移除；需要追溯时使用 Git 历史。
+本目录保留当前实现的正式文档,以及资产验收方案(`acceptance/`)与实施计划(`superpowers/plans/`)。其余历史研究草稿和机器证据不在工作树中,需要追溯时使用 Git 历史。
 
 ## 使用文档
 
@@ -9,6 +9,13 @@
 - [官方 Blender MCP 分发与安装](distribute-official-blender-mcp.md)：受审分发、信任边界、安装和回滚入口。
 - [官方 Blender MCP 使用](use-official-blender-mcp.md)：安装后的安全使用方式。
 - [验证说明](validation.md)：自动化门禁、手工验证与结论边界。
+
+## 资产验收方案
+
+- [验收方案 V3.8](acceptance/blender_mcp_skill_acceptance_optimized_v3_8.md):当前生效的规范版本,含 check registry、file registry、判定公式与夹具表。同目录保留 V3.2~V3.7 与历次审计报告作为演进记录,**它们不是当前规范**。
+- [判定核心实施计划](superpowers/plans/2026-08-24-asset-acceptance-decision-core.md):P0 的第一份计划,只覆盖不依赖 Blender 的判定核心。
+
+该方案描述的通用资产验收**尚未实现**,不得用于自动发布放行。
 
 ## 技术决策
 

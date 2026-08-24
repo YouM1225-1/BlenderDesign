@@ -4,19 +4,32 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import hashlib
 import json
 import math
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-from smoke.process_registry import read_private_bytes, require_private_directory
+from acceptance.primitives import (
+    AcceptanceFailure,
+    clean_environment,
+    create_private_directory,
+    file_evidence,
+    finite_json_float,
+    group_exists,
+    normalise_new_root,
+    reject_duplicate_keys,
+    reject_json_constant,
+    require_zero,
+    run_command,
+    stop_group,
+    write_json_exclusive,
+)
+from smoke.process_registry import read_private_bytes
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BLENDER = Path("/Applications/Blender.app/Contents/MacOS/Blender")
@@ -27,12 +40,6 @@ GUI_REQUIRED_TRUE = (
     "timer_tick", "revision_bump", "fields", "hash_scope", "cycles_leak_free",
     "large_scene", "large_scene_budget_ok", "nfr_p1",
 )
-
-
-class AcceptanceFailure(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -58,30 +65,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def _normalise_new_root(path: Path) -> Path:
-    candidate = path.expanduser()
-    if not candidate.is_absolute():
-        candidate = Path.cwd() / candidate
-    parent = candidate.parent.resolve(strict=True)
-    candidate = parent / candidate.name
-    try:
-        candidate.lstat()
-    except FileNotFoundError:
-        pass
-    else:
-        raise AcceptanceFailure(
-            "reused_evidence_root", f"evidence root already exists: {candidate}")
-    if candidate == ROOT or ROOT in candidate.parents:
-        raise AcceptanceFailure(
-            "evidence_root_inside_candidate",
-            "evidence root must be outside the candidate Git worktree",
-        )
-    return candidate
+    return normalise_new_root(path, ROOT)
 
 
-def _create_private_directory(path: Path) -> None:
-    os.mkdir(path, mode=0o700)
-    os.chmod(path, 0o700, follow_symlinks=False)
-    require_private_directory(path)
+_create_private_directory = create_private_directory
 
 
 def _require_clean_worktree(env: dict[str, str]) -> None:
@@ -118,43 +105,17 @@ def _require_python_version(actual: tuple[int, int, int] | None = None) -> None:
 
 
 def _clean_environment(uv: Path) -> dict[str, str]:
-    blocked = (
-        "BLENDERCODEX_", "BLENDER_", "DYLD_", "GIT_", "LD_", "PYTHON", "UV_",
-    )
-    clean = {
-        key: value for key, value in os.environ.items()
-        if key != "VIRTUAL_ENV" and not key.startswith(blocked)
-    }
-    clean.update({
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_NO_REPLACE_OBJECTS": "1",
-        "GIT_OPTIONAL_LOCKS": "0",
-        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "UV_BIN": str(uv),
-    })
+    clean = clean_environment(uv)
     return clean
 
 
-def _reject_json_constant(value: str) -> object:
-    raise ValueError(f"non-standard JSON constant: {value}")
+_reject_json_constant = reject_json_constant
 
 
-def _finite_json_float(value: str) -> float:
-    parsed = float(value)
-    if not math.isfinite(parsed):
-        raise ValueError(f"non-finite JSON number: {value}")
-    return parsed
+_finite_json_float = finite_json_float
 
 
-def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON object key: {key}")
-        result[key] = value
-    return result
+_reject_duplicate_keys = reject_duplicate_keys
 
 
 def _read_artifact(path: Path, mode: str, large_objects: int) -> dict[str, Any]:
@@ -201,91 +162,24 @@ def _read_artifact(path: Path, mode: str, large_objects: int) -> dict[str, Any]:
 
 
 def _file_evidence(path: Path) -> dict[str, object]:
-    try:
-        raw = read_private_bytes(
-            path, time.monotonic() + 5.0, MAX_ARTIFACT_BYTES)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise AcceptanceFailure(
-            "evidence_file_invalid", f"invalid evidence file {path}: {exc}") from exc
-    return {"path": path.name, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    return file_evidence(path, MAX_ARTIFACT_BYTES)
 
 
 def _write_json_exclusive(path: Path, value: object) -> None:
-    require_private_directory(path.parent)
-    raw = (json.dumps(
-        value, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
-    descriptor = os.open(
-        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            descriptor = -1
-            stream.write(raw)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+    write_json_exclusive(path, value)
 
 
-def _group_exists(group_id: int) -> bool:
-    try:
-        os.killpg(group_id, 0)
-    except ProcessLookupError:
-        return False
-    return True
+_group_exists = group_exists
 
 
-def _stop_group(process: subprocess.Popen[bytes]) -> None:
-    if _group_exists(process.pid):
-        os.killpg(process.pid, signal.SIGTERM)
-        try:
-            process.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            pass
-    if _group_exists(process.pid):
-        os.killpg(process.pid, signal.SIGKILL)
-        try:
-            process.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            pass
+_stop_group = stop_group
 
 
-def _run_command(
-    stage: str,
-    command: list[str],
-    *,
-    env: dict[str, str],
-    log_path: Path,
-    timeout: float,
-) -> int:
-    descriptor = os.open(
-        log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    try:
-        os.fchmod(descriptor, 0o600)
-        process = subprocess.Popen(
-            command, cwd=ROOT, env=env, stdout=descriptor,
-            stderr=subprocess.STDOUT, start_new_session=True, umask=0o077)
-    finally:
-        os.close(descriptor)
-    try:
-        returncode = process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        _stop_group(process)
-        raise AcceptanceFailure(
-            f"{stage}_timeout", f"{stage} exceeded {timeout:g} seconds") from exc
-    except BaseException:
-        _stop_group(process)
-        raise
-    if _group_exists(process.pid):
-        _stop_group(process)
-        raise AcceptanceFailure(
-            f"{stage}_process_group_leak", f"{stage} left a live process group")
-    return returncode
+def _run_command(stage, command, *, env, log_path, timeout):
+    return run_command(stage, command, cwd=ROOT, env=env, log_path=log_path, timeout=timeout)
 
 
-def _require_zero(stage: str, returncode: int) -> None:
-    if returncode != 0:
-        raise AcceptanceFailure(
-            f"{stage}_exit_nonzero", f"{stage} exited with status {returncode}")
+_require_zero = require_zero
 
 
 def _execute(args: argparse.Namespace, root: Path) -> dict[str, Any]:
