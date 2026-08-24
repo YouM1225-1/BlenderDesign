@@ -202,3 +202,29 @@ def test_tools_non_dict_entry_is_rejected(tmp_path):
     with pytest.raises(AcceptanceFailure) as caught:
         load_contract(path, candidate_root=tmp_path / "candidate")
     assert caught.value.code == "contract_invalid"
+
+
+def test_projection_group_not_list_is_rejected(tmp_path):
+    bad = _valid()
+    bad["projection"] = {"preserved": 5, "transformed": [], "lost": []}
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_projection_group_with_non_string_element_is_rejected(tmp_path):
+    bad = _valid("interchange")
+    bad["export"] = {"format": "glb", "preset": {}}
+    bad["projection"] = {"preserved": ["p01_object_count", 5], "transformed": [], "lost": []}
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_contract_file_not_found_is_rejected(tmp_path):
+    nonexistent = tmp_path / "does_not_exist.json"
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(nonexistent, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"

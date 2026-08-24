@@ -61,7 +61,10 @@ class Contract:
 
 
 def load_contract(path: Path, *, candidate_root: Path) -> Contract:
-    resolved = path.resolve(strict=True)
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise _fail(f"contract file not found: {exc}") from exc
     root = candidate_root.expanduser().resolve()
     if resolved == root or root in resolved.parents:
         raise _fail("contract must live outside the candidate input tree")
@@ -112,7 +115,13 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
         raise _fail("projection must have preserved/transformed/lost")
     union: list[str] = []
     for group in ("preserved", "transformed", "lost"):
-        union.extend(projection[group])
+        items = projection[group]
+        if type(items) is not list:
+            raise _fail(f"projection.{group} must be a list")
+        for item in items:
+            if type(item) is not str:
+                raise _fail(f"projection.{group} contains non-string element")
+        union.extend(items)
     if kind == "interchange" and sorted(union) != sorted(PROJECTION_FIELDS):
         raise _fail("projection union must be exactly p01..p14 for interchange")
     if len(set(union)) != len(union):

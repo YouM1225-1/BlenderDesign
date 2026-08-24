@@ -1108,14 +1108,16 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
 - `na_check_ids`、`projection`、`tools` 原先直接喂给 `list()` / `set()` / `for ... in`,类型错时
   抛裸 `TypeError` 而非 `AcceptanceFailure`。三处都补上 `type(...) is not list/dict` 前置检查,
   `tools` 的每个元素还需 `type(tool) is not dict`。
-- Step 1 的测试块与上面 Step 3 的实现同步更新,新增 11 条测试(4 类此前零覆盖的既有 guard、
-  candidate_root 恰好等于合同路径的等值分支、以及上述三处修复各一条回归测试),测试总数由
-  6 增至 18(含 1 个 `schema_version` 别名值的 parametrize,贡献 2 个 case)。
+- `path.resolve(strict=True)` 在合同文件不存在时抛裸 `FileNotFoundError`,需要把它纳入合同加载
+  的异常处理块,改为 `contract_invalid` 拒绝。
+- Step 1 的测试块与上面 Step 3 的实现同步更新,新增 14 条测试(4 类此前零覆盖的既有 guard、
+  candidate_root 恰好等于合同路径的等值分支、以及上述四处修复各一条回归测试),测试总数由
+  6 增至 21(含 1 个 `schema_version` 别名值的 parametrize,贡献 2 个 case)。
 
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `uv run --frozen pytest tests/unit/test_asset_contract.py -q`
-Expected: `18 passed`
+Expected: `21 passed`
 
 - [ ] **Step 5: 提交**
 
