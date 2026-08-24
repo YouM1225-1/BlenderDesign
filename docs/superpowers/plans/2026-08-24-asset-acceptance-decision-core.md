@@ -1045,7 +1045,7 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
     if type(value["schema_version"]) is not int or value["schema_version"] != 1:
         raise _fail("schema_version must be 1")
     kind = value["artifact_kind"]
-    if kind not in _KINDS:
+    if type(kind) is not str or kind not in _KINDS:
         raise _fail(f"artifact_kind must be one of {sorted(_KINDS)}")
     if value["profile"] != "static_render":
         raise _fail("profile must be static_render in P0")
@@ -1117,7 +1117,7 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `uv run --frozen pytest tests/unit/test_asset_contract.py -q`
-Expected: `21 passed`
+Expected: `23 passed`
 
 - [ ] **Step 5: 提交**
 

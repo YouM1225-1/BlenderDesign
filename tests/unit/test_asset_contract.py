@@ -228,3 +228,21 @@ def test_contract_file_not_found_is_rejected(tmp_path):
     with pytest.raises(AcceptanceFailure) as caught:
         load_contract(nonexistent, candidate_root=tmp_path / "candidate")
     assert caught.value.code == "contract_invalid"
+
+
+def test_artifact_kind_list_is_rejected(tmp_path):
+    bad = _valid()
+    bad["artifact_kind"] = []
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_artifact_kind_dict_is_rejected(tmp_path):
+    bad = _valid()
+    bad["artifact_kind"] = {}
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"

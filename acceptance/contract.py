@@ -88,7 +88,7 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
     if type(value["schema_version"]) is not int or value["schema_version"] != 1:
         raise _fail("schema_version must be 1")
     kind = value["artifact_kind"]
-    if kind not in _KINDS:
+    if type(kind) is not str or kind not in _KINDS:
         raise _fail(f"artifact_kind must be one of {sorted(_KINDS)}")
     if value["profile"] != "static_render":
         raise _fail("profile must be static_render in P0")
