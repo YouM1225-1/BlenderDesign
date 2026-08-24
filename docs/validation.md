@@ -40,6 +40,23 @@ detect-secrets 与 pip-audit，进行两次确定性构建，并逐字节比对�
 
 ## Blender 验证
 
+正式 Phase 0 验收入口是：
+
+```bash
+uv run --python 3.13.13 --frozen python scripts/run_phase0_acceptance.py \
+  --evidence-root /absolute/new/path/outside/the/repository \
+  --uv /absolute/reviewed/uv
+```
+
+`--evidence-root` 必须位于候选仓库外且尚不存在。该入口固定 100,000 对象，依次执行
+vendor generate/check、background smoke、GUI/NFR 和 kill/restart recovery；任一进程非零、
+产物缺失/非 0600 普通文件、严格 JSON/schema/`success` 无效、进程组或 registry 残留都会
+失败。汇总文件记录三份 JSON 与五份日志的 SHA-256。必须显式使用 Python 3.13.13，其他
+patch 版本以 `wrong_python_patch` 失败。
+
+该入口只闭合本仓库 Phase 0 验收，不实现通用资产方案的 trust policy、signed contract、
+双 child repeatability、semantic manifest、Reviewer、attestation 或 Publisher。
+
 Background smoke：
 
 ```bash
@@ -48,7 +65,10 @@ Background smoke：
   --python smoke/bg_check.py
 ```
 
-GUI、恢复和 100k 场景验证由 `smoke/runner.py` 与 `smoke/e2e.py` 提供。正式运行要求 Git 工作树完全干净，并对当前受跟踪的 Python、shell、TOML、`pyproject.toml`、`uv.lock` 和生成的 vendored protocol 建立有界哈希清单。历史计划或审计文档不参与运行时 provenance。
+`smoke/runner.py` 与 `smoke/e2e.py` 是上面正式入口编排的底层驱动；直接运行它们只作
+诊断，不能仅凭 Blender 退出码称为正式 GUI 验收。正式运行要求 Git 工作树完全干净，
+并对当前受跟踪的 Python、shell、TOML、`pyproject.toml`、`uv.lock` 和生成的 vendored
+protocol 建立有界哈希清单。历史计划或审计文档不参与运行时 provenance。
 
 ## 官方分发验证
 

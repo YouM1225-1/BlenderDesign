@@ -4,7 +4,7 @@ Fixed upstream base: `4309a39646e644261624bfcd2bca669b343b7621`.
 
 The build applies these patches in order and rejects a changed patch digest or
 post-patch source tree. The resulting source tree SHA-256 is
-`841e6e99951360518d0b6a52c8cbd2289d75f627d31f01a0547b30c0c2ba8b3b`.
+`912ed324426181d308b1fd704fe0bcffa0743ee12725c6bfaab5744962392d07`.
 
 1. `0001-server-hardening.patch`
    (`3f925dd5d561527000cd151135a69949293c2d69f2155ed8dc037fb4a19dabf0`)
@@ -45,6 +45,10 @@ post-patch source tree. The resulting source tree SHA-256 is
    (`a0c417189bc7a5677cc3a535cff074d15b1da739766040447945618319b317ee`)
    restricts chat-client requests and pre-open redirects to HTTP(S), applies a
    30-second timeout, and caps response bodies at 16 MiB.
+10. `0010-fix-python-api-member-lookup.patch`
+    (`c20cd9b42c9ee6872b09c462822e61de1b39c85670a4b82575e203b2d4953aa8`)
+    resolves members nested under the class container in per-class API RST
+    files and retains an end-to-end regression for `Scene.frame_current`.
 
 Review with `git apply --stat <patch>` and `git apply --check <patch>` from a
 clean checkout of the fixed upstream base.

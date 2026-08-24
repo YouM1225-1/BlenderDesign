@@ -1,0 +1,43 @@
+Resolve nested Python API class members
+
+diff --git a/mcp/blmcp/tools/get_python_api_docs.py b/mcp/blmcp/tools/get_python_api_docs.py
+--- a/mcp/blmcp/tools/get_python_api_docs.py
++++ b/mcp/blmcp/tools/get_python_api_docs.py
+@@ -480,7 +480,12 @@ def register(mcp: MCPToolServer) -> None:
+             if prefix_path is None:
+                 continue
+             doctree = doctree_for_path(prefix_path)
+-            if (rendered := find_definition_in_doctree(doctree, tail)):
++            rendered = find_definition_in_doctree(doctree, tail)
++            if rendered is None:
++                rendered = find_definition_in_doctree(
++                    doctree, "{:s}.{:s}".format(prefix.rsplit(".", 1)[-1], tail),
++                )
++            if rendered:
+                 return {
+                     "kind": "definition",
+                     "found": True,
+diff --git a/tests/test_mcp_server.py b/tests/test_mcp_server.py
+--- a/tests/test_mcp_server.py
++++ b/tests/test_mcp_server.py
+@@ -822,6 +822,20 @@ class TestGetPythonAPIDocs(unittest.TestCase):
+         # Rendered block includes the RST signature line.
+         self.assertIn(".. function:: IntProperty(", content)
+ 
++    def test_resolves_member_in_class_rst(self) -> None:
++        """
++        ``bpy.types.Scene.rst`` wraps members in ``.. class:: Scene``;
++        resolving a fully-qualified member must retain that container.
++        """
++        payload = _call_server_tool(
++            "get_python_api_docs",
++            {"identifier": "bpy.types.Scene.frame_current"},
++        )
++        self.assertEqual(payload["kind"], "definition")
++        self.assertTrue(payload["found"])
++        self.assertEqual(payload["identifier"], "bpy.types.Scene.frame_current")
++        self.assertIn(".. attribute:: frame_current", payload["content"])
++
+     def test_returns_not_found_for_missing_identifier(self) -> None:
+         """
+         Checks that an unknown identifier yields ``kind: missing`` with

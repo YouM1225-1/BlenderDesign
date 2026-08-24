@@ -366,7 +366,8 @@ def _git_bytes(
     deadline: float, *args: str, max_bytes: int = MAX_SOURCE_FILE_BYTES,
 ) -> bytes:
     return _bounded_process_stdout(
-        ["git", *args], cwd=ROOT, deadline=deadline, max_bytes=max_bytes)
+        ["/usr/bin/git", "-c", "core.fsmonitor=false", *args],
+        cwd=ROOT, deadline=deadline, max_bytes=max_bytes)
 
 
 def _git_text(

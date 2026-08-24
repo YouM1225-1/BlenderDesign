@@ -12,8 +12,8 @@ from typing import Iterator, Mapping, Protocol, Sequence
 
 
 UPSTREAM_COMMIT = "4309a39646e644261624bfcd2bca669b343b7621"
-PATCHED_SOURCE_SHA256 = "841e6e99951360518d0b6a52c8cbd2289d75f627d31f01a0547b30c0c2ba8b3b"
-PATCH_README_SHA256 = "16a0c4978f576219d2627a1589fe59a4e2c465ef827f38f44c01e67a6c831338"
+PATCHED_SOURCE_SHA256 = "912ed324426181d308b1fd704fe0bcffa0743ee12725c6bfaab5744962392d07"
+PATCH_README_SHA256 = "efe62734424c14353d61de4a7ab3c29cc81fce90e26cb2220c48d602c88c7f2b"
 DOWNSTREAM_PATCHES = (
     (
         "0001-server-hardening.patch",
@@ -59,6 +59,11 @@ DOWNSTREAM_PATCHES = (
         "0009-bound-chat-client-http.patch",
         "a0c417189bc7a5677cc3a535cff074d15b1da739766040447945618319b317ee",
         "Bound chat client HTTP responses",
+    ),
+    (
+        "0010-fix-python-api-member-lookup.patch",
+        "c20cd9b42c9ee6872b09c462822e61de1b39c85670a4b82575e203b2d4953aa8",
+        "Resolve nested Python API class members",
     ),
 )
 BUNDLE_VERSION = "1.0.0+" + UPSTREAM_COMMIT[:12] + ".p" + PATCHED_SOURCE_SHA256[:12]

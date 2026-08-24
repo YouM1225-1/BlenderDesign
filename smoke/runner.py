@@ -52,7 +52,8 @@ NFR_CLEANUP_MARGIN = 15.0        # single bounded cleanup reserve
 NFR_TERM_GRACE = 8.0             # let helper cancellation unwind the SDK Client context
 NFR_GROUP_GRACE = 3.0            # emergency TERM window for a recorded MCP process group
 MAX_NFR_ARTIFACT_BYTES = 32 * 1024 * 1024
-RES: dict = {"timer_tick": None, "revision_bump": None, "fields": None,
+RES: dict = {"schema_version": 1, "mode": "gui", "success": False,
+             "timer_tick": None, "revision_bump": None, "fields": None,
              "hash_scope": None, "cycles_leak_free": None, "large_scene": None,
              "large_scene_budget_ok": None, "large_scene_metrics": None,
              "nfr_p1": None, "nfr_p1_metrics": None, "errors": []}
@@ -498,7 +499,9 @@ def _finish() -> None:
     if NFR_OUT:
         keys += ("nfr_p1",)
     ok = all(RES[k] is True for k in keys) and not RES["errors"]
-    Path(OUT).write_text(json.dumps(RES, ensure_ascii=False, indent=1))
+    RES["success"] = ok
+    Path(OUT).write_text(json.dumps(
+        RES, ensure_ascii=False, indent=1, allow_nan=False))
     print("SMOKE_OK" if ok else f"SMOKE_FAIL {RES}")
     bpy.ops.wm.quit_blender()
 

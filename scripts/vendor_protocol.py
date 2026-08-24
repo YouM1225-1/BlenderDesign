@@ -27,10 +27,10 @@ def main() -> int:
             return 1
         print("vendor ok")
         return 0
-    DST.parent.mkdir(parents=True, exist_ok=True)
+    if DST.parent.exists():
+        shutil.rmtree(DST.parent)
+    DST.parent.mkdir(parents=True)
     (DST.parent / "__init__.py").write_text("")
-    if DST.exists():
-        shutil.rmtree(DST)
     shutil.copytree(SRC, DST, ignore=shutil.ignore_patterns("__pycache__"))
     print(f"vendored {len(list(DST.glob('*.py')))} files")
     return 0
