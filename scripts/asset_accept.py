@@ -21,6 +21,7 @@ from acceptance.primitives import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+_UNREADABLE_DIGEST = "0" * 64  # sha256 撞不出的哨兵值:标记"没能记录 digest"
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -32,11 +33,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def _acceptance_provenance() -> tuple[str, list[dict[str, str]]]:
-    """规范 §7.4 的 `acceptance` 工具行:覆盖 acceptance/ 全部 .py/.json 加本 CLI。"""
+    """规范 §7.4 的 `acceptance` 工具行:覆盖 acceptance/ 全部 .py/.json 加本 CLI。
+
+    按名字匹配的 rglob 结果可能是目录(同名巧合)或悬空符号链接;用 is_file() 过滤掉,
+    否则 read_bytes() 会因 IsADirectoryError/OSError 崩溃(调用方也兜底,但这里先避免)。
+    """
     package = ROOT / "acceptance"
     entries = sorted(
-        list(package.rglob("*.py")) + list(package.rglob("*.json"))
-        + [ROOT / "scripts" / "asset_accept.py"])
+        path for path in (
+            list(package.rglob("*.py")) + list(package.rglob("*.json"))
+            + [ROOT / "scripts" / "asset_accept.py"])
+        if path.is_file())
     accumulator = hashlib.sha256()
     files: list[dict[str, str]] = []
     for path in entries:
@@ -48,11 +55,11 @@ def _acceptance_provenance() -> tuple[str, list[dict[str, str]]]:
 
 
 def _input_digest(path: Path) -> str:
-    """输入不存在时返回 64 个 0,使 provenance 形状恒定,判定交给 R1 的 check。"""
+    """输入不存在或不可读时返回哨兵值,使 provenance 形状恒定,判定交给 R1 的 check。"""
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
-        return "0" * 64
+        return _UNREADABLE_DIGEST
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,30 +70,42 @@ def main(argv: list[str] | None = None) -> int:
     except AcceptanceFailure as exc:
         print(f"ASSET_ACCEPT_FAIL {exc.code}: {exc}", file=sys.stderr)
         return 1
+    except Exception as exc:          # noqa: BLE001 - root 尚未建立,写不出 summary
+        print(f"ASSET_ACCEPT_FAIL runner_internal_error: {exc}", file=sys.stderr)
+        return 1
     try:
         create_private_directory(root)
     except Exception as exc:                      # noqa: BLE001
         print(f"ASSET_ACCEPT_FAIL runner_internal_error: {exc}", file=sys.stderr)
         return 1
 
-    version, files = _acceptance_provenance()
-    provenance = {
-        "acceptance_files": files,
-        "tools": [{"id": "acceptance", "version": version},
-                  {"id": "python", "version": platform.python_version()}],
-        "input_digest": _input_digest(args.input),
-    }
     contract = None
     verdict = None
     failure_code = None
     error = None
+    provenance: dict[str, object] = {
+        "acceptance_files": [],
+        "tools": [{"id": "python", "version": platform.python_version()}],
+        "input_digest": _UNREADABLE_DIGEST,
+    }
     try:
+        version, files = _acceptance_provenance()
+        input_digest = _input_digest(args.input)
+        provenance = {
+            "acceptance_files": files,
+            "tools": [{"id": "acceptance", "version": version},
+                      {"id": "python", "version": platform.python_version()}],
+            "input_digest": input_digest,
+        }
         contract = load_contract(args.contract, candidate_root=args.input.parent)
-        # P0 骨架:R1 的输入存在性是第一条真实判定,其余 stage 由后续计划接入。
+        # P0 骨架:R1 的输入存在性与可读性是第一条真实判定,其余 stage 由后续计划接入。
         findings: list[Finding] = []
         if not args.input.is_file():
             findings.append(Finding(code="input_missing", severity="error",
                                     detail=f"input is not a regular file: {args.input}"))
+        elif input_digest == _UNREADABLE_DIGEST:
+            findings.append(Finding(code="input_unreadable", severity="error",
+                                    detail=f"input could not be read: {args.input}"))
         outcomes = []
         wired = {"r1.input.digest_recorded"}     # 本计划接入的唯一真实判定
         for spec in reg.CHECKS:
@@ -112,18 +131,18 @@ def main(argv: list[str] | None = None) -> int:
         failure_code = "runner_internal_error"
         error = f"{type(exc).__name__}: {exc}"
 
-    document = evidence.summary_document(
-        contract=contract, verdict=verdict, achieved_grade="local-trusted",
-        # P0 不渲染,故 platform_key 的后三段(engine/backend/vendor)填 none;
-        # Plan B 接入 render_views 后由 gpu.init() 探测填真值(规范 §5.3)。
-        platform_key=f"{platform.system().lower()}-{platform.machine().lower()}-none-none-none",
-        started_at=started_at,
-        completed_at=datetime.datetime.now(datetime.UTC).isoformat(),
-        evidence_manifest=[], runner_provenance=provenance,
-        failure_code=failure_code, error=error)
     try:
+        document = evidence.summary_document(
+            contract=contract, verdict=verdict, achieved_grade="local-trusted",
+            # P0 不渲染,故 platform_key 的后三段(engine/backend/vendor)填 none;
+            # Plan B 接入 render_views 后由 gpu.init() 探测填真值(规范 §5.3)。
+            platform_key=f"{platform.system().lower()}-{platform.machine().lower()}-none-none-none",
+            started_at=started_at,
+            completed_at=datetime.datetime.now(datetime.UTC).isoformat(),
+            evidence_manifest=[], runner_provenance=provenance,
+            failure_code=failure_code, error=error)
         evidence.write_summary(root, document)
-    except Exception as exc:                      # noqa: BLE001 - 连 summary 都写不出
+    except Exception as exc:                      # noqa: BLE001 - 连 summary 都造不出/写不出
         print(f"ASSET_ACCEPT_FAIL runner_internal_error: {exc}", file=sys.stderr)
         return 1
     status = "OK" if document["success"] else f"FAIL {document['failure_code']}"
