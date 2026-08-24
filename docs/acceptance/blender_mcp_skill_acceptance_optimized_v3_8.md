@@ -682,7 +682,7 @@ acceptance/
     reimport_probe.py    # R4 interchange 的 fresh-import 投影提取
     render_views.py      # R4 8 视角 × 4 pass
 scripts/asset_accept.py  # 薄 CLI(argparse → acceptance.decide 等)
-tests/unit/test_asset_accept.py       # 判定引擎与 coordinator(合成产物,无 Blender)
+tests/unit/test_asset_spec_counts.py       # 判定引擎与 coordinator(合成产物,无 Blender)
 tests/asset_fixtures/{generators,expected,artifacts}/
 docs/acceptance/         # 方案归档位(§11)
 ```
@@ -813,7 +813,7 @@ golden/expected 一律**由生成器或手工构造过程产出并经人工审�
 
 **family 覆盖矩阵(§8.1 义务的机械证明)**:16 个 family 全部有夹具——`contract_invalid`(3)、`toolchain_mismatch`(1)、`tool_crashed`(2)、`tool_output_invalid`(1)、`stale_result_file`(1)、`zero_checks_collected`(1)、`expected_set_mismatch`(1)、`forged_not_applicable`(1)、`forged_disposition`(1)、`evidence_missing`(1)、`evidence_truncated`(2)、`hash_mismatch`(1)、`isolation_insufficient`(1)、`resource_limit_exceeded`(1)、`runner_internal_error`(2)、`check_failed`(17);带 failure_code 的夹具共 37 条,各数之和 37 与之相等。测试套件须有一条机械断言:遍历夹具表的 expected 列,其 family 集合 == §7.2 全集(16 项),否则该断言失败。
 
-L0 计 42 项(17 synthetic + 6 handcrafted + 19 generator),L1 计 4 项。其中 9 项是**正向回归夹具**(预期列为"通过"),断言"必须通过",与其余"必须被拒"的夹具方向相反——它们守护的正是历轮修复的六处误拒缺陷。**本节全部计数由 `tests/unit/test_asset_accept.py` 的一条机械断言从表格重算并与正文比对**,不靠人工重数(连续三轮的计数回归即源于人工重数)。
+L0 计 42 项(17 synthetic + 6 handcrafted + 19 generator),L1 计 4 项。其中 9 项是**正向回归夹具**(预期列为"通过"),断言"必须通过",与其余"必须被拒"的夹具方向相反——它们守护的正是历轮修复的六处误拒缺陷。**本节全部计数由 `tests/unit/test_asset_spec_counts.py` 的一条机械断言从表格重算并与正文比对**,不靠人工重数(连续三轮的计数回归即源于人工重数)。
 
 ### 8.4 正向夹具(防"只测拒绝")
 
@@ -923,14 +923,14 @@ V3.4 经两路独立复审:**事实与处置闭合路判定通过**(21/21 实质
 | M-2 check → result 文件归属从未冻结 | 成立(`render_views` 两次调用会自然写出重复 ID → `expected_set_mismatch`) | §7.1 注册表**新增 `writer` 列**(37 行全部指派);明确第二次渲染调用的 `checks[]` 为空数组 |
 | M-3 新模型未传播到 §2.4/§5.2-1/§5.3 | 成立(`NotTested` 无产生点、`visual_unverified` 不可实现、三句失败态映射无执行主体) | `visual_unverified` 改为 `severity=error` 的 finding code;冻结 `NotTested` 的**唯一产生点**(coordinator 因前序 stage 失败而未启动某 stage);§5.3 三句改写为"写 finding → coordinator 聚合"的统一路径 |
 | M-4 `instances[]` 排序键退化为非全序 | 成立(所有真实对象共享 `("", [])`,与 V3.6 的 M-06 同形态) | 排序键补第三分量 `source_object_stable_id` |
-| L-1 计数回归第三轮复发,且"自动重算"声明不实 | 成立(覆盖矩阵 16 个数错 15 个;此前的"重算"含自指偏差) | 计数改为**只从表格行的 expected 列统计**并给出"带 code 夹具数 == 各数之和"的自校验;§8.3 声明该断言由 `tests/unit/test_asset_accept.py` 机械执行 |
+| L-1 计数回归第三轮复发,且"自动重算"声明不实 | 成立(覆盖矩阵 16 个数错 15 个;此前的"重算"含自指偏差) | 计数改为**只从表格行的 expected 列统计**并给出"带 code 夹具数 == 各数之和"的自校验;§8.3 声明该断言由 `tests/unit/test_asset_spec_counts.py` 机械执行 |
 | L-2 `unsupported_datablock_type` 无产生点 | 成立(coverage 算法只产 Fail,该 allowlist 条目是死条目) | 合同新增 `tolerated_unknown_types`;命中即写 warning finding,否则写 error finding |
 | L-3 coordinator 自产 result 不受任何条款校验 | 成立(条款 9 是唯一做 schema/`success` 校验处) | 条款 9 改写为"**所有 result 文件**……schema 合法且 `success == true`" |
 | L-4 `metrics` 格式两处描述冲突 | 成立 | 统一为 `{"hashes": {...}, "assumption_unverified": bool}` |
 
 **新增待实测项登记**(§5.2):`use_visible` 的实际谓词、collection 级可见性对导出的影响、三类无 glTF 表示的类型的导出行为、collection-instance 的 `extras` 逐 node 传递、Workbench 逐位可复现性——五项各自的实测结论必须写回本文并附命令与输出,未完成前对应夹具标 `assumption_unverified`。
 
-**流程改进**:计数回归连续三轮以同一形态复发,根因是人工重数。已把"从表格重算计数并与正文比对"落为 `tests/unit/test_asset_accept.py` 的一条真断言,不再依赖人工。
+**流程改进**:计数回归连续三轮以同一形态复发,根因是人工重数。已把"从表格重算计数并与正文比对"落为 `tests/unit/test_asset_spec_counts.py` 的一条真断言,不再依赖人工。
 
 ### 12.4 V3.7 终验(第六轮)处置
 

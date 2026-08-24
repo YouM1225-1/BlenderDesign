@@ -14,7 +14,7 @@ SPEC = (Path(__file__).resolve().parents[2]
 @pytest.fixture(scope="module")
 def spec_text() -> str:
     if not SPEC.exists():
-        pytest.skip(f"spec document not present: {SPEC.name}")
+        pytest.fail(f"spec document not present: {SPEC.name}")
     return SPEC.read_text(encoding="utf-8")
 
 
@@ -51,10 +51,25 @@ def test_fixture_counts_in_prose_match_the_table(spec_text):
 
 def test_every_family_has_at_least_one_fixture(spec_text):
     table = _section(spec_text, "### 8.3 夹具表", "### 8.4")
-    rows = [r for r in table.splitlines() if r.startswith("| `")]
+    lines = table.splitlines()
+    # Find header row and locate "expected" column
+    header_idx = None
+    expected_col = None
+    for i, line in enumerate(lines):
+        if "expected" in line and line.startswith("|"):
+            header_idx = i
+            cells = [c.strip() for c in line.split("|")]
+            for j, cell in enumerate(cells):
+                if "expected" in cell:
+                    expected_col = j
+                    break
+            break
+    assert header_idx is not None and expected_col is not None, "expected column not found in table"
+
+    rows = [r for r in lines if r.startswith("| `")]
     covered: set[str] = set()
     for row in rows:
         cells = [c.strip() for c in row.split("|")]
-        expected = cells[4] if len(cells) > 4 else ""
+        expected = cells[expected_col] if len(cells) > expected_col else ""
         covered |= {f for f in fc.FAILURE_FAMILIES if f"`{f}`" in expected}
     assert set(fc.FAILURE_FAMILIES) - covered == set()
