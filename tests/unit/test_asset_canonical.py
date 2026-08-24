@@ -74,16 +74,24 @@ def test_control_characters_use_short_escapes():
 
 def test_digest_is_stable_across_processes(tmp_path):
     """规范 §2.5.1 要求跨进程复算一致 —— 同进程重算证明不了这一点。"""
+    import os
     import subprocess
     import sys
+    from pathlib import Path
 
     script = tmp_path / "recompute.py"
     script.write_text(
         "from acceptance.canonical import digest\n"
         "print(digest('contract', {'a': [1, 1.0, -0.0], 'b': '\\u00e9'}))\n",
         encoding="utf-8")
+    # Must explicitly pass PYTHONPATH to the subprocess because the `acceptance` package
+    # is repo-only (not in wheel/sdist). In non-editable installs, the repo root is not
+    # on sys.path, so the subprocess fails to import unless we add it explicitly.
+    # This makes the test independent of whether the venv is editable or not.
+    repo_root = Path(__file__).resolve().parents[2]
     completed = subprocess.run(
-        [sys.executable, str(script)], check=True, capture_output=True, text=True)
+        [sys.executable, str(script)], check=True, capture_output=True, text=True,
+        env=os.environ | {"PYTHONPATH": str(repo_root)})
     here = digest("contract", {"a": [1, 1.0, -0.0], "b": "\u00e9"})
     assert completed.stdout.strip() == here
 
