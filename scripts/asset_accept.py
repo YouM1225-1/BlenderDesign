@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
+import os
 import sys
 from pathlib import Path
 
@@ -12,7 +13,8 @@ import platform
 
 from acceptance import check_registry as reg
 from acceptance import evidence
-from acceptance.contract import load_contract
+from acceptance import stages
+from acceptance.contract import Contract, load_contract
 from acceptance.decide import Finding, aggregate, decide
 from acceptance.primitives import (
     AcceptanceFailure,
@@ -62,6 +64,16 @@ def _input_digest(path: Path) -> str:
         return _UNREADABLE_DIGEST
 
 
+def _present_tools(contract: Contract) -> set[str]:
+    """按锁定表逐个探测:acceptance 自身恒在;其余看 path 是否为可执行文件。"""
+    present = {"acceptance"}
+    for tool in contract.raw["tools"]:
+        path = Path(str(tool["path"]))
+        if tool["id"] == "python" or (path.is_file() and os.access(path, os.X_OK)):
+            present.add(str(tool["id"]))
+    return present
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     started_at = datetime.datetime.now(datetime.UTC).isoformat()
@@ -98,16 +110,16 @@ def main(argv: list[str] | None = None) -> int:
             "input_digest": input_digest,
         }
         contract = load_contract(args.contract, candidate_root=args.input.parent)
-        # P0 骨架:R1 的输入存在性与可读性是第一条真实判定,其余 stage 由后续计划接入。
-        findings: list[Finding] = []
-        if not args.input.is_file():
-            findings.append(Finding(code="input_missing", severity="error",
-                                    detail=f"input is not a regular file: {args.input}"))
-        elif input_digest == _UNREADABLE_DIGEST:
-            findings.append(Finding(code="input_unreadable", severity="error",
-                                    detail=f"input could not be read: {args.input}"))
+        # Task 8:9 条 coordinator-owned check(R0/R1/R5,规范 §7.1 中不依赖外部进程的部分)
+        # 真实接入;其余 stage(R2-R4 与外部工具)由后续计划接入,维持 NotTested。
+        collected: dict[str, list[Finding]] = {}
+        collected.update(stages.run_r0(contract, tools_present=_present_tools(contract)))
+        collected.update(stages.run_r1(contract, args.input))
+        collected.update(stages.run_r5(
+            contract, evidence_manifest=[], recomputed_digest=contract.digest))
+        wired = set(collected)
+
         outcomes = []
-        wired = {"r1.input.digest_recorded"}     # 本计划接入的唯一真实判定
         for spec in reg.CHECKS:
             if spec.id in contract.na_check_ids:
                 terminal = None                  # aggregate 会先命中 N/A 分支
@@ -116,10 +128,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 terminal = "NotTested"           # 未接入的 stage:规范 §2.4 的唯一产生点
             outcomes.append(aggregate(
-                spec.id,
-                findings if spec.id in wired else [],
-                contract=contract, tool_id="acceptance",
-                tool_version=version,
+                spec.id, collected.get(spec.id, []),
+                contract=contract, tool_id="acceptance", tool_version=version,
                 source_truncated=False, terminal=terminal))
         verdict = decide(contract=contract, outcomes=outcomes,
                          actual_files=set(), expected_files=set(),
