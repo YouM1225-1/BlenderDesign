@@ -112,7 +112,16 @@ def _emit(value: object) -> str:
 
 
 def canonicalize(value: object) -> bytes:
-    return _emit(value).encode("utf-8")
+    # NFC 检查(_check_string)对孤立代理项(如 JSON 转义 `\ud800`)是空操作——它不是
+    # 一个有分解映射的码点,规范化前后相等。真正炸开的地方是编码:UTF-8/UTF-16 的严格
+    # 编码器都拒绝孤立代理项(_emit 里给字典键排序用的 `.encode("utf-16-be")`,以及本
+    # 函数的 `.encode("utf-8")`)。UnicodeEncodeError 是 ValueError 的子类但不是
+    # CanonicalError,必须在这里转换,否则会作为裸异常穿透调用方的
+    # `except CanonicalError`(见 contract.py:load_contract)。
+    try:
+        return _emit(value).encode("utf-8")
+    except UnicodeError as exc:
+        raise CanonicalError(f"value is not representable in UTF-8: {exc}") from exc
 
 
 def digest(kind: str, value: object) -> str:

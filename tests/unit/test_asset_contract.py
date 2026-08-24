@@ -362,3 +362,29 @@ def test_required_isolation_grade_deleted_from_raw_is_rejected(tmp_path):
     with pytest.raises(AcceptanceFailure) as caught:
         _ = contract.required_isolation_grade
     assert caught.value.code == "contract_invalid"
+
+
+def test_warning_allowlist_deleted_from_raw_is_rejected(tmp_path):
+    """contract.raw 可变;warning_allowlist 被删后 allowlisted() 必须 fail-closed,不是裸
+    KeyError——与上面三个属性同一形状的缺陷,提交 b14cfa6 修了那三个,漏了这一个方法。"""
+    path = _write(tmp_path, _valid())
+    contract = load_contract(path, candidate_root=tmp_path / "candidate")
+    del contract.raw["warning_allowlist"]
+    with pytest.raises(AcceptanceFailure) as caught:
+        contract.allowlisted("foo", "bar", "baz", "1.0")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_lone_surrogate_in_contract_is_rejected(tmp_path):
+    """`\\ud800` 这样的孤立代理转义能穿过 read_text()+json.loads()(两者都不校验编码合法
+    性),落地成一个 Python str 里的真实孤立代理码点。NFC 规范化对它是空操作,真正炸开
+    的地方是 canonical.py 的 UTF-8/UTF-16 编码——UnicodeEncodeError 是 ValueError 的
+    子类但不是 CanonicalError,此前会作为裸异常穿透 load_contract 的
+    `except CanonicalError`,被上层误判为 runner_internal_error(优先级 14)而不是
+    规范要求的 contract_invalid(优先级 0)。"""
+    bad = _valid()
+    bad["contract_id"] = "\ud800"
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"

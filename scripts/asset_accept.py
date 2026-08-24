@@ -25,6 +25,11 @@ from acceptance.primitives import (
 
 ROOT = Path(__file__).resolve().parents[1]
 _UNREADABLE_DIGEST = "0" * 64  # sha256 撞不出的哨兵值:标记"没能记录 digest"
+# 规范 budget.max_file_bytes 的默认值(512 MiB)。_input_digest() 跑在 load_contract()
+# 之前,拿不到每份合同各自的预算,故这里用一个固定硬上限,只为界住 provenance 摘要
+# 自身的内存/IO,不替代 run_r1 的 size_within_limit(那才是真正的放行判定)。
+_MAX_INPUT_DIGEST_BYTES = 512 * 1024 * 1024
+_INPUT_DIGEST_CHUNK_BYTES = 1024 * 1024
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -58,21 +63,50 @@ def _acceptance_provenance() -> tuple[str, list[dict[str, str]]]:
 
 
 def _input_digest(path: Path) -> str:
-    """输入不存在、不可读或不是普通文件时返回哨兵值,使 provenance 形状恒定,判定交给
-    R1 的 check。读取前先 lstat() 确认是普通文件——FIFO 等特殊文件必须在 read_bytes()
-    之前拦下,否则在没有写入方时会无限阻塞在 I/O 等待里;一个 fail-closed 的验收工具
-    永久挂起比崩溃更糟(它既不给结论也不释放)。
+    """输入不存在、不可读、不是普通文件、或超过硬上限时返回哨兵值,使 provenance 形状
+    恒定,真正的放行判定交给 R1 的 check。
+
+    有界流式读取,不做 `read_bytes()` 式的无界一次性读入(700 MiB 输入曾把峰值 RSS
+    推到 724.7 MiB,且早于 load_contract()/run_r1 的 size_within_limit 之前跑完):
+    - 只 open() 一次,带 O_NONBLOCK|O_NOFOLLOW——lstat() 确认是普通文件之后、open()
+      之前存在一个 TOCTOU 窗口,路径可能被换成 FIFO;O_NOFOLLOW 挡符号链接换入,
+      O_NONBLOCK 让换成 FIFO 也不会在 open()/read() 上无限阻塞(Task 8 堵过同一类
+      挂起,这里堵的是同一个洞的另一条路径)。
+    - fstat() 复核拿到的 fd 确实是 lstat() 看到的那个普通文件(设备号+inode 双 match),
+      不是普通文件或身份对不上就当没读到。
+    - 分块读取并增量喂给 SHA-256,任何时刻都只在内存里持有一个 chunk;一旦累计字节数
+      越过硬上限立即停止并回哨兵值,不产出一个只覆盖前缀、可能被误认成真实摘要的哈希。
     """
     try:
-        info = path.lstat()
+        before = path.lstat()
     except OSError:
         return _UNREADABLE_DIGEST
-    if not stat.S_ISREG(info.st_mode):
+    if not stat.S_ISREG(before.st_mode):
         return _UNREADABLE_DIGEST
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return _UNREADABLE_DIGEST
+    try:
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+            return _UNREADABLE_DIGEST
+        hasher = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, _INPUT_DIGEST_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_INPUT_DIGEST_BYTES:
+                return _UNREADABLE_DIGEST
+            hasher.update(chunk)
+        return hasher.hexdigest()
+    except OSError:
+        return _UNREADABLE_DIGEST
+    finally:
+        os.close(descriptor)
 
 
 def _present_tools(contract: Contract) -> set[str]:
@@ -126,9 +160,23 @@ def main(argv: list[str] | None = None) -> int:
         collected: dict[str, list[Finding]] = {}
         collected.update(stages.run_r0(contract, tools_present=_present_tools(contract)))
         collected.update(stages.run_r1(contract, args.input))
+        # 规范 §2.5.1 与 §2.6 条款 1:R5 必须用同一算法对同一合同路径**重算** digest 再
+        # 比对(TOCTOU 检查),不能拿 R0 时记下的 contract.digest 跟它自己比——那样构造
+        # 上永远不可能失败。复算失败(例如合同在此期间被删除或改坏)按既有 fail-closed
+        # 路径处理:load_contract 抛出的 AcceptanceFailure 会被下面统一的 except 捕获。
+        recomputed_digest = load_contract(
+            args.contract, candidate_root=args.input.parent).digest
         collected.update(stages.run_r5(
-            contract, evidence_manifest=[], recomputed_digest=contract.digest))
+            contract, evidence_manifest=[], recomputed_digest=recomputed_digest))
         wired = set(collected)
+
+        # 终审第 2 条 / 规范 §7.2 表与 §7.4:锁定工具缺失是基础设施未能正常完成
+        # (toolchain_mismatch,优先级 1),不是"资产被拒收"(check_failed)——验收机
+        # 没装 Blender 不等于资产不合格。r0.contract.tools_locked 上的 error finding
+        # 仍然保留作为证据,只是不让它的 Fail 落进 check_failed 的 failed_check_ids。
+        infra_failures: list[str] = []
+        if collected.get("r0.contract.tools_locked"):
+            infra_failures.append("toolchain_mismatch")
 
         outcomes = []
         for spec in reg.CHECKS:
@@ -144,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_truncated=False, terminal=terminal))
         verdict = decide(contract=contract, outcomes=outcomes,
                          actual_files=set(), expected_files=set(),
-                         achieved_grade="local-trusted", infra_failures=[])
+                         achieved_grade="local-trusted", infra_failures=infra_failures)
     except AcceptanceFailure as exc:
         failure_code = exc.code
         error = str(exc)

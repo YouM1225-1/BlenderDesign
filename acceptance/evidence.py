@@ -48,7 +48,7 @@ def summary_document(
         "schema_version": 1,
         "kind": "asset_acceptance",
         "success": success,
-        "contract_id": None if contract is None else contract.raw["contract_id"],
+        "contract_id": None if contract is None else contract.raw.get("contract_id"),
         "contract_digest": None if contract is None else contract.digest,
         "artifact_kind": None if contract is None else contract.artifact_kind,
         "required_isolation_grade": (

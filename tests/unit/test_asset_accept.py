@@ -169,10 +169,18 @@ def test_missing_tool_fails_r0_contract_tools_locked(tmp_path, monkeypatch):
     # r0.contract.tools_locked 真的接到了 `_present_tools()` 的返回值上,而不是长期
     # 靠这台机器装了 Blender 侥幸 Pass——可移植性回归的判别力证明,构造过程不碰真实
     # /Applications。
+    #
+    # 终审第 2 条:锁定工具缺失是基础设施未能正常完成(toolchain_mismatch,优先级 1),
+    # 不是"资产被拒收"(check_failed)——验收机没装 Blender 不等于资产不合格,规范
+    # §7.2 表/§7.4/§8.3 三处都要求这里报 toolchain_mismatch。r0.contract.tools_locked
+    # 本身仍记一条 Fail 留作证据,但 decide() 一旦有 infra family 触发就会走 triggered
+    # 分支提前返回,该分支的 failed_check_ids 恒为空列表(既有行为,不是本次改动引入),
+    # 所以不能再断言 tools_locked 进 failed_check_ids。
     monkeypatch.setattr(asset_accept, "_present_tools", lambda contract: set())
     code, summary = _run(tmp_path)
     assert code == 1
-    assert "r0.contract.tools_locked" in summary["failed_check_ids"]
+    assert summary["failure_code"] == "toolchain_mismatch"
+    assert summary["failed_check_ids"] == []
     r0 = next(c for c in summary["checks"] if c["id"] == "r0.contract.tools_locked")
     assert r0["raw_status"] == "Fail"
     assert any(f["code"] == "tool_not_installed" for f in r0["findings"])
@@ -204,3 +212,55 @@ def test_input_fifo_is_reported_not_hung(tmp_path):
     r1_link = next(c for c in summary["checks"] if c["id"] == "r1.input.no_link_or_device")
     assert r1_link["raw_status"] == "Fail"
     assert any(f["code"] == "input_not_regular_file" for f in r1_link["findings"])
+
+
+def test_contract_mutated_after_load_fails_digest_stable(tmp_path, monkeypatch):
+    # 终审第 3 条回归:main() 曾经把 `recomputed_digest=contract.digest` 传给
+    # run_r5——拿同一个对象的同一个属性跟自己比,构造上永远不可能失败,规范
+    # §2.5.1/§2.6 条款 1 要求的 TOCTOU 检查形同虚设。修好之后 main() 会在 R5 之前
+    # 对同一合同路径重新 load_contract() 拿一个独立算出的 digest。这里在
+    # `_present_tools()`(R0 之前、R5 重算之前的最后一个钩子)里把磁盘上的合同文件
+    # 换成另一份同样合法但内容不同的合同,证明 digest_stable 真的会用重新读盘算出的
+    # 值去比对,而不是自己骗自己。
+    contract_path = _contract_file(tmp_path)
+
+    def _tamper_contract_then_report_tools(contract) -> set[str]:
+        tampered = _valid()
+        tampered["contract_id"] = "tampered-after-initial-load"
+        contract_path.write_text(json.dumps(tampered), encoding="utf-8")
+        return {"acceptance", "blender"}
+
+    monkeypatch.setattr(asset_accept, "_present_tools", _tamper_contract_then_report_tools)
+    root = tmp_path / "evidence"
+    code = asset_accept.main([
+        "--contract", str(contract_path),
+        "--input", str(_input_path(tmp_path)),
+        "--evidence-root", str(root),
+    ])
+    summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+    assert code == 1
+    assert summary["failure_code"] == "check_failed"
+    assert "r5.contract.digest_stable" in summary["failed_check_ids"]
+    r5 = next(c for c in summary["checks"] if c["id"] == "r5.contract.digest_stable")
+    assert r5["raw_status"] == "Fail"
+    assert any(f["code"] == "contract_digest_drift" for f in r5["findings"])
+
+
+def test_oversized_input_digest_falls_back_to_sentinel(tmp_path, monkeypatch):
+    # 终审第 4 条回归:`_input_digest()` 曾经是裸 `hashlib.sha256(path.read_bytes())`,
+    # 对候选输入做无界一次性读入,发生在 load_contract()/run_r1 的 size_within_limit
+    # 检查之前——峰值内存与输入文件大小成正比(实测 700 MiB 输入 → 峰值 RSS 724.7 MiB)。
+    # 修好之后是有界流式读取:一旦累计字节数越过模块级硬上限就立即停止并回哨兵值,
+    # 且这个上限不依赖合同(_input_digest 跑在 load_contract 之前)。用 monkeypatch 把
+    # 硬上限降到 8 字节代替真的分配一个 512 MiB 文件,验证的是"越界即停"这个机制
+    # 本身,不依赖硬上限的具体取值。
+    monkeypatch.setattr(asset_accept, "_MAX_INPUT_DIGEST_BYTES", 8)
+    input_path = _input_path(tmp_path)
+    input_path.write_bytes(b"x" * 16)  # 16 字节 > 8 字节硬上限,但远小于合同的真实预算
+    _, summary = _run(tmp_path)
+    assert summary["runner_provenance"]["input_digest"] == "0" * 64
+    # 合同真实的 budget.max_file_bytes(512 MiB)完全没被触及——这条哨兵来自
+    # _input_digest 自己的硬上限,不是 r1.input.size_within_limit 的放行判定,
+    # 两条机制互相独立。
+    r1_size = next(c for c in summary["checks"] if c["id"] == "r1.input.size_within_limit")
+    assert r1_size["raw_status"] == "Pass"

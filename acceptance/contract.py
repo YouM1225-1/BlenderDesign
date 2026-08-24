@@ -66,7 +66,11 @@ class Contract:
     def allowlisted(self, check_id: str, code: str, tool_id: str, version: str) -> bool:
         target = {"check_id": check_id, "warning_code": code,
                   "tool_id": tool_id, "tool_version": version}
-        return any(entry == target for entry in self.raw["warning_allowlist"])
+        try:
+            allowlist = self.raw["warning_allowlist"]
+        except KeyError as exc:
+            raise _fail(f"missing required field: {exc}") from exc
+        return any(entry == target for entry in allowlist)
 
 
 def load_contract(path: Path, *, candidate_root: Path) -> Contract:

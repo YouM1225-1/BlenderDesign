@@ -2570,10 +2570,11 @@ mypy  --strict --python-version 3.13  ->  Success: no issues found in 6 source f
 
 **本计划交付的是可独立运行、可完整测试的判定核心**:合同能被封闭校验、摘要按 RFC 8785 可跨进程复算、判定引擎实现规范 §2.5 三步式与 §2.6 全部放行条件、9 条 coordinator-owned check(R0/R1/R5)真实接线、coordinator 在任何异常下都写出 fail-closed 的 `summary.json`。它**不包含**任何 Blender 交互。
 
-**两处已知的部分实现,已在代码注释与此处双重标注**:
+**三处已知的部分实现,已在代码注释与此处双重标注**:
 
 1. **条款 6 的伪造检出**:`decide()` 已接受 `child_declared_na` 形参并有对应测试,但**填充它需要解析子进程的 `result.json`**——result 解析随 Plan B 落地。在此之前该形参恒为空集,即条款 6 的检出能力尚未真正生效。
 2. **`platform_key` 的后三段**:P0 不渲染,故 engine/backend/vendor 三段填 `none`;Plan B 接入 `render_views` 后按规范 §5.3 用 `gpu.init()` 探测填真值。
+3. **`r0.contract.tools_locked` 只校验在场性**:规范 §7.4 同时要求校验 `tools[].version` 与 `.sha256`,但这被 P0 前置条件阻塞——`oiiotool` 与 `gltf_validator` 本机未安装、锁定表里的版本值也还没填死,校验代码此刻没有可比对的基准。当前 `_present_tools()`/`run_r0()` 只探测锁定工具"是否存在"(路径可执行,或 `id == "python"`);版本号与 sha256 的比对待锁定表填死后由 Plan C 落地。
 
 **后续计划(需另行编写,依赖本计划的接口)**:
 
