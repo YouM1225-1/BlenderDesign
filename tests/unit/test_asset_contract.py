@@ -101,3 +101,104 @@ def test_interchange_projection_union_must_be_p01_to_p14(tmp_path):
     with pytest.raises(AcceptanceFailure) as caught:
         load_contract(path, candidate_root=tmp_path / "candidate")
     assert caught.value.code == "contract_invalid"
+
+
+def test_missing_top_level_field_is_rejected(tmp_path):
+    bad = _valid()
+    del bad["contract_id"]
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_invalid_artifact_kind_is_rejected(tmp_path):
+    bad = _valid()
+    bad["artifact_kind"] = "not_a_real_kind"
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_invalid_profile_is_rejected(tmp_path):
+    bad = _valid()
+    bad["profile"] = "not_static_render"
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_invalid_required_isolation_grade_is_rejected(tmp_path):
+    bad = _valid()
+    bad["required_isolation_grade"] = "not_a_real_grade"
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_tools_entry_field_set_is_rejected(tmp_path):
+    bad = _valid()
+    bad["tools"] = [{"id": "blender", "version": "5.2.0"}]
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_tools_sha256_wrong_length_is_rejected(tmp_path):
+    bad = _valid()
+    bad["tools"] = [{"id": "blender", "version": "5.2.0", "sha256": "abc",
+                      "path": "/Applications/Blender.app/Contents/MacOS/Blender"}]
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_projection_field_in_multiple_groups_is_rejected(tmp_path):
+    bad = _valid()
+    bad["projection"] = {"preserved": ["dup_field"], "transformed": ["dup_field"], "lost": []}
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_candidate_root_equal_to_contract_path_is_rejected(tmp_path):
+    path = _write(tmp_path, _valid())
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=path)
+    assert caught.value.code == "contract_invalid"
+
+
+def test_symlinked_candidate_root_bypass_is_rejected(tmp_path):
+    real_candidate = tmp_path / "real_candidate"
+    real_candidate.mkdir()
+    link_candidate = tmp_path / "link_candidate"
+    link_candidate.symlink_to(real_candidate, target_is_directory=True)
+    _write(real_candidate, _valid())
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(link_candidate / "contract.json", candidate_root=link_candidate)
+    assert caught.value.code == "contract_invalid"
+
+
+@pytest.mark.parametrize("alias", [True, 1.0])
+def test_schema_version_alias_value_is_rejected(tmp_path, alias):
+    bad = _valid()
+    bad["schema_version"] = alias
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_tools_non_dict_entry_is_rejected(tmp_path):
+    bad = _valid()
+    bad["tools"] = [5]
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"

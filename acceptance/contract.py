@@ -62,9 +62,7 @@ class Contract:
 
 def load_contract(path: Path, *, candidate_root: Path) -> Contract:
     resolved = path.resolve(strict=True)
-    root = candidate_root.expanduser()
-    if not root.is_absolute():
-        root = Path.cwd() / root
+    root = candidate_root.expanduser().resolve()
     if resolved == root or root in resolved.parents:
         raise _fail("contract must live outside the candidate input tree")
     try:
@@ -84,7 +82,7 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
     missing = _TOP_LEVEL - set(value)
     if missing:
         raise _fail(f"missing top-level fields: {sorted(missing)}")
-    if value["schema_version"] != 1:
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
         raise _fail("schema_version must be 1")
     kind = value["artifact_kind"]
     if kind not in _KINDS:
@@ -102,10 +100,14 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
         if entry != {"id": spec.id, "impl": spec.impl, "order": spec.order}:
             raise _fail(f"checks entry mismatch or out of order at {spec.id}")
 
+    if type(value["na_check_ids"]) is not list:
+        raise _fail("na_check_ids must be a list")
     if list(value["na_check_ids"]) != list(reg.na_check_ids(kind)):
         raise _fail("na_check_ids must equal the derived not-applicable set")
 
     projection = value["projection"]
+    if type(projection) is not dict:
+        raise _fail("projection must be an object")
     if set(projection) != {"preserved", "transformed", "lost"}:
         raise _fail("projection must have preserved/transformed/lost")
     union: list[str] = []
@@ -116,7 +118,12 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
     if len(set(union)) != len(union):
         raise _fail("projection field appears in more than one group")
 
-    for tool in value["tools"]:
+    tools = value["tools"]
+    if type(tools) is not list:
+        raise _fail("tools must be a list")
+    for tool in tools:
+        if type(tool) is not dict:
+            raise _fail("tools entries must be objects")
         if set(tool) != {"id", "version", "sha256", "path"}:
             raise _fail("tools entries must have id/version/sha256/path")
         if not isinstance(tool["sha256"], str) or len(tool["sha256"]) != 64:

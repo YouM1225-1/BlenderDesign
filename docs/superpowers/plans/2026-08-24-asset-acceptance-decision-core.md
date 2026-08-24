@@ -837,6 +837,107 @@ def test_interchange_projection_union_must_be_p01_to_p14(tmp_path):
     with pytest.raises(AcceptanceFailure) as caught:
         load_contract(path, candidate_root=tmp_path / "candidate")
     assert caught.value.code == "contract_invalid"
+
+
+def test_missing_top_level_field_is_rejected(tmp_path):
+    bad = _valid()
+    del bad["contract_id"]
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_invalid_artifact_kind_is_rejected(tmp_path):
+    bad = _valid()
+    bad["artifact_kind"] = "not_a_real_kind"
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_invalid_profile_is_rejected(tmp_path):
+    bad = _valid()
+    bad["profile"] = "not_static_render"
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_invalid_required_isolation_grade_is_rejected(tmp_path):
+    bad = _valid()
+    bad["required_isolation_grade"] = "not_a_real_grade"
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_tools_entry_field_set_is_rejected(tmp_path):
+    bad = _valid()
+    bad["tools"] = [{"id": "blender", "version": "5.2.0"}]
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_tools_sha256_wrong_length_is_rejected(tmp_path):
+    bad = _valid()
+    bad["tools"] = [{"id": "blender", "version": "5.2.0", "sha256": "abc",
+                      "path": "/Applications/Blender.app/Contents/MacOS/Blender"}]
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_projection_field_in_multiple_groups_is_rejected(tmp_path):
+    bad = _valid()
+    bad["projection"] = {"preserved": ["dup_field"], "transformed": ["dup_field"], "lost": []}
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_candidate_root_equal_to_contract_path_is_rejected(tmp_path):
+    path = _write(tmp_path, _valid())
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=path)
+    assert caught.value.code == "contract_invalid"
+
+
+def test_symlinked_candidate_root_bypass_is_rejected(tmp_path):
+    real_candidate = tmp_path / "real_candidate"
+    real_candidate.mkdir()
+    link_candidate = tmp_path / "link_candidate"
+    link_candidate.symlink_to(real_candidate, target_is_directory=True)
+    _write(real_candidate, _valid())
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(link_candidate / "contract.json", candidate_root=link_candidate)
+    assert caught.value.code == "contract_invalid"
+
+
+@pytest.mark.parametrize("alias", [True, 1.0])
+def test_schema_version_alias_value_is_rejected(tmp_path, alias):
+    bad = _valid()
+    bad["schema_version"] = alias
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_tools_non_dict_entry_is_rejected(tmp_path):
+    bad = _valid()
+    bad["tools"] = [5]
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -913,9 +1014,7 @@ class Contract:
 
 def load_contract(path: Path, *, candidate_root: Path) -> Contract:
     resolved = path.resolve(strict=True)
-    root = candidate_root.expanduser()
-    if not root.is_absolute():
-        root = Path.cwd() / root
+    root = candidate_root.expanduser().resolve()
     if resolved == root or root in resolved.parents:
         raise _fail("contract must live outside the candidate input tree")
     try:
@@ -935,7 +1034,7 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
     missing = _TOP_LEVEL - set(value)
     if missing:
         raise _fail(f"missing top-level fields: {sorted(missing)}")
-    if value["schema_version"] != 1:
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
         raise _fail("schema_version must be 1")
     kind = value["artifact_kind"]
     if kind not in _KINDS:
@@ -953,10 +1052,14 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
         if entry != {"id": spec.id, "impl": spec.impl, "order": spec.order}:
             raise _fail(f"checks entry mismatch or out of order at {spec.id}")
 
+    if type(value["na_check_ids"]) is not list:
+        raise _fail("na_check_ids must be a list")
     if list(value["na_check_ids"]) != list(reg.na_check_ids(kind)):
         raise _fail("na_check_ids must equal the derived not-applicable set")
 
     projection = value["projection"]
+    if type(projection) is not dict:
+        raise _fail("projection must be an object")
     if set(projection) != {"preserved", "transformed", "lost"}:
         raise _fail("projection must have preserved/transformed/lost")
     union: list[str] = []
@@ -967,7 +1070,12 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
     if len(set(union)) != len(union):
         raise _fail("projection field appears in more than one group")
 
-    for tool in value["tools"]:
+    tools = value["tools"]
+    if type(tools) is not list:
+        raise _fail("tools must be a list")
+    for tool in tools:
+        if type(tool) is not dict:
+            raise _fail("tools entries must be objects")
         if set(tool) != {"id", "version", "sha256", "path"}:
             raise _fail("tools entries must have id/version/sha256/path")
         if not isinstance(tool["sha256"], str) or len(tool["sha256"]) != 64:
@@ -981,10 +1089,25 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
     return Contract(raw=value, digest=computed)
 ```
 
+**修复记录(超出本节最初示例代码的范围,后续加固):**
+- 候选根包含性检查原先只对合同文件路径 `resolve(strict=True)`,`candidate_root` 仅做
+  `expanduser` + 绝对化,未解析符号链接,可被 `candidate_root` 自身是符号链接的情形绕过
+  (macOS `/tmp`、`/var` 即是符号链接)。改为 `candidate_root.expanduser().resolve()`
+  ——非 strict 的 `resolve()` 既能在路径尚不存在时把能解析的前缀解析掉、把剩余部分原样拼回,
+  也能在路径存在(哪怕是符号链接)时完整解析,两种场景都覆盖。
+- `schema_version` 原先用 `!= 1` 比较,`bool` 是 `int` 子类(`True == 1`)、`1.0 == 1` 也成立,
+  导致别名值被接受。改为 `type(value["schema_version"]) is not int or value["schema_version"] != 1`。
+- `na_check_ids`、`projection`、`tools` 原先直接喂给 `list()` / `set()` / `for ... in`,类型错时
+  抛裸 `TypeError` 而非 `AcceptanceFailure`。三处都补上 `type(...) is not list/dict` 前置检查,
+  `tools` 的每个元素还需 `type(tool) is not dict`。
+- Step 1 的测试块与上面 Step 3 的实现同步更新,新增 11 条测试(4 类此前零覆盖的既有 guard、
+  candidate_root 恰好等于合同路径的等值分支、以及上述三处修复各一条回归测试),测试总数由
+  6 增至 18(含 1 个 `schema_version` 别名值的 parametrize,贡献 2 个 case)。
+
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `uv run --frozen pytest tests/unit/test_asset_contract.py -q`
-Expected: `6 passed`
+Expected: `18 passed`
 
 - [ ] **Step 5: 提交**
 
