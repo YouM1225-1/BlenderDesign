@@ -34,7 +34,7 @@ only-include = ["protocol", "bridge", "server"]
 python_version = "3.13"
 strict = true
 warn_unused_ignores = false
-files = ["protocol", "bridge/core", "server"]
+files = ["protocol", "bridge/core", "server", "acceptance"]
 
 [[tool.mypy.overrides]]
 module = ["bpy", "bpy.*"]

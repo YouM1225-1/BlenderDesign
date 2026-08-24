@@ -35,7 +35,7 @@ if ! (cd / && "$PWD_ROOT/.venv/bin/python" -c "import server" 2>/dev/null); then
   exit 1
 fi
 "$UV_BIN" run --frozen ruff check \
-  protocol bridge server tests scripts smoke plugins/blender-mcp-installer/scripts
+  protocol bridge server tests scripts smoke acceptance plugins/blender-mcp-installer/scripts
 "$UV_BIN" run --frozen mypy
 "$UV_BIN" run --frozen mypy --strict --ignore-missing-imports --follow-imports=skip \
   plugins/blender-mcp-installer/scripts/blender_mcp_installer/__init__.py \
@@ -131,7 +131,7 @@ PY
   done
 
   "$UV_BIN" run --quiet --no-project --python "$PYTHON_VERSION" --with bandit==1.9.4 \
-    bandit -q -r protocol bridge server smoke scripts \
+    bandit -q -r protocol bridge server smoke scripts acceptance \
     plugins/blender-mcp-installer/scripts -ll
   "$UV_BIN" run --quiet --no-project --python "$PYTHON_VERSION" --with bandit==1.9.4 \
     bandit -q -r "$PATCHED_SOURCE/mcp" "$PATCHED_SOURCE/addon" \
