@@ -10,6 +10,7 @@ from acceptance.primitives import AcceptanceFailure
 
 _GRADE_ORDER = {"local-trusted": 0, "isolated": 1, "attested": 2}
 _VALID_SEVERITIES = frozenset({"error", "warning", "info"})
+_VALID_TERMINALS = frozenset({None, "Crash", "Missing", "NotTested"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +45,7 @@ class Verdict:
 
 
 _SPEC_BY_ID = {spec.id: spec for spec in reg.CHECKS}
+_VALID_ARTIFACT_KINDS = frozenset(spec.kind for spec in reg.CHECKS if spec.kind != "all")
 
 
 def aggregate(
@@ -61,6 +63,9 @@ def aggregate(
     if spec is None:
         raise AcceptanceFailure(
             "expected_set_mismatch", f"unknown check id: {check_id}")
+    if terminal not in _VALID_TERMINALS:
+        raise AcceptanceFailure(
+            "tool_output_invalid", f"unknown terminal status: {terminal!r}")
     dispositioned: list[Finding] = []
     for item in findings:
         if item.severity not in _VALID_SEVERITIES:
@@ -129,6 +134,10 @@ def decide(
     # 规范 §7.2 规则 1:**先把全部触发的 infra family 收齐,再取优先级最高的一个**。
     # 不能按源码书写顺序 early-return —— 那样 "isolation 不足 + 子进程崩溃" 会报
     # isolation_insufficient(优先级 12)而不是 tool_crashed(优先级 2)。
+    for item in infra_failures:
+        if item not in fc.FAILURE_FAMILIES:
+            raise AcceptanceFailure(
+                "runner_internal_error", f"unknown infra failure family: {item!r}")
     triggered: list[str] = list(infra_failures)
 
     if achieved_grade not in _GRADE_ORDER:
@@ -140,8 +149,21 @@ def decide(
     if _GRADE_ORDER[achieved_grade] < _GRADE_ORDER[contract.required_isolation_grade]:
         triggered.append("isolation_insufficient")
 
+    if contract.artifact_kind not in _VALID_ARTIFACT_KINDS:
+        raise AcceptanceFailure(
+            "contract_invalid", f"unknown artifact_kind: {contract.artifact_kind!r}")
+    try:
+        na_ids = set(contract.na_check_ids)
+    except TypeError as exc:
+        raise AcceptanceFailure(
+            "contract_invalid", f"na_check_ids is not a set of hashable ids: {exc}") from exc
+    if na_ids != set(reg.na_check_ids(contract.artifact_kind)):
+        raise AcceptanceFailure(
+            "contract_invalid",
+            "na_check_ids does not match the derived not-applicable set for artifact_kind")
+
     expected_ids = {c.id for c in reg.checks_for_kind(contract.artifact_kind)}
-    expected_ids |= set(contract.na_check_ids)
+    expected_ids |= na_ids
     actual_ids = [o.id for o in outcomes]
     if not actual_ids:
         triggered.append("zero_checks_collected")
@@ -151,7 +173,7 @@ def decide(
         triggered.append("expected_set_mismatch")
 
     # 规范 §2.6 条款 6:子进程声明的 N/A 若不在合同 N/A 集内即为伪造。
-    if set(child_declared_na) - set(contract.na_check_ids):
+    if set(child_declared_na) - na_ids:
         triggered.append("forged_not_applicable")
 
     # 规范 §2.6 条款 7:Crash/Missing/Truncated 一律阻断,不分 required。

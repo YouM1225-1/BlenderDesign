@@ -283,3 +283,46 @@ def test_crash_outranks_missing(tmp_path):
                      actual_files={"summary"}, expected_files={"summary"},
                      achieved_grade="local-trusted", infra_failures=[])
     assert verdict.failure_code == "tool_crashed"   # 优先级 2 高于 evidence_missing 的 9
+
+
+def test_invalid_terminal_is_rejected(tmp_path):
+    """fail-closed:terminal 只能是 None/Crash/Missing/NotTested,非法值不能静默落到 Pass(与 severity 同款闭集校验)。"""
+    with pytest.raises(AcceptanceFailure) as caught:
+        aggregate(CHECK, [], contract=_contract(tmp_path), tool_id=None,
+                  tool_version=None, source_truncated=False, terminal="Bogus")
+    assert caught.value.code == "tool_output_invalid"
+
+
+def test_invalid_infra_failure_family_is_rejected(tmp_path):
+    """裸 ValueError 必须变成 AcceptanceFailure:coordinator 拼错 infra failure family 名字属于 runner 内部错误。"""
+    contract = _contract(tmp_path)
+    with pytest.raises(AcceptanceFailure) as caught:
+        decide(contract=contract, outcomes=_all_pass(contract),
+               actual_files={"summary"}, expected_files={"summary"},
+               achieved_grade="local-trusted", infra_failures=["totally_bogus_family"])
+    assert caught.value.code == "runner_internal_error"
+
+
+def test_invalid_artifact_kind_is_rejected(tmp_path):
+    """contract.raw 可变;artifact_kind 被篡改成非法值时 checks_for_kind 会静默缩小 expected_ids,必须 fail-closed。"""
+    contract = _contract(tmp_path)
+    outcomes = _all_pass(contract)
+    contract.raw["artifact_kind"] = "Bogus"
+    with pytest.raises(AcceptanceFailure) as caught:
+        decide(contract=contract, outcomes=outcomes,
+               actual_files={"summary"}, expected_files={"summary"},
+               achieved_grade="local-trusted", infra_failures=[])
+    assert caught.value.code == "contract_invalid"
+
+
+def test_na_check_ids_inconsistent_with_kind_is_rejected(tmp_path):
+    """contract.raw 可变;na_check_ids 与 artifact_kind 的派生互补集不一致会让真正适用的 check 被误判为 N/A,必须 fail-closed。"""
+    contract = _contract(tmp_path)
+    outcomes = _all_pass(contract)
+    applicable_id = reg.checks_for_kind(contract.artifact_kind)[0].id
+    contract.raw["na_check_ids"] = list(contract.raw["na_check_ids"]) + [applicable_id]
+    with pytest.raises(AcceptanceFailure) as caught:
+        decide(contract=contract, outcomes=outcomes,
+               actual_files={"summary"}, expected_files={"summary"},
+               achieved_grade="local-trusted", infra_failures=[])
+    assert caught.value.code == "contract_invalid"
