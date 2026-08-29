@@ -717,7 +717,6 @@ def test_staging_empty_profile_mutates_only_private_stage_and_sets_exact_prefere
         runner,
     )
 
-    assert change.changed
     assert change.extension_path == stage / "resources/extensions/user_default/mcp"
     assert change.userpref_path == stage / "resources/config/userpref.blend"
     assert change.extension_image.state.value == "present"
@@ -897,8 +896,7 @@ def test_current_owned_existing_or_created_stage_parent_succeeds(
         BlenderAuthorizations(True, True, True, True),
         runner,
     )
-    assert change.changed
-    assert change.stage_root == parent / "stage"
+    assert change.extension_path == parent / "stage/resources/extensions/user_default/mcp"
 
 
 @pytest.mark.parametrize("failure", ["fstat", "child_fsync", "parent_fsync"])
@@ -1026,7 +1024,9 @@ def test_staging_copies_existing_userpref_but_absent_profile_starts_without_copy
     assert change.userpref_path.read_bytes() == b"TASK5-PREFERENCES\n"
 
 
-def test_exact_state_is_noop_and_missing_consent_precedes_stage_creation(tmp_path: Path) -> None:
+def test_exact_state_is_staged_for_changed_install_and_missing_consent_precedes_stage_creation(
+    tmp_path: Path,
+) -> None:
     blender = _executable(tmp_path / "Blender")
     resources, env = _profile(tmp_path)
     _installed_profile(resources, env)
@@ -1040,17 +1040,33 @@ def test_exact_state_is_noop_and_missing_consent_precedes_stage_creation(tmp_pat
     )
     state = inspect_blender(blender, env, runner)
     before = len(runner.calls)
-    stage = tmp_path / "must-not-exist"
-    change = stage_blender_change(
-        state,
-        EXTENSION_ZIP,
-        stage,
-        BlenderAuthorizations(True, True, True, True),
-        runner,
-    )
-    assert not change.changed
-    assert not stage.exists()
-    assert len(runner.calls) == before
+    stage = tmp_path / "exact-restage"
+    live_root, live_extension = _tree_ref(state.extension_root)
+    try:
+        extension_before = live_extension.capture()
+        userpref_before = state.userpref.read_bytes()
+        change = stage_blender_change(
+            state,
+            EXTENSION_ZIP,
+            stage,
+            BlenderAuthorizations(True, True, True, True),
+            runner,
+        )
+        assert live_extension.capture() == extension_before
+        assert state.userpref.read_bytes() == userpref_before
+    finally:
+        live_root.close()
+    assert change.extension_path == stage / "resources/extensions/user_default/mcp"
+    assert change.userpref_path == stage / "resources/config/userpref.blend"
+    payload = load_extension_payload(EXTENSION_ZIP)
+    verify_blender_files(change.staged_state, payload, change.extension_image)
+    stage_root, staged_extension = _tree_ref(change.extension_path)
+    try:
+        assert staged_extension.capture() == change.extension_image
+        assert compare_extension_tree(payload, staged_extension, change.extension_image).exact
+    finally:
+        stage_root.close()
+    assert len(runner.calls) > before
     with pytest.raises(ValueError, match="authorizations"):
         stage_blender_change(
             state,

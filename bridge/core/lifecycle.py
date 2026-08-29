@@ -373,17 +373,7 @@ class BridgeSession:
         for conn in conns:
             if conn.sock in ready_r:
                 self._read(conn)
-        self._enforce_backpressure(conns)
         return False
-
-    def _enforce_backpressure(self, conns: list[_Conn]) -> None:
-        """规则 4 由 I/O 线程执行——主线程绝不触碰 socket（规则 3 的结构性保证）。"""
-        for conn in conns:
-            with self._conns_lock:
-                over = conn.outbox_bytes > MAX_OUTBOX
-            if over:
-                _diag.info("outbox limit exceeded, dropping connection")
-                self._drop(conn)
 
     def _retry_pending_closes(self) -> None:
         with self._conns_lock:

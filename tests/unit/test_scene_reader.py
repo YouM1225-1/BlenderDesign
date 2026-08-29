@@ -233,6 +233,42 @@ def test_chunked_hash_matches_digest_across_multiple_sort_chunks(monkeypatch):
     assert snapshot.scene_hash == scene_hash.digest(lines)
 
 
+@pytest.mark.parametrize("names", [
+    ["ascii-z", "ascii-a", "ascii-m"],
+    ["\u732b", "\U0001f680", "\u00e9", "e\u0301", "\u03a9", "\u4e2d"],
+])
+def test_object_bytes_preserve_text_sort_and_hash(monkeypatch, names):
+    module, scene = _load_scene_reader(monkeypatch, object_count=0)
+    scene.objects.extend(_Object(name, float(index))
+                         for index, name in enumerate(names))
+    snapshot = _finish(module.BpySceneReader(module.RevisionCounter()).snapshot_steps(
+        include_collections=False,
+    ))
+    lines = [module.BpySceneReader._object_line(obj)[0] for obj in scene.objects]
+
+    assert [line.decode("utf-8") for line in sorted(
+        item.encode("utf-8") for item in lines)] == sorted(lines)
+    assert snapshot.scene_hash == scene_hash.digest(lines)
+
+
+def test_object_text_limit_counts_utf8_bytes_at_exact_boundary(monkeypatch):
+    module, scene = _load_scene_reader(monkeypatch, object_count=0)
+    scene.objects.append(_Object("\u732b\U0001f680", 0.0))
+    line = module.BpySceneReader._object_line(scene.objects[:1][0])[0]
+    byte_count = len(line.encode("utf-8"))
+    monkeypatch.setattr(module, "MAX_SNAPSHOT_TEXT_BYTES", byte_count)
+    snapshot = _finish(module.BpySceneReader(module.RevisionCounter()).snapshot_steps(
+        include_collections=False,
+    ))
+    assert snapshot.scene_hash == scene_hash.digest([line])
+
+    monkeypatch.setattr(module, "MAX_SNAPSHOT_TEXT_BYTES", byte_count - 1)
+    with pytest.raises(module.SnapshotLimitExceeded, match="object text"):
+        _finish(module.BpySceneReader(module.RevisionCounter()).snapshot_steps(
+            include_collections=False,
+        ))
+
+
 def test_scene_info_race_invalidates_before_snapshot_publish(monkeypatch):
     module, _scene = _load_scene_reader(monkeypatch)
     counter = module.RevisionCounter()

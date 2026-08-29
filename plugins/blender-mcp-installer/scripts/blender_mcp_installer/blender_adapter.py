@@ -252,8 +252,6 @@ class BlenderLifecycle:
 
 @dataclass(frozen=True)
 class BlenderChange:
-    changed: bool
-    stage_root: Path | None
     extension_path: Path
     userpref_path: Path
     extension_image: TreeImage
@@ -1380,26 +1378,6 @@ def _stage_env(state: BlenderState, stage: Path) -> dict[str, str]:
     }
 
 
-def _exact_state(state: BlenderState, payload: PayloadIndex) -> bool:
-    if (
-        state.repository != _REPOSITORY
-        or state.manifest_id != payload.manifest_id
-        or state.manifest_version != payload.manifest_version
-        or state.canonical_payload_digest != payload.canonical_digest
-        or not state.enabled
-        or not state.online_access
-        or state.host != _HOST
-        or state.port != _PORT
-        or state.autostart is not True
-    ):
-        return False
-    try:
-        comparison, _ = _current_comparison(state, payload)
-    except InstallerError:
-        return False
-    return comparison.exact
-
-
 def stage_blender_change(
     state: BlenderState,
     extension_zip: Path,
@@ -1413,23 +1391,6 @@ def stage_blender_change(
         raise ValueError("all four Blender authorizations are required")
     payload_raw = _read_regular(extension_zip, maximum=_MAX_ARCHIVE)
     payload = _load_extension_payload(payload_raw)
-    if _exact_state(state, payload):
-        image, _, root = _extension_snapshot(state.extensions_root)
-        try:
-            userpref = _capture_userpref(state.config_root)
-        finally:
-            if root is not None:
-                root.close()
-        return BlenderChange(
-            False,
-            None,
-            state.extension_root,
-            state.userpref,
-            image,
-            userpref,
-            state,
-            (),
-        )
     _absolute(install_stage, "Blender install stage")
     if install_stage.is_relative_to(state.user_resources) or state.user_resources.is_relative_to(
         install_stage
@@ -1591,8 +1552,6 @@ def stage_blender_change(
         raise InstallerError("staged Blender preferences are absent")
     compat = staged_state.extensions_root / ".cache/compat.dat"
     return BlenderChange(
-        True,
-        install_stage,
         staged_state.extension_root,
         staged_state.userpref,
         image,

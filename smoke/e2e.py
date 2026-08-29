@@ -28,10 +28,14 @@ from mcp import Client, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.shared.exceptions import MCPError
 
-from protocol import envelope
-from server.mcp.adapter import CapabilitiesResult, SceneSummaryResult, StatusResult
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from acceptance.strict_json import strict_json_loads  # noqa: E402
+from protocol import envelope  # noqa: E402
+from server.mcp.adapter import CapabilitiesResult, SceneSummaryResult, StatusResult  # noqa: E402
 try:
-    from smoke.process_registry import (
+    from smoke.process_registry import (  # noqa: E402
         ProcessRecord,
         REPLACE_MODE,
         SENTINEL_MODE,
@@ -73,7 +77,6 @@ except ModuleNotFoundError:  # absolute script execution puts smoke/ on sys.path
         wait_owned_process_record,
     )
 
-ROOT = Path(__file__).resolve().parents[1]
 UV = os.environ.get("UV_BIN", str(Path.home() / ".local/bin/uv"))
 BLENDER = "/Applications/Blender.app/Contents/MacOS/Blender"
 RUNS = 20
@@ -171,30 +174,8 @@ def _canonical(value: object) -> tuple[int, str]:
     return len(raw), hashlib.sha256(raw).hexdigest()
 
 
-def _reject_json_constant(value: str) -> object:
-    raise ValueError(f"non-standard JSON constant: {value}")
-
-
-def _finite_json_float(value: str) -> float:
-    parsed = float(value)
-    if not math.isfinite(parsed):
-        raise ValueError(f"non-finite JSON number: {value}")
-    return parsed
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON object key: {key}")
-        result[key] = value
-    return result
-
-
 def _strict_json_loads(raw: str | bytes) -> object:
-    return cast(object, json.loads(
-        raw, parse_constant=_reject_json_constant, parse_float=_finite_json_float,
-        object_pairs_hook=_reject_duplicate_keys))
+    return strict_json_loads(raw)
 
 
 def _exact_json_equal(left: object, right: object) -> bool:
@@ -435,7 +416,7 @@ def _bounded_directory_names(
 
 def _tracked_sources(deadline: float, required: set[Path]) -> set[Path]:
     scopes = [
-        "protocol", "bridge", "server", "smoke", "scripts", "tests",
+        "protocol", "bridge", "server", "acceptance", "smoke", "scripts", "tests",
         "pyproject.toml", "uv.lock",
     ]
     raw = _git_bytes(

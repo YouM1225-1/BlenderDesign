@@ -16,12 +16,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from acceptance.strict_json import strict_json_loads
 from smoke import e2e
 from smoke import process_registry
 
 
 _PHASE_A_PATHS = {
-    "smoke/process_registry.py", "smoke/runner.py", "smoke/e2e.py",
+    "acceptance/strict_json.py", "smoke/process_registry.py", "smoke/runner.py", "smoke/e2e.py",
     "tests/unit/test_e2e.py",
 }
 
@@ -908,18 +909,17 @@ def test_runner_never_signals_replaced_cached_outer_record(tmp_path, monkeypatch
         for node in ast.walk(recovery)
     )
     read_helpers = {
-        "_remaining", "_reject_json_constant", "_finite_json_float",
-        "_reject_duplicate_keys", "_strict_json_loads",
-        "_read_private_json",
+        "_remaining", "_strict_json_loads", "_read_private_json",
     }
     helper_body = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name in read_helpers
     ]
     helper_namespace = {
-        "json": json, "math": math, "os": os, "stat": stat,
+        "os": os, "stat": stat,
         "time": time, "Path": Path,
         "read_private_bytes": process_registry.read_private_bytes,
+        "strict_json_loads": strict_json_loads,
     }
     helper_module = ast.fix_missing_locations(
         ast.Module(body=helper_body, type_ignores=[]))
@@ -1973,7 +1973,8 @@ def test_provenance_ignores_ignored_untracked_python(monkeypatch):
     finally:
         ignored.unlink(missing_ok=True)
     assert str(ignored.relative_to(e2e.ROOT)) not in provenance["sources"]["files"]
-    assert {"pyproject.toml", "uv.lock"} <= set(provenance["sources"]["files"])
+    assert {"acceptance/strict_json.py", "pyproject.toml", "uv.lock"} <= set(
+        provenance["sources"]["files"])
     assert provenance["git"]["dirty"] is False
 
 

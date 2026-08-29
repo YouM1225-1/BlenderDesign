@@ -1,12 +1,13 @@
 """SDK v2 MCP adapter for the Phase 0 read-only Blender channel."""
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import threading
 import time
 from collections.abc import Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from mcp.server import MCPServer
 from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
@@ -34,6 +35,8 @@ _ACTIVE_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
     "bcx_request_deadline", default=None)
 _STATUS_AGGREGATION_LOCK = threading.Lock()
 _STATUS_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="bcx-status")
+_AUDIT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bcx-audit")
+_AUDIT_ADMISSION = threading.BoundedSemaphore(32)
 _SCENE_SUMMARY_ADMISSION = threading.BoundedSemaphore(2)
 
 _TOOL_ARGUMENTS = {
@@ -51,6 +54,64 @@ _TOOL_TYPES: dict[str, dict[str, tuple[type[Any], ...]]] = {
 
 def _deadline(budget: float) -> float:
     return _ACTIVE_DEADLINE.get() or time.monotonic() + budget
+
+
+async def _await_audit(call: Callable[[], None], deadline: float) -> None:
+    admission = _AUDIT_ADMISSION
+    if not admission.acquire(blocking=False):
+        raise TimeoutError("audit queue full")
+
+    loop = asyncio.get_running_loop()
+    done = asyncio.Event()
+
+    def run() -> None:
+        try:
+            call()
+        finally:
+            admission.release()
+
+    try:
+        submitted = _AUDIT_EXECUTOR.submit(run)
+    except BaseException:
+        admission.release()
+        raise
+
+    def notify_done(future: Future[None]) -> None:
+        try:
+            future.exception()
+        except BaseException:
+            pass
+        try:
+            loop.call_soon_threadsafe(done.set)
+        except RuntimeError:
+            pass
+
+    submitted.add_done_callback(notify_done)
+    cancelled: asyncio.CancelledError | None = None
+    queued = True
+    while not submitted.done():
+        try:
+            if queued:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    if submitted.running():
+                        queued = False
+                        continue
+                    raise TimeoutError("audit deadline expired in queue")
+                await asyncio.wait_for(done.wait(), remaining)
+            else:
+                await done.wait()
+        except TimeoutError:
+            if submitted.running():
+                queued = False
+            elif not submitted.done():
+                raise TimeoutError("audit deadline expired in queue") from None
+        except asyncio.CancelledError as exc:
+            cancelled = cancelled or exc
+            queued = False
+    submitted.result()
+    if cancelled is not None:
+        raise cancelled
 
 
 class ToolFailure(Exception):
@@ -139,14 +200,22 @@ class CapabilitiesResult(ClosedModel):
     instances_skipped_count: int
 
 
-_deps_cache: tuple[Discovery, AuditLog] | None = None
+_discovery_cache: Discovery | None = None
+_audit_cache: AuditLog | None = None
 
 
-def _deps() -> tuple[Discovery, AuditLog]:
-    global _deps_cache
-    if _deps_cache is None:
-        _deps_cache = Discovery(config.run_dir()), AuditLog(config.logs_dir())
-    return _deps_cache
+def _discovery() -> Discovery:
+    global _discovery_cache
+    if _discovery_cache is None:
+        _discovery_cache = Discovery(config.run_dir())
+    return _discovery_cache
+
+
+def _audit() -> AuditLog:
+    global _audit_cache
+    if _audit_cache is None:
+        _audit_cache = AuditLog(config.logs_dir())
+    return _audit_cache
 
 
 def _row(instance: Instance) -> dict[str, Any]:
@@ -238,7 +307,7 @@ def scene_summary_impl(discovery: Discovery, instance_id: str, include_collectio
     if instance is None:
         if stats.partial:
             raise ToolFailure(envelope.BRIDGE_UNAVAILABLE, "discovery incomplete", True)
-        raise ToolFailure("INSTANCE_NOT_FOUND", instance_id)
+        raise ToolFailure(envelope.INSTANCE_NOT_FOUND, instance_id)
     if instance.envelope_mismatch:
         raise ToolFailure(envelope.ENVELOPE_VERSION_MISMATCH, instance.version_warning or "")
     if instance.client is None:
@@ -263,11 +332,14 @@ def scene_summary_impl(discovery: Discovery, instance_id: str, include_collectio
             "units": result["units"], "summary": summary}
 
 
-def capabilities_impl(discovery: Discovery, include_instances: bool = False) -> dict[str, Any]:
+def capabilities_impl(discovery: Discovery | None = None,
+                      include_instances: bool = False) -> dict[str, Any]:
     connected: list[dict[str, Any]] = []
     partial = False
     skipped = 0
     if include_instances:
+        if discovery is None:
+            raise ValueError("discovery required when include_instances is true")
         instances, stats = discovery.instances_with_stats(deadline=_deadline(OVERALL_BUDGET))
         connected = [item.session for item in instances if item.client is not None]
         partial, skipped = stats.partial, stats.skipped_count
@@ -288,7 +360,7 @@ async def _audit_and_validate_tool_call(ctx: ServerRequestContext[Any, Any],
     token = _ACTIVE_DEADLINE.set(started + (SCENE_SUMMARY_BUDGET if tool == "get_scene_summary"
                                              else OVERALL_BUDGET))
     try:
-        audit = _deps()[1]
+        audit = _audit()
     except Exception as exc:
         _ACTIVE_DEADLINE.reset(token)
         raise MCPError(-32000, "audit unavailable",
@@ -322,13 +394,22 @@ async def _audit_and_validate_tool_call(ctx: ServerRequestContext[Any, Any],
         error = code if isinstance(code, str) else str(getattr(exc, "code", type(exc).__name__))
         raise
     finally:
+        audit_postlude_at = time.monotonic()
+        audit_deadline = audit_postlude_at + AUDIT_LOCK_TIMEOUT
+        audit_duration_ms = (audit_postlude_at - started) * 1000
+
+        def record_audit() -> None:
+            audit.record(
+                tool, ctx.request_id if ctx.request_id is not None else "<missing>",
+                ok=error is None, duration_ms=audit_duration_ms,
+                instance_id=safe_args.get("instance_id") if isinstance(
+                    safe_args.get("instance_id"), str) else None,
+                params=safe_args, error=error,
+                deadline=audit_deadline,
+            )
+
         try:
-            audit.record(tool, ctx.request_id if ctx.request_id is not None else "<missing>",
-                         ok=error is None, duration_ms=(time.monotonic() - started) * 1000,
-                         instance_id=safe_args.get("instance_id") if isinstance(
-                             safe_args.get("instance_id"), str) else None,
-                         params=safe_args, error=error,
-                         deadline=time.monotonic() + AUDIT_LOCK_TIMEOUT)
+            await _await_audit(record_audit, audit_deadline)
         except Exception as exc:
             raise MCPError(-32000, "audit unavailable",
                            {"code": "AUDIT_UNAVAILABLE", "retryable": True}) from exc
@@ -345,14 +426,14 @@ mcp = MCPServer("blender-codex", version=SERVER_VERSION, instructions=INSTRUCTIO
 @mcp.tool()
 def get_blender_status(instance_selector: str | None = None) -> StatusResult:
     """列出 Blender 实例、Bridge 连接状态与场景概况。无实例时返回引导文案。"""
-    return StatusResult.model_validate(status_impl(_deps()[0], instance_selector))
+    return StatusResult.model_validate(status_impl(_discovery(), instance_selector))
 
 
 @mcp.tool()
 def get_scene_summary(instance_id: str, include_collections: bool = True,
                       include_managed_objects: bool = True) -> SceneSummaryResult:
     """返回指定实例的场景摘要：对象统计、单位、scene_hash 与受管对象清单。"""
-    discovery = _deps()[0]
+    discovery = _discovery()
     try:
         return SceneSummaryResult.model_validate(scene_summary_impl(
             discovery, instance_id, include_collections, include_managed_objects))
@@ -367,7 +448,8 @@ def get_scene_summary(instance_id: str, include_collections: bool = True,
 @mcp.tool()
 def describe_capabilities(include_instances: bool = False) -> CapabilitiesResult:
     """返回本 Server 能力：支持的工具、IR 版本、Blender 基线。默认不连 Bridge。"""
-    return CapabilitiesResult.model_validate(capabilities_impl(_deps()[0], include_instances))
+    discovery = _discovery() if include_instances else None
+    return CapabilitiesResult.model_validate(capabilities_impl(discovery, include_instances))
 
 
 def _close_input_schemas() -> None:

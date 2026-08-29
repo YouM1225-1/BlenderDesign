@@ -264,10 +264,6 @@ class Discovery:
             return False
         return True
 
-    def find(self, instance_id: str,
-             deadline: float | None = None) -> Instance | None:
-        return self.find_with_stats(instance_id, deadline)[0]
-
     def find_with_stats(
             self, instance_id: str,
             deadline: float | None = None) -> tuple[Instance | None, ScanStats]:

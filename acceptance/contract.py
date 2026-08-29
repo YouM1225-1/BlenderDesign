@@ -1,7 +1,6 @@
 """规范 §7.3 contract.json 的封闭加载与 §2.5.1 的 digest。"""
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,9 +9,7 @@ from acceptance import check_registry as reg
 from acceptance.canonical import CanonicalError, digest as canonical_digest
 from acceptance.primitives import (
     AcceptanceFailure,
-    finite_json_float,
-    reject_duplicate_keys,
-    reject_json_constant,
+    strict_json_loads,
 )
 
 _TOP_LEVEL = frozenset({
@@ -82,12 +79,7 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
     if resolved == root or root in resolved.parents:
         raise _fail("contract must live outside the candidate input tree")
     try:
-        value = json.loads(
-            resolved.read_text(encoding="utf-8"),
-            parse_constant=reject_json_constant,
-            parse_float=finite_json_float,
-            object_pairs_hook=reject_duplicate_keys,
-        )
+        value = strict_json_loads(resolved.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise _fail(f"unreadable or invalid JSON: {exc}") from exc
     if type(value) is not dict:

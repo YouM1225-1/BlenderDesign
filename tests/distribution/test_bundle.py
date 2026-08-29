@@ -487,6 +487,57 @@ def test_replace_wheel_zip_or_lock_after_verify_cannot_change_staged_copy(
     assert (staged.root / target).read_bytes() == expected
 
 
+def test_materialize_reuses_opened_digest_without_full_source_reread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, commit = _checkout(tmp_path)
+    with open_verified_bundle(verify_distribution_checkout(bundle, commit, _git)) as verified:
+        real_pread = os.pread
+        sizes: list[int] = []
+
+        def record_pread(fd: int, size: int, offset: int) -> bytes:
+            sizes.append(size)
+            return real_pread(fd, size, offset)
+
+        monkeypatch.setattr(os, "pread", record_pread)
+        verified.materialize(tmp_path / "private-stage")
+
+    assert max(sizes) == 1024 * 1024
+
+
+def test_materialize_digest_rejects_same_identity_content_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, commit = _checkout(tmp_path)
+    wheel = bundle / ARTIFACTS[0][1]
+    before = wheel.stat(follow_symlinks=False)
+    with open_verified_bundle(verify_distribution_checkout(bundle, commit, _git)) as verified:
+        source_fd = verified._files[wheel.name][0]
+        real_pread = os.pread
+        changed = False
+
+        def mutate_after_first_chunk(fd: int, size: int, offset: int) -> bytes:
+            nonlocal changed
+            if fd == source_fd and offset == 0 and not changed:
+                changed = True
+                mutation_offset = before.st_size // 2
+                write_fd = os.open(wheel, os.O_WRONLY | os.O_NOFOLLOW)
+                try:
+                    original = real_pread(source_fd, 1, mutation_offset)
+                    os.pwrite(write_fd, bytes((original[0] ^ 0xFF,)), mutation_offset)
+                finally:
+                    os.close(write_fd)
+                os.utime(wheel, ns=(before.st_atime_ns, before.st_mtime_ns))
+            return real_pread(fd, size, offset)
+
+        monkeypatch.setattr(os, "pread", mutate_after_first_chunk)
+        with pytest.raises(ValueError, match="staged copy differs from opened source"):
+            verified.materialize(tmp_path / "private-stage")
+
+    assert changed
+    assert not (tmp_path / "private-stage").exists()
+
+
 @pytest.mark.parametrize(
     "lock",
     [
@@ -795,7 +846,7 @@ def test_tampered_manifest_cannot_replace_last_good_output(
         data["artifacts"][0]["size"] += 1
         data["artifacts"][0]["sha256"] = "a" * 64
         (candidate / "manifest.json").write_text(json.dumps(data, separators=(",", ":")) + "\n")
-        (candidate / "SHA256SUMS").write_text(builder._write_checksum_text(candidate))
+        (candidate / "SHA256SUMS").write_text(builder._checksum_text(candidate))
         return builder._validate_candidate(candidate, Path("blender"))
 
     monkeypatch.setattr(

@@ -72,6 +72,8 @@ bash scripts/checks.sh
 
 该脚本依次执行依赖同步、Ruff、严格 mypy、插件结构校验、协议 vendor 一致性、嵌套导入 smoke，以及 unit、contract 和 distribution 测试。uv 按 `UV_BIN`、`PATH`、`$HOME/.local/bin/uv` 的顺序解析。正式发布使用 `RELEASE=1`，额外执行上游双 SDK 门禁、依赖/secret/安全扫描与发行物重建比对。
 
+日常只读快速反馈使用 `bash scripts/checks-fast.sh`；它复用现有 `.venv`，不执行依赖同步、代码生成、重装、构建或 distribution tests，不能替代提交前的完整门禁。
+
 ## 仓库结构
 
 ```text
@@ -80,6 +82,7 @@ bridge/core/                   与 bpy 解耦的会话、队列、路由和生�
 bridge/blender/                Blender Extension 的 UI、driver 与场景读取层
 server/core/                   discovery、配置、审计和 Bridge client
 server/mcp/                    Phase 0 MCP SDK v2 adapter
+acceptance/                    checkout-only 的资产验收 P0 判定核心，不进入 wheel/sdist
 plugins/blender-mcp-installer/ 官方 Blender MCP 的 Codex 插件、安装器与固定产物
 scripts/                       构建、vendor 和验证脚本
 smoke/                         Blender background/GUI/E2E smoke 工具
@@ -96,4 +99,4 @@ docs/                          当前架构、安装、使用、验证和技术�
 - [官方 Blender MCP 使用](docs/use-official-blender-mcp.md)
 - [验证说明](docs/validation.md)
 
-仓库只保留当前正式文档。历史计划、审计和实验结论通过 Git 历史追溯，不作为当前运行时输入。
+仓库只保留当前正式文档；`docs/acceptance/`、其判定核心实施计划，以及根目录中绑定旧提交的 V3.1 对抗性审计是明确列出的演进档案例外。其余历史计划、审计和实验结论通过 Git 历史追溯，均不作为当前运行时输入。

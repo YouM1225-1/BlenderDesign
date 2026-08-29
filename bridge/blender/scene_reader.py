@@ -93,7 +93,7 @@ class BpySceneReader:
         del scene
         revision = self._counter.value
         generation = self._counter.generation
-        chunks: list[tuple[str, ...]] = []
+        chunks: list[tuple[bytes, ...]] = []
         object_text_bytes = 0
         n_mesh = n_cam = n_light = 0
         for start in range(0, object_count, 1024):
@@ -109,15 +109,16 @@ class BpySceneReader:
             except (ReferenceError, RuntimeError, TypeError) as exc:
                 raise SnapshotInvalidated("scene changed during snapshot") from exc
             del current_scene
-            batch_lines: list[str] = []
+            batch_lines: list[bytes] = []
             obj = None
             try:
                 for obj in batch:
                     line, is_mesh, is_camera, is_light = self._object_line(obj)
-                    object_text_bytes += len(line.encode("utf-8"))
+                    encoded_line = line.encode("utf-8")
+                    object_text_bytes += len(encoded_line)
                     if object_text_bytes > MAX_SNAPSHOT_TEXT_BYTES:
                         raise SnapshotLimitExceeded("object text limit exceeded")
-                    batch_lines.append(line)
+                    batch_lines.append(encoded_line)
                     n_mesh += is_mesh
                     n_cam += is_camera
                     n_light += is_light
@@ -139,11 +140,11 @@ class BpySceneReader:
         digest = hashlib.sha256()
         first = True
         hash_steps = 0
-        for line in heapq.merge(*chunks):
+        for encoded_line in heapq.merge(*chunks):
             self._check_marker(revision, generation)
             if not first:
                 digest.update(b"\n")
-            digest.update(line.encode("utf-8"))
+            digest.update(encoded_line)
             first = False
             hash_steps += 1
             if hash_steps == 128:
@@ -154,8 +155,9 @@ class BpySceneReader:
 
         # The hash is complete; release all per-object strings before optionally
         # materializing collection names so the two bounded working sets do not
-        # overlap.  ``line`` is reset to release the last merge item as well.
+        # overlap. ``encoded_line`` is reset to release the last merge item as well.
         line = ""
+        encoded_line = b""
         chunks.clear()
 
         collections: list[str] = []

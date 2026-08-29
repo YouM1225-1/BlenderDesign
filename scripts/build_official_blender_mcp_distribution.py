@@ -603,11 +603,7 @@ def _manifest(epoch: int, output: Path) -> ReleaseManifest:
 
 
 def _write_checksums(output: Path) -> None:
-    names = ("manifest.json", *(filename for _, filename in ARTIFACTS))
-    content = "".join(
-        f"{hashlib.sha256((output / name).read_bytes()).hexdigest()}  {name}\n" for name in names
-    )
-    (output / "SHA256SUMS").write_text(content, encoding="ascii")
+    (output / "SHA256SUMS").write_text(_checksum_text(output), encoding="ascii")
 
 
 def _validate_candidate(output: Path, blender_bin: Path) -> ReleaseManifest:
@@ -626,13 +622,13 @@ def _validate_candidate(output: Path, blender_bin: Path) -> ReleaseManifest:
     _validate_wheel(output / ARTIFACTS[0][1])
     _validate_extension(output / ARTIFACTS[1][1])
     _run(validate_extension_command(blender_bin, output / ARTIFACTS[1][1]))
-    expected_lines = _write_checksum_text(output)
+    expected_lines = _checksum_text(output)
     if (output / "SHA256SUMS").read_text(encoding="ascii") != expected_lines:
         raise ValueError("candidate checksum file is invalid")
     return manifest
 
 
-def _write_checksum_text(output: Path) -> str:
+def _checksum_text(output: Path) -> str:
     return "".join(
         f"{hashlib.sha256((output / name).read_bytes()).hexdigest()}  {name}\n"
         for name in ("manifest.json", *(filename for _, filename in ARTIFACTS))

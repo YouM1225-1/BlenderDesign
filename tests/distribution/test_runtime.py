@@ -36,10 +36,13 @@ from blender_mcp_installer.filesystem import (  # noqa: E402
 )
 from blender_mcp_installer.model import ImageState, TreeImage  # noqa: E402
 from blender_mcp_installer.runtime import (  # noqa: E402
-    inspect_runtime,
     stage_runtime,
     verify_runtime,
 )
+
+
+def _inspect_runtime(runtime_root: TreeRef, manifest):
+    return runtime_module._state(runtime_root, manifest, strict=False)
 
 
 def _profile(root: Path) -> ManagedProfile:
@@ -310,13 +313,10 @@ def test_inspect_and_verify_record_exact_runtime_and_noop_is_read_only(tmp_path:
     root, stage, runner = _stage(tmp_path, bundle)
     try:
         before = len(runner.calls)
-        state = inspect_runtime(TreeRef(root, stage.relative), bundle.manifest)
+        state = _inspect_runtime(TreeRef(root, stage.relative), bundle.manifest)
         assert state.exact
         assert state.python_version == "3.13.13"
         assert state.distributions == _locked(bundle)
-        assert state.blender_mcp_version == "1.0.0"
-        assert state.mcp_version == "1.28.1"
-        assert state.tomlkit_version == "0.13.3"
         assert state.entry_point == "blender-mcp = blmcp:main"
         assert state.entry_point_path == stage.path / "bin/blender-mcp"
         assert state.module_path.is_relative_to(stage.path)
@@ -328,7 +328,7 @@ def test_inspect_and_verify_record_exact_runtime_and_noop_is_read_only(tmp_path:
         assert verified.exact
         assert verified.tree == state.tree
         assert len(runner.calls) == before + 1
-        inspect_runtime(TreeRef(root, stage.relative), bundle.manifest)
+        _inspect_runtime(TreeRef(root, stage.relative), bundle.manifest)
         assert len(runner.calls) == before + 1
     finally:
         root.close()
@@ -469,7 +469,7 @@ def test_real_launcher_keeps_verified_runtime_bytecode_free(tmp_path: Path) -> N
         )
         assert stage.capture() == image
         assert marker.read_bytes() == marker_raw
-        assert inspect_runtime(TreeRef(root, stage.relative), bundle.manifest).exact
+        assert _inspect_runtime(TreeRef(root, stage.relative), bundle.manifest).exact
         assert (
             verify_runtime(
                 TreeRef(root, stage.relative), bundle.manifest, _profile(tmp_path), run
@@ -484,13 +484,13 @@ def test_absent_and_altered_runtime_are_not_exact(tmp_path: Path) -> None:
     data = tmp_path / "data"
     data.mkdir(mode=0o700)
     with SafeRoot.open(data, os.getuid(), data) as root:
-        absent = inspect_runtime(TreeRef(root, PurePath("runtime")), bundle.manifest)
+        absent = _inspect_runtime(TreeRef(root, PurePath("runtime")), bundle.manifest)
         assert absent.tree == TreeImage.absent()
         assert not absent.exact
     root, stage, _runner = _stage(tmp_path / "changed", bundle)
     try:
         (stage.path / "bin/blender-mcp-managed").write_text("changed\n")
-        assert not inspect_runtime(TreeRef(root, stage.relative), bundle.manifest).exact
+        assert not _inspect_runtime(TreeRef(root, stage.relative), bundle.manifest).exact
     finally:
         root.close()
 
@@ -515,7 +515,7 @@ def test_complete_runtime_content_is_bound_before_execution(
         target.write_bytes(b"changed-after-staging")
         target.chmod(mode)
         before = len(runner.calls)
-        assert not inspect_runtime(TreeRef(root, stage.relative), bundle.manifest).exact
+        assert not _inspect_runtime(TreeRef(root, stage.relative), bundle.manifest).exact
         with pytest.raises(InstallerError, match="runtime verification failed"):
             verify_runtime(
                 TreeRef(root, stage.relative), bundle.manifest, _profile(tmp_path), runner
@@ -543,7 +543,7 @@ def test_marker_requires_exact_canonical_private_bytes_before_execution(
         else:
             marker.chmod(0o666)
         before = len(runner.calls)
-        assert not inspect_runtime(TreeRef(root, stage.relative), bundle.manifest).exact
+        assert not _inspect_runtime(TreeRef(root, stage.relative), bundle.manifest).exact
         with pytest.raises(InstallerError, match="runtime verification failed"):
             verify_runtime(
                 TreeRef(root, stage.relative), bundle.manifest, _profile(tmp_path), runner

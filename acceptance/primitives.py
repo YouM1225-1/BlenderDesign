@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import signal
 import subprocess
 import time
 from pathlib import Path
 
+from acceptance.strict_json import (
+    finite_json_float as finite_json_float,
+    reject_duplicate_keys as reject_duplicate_keys,
+    reject_json_constant as reject_json_constant,
+    strict_json_loads as strict_json_loads,
+)
 from smoke.process_registry import read_private_bytes, require_private_directory
 
 
@@ -66,26 +71,6 @@ def clean_environment(
         "UV_BIN": str(uv),
     })
     return clean
-
-
-def reject_json_constant(value: str) -> object:
-    raise ValueError(f"non-standard JSON constant: {value}")
-
-
-def finite_json_float(value: str) -> float:
-    parsed = float(value)
-    if not math.isfinite(parsed):
-        raise ValueError(f"non-finite JSON number: {value}")
-    return parsed
-
-
-def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON object key: {key}")
-        result[key] = value
-    return result
 
 
 def file_evidence(path: Path, max_bytes: int) -> dict[str, object]:

@@ -131,9 +131,6 @@ class RuntimeState:
     tree: TreeImage
     python_version: str | None
     distributions: Mapping[str, str]
-    blender_mcp_version: str | None
-    mcp_version: str | None
-    tomlkit_version: str | None
     entry_point: str | None
     entry_point_path: Path | None
     module_path: Path | None
@@ -150,7 +147,7 @@ class RuntimeState:
 
 
 def _absent_state(tree: TreeImage) -> RuntimeState:
-    return RuntimeState(tree, None, {}, None, None, None, None, None, None, None, {}, (), False)
+    return RuntimeState(tree, None, {}, None, None, None, None, {}, (), False)
 
 
 def _content_summary(tree: TreeImage) -> tuple[int, str]:
@@ -855,9 +852,6 @@ def _state(runtime_root: TargetRef, manifest: ReleaseManifest, *, strict: bool) 
             tree,
             marker["python_version"],
             distributions,
-            distributions.get("blender-mcp"),
-            distributions.get("mcp"),
-            distributions.get("tomlkit"),
             marker["entry_point"],
             entry_point,
             module,
@@ -873,12 +867,6 @@ def _state(runtime_root: TargetRef, manifest: ReleaseManifest, *, strict: bool) 
         if strict:
             raise InstallerError("runtime verification failed")
         return _absent_state(tree)
-
-
-def inspect_runtime(runtime_root: TargetRef, manifest: ReleaseManifest) -> RuntimeState:
-    if not isinstance(runtime_root, TargetRef) or type(manifest) is not ReleaseManifest:
-        raise ValueError("invalid runtime inspection input")
-    return _state(runtime_root, manifest, strict=False)
 
 
 def verify_runtime(

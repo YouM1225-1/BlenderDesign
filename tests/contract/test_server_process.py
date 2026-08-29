@@ -92,6 +92,16 @@ def _spawn(tmp_path):
     return p
 
 
+def _stop(p):
+    try:
+        p.kill()
+        p.wait(timeout=5)
+    finally:
+        for stream in (p.stdin, p.stdout, p.stderr):
+            if stream is not None:
+                stream.close()
+
+
 def _stdio_params(tmp_path):
     from mcp import StdioServerParameters
     return StdioServerParameters(
@@ -105,8 +115,7 @@ def _stdio_params(tmp_path):
 def proc(tmp_path):
     p = _spawn(tmp_path)
     yield p
-    p.kill()
-    p.wait(timeout=5)
+    _stop(p)
 
 
 def _send(p, obj):
@@ -253,8 +262,7 @@ def test_cold_start_and_stdout_purity(tmp_path):
         assert payload["ir_schema_version"] is None
         _drain_stdout(p, time.monotonic() + 0.2)
     finally:
-        p.kill()
-        p.wait(timeout=5)
+        _stop(p)
 
 
 def test_audit_request_id_matches_inbound_jsonrpc_id(tmp_path):
@@ -275,8 +283,7 @@ def test_audit_request_id_matches_inbound_jsonrpc_id(tmp_path):
         assert rows[-2]["request_id"] == 42 and type(rows[-2]["request_id"]) is int
         assert rows[-1]["request_id"] == "42" and type(rows[-1]["request_id"]) is str
     finally:
-        p.kill()
-        p.wait(timeout=5)
+        _stop(p)
 
 
 @pytest.mark.parametrize("protocol", [CODEX_PROTOCOL, LEGACY_PROTOCOL])
@@ -452,8 +459,7 @@ def test_read_until_preserves_same_chunk_backlog_and_matches_id_type_exactly():
         assert type(first["id"]) is int and first["id"] == 1
         assert type(second["id"]) is int and second["id"] == 2
     finally:
-        p.kill()
-        p.wait(timeout=5)
+        _stop(p)
 
 
 def test_stdout_pollution_after_target_in_same_chunk_is_not_hidden():
@@ -468,8 +474,7 @@ def test_stdout_pollution_after_target_in_same_chunk_is_not_hidden():
         with pytest.raises(json.JSONDecodeError):
             _read_until(p, 1, time.monotonic() + 1.0)
     finally:
-        p.kill()
-        p.wait(timeout=5)
+        _stop(p)
 
 
 def test_delayed_stdout_pollution_after_target_is_not_hidden():
@@ -486,8 +491,7 @@ def test_delayed_stdout_pollution_after_target_is_not_hidden():
         with pytest.raises(json.JSONDecodeError):
             _drain_stdout(p, time.monotonic() + 1.0)
     finally:
-        p.kill()
-        p.wait(timeout=5)
+        _stop(p)
 
 
 def test_partial_stdout_line_cannot_escape_deadline():
@@ -502,8 +506,7 @@ def test_partial_stdout_line_cannot_escape_deadline():
             _read_until(p, 1, t0 + 0.2)
         assert time.monotonic() - t0 < 1.0
     finally:
-        p.kill()
-        p.wait(timeout=5)
+        _stop(p)
 
 
 def test_unterminated_stdout_line_is_size_bounded(monkeypatch):
@@ -518,8 +521,7 @@ def test_unterminated_stdout_line_is_size_bounded(monkeypatch):
         with pytest.raises(AssertionError, match="size limit"):
             _read_until(p, 1, time.monotonic() + 1.0)
     finally:
-        p.kill()
-        p.wait(timeout=5)
+        _stop(p)
 
 
 def test_stdout_message_flood_is_bounded(monkeypatch):
@@ -535,5 +537,4 @@ def test_stdout_message_flood_is_bounded(monkeypatch):
         with pytest.raises(AssertionError, match="message flood"):
             _read_until(p, 1, time.monotonic() + 1.0)
     finally:
-        p.kill()
-        p.wait(timeout=5)
+        _stop(p)

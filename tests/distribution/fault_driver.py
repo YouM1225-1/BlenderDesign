@@ -27,6 +27,18 @@ _PREIMAGES = {
 }
 
 
+class ExitFaultInjector:
+    def __init__(self, point: str, code: int) -> None:
+        self.point = point
+        self.code = code
+        self.hit_requested = False
+
+    def hit(self, point: str) -> None:
+        if point == self.point:
+            self.hit_requested = True
+            raise SystemExit(self.code)
+
+
 def _applicable_points(fixture_kind: str, preimage: str) -> dict[str, frozenset[str]]:
     if preimage not in _PREIMAGES[fixture_kind]:
         raise ValueError("preimage is not valid for fixture kind")
@@ -293,8 +305,6 @@ def _patch_scenario(cli, root: Path, fixture_kind: str, preimage: str, point: st
             extension_image = capture_tree(safe, Path("resources/extensions/user_default/mcp"))
             userpref_image = capture_file(safe, Path("resources/config/userpref.blend"))
         return BlenderChange(
-            True,
-            work,
             extension,
             userpref,
             extension_image,
@@ -376,7 +386,7 @@ def main() -> int:
     root = Path(__file__).resolve().parents[2]
     scripts = root / "plugins/blender-mcp-installer/scripts"
     sys.path.insert(0, str(scripts))
-    from blender_mcp_installer.cli import ExitFaultInjector, run_cli
+    from blender_mcp_installer.cli import run_cli
     import blender_mcp_installer.cli as cli
 
     if args.scenario_root is not None:

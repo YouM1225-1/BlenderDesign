@@ -122,18 +122,6 @@ class _Parser(argparse.ArgumentParser):
         raise _ArgumentError
 
 
-class ExitFaultInjector:
-    def __init__(self, point: str, code: int) -> None:
-        self.point = point
-        self.code = code
-        self.hit_requested = False
-
-    def hit(self, point: str) -> None:
-        if point == self.point:
-            self.hit_requested = True
-            raise SystemExit(self.code)
-
-
 class _SelectorFault:
     def __init__(self, fault: FaultInjector, publication_point: str) -> None:
         self.fault = fault
@@ -143,13 +131,6 @@ class _SelectorFault:
         self.fault.hit(point)
         if point == "after_json_parent_fsync":
             self.fault.hit(self.publication_point)
-
-
-@dataclass(frozen=True)
-class ReconcileResult:
-    pending: PendingSelector | None
-    active: ActiveSelector | None
-    changed: bool
 
 
 @dataclass(frozen=True)
@@ -840,7 +821,7 @@ def reconcile_selectors(
     fault: FaultInjector,
     *,
     manifest_sha256: str,
-) -> ReconcileResult:
+) -> None:
     del blender
     _settle_pending_atomic_json(roots, manifest_sha256, fault)
     try:
@@ -852,7 +833,7 @@ def reconcile_selectors(
             active = load_active(roots.active, roots)
         except Exception as exc:
             raise InstallerError("selector reconciliation conflict") from exc
-        return ReconcileResult(None, active, False)
+        return
     new = ActiveSelector(1, pending.generation, pending.install_id, pending.receipt_basename)
     with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
         _settle_receipt_atomic_json(roots, pending, bundle, manifest_sha256, state, fault)
@@ -887,7 +868,7 @@ def reconcile_selectors(
             ):
                 raise InstallerError("selector reconciliation conflict")
             _remove_pending(state, roots, pending, fault)
-        return ReconcileResult(None, active, True)
+        return
     with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
         _validate_pending_receipt(receipt, pending, roots, bundle, manifest_sha256, state)
         active_target = next(
@@ -1011,7 +992,7 @@ def reconcile_selectors(
                 fault=fault,
             )
             _remove_pending(state, roots, pending, fault)
-        return ReconcileResult(None, active, True)
+        return
     if active == pending.previous_active:
         with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
             active_ref = TargetRef(state, PurePath("active.json"))
@@ -1057,7 +1038,7 @@ def reconcile_selectors(
                 fault=fault,
             )
             _remove_pending(state, roots, pending, fault)
-        return ReconcileResult(None, new, True)
+        return
     raise InstallerError("incomplete selector publication")
 
 

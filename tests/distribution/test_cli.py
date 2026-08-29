@@ -21,7 +21,14 @@ SCRIPTS = ROOT / "plugins/blender-mcp-installer/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from blender_mcp_installer import cli  # noqa: E402
-from blender_mcp_installer.blender_adapter import BlenderChange, BlenderState  # noqa: E402
+from blender_mcp_installer.blender_adapter import (  # noqa: E402
+    BlenderChange,
+    BlenderState,
+    compare_extension_tree,
+    inspect_blender,
+    load_extension_payload,
+    verify_blender_files,
+)
 from blender_mcp_installer.bundle import StagedBundle, parse_manifest  # noqa: E402
 from blender_mcp_installer.filesystem import (  # noqa: E402
     InstallerError,
@@ -48,8 +55,13 @@ from blender_mcp_installer.model import (  # noqa: E402
 )
 from blender_mcp_installer.verification import HostCapabilities  # noqa: E402
 from tests.distribution.fake_host import HostHarness  # noqa: E402
+from tests.distribution.test_blender_adapter import BlenderRunner  # noqa: E402
 from tests.distribution.test_bundle import _checkout  # noqa: E402
-from tests.distribution.fault_driver import _PREIMAGES, _applicable_points  # noqa: E402
+from tests.distribution.fault_driver import (  # noqa: E402
+    ExitFaultInjector,
+    _PREIMAGES,
+    _applicable_points,
+)
 
 
 COMMIT = "a" * 40
@@ -742,6 +754,97 @@ def _install_context(host: HostHarness) -> tuple[cli._Context, BlenderState, Ins
     )
 
 
+def test_changed_install_restages_exact_external_blender_with_codex_drift(
+    host: HostHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context, _, roots = _install_context(host)
+    runner = BlenderRunner(
+        host.blender,
+        enabled=True,
+        online_access=True,
+        host="localhost",
+        port=9876,
+        autostart=True,
+    )
+    context = replace(context, host=replace(context.host, runner=runner))
+    roots.extension_target.mkdir(parents=True)
+    with zipfile.ZipFile(ARTIFACTS / "mcp-1.0.0.zip") as archive:
+        archive.extractall(roots.extension_target)
+    for path in roots.extension_target.rglob("*"):
+        if path.is_file():
+            path.chmod(0o644)
+    roots.userpref_target.write_bytes(b"preferences")
+    roots.userpref_target.chmod(0o600)
+    roots.codex_config.write_bytes(b"[foreign]\nvalue = 'drift'\n")
+    roots.codex_config.chmod(0o600)
+
+    def inspection(_context):
+        return SimpleNamespace(
+            exact=False,
+            blender_state=inspect_blender(host.blender, context.host.env, runner),
+        )
+
+    def fake_runtime(_bundle, _uv, _python, _profile, stage, _runner):
+        (stage.path / "bin").mkdir()
+        (stage.path / "bin/python").write_bytes(b"python")
+        (stage.path / "bin/blender-mcp-managed").write_bytes(b"launcher")
+        return capture_tree(stage.root, stage.relative)
+
+    def fake_codex(_fd, _current, _desired, _runtime_python, stage: StagedFile):
+        stage.path.write_bytes(b"[mcp_servers.blender]\n")
+        refreshed = stage.refresh()
+        return SimpleNamespace(post=refreshed.image, stage=refreshed)
+
+    def target_images():
+        with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
+            with cli._refs(roots, state) as refs:
+                return {
+                    TargetRole.RUNTIME: refs["runtime"].capture(),
+                    TargetRole.BLENDER_EXTENSION: refs["extension"].capture(),
+                    TargetRole.BLENDER_USERPREF: capture_file(
+                        refs["userpref"].root, refs["userpref"].relative
+                    ),
+                    TargetRole.CODEX_CONFIG: capture_file(
+                        refs["codex"].root, refs["codex"].relative
+                    ),
+                    TargetRole.ACTIVE_SELECTOR: capture_file(
+                        refs["active"].root, refs["active"].relative
+                    ),
+                }
+
+    monkeypatch.setattr(cli, "_inspection", inspection)
+    monkeypatch.setattr(cli, "_lifecycle_closed", lambda _context: None)
+    monkeypatch.setattr(cli, "stage_runtime", fake_runtime)
+    monkeypatch.setattr(cli, "stage_codex_config", fake_codex)
+    monkeypatch.setattr(cli, "verify_runtime", lambda *_args: None)
+    monkeypatch.setattr(cli, "verify_codex_toml", lambda *_args: None)
+    monkeypatch.setattr(cli, "verify_codex_effective", lambda *_args: None)
+
+    pre = target_images()
+    exact_blender = inspect_blender(host.blender, context.host.env, runner)
+    payload = load_extension_payload(ARTIFACTS / "mcp-1.0.0.zip")
+    verify_blender_files(exact_blender, payload)
+    assert exact_blender.canonical_payload_digest == payload.canonical_digest
+    assert not tuple(roots.extension_target.rglob("*.pyc"))
+    with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
+        with cli._refs(roots, state) as refs:
+            assert compare_extension_tree(payload, refs["extension"]).exact
+
+    result = cli._changed_install(context, NoOpFaultInjector())
+
+    assert result["changed"] is True and result["no_op"] is False
+    receipt_path = Path(result["receipt"])
+    receipt = cli.load_receipt(receipt_path, roots)
+    assert receipt.status is ReceiptStatus.INSTALLED
+    assert receipt.parent_install_id is None
+    assert pre == {target.role: target.pre for target in receipt.targets}
+    assert target_images() == {
+        target.role: target.install_post for target in receipt.targets
+    }
+    assert cli.load_active(roots.active, roots).install_id == receipt.install_id
+    assert not (roots.state_root / "stages" / str(receipt.install_id) / "blender-work").exists()
+
+
 def test_first_install_orchestrates_journaled_adapters(
     host: HostHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -773,8 +876,6 @@ def test_first_install_orchestrates_journaled_adapters(
             extension_image = capture_tree(root, Path("resources/extensions/user_default/mcp"))
             userpref_image = capture_file(root, Path("resources/config/userpref.blend"))
         return BlenderChange(
-            True,
-            work,
             extension,
             userpref,
             extension_image,
@@ -870,7 +971,7 @@ def test_first_install_orchestrates_journaled_adapters(
             context.source_bundle,
             blender,
             second,
-            cli.ExitFaultInjector("after_active_restore_swap", 70),
+            ExitFaultInjector("after_active_restore_swap", 70),
             manifest_sha256=context.manifest_sha256,
         )
     assert swap_crash.value.code == 70
@@ -931,7 +1032,7 @@ def test_first_install_orchestrates_journaled_adapters(
             context.source_bundle,
             blender,
             installed,
-            cli.ExitFaultInjector("after_json_parent_fsync", 70),
+            ExitFaultInjector("after_json_parent_fsync", 70),
             manifest_sha256=context.manifest_sha256,
         )
     assert atomic_crash.value.code == 70
@@ -957,7 +1058,7 @@ def test_first_install_orchestrates_journaled_adapters(
             context.source_bundle,
             blender,
             installed,
-            cli.ExitFaultInjector("after_active_restore_move", 70),
+            ExitFaultInjector("after_active_restore_move", 70),
             manifest_sha256=context.manifest_sha256,
         )
     assert crashed.value.code == 70
@@ -1272,7 +1373,7 @@ def test_extension_rollback_cleanup_is_retryable_at_native_restore_fault(
             bundle,
             object(),
             receipt,
-            cli.ExitFaultInjector("after_extension_tree_restore_move", 70),
+            ExitFaultInjector("after_extension_tree_restore_move", 70),
             manifest_sha256="0" * 64,
         )
 

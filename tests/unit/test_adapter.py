@@ -6,6 +6,7 @@ import threading
 import time
 
 import pytest
+from protocol import envelope
 from server.core.audit import AuditLog
 from server.core.discovery import Instance, ScanStats
 from server.mcp.adapter import (GUIDANCE, ToolFailure, capabilities_impl,
@@ -336,7 +337,7 @@ def test_scene_summary_injects_server_fields():
 def test_scene_summary_error_mapping():
     with pytest.raises(ToolFailure) as e1:
         scene_summary_impl(FakeDiscovery([]), "gui-9-zz")
-    assert e1.value.code == "INSTANCE_NOT_FOUND"
+    assert e1.value.code == envelope.INSTANCE_NOT_FOUND
     with pytest.raises(ToolFailure) as partial:
         scene_summary_impl(FakeDiscovery([], partial=True, skipped=1), "gui-9-zz")
     assert partial.value.code == "BRIDGE_UNAVAILABLE"
@@ -446,7 +447,8 @@ async def test_scene_summary_server_admission_spans_sdk_conversion(audit, monkey
         release_conversion.set()
 
     monkeypatch.setattr(adapter, "scene_summary_impl", blocking_impl)
-    monkeypatch.setattr(adapter, "_deps_cache", (FakeDiscovery([]), audit))
+    monkeypatch.setattr(adapter, "_discovery_cache", FakeDiscovery([]))
+    monkeypatch.setattr(adapter, "_audit_cache", audit)
     monkeypatch.setattr(adapter, "_SCENE_SUMMARY_ADMISSION",
                         threading.BoundedSemaphore(2))
     monkeypatch.setattr(metadata_cls, "convert_result", blocking_convert)
@@ -493,7 +495,8 @@ async def test_scene_summary_server_admission_releases_after_exception(audit,
                         "light_count": 0, "collections": [], "managed_objects": []},
         }
 
-    monkeypatch.setattr(adapter, "_deps_cache", (FakeDiscovery([]), audit))
+    monkeypatch.setattr(adapter, "_discovery_cache", FakeDiscovery([]))
+    monkeypatch.setattr(adapter, "_audit_cache", audit)
     monkeypatch.setattr(adapter, "scene_summary_impl", flaky)
     monkeypatch.setattr(adapter, "_SCENE_SUMMARY_ADMISSION",
                         threading.BoundedSemaphore(2))
@@ -531,6 +534,23 @@ def test_capabilities_is_local_by_default():
     assert out["instances_partial"] is False and out["instances_skipped_count"] == 0
 
 
+@pytest.mark.asyncio
+async def test_capabilities_default_does_not_initialize_discovery(audit, monkeypatch):
+    import server.mcp.adapter as adapter
+    from mcp import Client
+
+    class ExplodingDiscovery:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("default capabilities initialized discovery")
+
+    monkeypatch.setattr(adapter, "_discovery_cache", None)
+    monkeypatch.setattr(adapter, "_audit_cache", audit)
+    monkeypatch.setattr(adapter, "Discovery", ExplodingDiscovery)
+    async with Client(adapter.mcp) as client:
+        result = await client.call_tool("describe_capabilities", {})
+    assert result.is_error is False
+
+
 def test_capabilities_lists_connected_when_requested():
     out = capabilities_impl(FakeDiscovery([make_inst(client=FakeClient({}))],
                                                     partial=True, skipped=4),
@@ -559,7 +579,8 @@ async def test_mcp_boundary_audits_success_and_unknown_arguments(audit, tmp_path
     from mcp import Client
     from mcp.shared.exceptions import MCPError
 
-    monkeypatch.setattr(adapter, "_deps_cache", (FakeDiscovery([]), audit))
+    monkeypatch.setattr(adapter, "_discovery_cache", FakeDiscovery([]))
+    monkeypatch.setattr(adapter, "_audit_cache", audit)
     async with Client(adapter.mcp) as client:
         result = await client.call_tool("get_blender_status", {})
         assert result.is_error is False
@@ -579,7 +600,8 @@ async def test_mcp_boundary_rejects_sdk_type_coercion(audit, tmp_path, monkeypat
     from mcp import Client
     from mcp.shared.exceptions import MCPError
 
-    monkeypatch.setattr(adapter, "_deps_cache", (FakeDiscovery([]), audit))
+    monkeypatch.setattr(adapter, "_discovery_cache", FakeDiscovery([]))
+    monkeypatch.setattr(adapter, "_audit_cache", audit)
     async with Client(adapter.mcp) as client:
         with pytest.raises(MCPError) as exc:
             await client.call_tool(
@@ -602,7 +624,8 @@ async def test_audit_covers_all_scene_summary_arguments(audit, tmp_path, monkeyp
         "summary": {"object_count": 0, "mesh_count": 0, "camera_count": 0,
                     "light_count": 0, "collections": [], "managed_objects": []}}})
     discovery = FakeDiscovery([make_inst(client=c)])
-    monkeypatch.setattr(adapter, "_deps_cache", (discovery, audit))
+    monkeypatch.setattr(adapter, "_discovery_cache", discovery)
+    monkeypatch.setattr(adapter, "_audit_cache", audit)
     arguments = {"instance_id": "gui-1-aa", "include_collections": False,
                  "include_managed_objects": False}
     async with Client(adapter.mcp) as client:
@@ -619,7 +642,8 @@ async def test_output_validation_failure_is_audited(audit, tmp_path, monkeypatch
     import server.mcp.adapter as adapter
     from mcp import Client
 
-    monkeypatch.setattr(adapter, "_deps_cache", (FakeDiscovery([]), audit))
+    monkeypatch.setattr(adapter, "_discovery_cache", FakeDiscovery([]))
+    monkeypatch.setattr(adapter, "_audit_cache", audit)
     # Pydantic's default mode would coerce integer 1 to true despite the boolean schema.
     monkeypatch.setattr(adapter, "status_impl", lambda *_args, **_kwargs: {"ok": 1})
     async with Client(adapter.mcp) as client:
@@ -640,7 +664,8 @@ async def test_audit_failure_is_structured_and_fail_closed(audit, monkeypatch):
         raise TimeoutError("audit deadline expired")
 
     monkeypatch.setattr(audit, "record", fail_record)
-    monkeypatch.setattr(adapter, "_deps_cache", (FakeDiscovery([]), audit))
+    monkeypatch.setattr(adapter, "_discovery_cache", FakeDiscovery([]))
+    monkeypatch.setattr(adapter, "_audit_cache", audit)
     async with Client(adapter.mcp) as client:
         with pytest.raises(MCPError) as exc:
             await client.call_tool("get_blender_status", {})
@@ -654,10 +679,10 @@ async def test_audit_initialization_failure_is_structured(monkeypatch):
     from mcp import Client
     from mcp.shared.exceptions import MCPError
 
-    def fail_deps():
+    def fail_audit():
         raise PermissionError("private directory required: /sensitive/runtime")
 
-    monkeypatch.setattr(adapter, "_deps", fail_deps)
+    monkeypatch.setattr(adapter, "_audit", fail_audit)
     async with Client(adapter.mcp) as client:
         with pytest.raises(MCPError) as exc:
             await client.call_tool("describe_capabilities", {})
@@ -678,12 +703,324 @@ async def test_audit_postlude_receives_one_absolute_deadline(audit, monkeypatch)
         remaining.append(deadline - time.monotonic())
 
     monkeypatch.setattr(audit, "record", capture_record)
-    monkeypatch.setattr(adapter, "_deps_cache", (FakeDiscovery([]), audit))
+    monkeypatch.setattr(adapter, "_discovery_cache", FakeDiscovery([]))
+    monkeypatch.setattr(adapter, "_audit_cache", audit)
     async with Client(adapter.mcp) as client:
         result = await client.call_tool("get_blender_status", {})
     assert result.is_error is False
     assert len(remaining) == 1
     assert 0 < remaining[0] <= adapter.AUDIT_LOCK_TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_queued_audit_does_not_receive_a_fresh_deadline(audit, monkeypatch):
+    import server.mcp.adapter as adapter
+    from mcp import Client
+    from mcp.shared.exceptions import MCPError
+
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_finished = threading.Event()
+    record_calls = 0
+
+    def blocking_record(*_args, duration_ms=None, deadline=None, **_kwargs):
+        nonlocal record_calls
+        assert duration_ms is not None and deadline is not None
+        record_calls += 1
+        if record_calls == 1:
+            first_entered.set()
+            assert release_first.wait(1.0)
+            return
+        assert deadline <= time.monotonic()
+        second_finished.set()
+        raise TimeoutError("audit deadline expired")
+
+    monkeypatch.setattr(adapter, "AUDIT_LOCK_TIMEOUT", 0.05)
+    monkeypatch.setattr(audit, "record", blocking_record)
+    monkeypatch.setattr(adapter, "_discovery_cache", FakeDiscovery([]))
+    monkeypatch.setattr(adapter, "_audit_cache", audit)
+    try:
+        async with Client(adapter.mcp) as client:
+            first = asyncio.create_task(client.call_tool("get_blender_status", {}))
+            deadline = time.monotonic() + 0.5
+            while not first_entered.is_set() and time.monotonic() < deadline:
+                await asyncio.sleep(0.001)
+            assert first_entered.is_set()
+            second = asyncio.create_task(client.call_tool("get_blender_status", {}))
+            with pytest.raises(MCPError) as exc:
+                await asyncio.wait_for(second, 0.5)
+            assert not first.done() and record_calls == 1
+            release_first.set()
+            first_result = await first
+            deadline = time.monotonic() + 0.5
+            while not second_finished.is_set() and time.monotonic() < deadline:
+                await asyncio.sleep(0.001)
+    finally:
+        release_first.set()
+
+    assert first_result.is_error is False
+    assert exc.value.data == {"code": "AUDIT_UNAVAILABLE", "retryable": True}
+    assert second_finished.is_set() and record_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_audit_admission_bounds_expired_queue_without_cancelling(monkeypatch):
+    import server.mcp.adapter as adapter
+
+    class CountingExecutor(adapter.ThreadPoolExecutor):
+        def __init__(self):
+            super().__init__(max_workers=1)
+            self.submissions = 0
+
+        def submit(self, *args, **kwargs):
+            self.submissions += 1
+            return super().submit(*args, **kwargs)
+
+    admission = threading.BoundedSemaphore(2)
+    executor = CountingExecutor()
+    monkeypatch.setattr(adapter, "_AUDIT_ADMISSION", admission)
+    monkeypatch.setattr(adapter, "_AUDIT_EXECUTOR", executor)
+    loop = asyncio.get_running_loop()
+    exception_contexts = []
+    previous_handler = loop.get_exception_handler()
+    releases = []
+
+    async def wait_for_event(event):
+        deadline = time.monotonic() + 0.5
+        while not event.is_set() and time.monotonic() < deadline:
+            await asyncio.sleep(0.001)
+        assert event.is_set()
+
+    loop.set_exception_handler(lambda _loop, context: exception_contexts.append(context))
+    try:
+        for _ in range(3):
+            first_started = threading.Event()
+            second_started = threading.Event()
+            release_first = threading.Event()
+            releases.append(release_first)
+            third_calls = 0
+
+            def first_audit():
+                first_started.set()
+                assert release_first.wait(1.0)
+
+            def expired_audit():
+                assert time.monotonic() >= second_deadline
+                second_started.set()
+                raise RuntimeError("expired audit failure")
+
+            def third_audit():
+                nonlocal third_calls
+                third_calls += 1
+
+            first = asyncio.create_task(
+                adapter._await_audit(first_audit, time.monotonic() + 1.0))
+            await wait_for_event(first_started)
+            second_deadline = time.monotonic() + 0.03
+            with pytest.raises(TimeoutError, match="deadline expired"):
+                await adapter._await_audit(expired_audit, second_deadline)
+
+            assert second_started.is_set() is False
+            assert admission.acquire(blocking=False) is False
+            submitted = executor.submissions
+            with pytest.raises(TimeoutError, match="queue full"):
+                await adapter._await_audit(third_audit, time.monotonic() + 1.0)
+            assert executor.submissions == submitted and third_calls == 0
+
+            release_first.set()
+            await first
+            await wait_for_event(second_started)
+            deadline = time.monotonic() + 0.5
+            restored = False
+            while time.monotonic() < deadline:
+                first_slot = admission.acquire(blocking=False)
+                second_slot = first_slot and admission.acquire(blocking=False)
+                if first_slot:
+                    admission.release()
+                if second_slot:
+                    admission.release()
+                    restored = True
+                    break
+                await asyncio.sleep(0.001)
+            assert restored
+        await asyncio.sleep(0)
+    finally:
+        for release in releases:
+            release.set()
+        executor.shutdown(wait=True)
+        loop.set_exception_handler(previous_handler)
+
+    assert exception_contexts == []
+
+
+@pytest.mark.asyncio
+async def test_audit_started_within_budget_excludes_queue_from_duration(audit, monkeypatch):
+    import server.mcp.adapter as adapter
+    from mcp import Client
+
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_submitted = asyncio.Event()
+    durations = []
+    submitted = 0
+    second_submitted_at = None
+    second_record_started = None
+    original_await_audit = adapter._await_audit
+
+    def blocking_record(*_args, duration_ms=None, **_kwargs):
+        nonlocal second_record_started
+        assert duration_ms is not None
+        durations.append(duration_ms)
+        if len(durations) == 1:
+            first_entered.set()
+            assert release_first.wait(1.0)
+        else:
+            second_record_started = time.monotonic()
+
+    async def observe_submission(call, deadline):
+        nonlocal submitted, second_submitted_at
+        submitted += 1
+        if submitted == 2:
+            second_submitted_at = time.monotonic()
+            second_submitted.set()
+        await original_await_audit(call, deadline)
+
+    monkeypatch.setattr(adapter, "AUDIT_LOCK_TIMEOUT", 1.0)
+    monkeypatch.setattr(adapter, "_await_audit", observe_submission)
+    monkeypatch.setattr(audit, "record", blocking_record)
+    monkeypatch.setattr(adapter, "_discovery_cache", FakeDiscovery([]))
+    monkeypatch.setattr(adapter, "_audit_cache", audit)
+    try:
+        async with Client(adapter.mcp) as client:
+            first = asyncio.create_task(client.call_tool("get_blender_status", {}))
+            deadline = time.monotonic() + 0.5
+            while not first_entered.is_set() and time.monotonic() < deadline:
+                await asyncio.sleep(0.001)
+            assert first_entered.is_set()
+            second = asyncio.create_task(client.call_tool("get_blender_status", {}))
+            await asyncio.wait_for(second_submitted.wait(), 0.5)
+            await asyncio.sleep(0.1)
+            release_first.set()
+            first_result, second_result = await asyncio.gather(first, second)
+    finally:
+        release_first.set()
+
+    assert first_result.is_error is second_result.is_error is False
+    assert second_submitted_at is not None and second_record_started is not None
+    queue_ms = (second_record_started - second_submitted_at) * 1000
+    assert queue_ms >= 50 and durations[1] < queue_ms
+
+
+@pytest.mark.asyncio
+async def test_slow_audit_does_not_block_the_event_loop(audit, monkeypatch):
+    import server.mcp.adapter as adapter
+    from mcp import Client
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_record(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(1.0)
+
+    monkeypatch.setattr(audit, "record", slow_record)
+    monkeypatch.setattr(adapter, "_discovery_cache", FakeDiscovery([]))
+    monkeypatch.setattr(adapter, "_audit_cache", audit)
+    try:
+        async with Client(adapter.mcp) as client:
+            request = asyncio.create_task(client.call_tool("get_blender_status", {}))
+            deadline = time.monotonic() + 0.5
+            while not entered.is_set() and time.monotonic() < deadline:
+                await asyncio.sleep(0.001)
+            assert entered.is_set() and not request.done()
+            release.set()
+            result = await request
+    finally:
+        release.set()
+
+    assert result.is_error is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("audit_failure", [False, True])
+async def test_cancelled_summary_waits_for_exactly_one_audit_before_release(
+        audit, monkeypatch, audit_failure):
+    import server.mcp.adapter as adapter
+    from mcp import Client
+    from mcp.shared.exceptions import MCPError
+
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_submitted = asyncio.Event()
+    calls = 0
+    submitted = 0
+    original_await_audit = adapter._await_audit
+    valid = {
+        "instance_id": "gui-1-aa", "scene_name": "S", "scene_revision": 1,
+        "scene_hash": "sha256:x", "scene_path": None, "version_warning": None,
+        "units": {"system": "NONE", "scale_length": 1.0},
+        "summary": {"object_count": 0, "mesh_count": 0, "camera_count": 0,
+                    "light_count": 0, "collections": [], "managed_objects": []},
+    }
+
+    def blocking_record(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_entered.set()
+            assert release_first.wait(2.0)
+            return
+        if audit_failure:
+            raise TimeoutError("audit deadline expired")
+
+    async def observe_submission(call, deadline):
+        nonlocal submitted
+        submitted += 1
+        if submitted == 2:
+            second_submitted.set()
+        await original_await_audit(call, deadline)
+
+    monkeypatch.setattr(audit, "record", blocking_record)
+    monkeypatch.setattr(adapter, "scene_summary_impl", lambda *_args, **_kwargs: valid)
+    monkeypatch.setattr(adapter, "_discovery_cache", FakeDiscovery([]))
+    monkeypatch.setattr(adapter, "_audit_cache", audit)
+    monkeypatch.setattr(adapter, "_await_audit", observe_submission)
+    monkeypatch.setattr(adapter, "AUDIT_LOCK_TIMEOUT", 0.05)
+    admission = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(adapter, "_SCENE_SUMMARY_ADMISSION", admission)
+    try:
+        async with Client(adapter.mcp) as client:
+            first = asyncio.create_task(client.call_tool("get_blender_status", {}))
+            deadline = time.monotonic() + 1.0
+            while not first_entered.is_set() and time.monotonic() < deadline:
+                await asyncio.sleep(0.001)
+            assert first_entered.is_set()
+            request = asyncio.create_task(client.call_tool(
+                "get_scene_summary", {"instance_id": "gui-1-aa"}))
+            await asyncio.wait_for(second_submitted.wait(), 0.5)
+            request.cancel()
+            await asyncio.sleep(0.04)
+            request.cancel()
+            await asyncio.sleep(0.04)
+            assert not request.done()
+            assert admission.acquire(blocking=False) is False
+            assert calls == 1
+            release_first.set()
+            first_result = await first
+            if audit_failure:
+                with pytest.raises(MCPError) as exc:
+                    await request
+                assert exc.value.data == {"code": "AUDIT_UNAVAILABLE", "retryable": True}
+            else:
+                with pytest.raises(asyncio.CancelledError):
+                    await request
+    finally:
+        release_first.set()
+
+    assert first_result.is_error is False
+    assert calls == submitted == 2
+    assert admission.acquire(blocking=False) is True
+    admission.release()
 
 
 @pytest.mark.asyncio
@@ -694,7 +1031,8 @@ async def test_scene_summary_mcp_error_has_domain_code_and_retryable(audit, tmp_
     from mcp.shared.exceptions import MCPError
 
     discovery = FakeDiscovery([make_inst(state="disconnected", client=None)])
-    monkeypatch.setattr(adapter, "_deps_cache", (discovery, audit))
+    monkeypatch.setattr(adapter, "_discovery_cache", discovery)
+    monkeypatch.setattr(adapter, "_audit_cache", audit)
     async with Client(adapter.mcp) as client:
         with pytest.raises(MCPError) as exc:
             await client.call_tool("get_scene_summary", {"instance_id": "gui-1-aa"})
@@ -731,7 +1069,8 @@ async def test_scene_summary_rejects_malformed_bridge_payloads(audit, tmp_path,
             return self.results.pop(0)
 
     discovery = FakeDiscovery([make_inst(client=MalformedClient())])
-    monkeypatch.setattr(adapter, "_deps_cache", (discovery, audit))
+    monkeypatch.setattr(adapter, "_discovery_cache", discovery)
+    monkeypatch.setattr(adapter, "_audit_cache", audit)
     async with Client(adapter.mcp) as client:
         for _ in range(3):
             with pytest.raises(MCPError) as exc:

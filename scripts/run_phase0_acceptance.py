@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import json
 import math
 import os
 import shutil
@@ -19,14 +18,10 @@ from acceptance.primitives import (
     clean_environment,
     create_private_directory,
     file_evidence,
-    finite_json_float,
-    group_exists,
     normalise_new_root,
-    reject_duplicate_keys,
-    reject_json_constant,
     require_zero,
     run_command,
-    stop_group,
+    strict_json_loads,
     write_json_exclusive,
 )
 from smoke.process_registry import read_private_bytes
@@ -109,24 +104,11 @@ def _clean_environment(uv: Path) -> dict[str, str]:
     return clean
 
 
-_reject_json_constant = reject_json_constant
-
-
-_finite_json_float = finite_json_float
-
-
-_reject_duplicate_keys = reject_duplicate_keys
-
-
 def _read_artifact(path: Path, mode: str, large_objects: int) -> dict[str, Any]:
     try:
         raw = read_private_bytes(
             path, time.monotonic() + 5.0, MAX_ARTIFACT_BYTES)
-        value = json.loads(
-            raw, parse_constant=_reject_json_constant,
-            parse_float=_finite_json_float,
-            object_pairs_hook=_reject_duplicate_keys,
-        )
+        value = strict_json_loads(raw)
     except (OSError, RuntimeError, ValueError) as exc:
         raise AcceptanceFailure(
             f"{mode}_artifact_invalid", f"invalid {mode} artifact: {exc}") from exc
@@ -167,12 +149,6 @@ def _file_evidence(path: Path) -> dict[str, object]:
 
 def _write_json_exclusive(path: Path, value: object) -> None:
     write_json_exclusive(path, value)
-
-
-_group_exists = group_exists
-
-
-_stop_group = stop_group
 
 
 def _run_command(stage, command, *, env, log_path, timeout):

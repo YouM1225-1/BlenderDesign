@@ -46,6 +46,7 @@ Blender 用户必须在 3D 视图的 `Codex` 侧栏中显式允许连接。Bridg
 | `bridge/blender/` | Blender UI、driver 与场景读取 |
 | `server/core/` | 配置、实例发现、审计和 Bridge client |
 | `server/mcp/` | MCP SDK v2 adapter 与三个只读工具 |
+| `acceptance/` | checkout-only 的资产验收 P0 判定核心，不进入 wheel/sdist |
 | `plugins/blender-mcp-installer/` | 官方 MCP 的固定分发与安装器 |
 | `smoke/` | background、GUI、恢复与性能验证 |
 | `tests/` | unit、contract 和 distribution 测试 |
@@ -55,4 +56,4 @@ Blender 用户必须在 3D 视图的 `Codex` 侧栏中显式允许连接。Bridg
 - Phase 0 运行目录和日志位于当前用户的 BlenderCodex 应用支持目录；socket、token 和日志均受本地权限约束。
 - 官方安装器会修改 Codex 配置、Blender Extension 和 Blender 用户偏好，但不会打开或修改项目 `.blend` 文件。
 - `.blend` 样例和 PNG 属于仓库资产，不参与 MCP 安装器信任链。
-- 历史设计和审计只存在于 Git 历史，不作为当前运行时输入。
+- 除 `docs/README.md` 明确列出的资产验收演进档案外，历史设计和审计只存在于 Git 历史；两者都不作为当前运行时输入。

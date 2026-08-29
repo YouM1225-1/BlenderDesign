@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bpy  # noqa: E402
 import bmesh  # noqa: E402
+from acceptance.strict_json import strict_json_loads  # noqa: E402
 from bridge.blender import driver, panel  # noqa: E402
 from server.core.bridge_client import BridgeClient, BridgeError  # noqa: E402
 from smoke.process_registry import (  # noqa: E402
@@ -84,30 +85,8 @@ def _remaining(deadline: float) -> float:
     return remaining
 
 
-def _reject_json_constant(value: str) -> object:
-    raise ValueError(f"non-standard JSON constant: {value}")
-
-
-def _finite_json_float(value: str) -> float:
-    parsed = float(value)
-    if not math.isfinite(parsed):
-        raise ValueError(f"non-finite JSON number: {value}")
-    return parsed
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON object key: {key}")
-        result[key] = value
-    return result
-
-
 def _strict_json_loads(raw: bytes) -> object:
-    return json.loads(
-        raw, parse_constant=_reject_json_constant, parse_float=_finite_json_float,
-        object_pairs_hook=_reject_duplicate_keys)
+    return strict_json_loads(raw)
 
 
 def _read_private_json(path: Path, deadline: float, max_bytes: int) -> object:

@@ -34,7 +34,6 @@ from blender_mcp_installer.filesystem import (  # noqa: E402
     capture_file,
     capture_tree,
     conditional_remove_tree,
-    copy_tree,
     create_deterministic_stage,
     forward_file,
     forward_tree,
@@ -1676,13 +1675,6 @@ def test_fault_driver_uses_closed_command_matrix_and_requires_hit(tmp_path: Path
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("")
     (package / "cli.py").write_text(
-        "class ExitFaultInjector:\n"
-        "    def __init__(self, point, code):\n"
-        "        self.point, self.code, self.hit_requested = point, code, False\n"
-        "    def hit(self, point):\n"
-        "        if point == self.point:\n"
-        "            self.hit_requested = True\n"
-        "            raise SystemExit(self.code)\n"
         "def run_cli(argv, fault):\n"
         "    if '--exercise-fault' in argv:\n"
         "        fault.hit('after_extension_tree_publish')\n"
@@ -1713,6 +1705,14 @@ def _staged_file(root: SafeRoot, basename: str, raw: bytes) -> StagedFile:
     stage = create_deterministic_stage(root, basename, FileImage.absent(), NoOpFaultInjector())
     assert isinstance(stage, StagedFile)
     _write_private_bytes(stage.path, raw)
+    return stage.refresh()
+
+
+def _staged_tree(root: SafeRoot, basename: str, source: Path) -> StagedTree:
+    stage = create_deterministic_stage(root, basename, TreeImage.absent(), NoOpFaultInjector())
+    assert isinstance(stage, StagedTree)
+    shutil.copytree(source, stage.path, dirs_exist_ok=True)
+    stage.path.chmod(stage.image.mode)
     return stage.refresh()
 
 
@@ -1815,95 +1815,6 @@ def test_deterministic_stage_rejects_replacement_before_final_capture(
             assert (tmp_path / "stage/foreign").read_bytes() == b"foreign"
         else:
             assert (tmp_path / "stage").read_bytes() == b"foreign"
-
-
-@pytest.mark.parametrize("nonempty", [False, True])
-def test_copy_tree_proves_stable_source_and_copies_closed_tree(
-    tmp_path: Path, nonempty: bool
-) -> None:
-    source_path = tmp_path / "source"
-    stage_parent = tmp_path / "staging"
-    source_path.mkdir()
-    stage_parent.mkdir()
-    if nonempty:
-        (source_path / "nested").mkdir()
-        _write_private_bytes(source_path / "nested/payload", b"payload")
-    with _safe(tmp_path) as root:
-        source = TreeRef(root, PurePath("source"))
-        stage_root = SafeRoot.open(stage_parent, os.getuid(), stage_parent)
-        try:
-            created = create_deterministic_stage(
-                stage_root, "tree", TreeImage.absent(), NoOpFaultInjector()
-            )
-            assert isinstance(created, StagedTree)
-            copied = copy_tree(source, created)
-            assert copied == capture_tree(stage_root, PurePath("tree"))
-            assert copied.state is ImageState.PRESENT
-            expected_paths = () if not nonempty else ("nested", "nested/payload")
-            assert tuple(entry.path for entry in copied.entries) == expected_paths
-            assert capture_tree(root, PurePath("source")) == source.capture()
-        finally:
-            stage_root.close()
-
-
-@pytest.mark.parametrize("entry_kind", ["symlink", "fifo"])
-def test_copy_tree_rejects_nested_links_and_special_files(tmp_path: Path, entry_kind: str) -> None:
-    source_path = tmp_path / "source"
-    source_path.mkdir()
-    if entry_kind == "symlink":
-        (source_path / "bad").symlink_to("missing")
-    else:
-        os.mkfifo(source_path / "bad")
-    with _safe(tmp_path) as root:
-        created = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
-        assert isinstance(created, StagedTree)
-        with pytest.raises(ValueError, match="symlink or special"):
-            copy_tree(TreeRef(root, PurePath("source")), created)
-        assert capture_tree(root, PurePath("stage")).entries == ()
-
-
-def test_copy_tree_rejects_foreign_owner_and_source_change(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source_path = tmp_path / "source"
-    source_path.mkdir()
-    _write_private_bytes(source_path / "payload", b"payload")
-    payload_ino = (source_path / "payload").stat().st_ino
-    original_owner = filesystem._require_owner
-
-    def reject_payload(info: os.stat_result, uid: int) -> None:
-        if info.st_ino == payload_ino:
-            raise ValueError("foreign-owned path")
-        original_owner(info, uid)
-
-    with _safe(tmp_path) as root:
-        stage = create_deterministic_stage(
-            root, "foreign-stage", TreeImage.absent(), NoOpFaultInjector()
-        )
-        assert isinstance(stage, StagedTree)
-        monkeypatch.setattr(filesystem, "_require_owner", reject_payload)
-        with pytest.raises(ValueError, match="foreign-owned"):
-            copy_tree(TreeRef(root, PurePath("source")), stage)
-        monkeypatch.setattr(filesystem, "_require_owner", original_owner)
-
-        changing_stage = create_deterministic_stage(
-            root, "changing-stage", TreeImage.absent(), NoOpFaultInjector()
-        )
-        assert isinstance(changing_stage, StagedTree)
-        original_copy = filesystem._copy_file
-
-        def mutate_after_copy(source_fd: int, name: str, target_fd: int, uid: int) -> FileImage:
-            result = original_copy(source_fd, name, target_fd, uid)
-            fd = os.open(name, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, dir_fd=source_fd)
-            try:
-                os.write(fd, b"changed")
-            finally:
-                os.close(fd)
-            return result
-
-        monkeypatch.setattr(filesystem, "_copy_file", mutate_after_copy)
-        with pytest.raises(ValueError, match="source tree changed"):
-            copy_tree(TreeRef(root, PurePath("source")), changing_stage)
 
 
 def test_native_rename_wrappers_map_closed_errors_and_fsync_both_parents(
@@ -2256,9 +2167,7 @@ def test_tree_forward_and_restore_are_byte_identical(tmp_path: Path, nonempty: b
         target = TreeRef(root, PurePath("target"))
         recovery = TreeRef(root, PurePath("recovery"))
         pre = target.capture()
-        created = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
-        assert isinstance(created, StagedTree)
-        stage = created.with_image(copy_tree(TreeRef(root, PurePath("source")), created))
+        stage = _staged_tree(root, "stage", source_path)
         post = stage.image
         assert (
             forward_tree(target, pre, stage, recovery, NoOpFaultInjector()) is NativeState.SWAPPED
@@ -2290,9 +2199,7 @@ def test_absent_tree_publish_and_ar1_retry(tmp_path: Path) -> None:
     with _safe(tmp_path) as root:
         target = TreeRef(root, PurePath("target"))
         recovery = TreeRef(root, PurePath("recovery"))
-        created = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
-        assert isinstance(created, StagedTree)
-        stage = created.with_image(copy_tree(TreeRef(root, PurePath("source")), created))
+        stage = _staged_tree(root, "stage", source_path)
         post = stage.image
         with pytest.raises(_InjectedCrash):
             forward_tree(
@@ -2474,13 +2381,7 @@ def test_swap_races_reverse_either_replaced_operand(
             target: TargetRef = TreeRef(root, PurePath("target"))
             recovery: TargetRef = TreeRef(root, PurePath("recovery"))
             pre = capture_tree(root, target.relative)
-            created = create_deterministic_stage(
-                root, "stage", TreeImage.absent(), NoOpFaultInjector()
-            )
-            assert isinstance(created, StagedTree)
-            stage: StagedFile | StagedTree = created.with_image(
-                copy_tree(TreeRef(root, PurePath("source")), created)
-            )
+            stage: StagedFile | StagedTree = _staged_tree(root, "stage", source_path)
             post = stage.image
             forward = forward_tree
             restore = restore_tree
@@ -2564,13 +2465,7 @@ def test_excl_source_race_moves_exact_foreign_back(
         if tree:
             target: TargetRef = TreeRef(root, PurePath("target"))
             recovery: TargetRef = TreeRef(root, PurePath("recovery"))
-            created = create_deterministic_stage(
-                root, "stage", TreeImage.absent(), NoOpFaultInjector()
-            )
-            assert isinstance(created, StagedTree)
-            stage: StagedFile | StagedTree = created.with_image(
-                copy_tree(TreeRef(root, PurePath("source")), created)
-            )
+            stage: StagedFile | StagedTree = _staged_tree(root, "stage", source_path)
             pre = TreeImage.absent()
             post = stage.image
             forward = forward_tree
@@ -2621,260 +2516,6 @@ def test_excl_source_race_moves_exact_foreign_back(
         )
         assert foreign.state is ImageState.PRESENT and foreign != post
         assert destination.state is ImageState.ABSENT
-
-
-@pytest.mark.parametrize("mutation", ["add", "rename", "remove", "collision"])
-def test_copy_tree_never_adopts_or_cleans_foreign_destination_change(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
-) -> None:
-    source_path = tmp_path / "source"
-    source_path.mkdir()
-    _write_private_bytes(source_path / "payload", b"payload")
-    with _safe(tmp_path) as root:
-        stage = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
-        assert isinstance(stage, StagedTree)
-        original_copy = filesystem._copy_file
-
-        def mutate(source_fd: int, name: str, target_fd: int, uid: int) -> FileImage:
-            if mutation == "collision":
-                _foreign_object(target_fd, name, tree=False)
-                return original_copy(source_fd, name, target_fd, uid)
-            result = original_copy(source_fd, name, target_fd, uid)
-            if mutation == "add":
-                _foreign_object(target_fd, "foreign", tree=False)
-            elif mutation == "rename":
-                os.rename(name, "foreign", src_dir_fd=target_fd, dst_dir_fd=target_fd)
-            else:
-                os.unlink(name, dir_fd=target_fd)
-            return result
-
-        monkeypatch.setattr(filesystem, "_copy_file", mutate)
-        with pytest.raises((InstallerError, FileExistsError, ValueError)):
-            copy_tree(TreeRef(root, PurePath("source")), stage)
-        assert capture_tree(root, stage.relative).state is ImageState.PRESENT
-
-
-def test_copy_tree_rejects_replacement_before_final_file_capture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source_path = tmp_path / "source"
-    source_path.mkdir()
-    _write_private_bytes(source_path / "payload", b"payload")
-    with _safe(tmp_path) as root:
-        stage = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
-        assert isinstance(stage, StagedTree)
-        original_capture = filesystem._capture_file_at
-        replaced = False
-
-        def replace_before_capture(parent_fd: int, name: str, uid: int) -> FileImage:
-            nonlocal replaced
-            if not replaced and name == "payload" and os.fstat(parent_fd).st_ino == stage.image.ino:
-                replaced = True
-                os.unlink(name, dir_fd=parent_fd)
-                _foreign_object(parent_fd, name, tree=False)
-            return original_capture(parent_fd, name, uid)
-
-        monkeypatch.setattr(filesystem, "_capture_file_at", replace_before_capture)
-        with pytest.raises(InstallerError, match="transaction state conflict"):
-            copy_tree(TreeRef(root, PurePath("source")), stage)
-        assert (stage.path / "payload").read_bytes() == b"foreign"
-
-
-def test_copy_file_closes_source_when_destination_open_collides(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source_path = tmp_path / "source"
-    target_path = tmp_path / "target"
-    source_path.mkdir()
-    target_path.mkdir()
-    _write_private_bytes(source_path / "payload", b"source")
-    _write_private_bytes(target_path / "payload", b"collision")
-    source_fd = os.open(source_path, os.O_RDONLY | os.O_DIRECTORY)
-    target_fd = os.open(target_path, os.O_RDONLY | os.O_DIRECTORY)
-    opened: list[int] = []
-    closed: list[int] = []
-    real_open = os.open
-    real_close = os.close
-
-    def record_open(*args: object, **kwargs: object) -> int:
-        fd = real_open(*args, **kwargs)
-        opened.append(fd)
-        return fd
-
-    def record_close(fd: int) -> None:
-        closed.append(fd)
-        real_close(fd)
-
-    monkeypatch.setattr(filesystem.os, "open", record_open)
-    monkeypatch.setattr(filesystem.os, "close", record_close)
-    try:
-        for _ in range(3):
-            with pytest.raises(FileExistsError):
-                filesystem._copy_file(source_fd, "payload", target_fd, os.getuid())
-        assert sorted(opened) == sorted(closed)
-    finally:
-        real_close(target_fd)
-        real_close(source_fd)
-
-
-@pytest.mark.parametrize("failure", ["collision", "open"])
-def test_copy_directory_closes_source_child_on_repeated_destination_failures(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
-) -> None:
-    source_path = tmp_path / "source"
-    target_path = tmp_path / "target"
-    (source_path / "nested").mkdir(parents=True)
-    target_path.mkdir()
-    source_fd = os.open(source_path, os.O_RDONLY | os.O_DIRECTORY)
-    target_fd = os.open(target_path, os.O_RDONLY | os.O_DIRECTORY)
-    real_open_directory = filesystem._open_verified_directory
-    real_close = os.close
-    active: dict[int, int] = {}
-
-    def track_open_directory(parent_fd: int, name: str, uid: int | None) -> int:
-        if failure == "open" and parent_fd == target_fd:
-            raise OSError(errno.EIO, "injected destination open failure")
-        fd = real_open_directory(parent_fd, name, uid)
-        active[fd] = active.get(fd, 0) + 1
-        return fd
-
-    def track_close(fd: int) -> None:
-        if active.get(fd, 0):
-            active[fd] -= 1
-            if active[fd] == 0:
-                del active[fd]
-        real_close(fd)
-
-    monkeypatch.setattr(filesystem, "_open_verified_directory", track_open_directory)
-    monkeypatch.setattr(filesystem.os, "close", track_close)
-    if failure == "collision":
-        real_mkdir = os.mkdir
-
-        def collide(name: str, *args: object, **kwargs: object) -> None:
-            if name == "nested" and kwargs.get("dir_fd") == target_fd:
-                raise FileExistsError(errno.EEXIST, "injected directory collision", name)
-            real_mkdir(name, *args, **kwargs)
-
-        monkeypatch.setattr(filesystem.os, "mkdir", collide)
-    try:
-        for _ in range(3):
-            with pytest.raises(
-                FileExistsError if failure == "collision" else OSError,
-                match="collision" if failure == "collision" else "open failure",
-            ):
-                filesystem._copy_directory(source_fd, target_fd, os.getuid())
-            if failure == "open":
-                os.rmdir("nested", dir_fd=target_fd)
-        assert active == {}
-    finally:
-        real_close(target_fd)
-        real_close(source_fd)
-
-
-def test_copy_tree_closes_source_root_on_repeated_destination_open_failures(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source_path = tmp_path / "source"
-    source_path.mkdir()
-    real_open_directory = filesystem._open_verified_directory
-    real_close = os.close
-    active: dict[int, int] = {}
-    source_opens = 0
-    failed_stages: set[str] = set()
-    in_copy = False
-
-    def track_open_directory(parent_fd: int, name: str, uid: int | None) -> int:
-        nonlocal source_opens
-        if in_copy and name == "source":
-            source_opens += 1
-        if (
-            in_copy
-            and name.startswith("stage-")
-            and source_opens % 2 == 0
-            and name not in failed_stages
-        ):
-            failed_stages.add(name)
-            raise OSError(errno.EIO, "injected stage open failure")
-        fd = real_open_directory(parent_fd, name, uid)
-        active[fd] = active.get(fd, 0) + 1
-        return fd
-
-    def track_close(fd: int) -> None:
-        if active.get(fd, 0):
-            active[fd] -= 1
-            if active[fd] == 0:
-                del active[fd]
-        real_close(fd)
-
-    monkeypatch.setattr(filesystem, "_open_verified_directory", track_open_directory)
-    monkeypatch.setattr(filesystem.os, "close", track_close)
-    with _safe(tmp_path) as root:
-        for index in range(3):
-            stage = create_deterministic_stage(
-                root,
-                f"stage-{index}",
-                TreeImage.absent(),
-                NoOpFaultInjector(),
-            )
-            assert isinstance(stage, StagedTree)
-            in_copy = True
-            try:
-                with pytest.raises(OSError, match="stage open failure"):
-                    copy_tree(TreeRef(root, PurePath("source")), stage)
-            finally:
-                in_copy = False
-    assert failed_stages == {"stage-0", "stage-1", "stage-2"}
-    assert active == {}
-
-
-def test_copy_tree_pure_partial_failure_removes_stage_for_clean_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source_path = tmp_path / "source"
-    source_path.mkdir()
-    for name in ("a", "b"):
-        _write_private_bytes(source_path / name, name.encode())
-    with _safe(tmp_path) as root:
-        stage = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
-        assert isinstance(stage, StagedTree)
-        original_copy = filesystem._copy_file
-        calls = 0
-
-        def fail_second(source_fd: int, name: str, target_fd: int, uid: int) -> FileImage:
-            nonlocal calls
-            calls += 1
-            if calls == 2:
-                raise OSError(errno.EIO, "injected copy failure")
-            return original_copy(source_fd, name, target_fd, uid)
-
-        monkeypatch.setattr(filesystem, "_copy_file", fail_second)
-        with pytest.raises(OSError, match="injected copy failure"):
-            copy_tree(TreeRef(root, PurePath("source")), stage)
-        assert capture_tree(root, stage.relative).state is ImageState.ABSENT
-        assert isinstance(
-            create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector()),
-            StagedTree,
-        )
-
-
-def test_copy_tree_partial_file_write_removes_only_created_stage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source_path = tmp_path / "source"
-    source_path.mkdir()
-    _write_private_bytes(source_path / "payload", b"payload")
-    with _safe(tmp_path) as root:
-        stage = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
-        assert isinstance(stage, StagedTree)
-
-        def fail_partial(fd: int, raw: bytes) -> None:
-            os.write(fd, raw[:1])
-            raise OSError(errno.EIO, "injected partial write")
-
-        monkeypatch.setattr(filesystem, "_write_all", fail_partial)
-        with pytest.raises(OSError, match="injected partial write"):
-            copy_tree(TreeRef(root, PurePath("source")), stage)
-        assert capture_tree(root, stage.relative).state is ImageState.ABSENT
 
 
 def test_reverse_paths_quarantine_post_before_cleanup(tmp_path: Path) -> None:
@@ -2933,9 +2574,7 @@ def test_tree_recovery_cleanup_retries_exact_deletion_prefix(
     with _safe(tmp_path) as root:
         target = TreeRef(root, PurePath("target"))
         recovery = TreeRef(root, PurePath("recovery"))
-        stage0 = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
-        assert isinstance(stage0, StagedTree)
-        stage = stage0.with_image(copy_tree(TreeRef(root, PurePath("source")), stage0))
+        stage = _staged_tree(root, "stage", source)
         post = stage.image
         assert (
             restore_tree(target, TreeImage.absent(), post, stage, recovery, NoOpFaultInjector())
@@ -2969,9 +2608,7 @@ def test_tree_recovery_cleanup_preserves_foreign_remainder(tmp_path: Path, mutat
     with _safe(tmp_path) as root:
         target = TreeRef(root, PurePath("target"))
         recovery = TreeRef(root, PurePath("recovery"))
-        created = create_deterministic_stage(root, "stage", TreeImage.absent(), NoOpFaultInjector())
-        assert isinstance(created, StagedTree)
-        stage = created.with_image(copy_tree(TreeRef(root, PurePath("source")), created))
+        stage = _staged_tree(root, "stage", source)
         post = stage.image
         assert (
             restore_tree(target, TreeImage.absent(), post, stage, recovery, NoOpFaultInjector())

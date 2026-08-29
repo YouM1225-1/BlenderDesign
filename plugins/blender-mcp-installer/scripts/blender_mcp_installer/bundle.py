@@ -553,10 +553,12 @@ class VerifiedBundle:
         checkout: TrustedCheckout,
         manifest: ReleaseManifest,
         files: dict[str, tuple[int, os.stat_result]],
+        digests: Mapping[str, str],
     ) -> None:
         self.checkout = checkout
         self.manifest = manifest
         self._files = files
+        self._digests = digests
 
     def materialize(self, private_bundle_stage: Path) -> StagedBundle:
         private_bundle_stage.mkdir(mode=0o700, parents=False, exist_ok=False)
@@ -580,8 +582,7 @@ class VerifiedBundle:
                 after = os.fstat(source_fd)
                 if _identity(source_stat) != _identity(after) or copied != source_stat.st_size:
                     raise ValueError(f"source changed during materialization: {name}")
-                expected = hashlib.sha256(os.pread(source_fd, source_stat.st_size, 0)).hexdigest()
-                if digest.hexdigest() != expected:
+                if digest.hexdigest() != self._digests[name]:
                     raise ValueError(f"staged copy differs from opened source: {name}")
             directory_fd = os.open(private_bundle_stage, os.O_RDONLY | os.O_DIRECTORY)
             try:
@@ -631,7 +632,12 @@ def open_verified_bundle(checkout: TrustedCheckout) -> Iterator[VerifiedBundle]:
             if hashlib.sha256(opened[artifact.filename]).hexdigest() != artifact.sha256:
                 raise ValueError(f"manifest checksum mismatch: {artifact.filename}")
         validate_runtime_lock(opened[ARTIFACTS[2][1]])
-        yield VerifiedBundle(checkout, manifest, files)
+        yield VerifiedBundle(
+            checkout,
+            manifest,
+            files,
+            {"SHA256SUMS": hashlib.sha256(checksum_raw).hexdigest(), **checksums},
+        )
     finally:
         for fd, _file_stat in files.values():
             os.close(fd)
