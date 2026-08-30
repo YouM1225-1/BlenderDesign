@@ -7,7 +7,7 @@
 - macOS Apple Silicon；
 - Python `>=3.13,<3.14`；
 - `uv`；
-- Blender 5.2.x 为当前验证基线；
+- Blender 5.2.0 为当前精确验证基线；
 - Codex CLI。
 
 ## 安装依赖

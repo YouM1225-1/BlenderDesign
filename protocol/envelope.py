@@ -17,6 +17,7 @@ ENVELOPE_VERSION = 1
 MAX_REQUEST_TEXT_BYTES = 1024
 
 METHOD_TIMEOUTS: dict[str, float] = {"ping": 2.0, "status": 2.0, "scene_summary": 15.0}
+MAX_REQUEST_BUDGET_MS = int(max(METHOD_TIMEOUTS.values()) * 1000)
 
 UNKNOWN_METHOD = "UNKNOWN_METHOD"
 BRIDGE_BUSY = "BRIDGE_BUSY"
@@ -35,15 +36,21 @@ class Request:
     method: str
     params: dict[str, Any]
     v: int = ENVELOPE_VERSION
+    budget_ms: int | None = None
 
     @classmethod
-    def new(cls, token: str, method: str, params: dict[str, Any]) -> "Request":
-        return cls(id=str(uuid.uuid4()), token=token, method=method, params=params)
+    def new(cls, token: str, method: str, params: dict[str, Any], *,
+            budget_ms: int | None = None) -> "Request":
+        return cls(id=str(uuid.uuid4()), token=token, method=method, params=params,
+                   budget_ms=budget_ms)
 
 
 def encode_request(req: Request) -> bytes:
+    body = asdict(req)
+    if req.budget_ms is None:
+        del body["budget_ms"]
     return framing.encode_frame(
-        json.dumps(asdict(req), ensure_ascii=False, allow_nan=False).encode("utf-8"))
+        json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8"))
 
 
 def _valid_text_field(value: object) -> bool:
@@ -81,12 +88,16 @@ def decode_request(payload: bytes) -> Request:
     try:
         req = Request(
             id=raw["id"], token=raw["token"], method=raw["method"],
-            params=raw["params"], v=raw.get("v", ENVELOPE_VERSION),
+            params=raw["params"], budget_ms=raw.get("budget_ms"),
+            v=raw.get("v", ENVELOPE_VERSION),
         )
     except KeyError as e:
         raise ValueError(f"missing field {e}") from e
     if not (_valid_text_field(req.id) and _valid_text_field(req.token)
             and _valid_text_field(req.method) and isinstance(req.params, dict)
+            and (req.budget_ms is None
+                 or (type(req.budget_ms) is int
+                     and 0 < req.budget_ms <= MAX_REQUEST_BUDGET_MS))
             and type(req.v) is int and req.v == ENVELOPE_VERSION):
         raise ValueError("field type mismatch")
     return req

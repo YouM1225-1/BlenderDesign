@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import heapq
+import json
 from collections.abc import Generator
 
 import bpy
@@ -10,6 +11,7 @@ import bpy
 from ..core import scene_hash
 from ..core.contracts import (SceneSnapshot, SnapshotInvalidated,
                               SnapshotLimitExceeded)
+from ..core.router import MAX_COLLECTION_WIRE_BYTES
 
 MAX_SNAPSHOT_ITEMS = 1_000_000
 MAX_SNAPSHOT_TEXT_BYTES = 64 * 1024 * 1024
@@ -166,6 +168,7 @@ class BpySceneReader:
             if collection_count > MAX_SNAPSHOT_ITEMS:
                 raise SnapshotLimitExceeded("collection item limit exceeded")
             collection_text_bytes = 0
+            collection_wire_bytes = 2  # JSON array brackets
             for start in range(0, collection_count, 128):
                 self._check_marker(revision, generation)
                 if len(bpy.data.collections) != collection_count:
@@ -183,6 +186,11 @@ class BpySceneReader:
                         collection_text_bytes += len(name.encode("utf-8"))
                         if collection_text_bytes > MAX_SNAPSHOT_TEXT_BYTES:
                             raise SnapshotLimitExceeded("collection text limit exceeded")
+                        encoded_name = json.dumps(name, ensure_ascii=False).encode("utf-8")
+                        collection_wire_bytes += len(encoded_name) + (
+                            2 if names or collections else 0)
+                        if collection_wire_bytes > MAX_COLLECTION_WIRE_BYTES:
+                            raise SnapshotLimitExceeded("collection wire limit exceeded")
                         names.append(name)
                     collections.extend(names)
                     names.clear()

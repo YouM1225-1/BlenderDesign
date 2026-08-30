@@ -2537,22 +2537,25 @@ def recover_active(
 
 def verify(args: argparse.Namespace) -> dict[str, object]:
     with _context(args) as context:
-        inspection = _inspection(context)
-        if args.receipt is not None and inspection.receipt_path != args.receipt:
-            raise InstallerError("verification receipt is not active")
-        result = verify_live(
-            context.source_bundle,
-            inspection,
-            inspection.runtime_command,
-            context.host.codex_bin,
-            context.host.env,
-            OfficialMCPProbe(context.roots.runtime / "bin/python"),
-        )
-        if inspection.receipt_path is None:
-            raise InstallerError("active receipt is absent")
+        try:
+            with SafeRoot.open(
+                context.roots.state_root, os.getuid(), context.roots.state_root
+            ) as state:
+                with InstallerLock.acquire(state, create=False):
+                    result = verify_live(
+                        context.source_bundle,
+                        context.roots,
+                        context.blender,
+                        context.host,
+                        args.receipt,
+                        context.host.env,
+                        OfficialMCPProbe(context.roots.runtime / "bin/python"),
+                    )
+        except (OSError, ValueError) as exc:
+            raise InstallerError("verification lock unavailable") from exc
         return {
             "command": "verify",
-            "receipt": str(inspection.receipt_path),
+            "receipt": str(result.receipt_path),
             "parsed_codex": result.parsed_codex,
             "effective_codex": result.effective_codex,
             "mcp_catalog": result.mcp_catalog,

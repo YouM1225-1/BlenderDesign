@@ -136,6 +136,30 @@ def test_scene_summary_resource_limit_is_structured(caplog):
     assert any("resource limit exceeded" in record.message for record in caplog.records)
 
 
+def test_collection_wire_reserve_leaves_room_for_complete_response():
+    from bridge.core.router import MAX_COLLECTION_WIRE_BYTES
+
+    class NearLimitReader(FakeReader):
+        def snapshot_steps(
+            self,
+            *,
+            include_collections: bool = True,
+            include_managed_objects: bool = True,
+        ) -> Generator[None, None, SceneSnapshot]:
+            if False:
+                yield
+            return SceneSnapshot(
+                scene_revision=7, scene_hash="sha256:abc", scene_name="Scene",
+                scene_path="/tmp/a.blend", units_system="METRIC",
+                units_scale_length=1.0, object_count=0, mesh_count=0,
+                camera_count=0, light_count=0,
+                collections=("x" * (MAX_COLLECTION_WIRE_BYTES - 4),),
+            )
+
+    result = call("scene_summary", reader=NearLimitReader())
+    assert result["ok"] is True
+
+
 def test_unknown_method():
     body = call("nope")
     assert body["ok"] is False

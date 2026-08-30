@@ -25,10 +25,8 @@ class BoundaryRole(str, Enum):
     DATA_ROOT = "data_root"
     STATE_ROOT = "state_root"
     CODEX_HOME = "codex_home"
-    BLENDER_RESOURCES = "blender_resources"
     BLENDER_CONFIG = "blender_config"
     BLENDER_EXTENSIONS = "blender_extensions"
-    TARGET_PARENT = "target_parent"
 
 
 class TargetRole(str, Enum):
@@ -44,8 +42,6 @@ class ReceiptStatus(str, Enum):
     INSTALLED = "installed"
     ROLLBACK_PENDING = "rollback_pending"
     ROLLED_BACK = "rolled_back"
-    FAILED = "failed"
-    CONFLICT = "conflict"
 
 
 class ActionKind(str, Enum):

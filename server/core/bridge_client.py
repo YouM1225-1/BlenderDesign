@@ -28,14 +28,17 @@ class BridgeClient:
         deadline = (relative_deadline if deadline is None
                     else min(relative_deadline, deadline))
         self._check_deadline(deadline)
-        request = envelope.Request.new(self._token, method, params if params is not None else {})
-        frame = envelope.encode_request(request)
-        self._check_deadline(deadline)
 
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 self._set_deadline(client, deadline)
                 client.connect(self._socket_path)
+                self._check_deadline(deadline)
+                request = envelope.Request.new(
+                    self._token, method, params if params is not None else {},
+                    budget_ms=self._remaining_budget_ms(deadline),
+                )
+                frame = envelope.encode_request(request)
                 self._check_deadline(deadline)
                 self._set_deadline(client, deadline)
                 client.sendall(frame)
@@ -57,6 +60,14 @@ class BridgeClient:
     def _check_deadline(deadline: float) -> None:
         if time.monotonic() >= deadline:
             raise BridgeError(envelope.BRIDGE_TIMEOUT, "request timed out", retryable=True)
+
+    @staticmethod
+    def _remaining_budget_ms(deadline: float) -> int:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BridgeError(envelope.BRIDGE_TIMEOUT, "request timed out", retryable=True)
+        return min(envelope.MAX_REQUEST_BUDGET_MS,
+                   max(1, int(remaining * 1000)))
 
     @classmethod
     def _set_deadline(cls, client: socket.socket, deadline: float) -> None:

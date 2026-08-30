@@ -6,9 +6,12 @@ from collections.abc import Generator
 from dataclasses import dataclass
 
 from ._proto import envelope
+from ._proto import framing
 from .contracts import SceneReader, SnapshotLimitExceeded
 
 _diag = logging.getLogger("bcx.bridge")
+# Bounded room for the response envelope and fixed-size scene metadata.
+MAX_COLLECTION_WIRE_BYTES = framing.MAX_FRAME - 64 * 1024
 
 
 @dataclass(frozen=True)

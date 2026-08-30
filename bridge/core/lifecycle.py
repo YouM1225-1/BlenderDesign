@@ -105,6 +105,7 @@ class _Conn:
         self.outbox_bytes = 0
         self.send_offset = 0                  # outbox[0] 的部分写偏移
         self.closing = False
+        self.cancelled = threading.Event()
 
 
 class BridgeSession:
@@ -453,15 +454,21 @@ class BridgeSession:
             self._drop(conn)
             return False
         timeout = envelope.METHOD_TIMEOUTS.get(req.method, 2.0)
+        if req.budget_ms is not None:
+            timeout = min(timeout, req.budget_ms / 1000.0)
         deadline = self._clock.monotonic() + timeout
         try:
-            self._queue.submit(req, lambda frame: self.send(conn, frame), deadline)
+            self._queue.submit(req, lambda frame: self.send(conn, frame), deadline,
+                               conn.cancelled)
         except QueueFull:
             self.send(conn, envelope.error_frame(req.id, envelope.BRIDGE_BUSY,
                                                  "queue full", retryable=True))
         return True
 
     def _drop(self, conn: _Conn) -> None:
+        cancelled = getattr(conn, "cancelled", None)
+        if cancelled is not None:
+            cancelled.set()
         with self._conns_lock:
             key = next((key for key, value in self._conns.items() if value is conn), None)
             conn.closing = True

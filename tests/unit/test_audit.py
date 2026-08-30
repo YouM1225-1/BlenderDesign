@@ -206,14 +206,22 @@ def test_unbounded_audit_fields_fail_closed_before_file_creation(tmp_path):
          {"instance_id": "x" * (audit_module.MAX_AUDIT_FIELD_BYTES + 1)}),
         (("tool", "request"),
          {"error": "x" * (audit_module.MAX_AUDIT_FIELD_BYTES + 1)}),
-        (("tool", "request"),
-         {"paths": ["x"] * (audit_module.MAX_AUDIT_PATHS + 1)}),
-        (("tool", "request"),
-         {"paths": ["x" * (audit_module.MAX_AUDIT_FIELD_BYTES + 1)]}),
     ]
     for args, kwargs in cases:
         with pytest.raises(ValueError):
             log.record(*args, ok=True, duration_ms=1.0, **kwargs)
+    assert list((tmp_path / "logs").iterdir()) == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("paths", ["future"]),
+    ("transaction_id", "future"),
+])
+def test_record_does_not_accept_phase1_placeholders(tmp_path, field, value):
+    log = AuditLog(tmp_path / "logs")
+    with pytest.raises(TypeError, match=field):
+        log.record("tool", "request", ok=True, duration_ms=1.0,
+                   **{field: value})
     assert list((tmp_path / "logs").iterdir()) == []
 
 

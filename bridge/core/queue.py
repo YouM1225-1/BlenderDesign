@@ -34,6 +34,7 @@ class _Task:
     reply: Callable[[bytes], None]
     deadline: float
     continuation: ResponseSteps | None = None
+    cancelled: threading.Event | None = None
 
 
 class TaskQueue:
@@ -54,14 +55,14 @@ class TaskQueue:
             return len(self._tasks) + self._active
 
     def submit(self, request: envelope.Request, reply: Callable[[bytes], None],
-               deadline: float) -> None:
+               deadline: float, cancelled: threading.Event | None = None) -> None:
         with self._lock:
             if len(self._tasks) + self._active >= self._capacity:
                 raise QueueFull(request.id)
             if (request.method == "scene_summary"
                     and self._scene_summaries >= MAX_SCENE_SUMMARY_TASKS):
                 raise QueueFull(request.id)
-            self._tasks.append(_Task(request, reply, deadline))
+            self._tasks.append(_Task(request, reply, deadline, cancelled=cancelled))
             if request.method == "scene_summary":
                 self._scene_summaries += 1
 
@@ -96,7 +97,8 @@ class TaskQueue:
                     return IDLE_INTERVAL
                 task = self._tasks.popleft()
                 self._active += 1
-            if self._clock.monotonic() >= task.deadline:
+            if ((task.cancelled is not None and task.cancelled.is_set())
+                    or self._clock.monotonic() >= task.deadline):
                 self._diag.info("drop expired request %s", task.request.id)
                 if task.continuation is not None:
                     self._close_continuation(task.request.id, task.continuation)
@@ -107,6 +109,11 @@ class TaskQueue:
                 result: bytes | ResponseSteps = (
                     self._handler(task.request) if continuation is None else continuation
                 )
+                if task.cancelled is not None and task.cancelled.is_set():
+                    if not isinstance(result, bytes):
+                        self._close_continuation(task.request.id, result)
+                    self._complete_active(task)
+                    continue
                 if isinstance(result, bytes):
                     frame = result
                 else:
@@ -118,8 +125,9 @@ class TaskQueue:
                         continue
                     if self._clock.monotonic() >= end:
                         with self._lock:
-                            self._tasks.append(_Task(task.request, task.reply, task.deadline,
-                                                     continuation))
+                            self._tasks.append(_Task(
+                                task.request, task.reply, task.deadline, continuation,
+                                task.cancelled))
                             self._active -= 1
                         return BUSY_INTERVAL
                     try:
@@ -129,9 +137,14 @@ class TaskQueue:
                             raise TypeError("continuation must return bytes")
                         frame = done.value
                     else:
+                        if task.cancelled is not None and task.cancelled.is_set():
+                            self._close_continuation(task.request.id, continuation)
+                            self._complete_active(task)
+                            continue
                         with self._lock:
-                            self._tasks.append(_Task(task.request, task.reply, task.deadline,
-                                                     continuation))
+                            self._tasks.append(_Task(
+                                task.request, task.reply, task.deadline, continuation,
+                                task.cancelled))
                             self._active -= 1
                         continue
             except Exception as e:
@@ -140,7 +153,8 @@ class TaskQueue:
                     self._close_continuation(task.request.id, continuation)
                 frame = envelope.error_frame(task.request.id, envelope.SCENE_QUERY_FAILED,
                                              type(e).__name__)
-            if self._clock.monotonic() >= task.deadline:
+            if ((task.cancelled is not None and task.cancelled.is_set())
+                    or self._clock.monotonic() >= task.deadline):
                 self._diag.info("drop late response %s", task.request.id)
                 self._complete_active(task)
                 continue

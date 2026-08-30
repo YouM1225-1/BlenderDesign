@@ -1,7 +1,8 @@
-"""JSONL 审计。spec §5.2：参数只记摘要；transaction_id/paths 为 Phase 1 占位。
+"""JSONL 审计。spec §5.2：参数只记摘要。
 
 小参数保持 canonical JSON SHA-256；超过 64 KiB、过深或不可编码的参数只记
 固定 sentinel 摘要。日志字段有界且 fail-closed，避免审计本身成为资源逃逸点。
+Phase 0 日志 schema 仍以固定空值保留 transaction_id/paths 兼容键。
 """
 from __future__ import annotations
 
@@ -24,7 +25,6 @@ MAX_AUDIT_PARAMS_DEPTH = 64
 MAX_AUDIT_PARAMS_ITEMS = 16 * 1024
 MAX_AUDIT_FIELD_BYTES = 4096
 MAX_AUDIT_REQUEST_ID_BITS = 4096
-MAX_AUDIT_PATHS = 32
 MAX_AUDIT_LINE_BYTES = 128 * 1024
 _PARAMS_TRUNCATED_SENTINEL = b"\x00audit-params-truncated-v1\x00"
 _PARAMS_UNENCODABLE_SENTINEL = b"\x00audit-params-unencodable-v1\x00"
@@ -322,8 +322,7 @@ class AuditLog:
 
     def record(self, tool: str, request_id: str | int, ok: bool, duration_ms: float,
                instance_id: str | None = None, params: dict[str, Any] | None = None,
-               error: str | None = None, paths: list[str] | None = None,
-               transaction_id: None = None, deadline: float | None = None) -> None:
+               error: str | None = None, deadline: float | None = None) -> None:
         _check_deadline(deadline)
         _require_text("tool", tool, deadline)
         if type(request_id) is str:
@@ -335,16 +334,8 @@ class AuditLog:
             _require_text("instance_id", instance_id, deadline)
         if error is not None:
             _require_text("error", error, deadline)
-        if type(ok) is not bool or transaction_id is not None:
+        if type(ok) is not bool:
             raise ValueError("invalid audit scalar field")
-        if paths is None:
-            safe_paths: list[str] = []
-        elif type(paths) is not list or len(paths) > MAX_AUDIT_PATHS:
-            raise ValueError("invalid or oversized audit paths")
-        else:
-            safe_paths = list(paths)
-            for item in safe_paths:
-                _require_text("path", item, deadline)
         if (type(duration_ms) not in (int, float)
                 or not math.isfinite(duration_ms)):
             raise ValueError("invalid audit duration_ms")
@@ -353,10 +344,12 @@ class AuditLog:
         now = datetime.datetime.now(datetime.UTC)
         digest = _params_digest(params, deadline)
         _check_deadline(deadline)
-        row = {"ts": now.isoformat(timespec="milliseconds"), "request_id": request_id,
-               "tool": tool, "instance_id": instance_id, "transaction_id": transaction_id,
-               "params_digest": digest, "ok": ok, "duration_ms": rounded_duration,
-               "paths": safe_paths, "error": error}
+        row: dict[str, Any] = {
+            "ts": now.isoformat(timespec="milliseconds"), "request_id": request_id,
+            "tool": tool, "instance_id": instance_id, "transaction_id": None,
+            "params_digest": digest, "ok": ok, "duration_ms": rounded_duration,
+            "paths": [], "error": error,
+        }
         path = self._dir / f"server-{now:%Y-%m-%d}.jsonl"
         line = json.dumps(row, ensure_ascii=False) + "\n"
         _check_deadline(deadline)

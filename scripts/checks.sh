@@ -70,8 +70,7 @@ if test -n "$UNEXPECTED_SDIST"; then
   exit 1
 fi
 "$UV_BIN" run --frozen pytest -q --ignore=tests/distribution         # L1 + L2
-"$UV_BIN" run --frozen --with tomlkit==0.13.3 \
-  pytest tests/distribution -q                                       # distributable
+"$UV_BIN" run --frozen pytest tests/distribution -q                 # distributable
 
 if test "${RELEASE:-0}" = 1; then
   : "${OFFICIAL_MCP_SOURCE:?RELEASE=1 requires OFFICIAL_MCP_SOURCE}"
@@ -114,8 +113,9 @@ PY
 
   for sdk in 1.28.1 2.0.0; do
     "$UV_BIN" run --quiet --no-project --python "$PYTHON_VERSION" \
-      --with "mcp[cli]==$sdk" --with pyyaml --with docutils \
-      --with types-pyyaml --with types-docutils \
+      --with "mcp[cli]==$sdk" --with pyyaml==6.0.3 --with docutils==0.23 \
+      --with types-pyyaml==6.0.12.20260815 \
+      --with types-docutils==0.22.3.20260724 \
       --with ruff==0.12.5 --with mypy==1.17.1 --with vulture==2.14 \
       make -C "$PATCHED_SOURCE" PYTHON=python check_all
     for test_file in test_tool_listing.py test_rst_parse.py test_rst_search.py \
@@ -124,7 +124,7 @@ PY
         cd "$PATCHED_SOURCE"
         PYTHONPATH="$PATCHED_SOURCE/mcp:$PATCHED_SOURCE/addon:$PATCHED_SOURCE" \
           "$UV_BIN" run --quiet --no-project --python "$PYTHON_VERSION" \
-          --with "mcp[cli]==$sdk" --with pyyaml --with docutils \
+          --with "mcp[cli]==$sdk" --with pyyaml==6.0.3 --with docutils==0.23 \
           python "tests/$test_file"
       )
     done

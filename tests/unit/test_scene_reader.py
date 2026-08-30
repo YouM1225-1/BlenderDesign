@@ -1,5 +1,6 @@
 # tests/unit/test_scene_reader.py
 import importlib
+import json
 import sys
 import types
 from pathlib import Path
@@ -326,3 +327,19 @@ def test_snapshot_reader_caps_collection_items_and_skips_unrequested_source(monk
     with pytest.raises(module.SnapshotLimitExceeded, match="collection text"):
         _finish(module.BpySceneReader(module.RevisionCounter()).snapshot_steps())
     assert collections.slice_calls == 1
+
+
+def test_snapshot_reader_caps_collection_wire_bytes_before_materializing_all(monkeypatch):
+    module, _scene = _load_scene_reader(monkeypatch, object_count=0,
+                                       collection_count=2)
+    names = [collection.name for collection in module.bpy.data.collections]
+    exact = 2 + sum(len(json.dumps(name, ensure_ascii=False).encode("utf-8"))
+                    for name in names) + 2 * (len(names) - 1)
+
+    monkeypatch.setattr(module, "MAX_COLLECTION_WIRE_BYTES", exact)
+    snapshot = _finish(module.BpySceneReader(module.RevisionCounter()).snapshot_steps())
+    assert snapshot.collections == tuple(names)
+
+    monkeypatch.setattr(module, "MAX_COLLECTION_WIRE_BYTES", exact - 1)
+    with pytest.raises(module.SnapshotLimitExceeded, match="collection wire"):
+        _finish(module.BpySceneReader(module.RevisionCounter()).snapshot_steps())

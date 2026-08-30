@@ -2,11 +2,11 @@
 
 ## 可执行规范版:判定归属定案、实例化闭合与 owner 补全
 
-> 修订日期:2026-08-24(Asia/Shanghai)
-> 仓库基线:`BlenderDesign` commit `bf63c89294a5f79649a2c550331ea8987cdeab1b`;当日实测 `bash scripts/checks.sh` → `ALL CHECKS PASSED`(362 passed;821 passed + 1 skipped)
-> 前序:V3.3 及其审计(5H/11M/5L)→ V3.4(21/21 处置)→ V3.4 双路复审 → V3.5 → **V3.5 全量审计(9H/8M/2L)经逐条独立验证:18 项成立、1 项部分成立** → 本文 V3.6
-> 本版重点(V3.6 双路审计:规范路 7H/9M/6L、实证路 8 条断言全部成立):修正**第四处误拒**(`export_apply=True` 下投影表 source 取向未定,带 SUBSURF/MIRROR 的合法资产必被拒);为 `interchange` 补齐 import 侧渲染集与差异图;把 result 文件改为 per-subprocess;`bcx_uid` 落到 manifest 字段并加防伪造;自研 warning 经 `acceptance` 工具行获得可 allowlist 路径;§2.5 三步判定改写为无歧义全称量词
-> 文档性质:**自包含且可执行的规范**。实现者只依据本文即可编码 P0——全部 check ID、failure code、JSON 字段、相机与阈值参数、投影映射均在文内冻结,不需要另行拍板产品决策。本文同时仍是设计:通用建模产物验收在本仓库尚未实现,不得用于自动发布放行
+> 修订日期:2026-08-30(Asia/Shanghai)
+> 方案冻结基线:`BlenderDesign` commit `bf63c89294a5f79649a2c550331ea8987cdeab1b`;实现状态以当前代码、测试和 `pyproject.toml` 为准
+> 前序:V3.2 → V3.3 及审计 → V3.4 双路复审 → V3.5 全量审计 → V3.6 → V3.7 → 本文 V3.8
+> 本版重点:修正 `export_apply=True` 下的投影表 source 取向;为 `interchange` 补齐 import 侧渲染集与差异图;把 result 文件改为 per-subprocess;`bcx_uid` 落到 manifest 字段并加防伪造;§2.5 三步判定改写为无歧义全称量词
+> 文档性质:**自包含且可执行的规范**。仓库已实现不依赖 Blender 的 R0/R1/R5 判定核心;通用建模产物的 R2～R4 验收仍未实现,不得用于自动发布放行
 
 ---
 
@@ -31,7 +31,7 @@ Reviewer/调用方(读取冻结 evidence 后作最终决定)
 
 | 能力 | 状态 | 结论 |
 |---|---|---|
-| 仓库常规门禁 | implemented-and-enforced | 当日实测 `ALL CHECKS PASSED`:362 unit/contract;821 distribution + 1 条件跳过 |
+| 仓库常规门禁 | implemented-and-enforced | `scripts/checks-fast.sh` 覆盖 Ruff、mypy 和非 distribution pytest;`scripts/checks.sh` 是含发布链的完整门禁 |
 | `RELEASE=1` 发行门禁 | implemented-and-enforced(源码与既有测试结构核实;本轮未重放全链路) | 上游 `ls-remote` 精确一致、补丁重放、MCP SDK 1.28.1/2.0.0 双重放、Bandit/detect-secrets/pip-audit、双确定性构建逐字节 `cmp` |
 | Phase 0 正式 wrapper | implemented-and-enforced | 只验证只读 Bridge 的真 Blender GUI/NFR/recovery;三个 known-bad 已有 unit 回归 |
 | 官方 Blender MCP 固定分发 | implemented-and-enforced | 上游 `projects.blender.org/lab/blender_mcp` @ `4309a39646e6…`,10 个下游 patch,26 项工具目录 |
@@ -41,9 +41,9 @@ Reviewer/调用方(读取冻结 evidence 后作最终决定)
 | 多次 clean-run 产物比较 | absent | Phase 0 NFR/recovery 不是资产确定性验证 |
 | 签名审批 / attestation / 发布系统 | absent | 仅 L2 增强项 |
 
-### 0.3 正式验收当前被工作树状态阻塞
+### 0.3 正式 Phase 0 验收的工作树前置
 
-`_require_clean_worktree`([run_phase0_acceptance.py:87](scripts/run_phase0_acceptance.py#L87))把 untracked 文件也算脏。当前未跟踪文件包括历次方案与审计文档(V3.2 至本文 V3.7 及三份审计/验证报告)与三个 pilot 资产(`hantavirus_scientific_cutaway.blend`、`hantavirus_scientific_cutaway_v2.blend`、`hantavirus_scientific_cutaway_final.png`);**任一存在都会使正式 Phase 0 验收以 `dirty_worktree` 失败**。确切清单以运行时 `git status --porcelain --untracked-files=all` 为准,不在本文固定(避免文档随文件增减而失准)。处置见 §11。
+`_require_clean_worktree`([run_phase0_acceptance.py:87](../../scripts/run_phase0_acceptance.py#L87))把 untracked 文件也算脏。截至 2026-08-30 复核,历次方案、审计文档和三个 Hantavirus pilot 资产均已跟踪,原先的未跟踪文件阻塞不再存在。正式运行前仍必须以 `git status --porcelain --untracked-files=all` 确认无修改和无未跟踪文件。
 
 ---
 
@@ -315,7 +315,7 @@ unsupported_fields: [str]
 3. 返回 `True` → `r2.geometry.validate_clean` 记 Fail(数据本含非法结构),不是"已修好"的 Pass;
 4. 它不覆盖非流形、法线朝向、UV 重叠、材质语义——这些是独立自建检查。
 
-现有 `scene_hash`([scene_hash.py:13-32](bridge/core/scene_hash.py#L13))仅覆盖名称/类型/量化矩阵/RNA 类型/顶点边面数。**该摘要在代码与协议中的实际字段名就是 `scene_hash`**(`bridge/core/contracts.py:19`、`server/mcp/adapter.py:111`;`phase0_structure_digest` 至今未在任何源码或协议中出现,只是历次方案的改名建议)。本文不要求改名,只规定其语义边界:禁止用于 source↔export、两次 clean-run、checkpoint 或发布 identity。
+现有 `scene_hash`([scene_hash.py:13-32](../../bridge/core/scene_hash.py#L13))仅覆盖名称/类型/量化矩阵/RNA 类型/顶点边面数。**该摘要在代码与协议中的实际字段名就是 `scene_hash`**(`bridge/core/contracts.py:19`、`server/mcp/adapter.py:111`;`phase0_structure_digest` 至今未在任何源码或协议中出现,只是历次方案的改名建议)。本文不要求改名,只规定其语义边界:禁止用于 source↔export、两次 clean-run、checkpoint 或发布 identity。
 
 ---
 
@@ -704,20 +704,19 @@ docs/acceptance/         # 方案归档位(§11)
 
 | 既有配置 | 现状(实测) | 后果 |
 |---|---|---|
-| `scripts/checks.sh` ruff 范围 | `protocol bridge server tests scripts smoke plugins/…` | `acceptance/` **不被 lint** |
-| `pyproject.toml` `[tool.mypy] files` | `["protocol", "bridge/core", "server"]` | `acceptance/` **不被类型检查** |
-| `checks.sh` RELEASE Bandit 范围 | 同样不含 `acceptance/` | 安全敏感代码**不被扫描** |
+| `scripts/checks.sh` ruff 范围 | 已包含 `acceptance/` | 已纳入 lint |
+| `pyproject.toml` `[tool.mypy] files` | `["protocol", "bridge/core", "server", "acceptance"]` | 已纳入 strict 类型检查 |
+| `checks.sh` RELEASE Bandit 范围 | 已包含 `acceptance/` | 已纳入安全扫描 |
 | `[tool.hatch.build.targets.wheel] packages` | `["protocol", "bridge", "server"]` | 新包不入 wheel/sdist |
 | `[project.scripts]` | 仅 `blender-codex-server` | 无验收 CLI 入口 |
 
-即:坚持零修改会让**安全敏感的验收代码完全逃过全部静态门禁,而 `checks.sh` 仍然全绿**——这与本方案"证据不说谎"的前提直接冲突。
+上述三处门禁补全已落地;它们防止 repo-only 验收代码在 `checks.sh` 全绿时逃过静态检查。
 
 **定案**:
 
 1. **边界**:资产验收工具为 **repo-only**,不进 wheel/sdist(`only-include` 与 sdist 白名单**不变**,避免扩大分发面);因此 `[project.scripts]` 也不新增入口,CLI 以 `uv run python scripts/asset_accept.py` 调用。
-2. **必须修改的既有文件(最小集)**:`scripts/checks.sh` 的 ruff 与 RELEASE Bandit 路径列表各加 `acceptance`;`pyproject.toml` 的 `[tool.mypy] files` 加 `"acceptance"`。两处均为纯增列,不改变既有行为。
-3. **共享原语改为提取,不复制**(撤销 V3.5 的复制方案):把 root 规范化与私有目录、环境清洗、严格 JSON 三件套、`_file_evidence`、`_write_json_exclusive`、进程组运行/终止、`AcceptanceFailure`(实测函数体约 135 行)提取为 `acceptance/primitives.py`,并让 `scripts/run_phase0_acceptance.py` 回 import。理由:这些是**安全敏感**逻辑(权限位、`O_EXCL`、进程组清理),复制后靠人工"同步检查"必然漂移;而既然门禁配置已必须修改,"零修改"这一原本支持复制的唯一理由已不存在。
-   - **风险控制**:该重构是纯搬迁,不改语义;完成标准是既有 `tests/unit/test_phase0_acceptance.py` **一行不改**继续全绿,且 `bash scripts/checks.sh` 输出 `ALL CHECKS PASSED`。若任一不满足则回滚,退回复制方案并在文档记录原因。
+2. **已实施的既有文件最小修改**:`scripts/checks.sh` 的 ruff 与 RELEASE Bandit 路径列表已加 `acceptance`;`pyproject.toml` 的 `[tool.mypy] files` 已加 `"acceptance"`。
+3. **共享原语已提取,不复制**:`acceptance/primitives.py` 持有 root 规范化与私有目录、环境清洗、严格 JSON、evidence 写入和进程组终止原语;`scripts/run_phase0_acceptance.py` 回 import 并保留兼容薄封装。对应 Phase 0 回归与静态门禁已纳入 `scripts/checks.sh`。
 
 > 审计间冲突记录:上一轮审计判"先提取共享函数不是必要前置"(故 V3.5 改为复制),本轮审计判"复制造成双份真相"。本文采纳后者,因为前者的立论基础("P0 可以零修改既有文件")已被本轮实测推翻。
 
@@ -741,7 +740,7 @@ docs/acceptance/         # 方案归档位(§11)
 
 ### 7.9 P1 / P2(概要)
 
-P1(L1):第二 normal child 与四级确定性;沙箱与资源限制(§1);BAT 5.2 fixture matrix;**空缓存** offline reopen(P0 的 reopen 是普通 offline 重开,不清缓存);USD/FBX/动画 Profile;`reproducible_by_script` 可选门;FLIP/VLM advisories;gltf-transform 交叉验证;每周 daily-build 金丝雀;共享库提取;`readOnlyHint` 等 MCP annotations(仅元数据,非安全边界;实施需同步更新 [test_server_process.py](tests/contract/test_server_process.py) 的目录投影断言)。
+P1(L1):第二 normal child 与四级确定性;沙箱与资源限制(§1);BAT 5.2 fixture matrix;**空缓存** offline reopen(P0 的 reopen 是普通 offline 重开,不清缓存);USD/FBX/动画 Profile;`reproducible_by_script` 可选门;FLIP/VLM advisories;gltf-transform 交叉验证;每周 daily-build 金丝雀;共享库提取;`readOnlyHint` 等 MCP annotations(仅元数据,非安全边界;实施需同步更新 [test_server_process.py](../../tests/contract/test_server_process.py) 的目录投影断言)。
 P2(L2):不同 OS principal、签名审批、DSSE/Sigstore、透明日志、Publisher receipt。
 
 ---
@@ -764,7 +763,7 @@ golden/expected 一律**由生成器或手工构造过程产出并经人工审�
 
 | Fixture | 等级 | 构造 | expected `failure_code` / 关键 check | 现状 |
 |---|---|---|---|---|
-| `exit_zero_success_false` | L0 | synthetic | `tool_output_invalid`(exit 0 但 `success!=true`) | wrapper 层已有([tests/unit/test_phase0_acceptance.py:55](tests/unit/test_phase0_acceptance.py#L55)) |
+| `exit_zero_success_false` | L0 | synthetic | `tool_output_invalid`(exit 0 但 `success!=true`) | wrapper 层已有([tests/unit/test_phase0_acceptance.py:55](../../tests/unit/test_phase0_acceptance.py#L55)) |
 | `reused_evidence_root` | L0 | synthetic | `runner_internal_error`(启动子进程前拒绝) | wrapper 层已有(L78) |
 | `stale_result_file` | L0 | synthetic | `stale_result_file` | 无 |
 | `zero_checks_collected` | L0 | synthetic | `zero_checks_collected` | 无 |
@@ -849,7 +848,7 @@ L0 计 42 项(17 synthetic + 6 handcrafted + 19 generator),L1 计 4 项。其中
 | >4GB 误报(#244) | 误报非盲区 | 合同 `max_file_bytes`(默认 512 MiB)天然规避;记 known-issue | 同 L0 |
 
 - 其余锚定事实:glTF-Validator 仅 severity=error 影响退出码、CLI 默认 `--validate-resources` 而库 API 默认关闭、npm 最后发布 `2.0.0-dev.3.10`(2024-10);OpenUSD GHSA-8878-wr6v-j5cm(§1);`mesh.validate()` 副作用(§4);MCP ToolAnnotations 均为 hint、不可作安全决策依据;glTF `image` 对象无宽高字段(§7.6 实测)。
-- **仓库内先例**:Phase 0 wrapper 安全原语与三个 known-bad 回归;`verify_live` 的等序目录比较、单一只读探针、快照防 stale([verification.py:1035-](plugins/blender-mcp-installer/scripts/blender_mcp_installer/verification.py#L1035));`RELEASE=1` 的"精确重建 + 逐字节比对"。
+- **仓库内先例**:Phase 0 wrapper 安全原语与三个 known-bad 回归;`verify_live` 的等序目录比较、单一只读探针、快照防 stale([verification.py:1035-](../../plugins/blender-mcp-installer/scripts/blender_mcp_installer/verification.py#L1035));`RELEASE=1` 的"精确重建 + 逐字节比对"。
 - **上游对照**(observed_at=2026-08-24):ahujasid/blender-mcp 的 `execute_code` 为裸 `exec`,无沙箱与产物校验,RCE 类 issue 关闭不修,有两个 2026-06-03 公布的 low 级 CVE:[CVE-2026-10661](https://github.com/advisories/GHSA-qqw9-95ww-prfm)(`input_image_url` 注入)与 [CVE-2026-10662](https://github.com/advisories/GHSA-5hr7-6m56-f3rg)(`zip_file_url` SSRF)——二者位于全局 GitHub Advisory Database,该仓库自身 Security advisories 页未发布公告;[PatrykIti/blender-ai-mcp](https://github.com/PatrykIti/blender-ai-mcp) 以确定性测量为卖点,方向一致。
 - **反例转化**:dcc-mcp 的 `passed=false` 仍 `skill_success`、pytest exit 5 当成功;blender-agent-studio 的 `hard_gate_pass=false` 但 exit 0、公开 CI 不启动 Blender → 夹具 `zero_checks_collected` 与双判定原则。
 - **可借鉴**(P1):blender-agent-studio `verifyReproduction`;newo-ether 的"提交时重新验证"与指针泄漏审计;pyblish/AYON 有序插件范式(本方案增强:冻结 check 集+版本+序的哈希);Unreal DataValidation 的单 CLI 非零退出形态;glTF-Blender-IO 每周 daily-build 金丝雀。
@@ -871,9 +870,9 @@ P0 代码与真 Blender fixture 落地前,唯一诚实结论仍是:
 
 ## 11. 立即行动清单
 
-1. **解除正式验收阻塞**:处置 §0.3 全部 untracked 文件——方案文档归档进 `docs/acceptance/`(同步更新 `docs/README.md` 的"历史已移除"表述与 V3.1 的跟踪位置);`.blend`/PNG 作为 pilot candidate 移入 `tests/asset_fixtures/artifacts/` 或仓库外资产目录并在合同记录路径。
-2. **V3.1 勘误**:若保留,页首补"D35~D43 所述 wrapper 实际入仓于 `bf63c89`"。
-3. **P0 启动**:按 §7 依序落地。**首个提交是共享原语提取**(§7.7 定案 3):新建 `acceptance/primitives.py`、`scripts/run_phase0_acceptance.py` 改为回 import、`scripts/checks.sh` 与 `pyproject.toml` 各加一处路径(§7.7 定案 2);完成标准是既有 `tests/unit/test_phase0_acceptance.py` **一行不改**继续全绿且 `checks.sh` 输出 `ALL CHECKS PASSED`,否则回滚改用复制方案。此后的提交才是 `check_registry.py`/`failure_codes.py`/三份 schema/`decide.py` 与 synthetic 夹具。
+1. **维护正式验收前置**:方案、审计文档和三个 pilot 资产已入库;每次正式 Phase 0 运行前继续确认工作树完全干净。Hantavirus `.blend`/PNG 仍是未接线 pilot,接入通用验收前由 owner 决定移入 `tests/asset_fixtures/artifacts/` 或改为仓库外资产。
+2. **V3.1 档案勘误**:`docs/README.md` 已明确 D35～D43 所述 wrapper 实际于 `bf63c89294a5f79649a2c550331ea8987cdeab1b` 入仓;不改写绑定旧提交的档案正文。
+3. **P0 继续实施**:共享原语、门禁覆盖、check/failure registry、合同加载、判定引擎、evidence 写入和 R0/R1/R5 九项 coordinator-owned check 已落地。下一步是实现 R2～R4 的 Blender inspector、export/reopen、projection 和视觉夹具;在 §7.8 全部完成前不得自动发布放行。
 
 已剥离(与验收闭环无关或不宜先验承诺):docs/ 空目录清理(git 不跟踪空目录,列为可选卫生项);MCP `readOnlyHint` 标注(移入 §7.9 P1)。
 

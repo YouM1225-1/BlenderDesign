@@ -170,6 +170,42 @@ def test_absolute_deadline_precedes_relative_timeout(live, monkeypatch):
     assert exc.value.code == envelope.BRIDGE_TIMEOUT
 
 
+def test_call_sends_remaining_budget_to_bridge():
+    socket_dir = Path(tempfile.mkdtemp(prefix="bcx-budget-"))
+    sock_path = socket_dir / "budget.sock"
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(sock_path))
+    server.listen(1)
+    observed: list[int | None] = []
+
+    def serve() -> None:
+        conn, _ = server.accept()
+        try:
+            frames: list[bytes] = []
+            buffer = framing.FrameBuffer()
+            while not frames:
+                frames = buffer.feed(conn.recv(65536))
+            request = envelope.decode_request(frames[0])
+            observed.append(request.budget_ms)
+            conn.sendall(envelope.ok_frame(request.id, {}))
+        finally:
+            conn.close()
+
+    worker = threading.Thread(target=serve, daemon=True)
+    worker.start()
+    try:
+        result = BridgeClient({"socket_path": str(sock_path), "token": "t"}).call(
+            "ping", timeout=0.2)
+        assert result == {}
+        assert observed and observed[0] is not None
+        assert 0 < observed[0] <= 200
+    finally:
+        server.close()
+        worker.join(timeout=1.0)
+        sock_path.unlink(missing_ok=True)
+        socket_dir.rmdir()
+
+
 MISSING_VERSION = object()
 
 

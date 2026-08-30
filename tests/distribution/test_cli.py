@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -752,6 +752,117 @@ def _install_context(host: HostHarness) -> tuple[cli._Context, BlenderState, Ins
         blender,
         roots,
     )
+
+
+def test_verify_holds_installer_lock_and_skips_duplicate_inspection(
+    host: HostHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context, _, roots = _install_context(host)
+    roots.state_root.mkdir(parents=True, exist_ok=True)
+    (roots.state_root / "installer.lock").write_bytes(b"")
+    (roots.state_root / "installer.lock").chmod(0o600)
+    (roots.runtime / "bin").mkdir(parents=True)
+    (roots.runtime / "bin/python").write_bytes(b"python")
+    (roots.runtime / "bin/python").chmod(0o700)
+    receipt = roots.receipts / "verified.json"
+    events: list[str] = []
+
+    @contextmanager
+    def locked(_state, *, create):
+        assert create is False
+        events.append("lock-enter")
+        yield
+        events.append("lock-exit")
+
+    def verified(bundle, install_roots, blender, host_capabilities, requested, env, probe):
+        assert bundle is context.source_bundle
+        assert install_roots is roots and blender is context.blender
+        assert host_capabilities is context.host and requested is None
+        assert env is context.host.env
+        assert probe.runtime_python == roots.runtime / "bin/python"
+        events.append("verify")
+        return SimpleNamespace(
+            receipt_path=receipt,
+            parsed_codex=True,
+            effective_codex=True,
+            mcp_catalog=True,
+            blender_read_only=True,
+            tool_count=26,
+        )
+
+    monkeypatch.setattr(cli, "_context", lambda _args: nullcontext(context))
+    monkeypatch.setattr(
+        cli,
+        "_inspection",
+        lambda _context: (_ for _ in ()).throw(AssertionError("duplicate inspection")),
+    )
+    monkeypatch.setattr(cli.InstallerLock, "acquire", locked)
+    monkeypatch.setattr(cli, "verify_live", verified)
+
+    before = {
+        path.relative_to(roots.state_root): path.read_bytes()
+        for path in roots.state_root.rglob("*")
+        if path.is_file()
+    }
+    result = cli.verify(SimpleNamespace(receipt=None))
+    after = {
+        path.relative_to(roots.state_root): path.read_bytes()
+        for path in roots.state_root.rglob("*")
+        if path.is_file()
+    }
+
+    assert events == ["lock-enter", "verify", "lock-exit"]
+    assert result["receipt"] == str(receipt)
+    assert after == before
+
+
+def test_verify_reports_lock_acquisition_failure(
+    host: HostHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context, _, roots = _install_context(host)
+    roots.state_root.mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def unavailable(_state, *, create):
+        assert create is False
+        raise ValueError("secret lock state")
+        yield
+
+    monkeypatch.setattr(cli, "_context", lambda _args: nullcontext(context))
+    monkeypatch.setattr(cli.InstallerLock, "acquire", unavailable)
+    monkeypatch.setattr(
+        cli,
+        "verify_live",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("verification started")),
+    )
+
+    with pytest.raises(InstallerError, match="verification lock unavailable") as caught:
+        cli.verify(SimpleNamespace(receipt=None))
+    assert "secret" not in str(caught.value)
+
+
+def test_verify_missing_lock_is_read_only(
+    host: HostHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context, _, roots = _install_context(host)
+    roots.state_root.mkdir(parents=True, exist_ok=True)
+    before = tuple(
+        sorted(path.relative_to(roots.state_root) for path in roots.state_root.rglob("*"))
+    )
+    monkeypatch.setattr(cli, "_context", lambda _args: nullcontext(context))
+    monkeypatch.setattr(
+        cli,
+        "verify_live",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("verification started")),
+    )
+
+    with pytest.raises(InstallerError, match="verification lock unavailable"):
+        cli.verify(SimpleNamespace(receipt=None))
+
+    after = tuple(
+        sorted(path.relative_to(roots.state_root) for path in roots.state_root.rglob("*"))
+    )
+    assert after == before
 
 
 def test_changed_install_restages_exact_external_blender_with_codex_drift(

@@ -226,6 +226,29 @@ def _stage(tmp_path: Path, bundle: StagedBundle):
     return root, created.with_image(image), runner
 
 
+def test_runtime_syncs_full_tree_once_then_only_marker_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    original_write = runtime_module._write_exclusive
+
+    def write(path, raw, mode):
+        original_write(path, raw, mode)
+        if path.name == ".blender-mcp-runtime.json":
+            events.append("marker")
+
+    monkeypatch.setattr(runtime_module, "_write_exclusive", write)
+    monkeypatch.setattr(runtime_module, "_sync_tree", lambda _path: events.append("tree"))
+    monkeypatch.setattr(
+        runtime_module, "_sync_directory", lambda _path: events.append("directory")
+    )
+
+    root, _, _ = _stage(tmp_path, _bundle(tmp_path))
+    root.close()
+
+    assert events == ["tree", "marker", "directory"]
+
+
 def test_stage_uses_hash_binary_only_commands_and_closed_environment(tmp_path: Path) -> None:
     bundle = _bundle(tmp_path)
     root, stage, runner = _stage(tmp_path, bundle)

@@ -899,9 +899,10 @@ def test_docs_index_and_repository_checks_include_plugin_contract() -> None:
         in (ROOT / "docs/README.md").read_text()
     )
     checks = (ROOT / "scripts/checks.sh").read_text()
+    project = (ROOT / "pyproject.toml").read_text()
     assert '"$UV_BIN" run --frozen pytest -q --ignore=tests/distribution' in checks
-    assert '"$UV_BIN" run --frozen --with tomlkit==0.13.3' in checks
-    assert "pytest tests/distribution -q" in checks
+    assert '"tomlkit==0.13.3"' in project
+    assert '"$UV_BIN" run --frozen pytest tests/distribution -q' in checks
     assert 'python "$PLUGIN_VALIDATOR" plugins/blender-mcp-installer' in checks
     assert "plugin validator: SKIP" not in checks
     assert 'if test "${RELEASE:-0}" = 1' in checks
@@ -909,6 +910,13 @@ def test_docs_index_and_repository_checks_include_plugin_contract() -> None:
     assert "detect-secrets==1.5.0" in checks
     assert "pip-audit==2.10.1" in checks
     assert "mcp[cli]==$sdk" in checks
+    for dependency in (
+        "pyyaml==6.0.3",
+        "docutils==0.23",
+        "types-pyyaml==6.0.12.20260815",
+        "types-docutils==0.22.3.20260724",
+    ):
+        assert dependency in checks
 
 
 def _fake_marketplace_codex(tmp_path: Path) -> Path:

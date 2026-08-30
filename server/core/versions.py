@@ -9,4 +9,4 @@ def check(blender_version: str) -> tuple[bool, str | None]:
     if blender_version == baseline:
         return True, None
     return False, (f"Blender {blender_version} 不是本系统钉定基线（{baseline} LTS）；"
-                   f"只读工具可用，写工具将被拒绝")
+                   f"当前 Phase 0 只读工具仍可用，但该版本未验证")

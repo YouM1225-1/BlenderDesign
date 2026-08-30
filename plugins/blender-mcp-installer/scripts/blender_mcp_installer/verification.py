@@ -323,6 +323,7 @@ class VerificationResult:
     mcp_catalog: bool
     blender_read_only: bool
     tool_count: int
+    receipt_path: Path
 
 
 def _absolute_executable(path: Path, label: str) -> Path:
@@ -1034,56 +1035,61 @@ def _valid_initialize(value: object, manifest: ReleaseManifest) -> bool:
 
 def verify_live(
     bundle: StagedBundle,
-    inspection: InstallationInspection,
-    runtime_command: Sequence[str],
-    codex_bin: Path,
+    roots: InstallRoots,
+    blender_state: BlenderState,
+    host: HostCapabilities,
+    requested_receipt: Path | None,
     env: Mapping[str, str],
     mcp_probe: MCPProbe,
 ) -> VerificationResult:
-    if type(bundle) is not StagedBundle or type(inspection) is not InstallationInspection:
-        raise ValueError("invalid live verification input")
-    if type(inspection.roots) is not InstallRoots:
-        raise InstallerError("invalid installation inspection")
-    _, receipt_path = _active_receipt_path(inspection.roots)
-    canonical_paths = _managed_paths(inspection.roots, receipt_path)
     if (
-        inspection.managed_targets != canonical_paths
-        or inspection.receipt_path != receipt_path
-        or len(inspection.managed_images) != len(canonical_paths)
+        type(bundle) is not StagedBundle
+        or type(roots) is not InstallRoots
+        or type(blender_state) is not BlenderState
+        or type(host) is not HostCapabilities
+        or (requested_receipt is not None and not isinstance(requested_receipt, Path))
     ):
-        raise InstallerError("invalid installation inspection")
+        raise ValueError("invalid live verification input")
+    _, receipt_path = _active_receipt_path(roots)
+    if requested_receipt is not None and requested_receipt != receipt_path:
+        raise InstallerError("verification receipt is not active")
+    canonical_paths = _managed_paths(roots, receipt_path)
     before = _snapshot(canonical_paths)
-    if before != inspection.managed_images:
-        raise InstallerError("stale installation inspection")
     handle: MCPHandle | None = None
     client: MCPClient | None = None
     error: InstallerError | None = None
     tool_count = 0
     try:
-        fresh = inspect_installation(
+        inspection = _inspect(
             bundle,
-            inspection.roots,
-            inspection.blender_state,
-            inspection.host,
+            roots,
+            blender_state,
+            host,
+            before,
+            receipt_path,
         )
-        if fresh.managed_targets != canonical_paths or fresh.managed_images != before:
+        if (
+            inspection.managed_targets != canonical_paths
+            or inspection.receipt_path != receipt_path
+            or inspection.managed_images != before
+        ):
             raise InstallerError("stale installation inspection")
-        command = tuple(runtime_command)
-        if command != fresh.runtime_command or not command or not Path(command[0]).is_absolute():
+        command = inspection.runtime_command
+        if not command or not Path(command[0]).is_absolute():
             raise InstallerError("managed runtime command mismatch")
-        if codex_bin != fresh.host.codex_bin:
-            raise InstallerError("Codex executable mismatch")
-        if not fresh.exact or tuple(bundle.manifest.tools) != fresh.expected_tools:
+        if not inspection.exact or tuple(bundle.manifest.tools) != inspection.expected_tools:
             raise InstallerError("installation inspection is not exact")
         try:
-            lifecycle = probe_blender_lifecycle(fresh.blender_executable, fresh.host.runner)
+            lifecycle = probe_blender_lifecycle(
+                inspection.blender_executable, inspection.host.runner
+            )
         except Exception as exc:
             raise InstallerError("selected Blender listener verification failed") from exc
         if (
             lifecycle.port_free
             or lifecycle.listener_pid is None
             or lifecycle.listener_pid not in lifecycle.matching_selected_pids
-            or lifecycle.listener_executable != fresh.blender_executable
+            or lifecycle.listener_executable != inspection.blender_executable
         ):
             raise InstallerError("selected Blender listener verification failed")
         try:
@@ -1102,7 +1108,7 @@ def verify_live(
         except Exception as exc:
             raise InstallerError("MCP catalog verification failed") from exc
         tool_count = len(tools)
-        if tools != fresh.expected_tools:
+        if tools != inspection.expected_tools:
             raise InstallerError("MCP catalog verification failed")
         try:
             result = client.call_tool("get_blendfile_summary_datablocks", {})
@@ -1139,4 +1145,4 @@ def verify_live(
             error = InstallerError("MCP cleanup failed")
     if error is not None:
         raise error
-    return VerificationResult(True, True, True, True, tool_count)
+    return VerificationResult(True, True, True, True, tool_count, receipt_path)

@@ -528,6 +528,14 @@ def _materialize_links(runtime: Path) -> None:
         _write_exclusive(path, raw, mode)
 
 
+def _sync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _sync_tree(path: Path) -> None:
     for child in sorted(path.rglob("*"), reverse=True):
         if child.is_symlink():
@@ -537,11 +545,7 @@ def _sync_tree(path: Path) -> None:
             os.fsync(fd)
         finally:
             os.close(fd)
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    _sync_directory(path)
 
 
 def stage_runtime(
@@ -699,7 +703,7 @@ def stage_runtime(
                 (json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n").encode(),
                 0o600,
             )
-            _sync_tree(runtime)
+            _sync_directory(runtime)
             check_stage()
             image = stage.capture()
             check_stage()

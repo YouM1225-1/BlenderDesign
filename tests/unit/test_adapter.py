@@ -320,6 +320,30 @@ def test_concurrent_status_calls_have_one_bounded_aggregation_pool():
     assert peak <= 8
 
 
+def test_concurrent_status_requests_overlap_without_unbounded_submission():
+    entered = threading.Barrier(2)
+
+    class BlockingClient:
+        def call(self, method, params=None, timeout=None, *, deadline=None):
+            entered.wait(timeout=0.5)
+            return {"instance_id": "gui-1-aa", "scene_path": None,
+                    "scene_revision": 0}
+
+    discovery = FakeDiscovery([make_inst(client=BlockingClient())])
+    results: list[dict] = []
+    workers = [threading.Thread(target=lambda: results.append(status_impl(discovery)))
+               for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=2.0)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert len(results) == 2
+    assert all(result["instances"][0]["bridge_state"] == "connected"
+               for result in results)
+
+
 def test_scene_summary_injects_server_fields():
     c = FakeClient({"scene_summary": {"scene_hash": "sha256:x", "scene_name": "S",
                                       "scene_revision": 1, "scene_path": None,

@@ -5,11 +5,19 @@ from protocol import envelope, framing
 
 
 def test_request_roundtrip():
-    req = envelope.Request.new(token="tok", method="ping", params={})
+    req = envelope.Request.new(token="tok", method="ping", params={}, budget_ms=250)
     payload = framing.FrameBuffer().feed(envelope.encode_request(req))[0]
     back = envelope.decode_request(payload)
     assert back == req
     assert back.v == envelope.ENVELOPE_VERSION
+
+
+@pytest.mark.parametrize("budget", [True, 0, -1, 1.5, "1", 15_001, 10 ** 400])
+def test_decode_request_rejects_invalid_relative_budget(budget):
+    raw = json.dumps({"id": "x", "token": "t", "method": "ping", "params": {},
+                      "budget_ms": budget, "v": 1}).encode()
+    with pytest.raises(ValueError):
+        envelope.decode_request(raw)
 
 
 def test_request_defaults_missing_version_and_ignores_unknown_outer_fields():
@@ -17,7 +25,7 @@ def test_request_defaults_missing_version_and_ignores_unknown_outer_fields():
                       "future_field": "ignored"}).encode()
     request = envelope.decode_request(raw)
     assert request.v == envelope.ENVELOPE_VERSION
-    assert request.id == "x" and request.params == {}
+    assert request.id == "x" and request.params == {} and request.budget_ms is None
 
 
 @pytest.mark.parametrize(

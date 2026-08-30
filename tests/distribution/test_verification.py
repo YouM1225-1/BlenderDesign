@@ -38,7 +38,7 @@ from blender_mcp_installer.verification import (
     OfficialMCPProbe,
     inspect_installation,
     probe_host,
-    verify_live,
+    verify_live as verify_current,
 )
 from tests.distribution.test_filesystem import (
     INSTALL_ID,
@@ -1219,20 +1219,25 @@ def _live(
     return bundle, inspection, probe, handle, hostile
 
 
+def _verify_live(bundle, inspection, env, probe, requested_receipt=None):
+    return verify_current(
+        bundle,
+        inspection.roots,
+        inspection.blender_state,
+        inspection.host,
+        requested_receipt,
+        env,
+        probe,
+    )
+
+
 def test_live_uses_hostile_parent_exact_catalog_and_only_read_only_no_arg_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     session = Session()
     bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
 
-    result = verify_live(
-        bundle,
-        inspection,
-        inspection.runtime_command,
-        inspection.host.codex_bin,
-        hostile,
-        probe,
-    )
+    result = _verify_live(bundle, inspection, hostile, probe)
 
     assert result.parsed_codex and result.effective_codex
     assert result.mcp_catalog and result.blender_read_only and result.tool_count == 26
@@ -1245,52 +1250,53 @@ def test_live_uses_hostile_parent_exact_catalog_and_only_read_only_no_arg_call(
     assert handle.closed and handle.terminated and handle.waited == 2.0
 
 
-@pytest.mark.parametrize("target_index", range(6))
-def test_live_rejects_each_stale_managed_image_before_start(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_index: int
+def test_live_snapshots_bracket_authoritative_inspection_and_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     session = Session()
     bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
-    target = inspection.managed_targets[target_index]
-    if target.is_dir():
-        (target / "tampered").write_text("after-inspection")
-    else:
-        target.write_text(target.read_text() + "\n")
+    events: list[str] = []
+    original_snapshot = verification._snapshot
+    original_inspect = verification._inspect
+    original_runtime = verification.verify_runtime
+    original_lifecycle = verification.probe_blender_lifecycle
 
-    with pytest.raises(InstallerError, match="stale installation inspection"):
-        verify_live(
-            bundle,
-            inspection,
-            inspection.runtime_command,
-            inspection.host.codex_bin,
-            hostile,
-            probe,
-        )
-    assert probe.command is None
-    assert not handle.opened
+    def snapshot(paths):
+        events.append("snapshot")
+        return original_snapshot(paths)
+
+    def inspect(*args):
+        events.append("inspect")
+        return original_inspect(*args)
+
+    def runtime(*args):
+        events.append("runtime-tree")
+        return original_runtime(*args)
+
+    def lifecycle(*args):
+        events.append("live")
+        return original_lifecycle(*args)
+
+    monkeypatch.setattr(verification, "_snapshot", snapshot)
+    monkeypatch.setattr(verification, "_inspect", inspect)
+    monkeypatch.setattr(verification, "verify_runtime", runtime)
+    monkeypatch.setattr(verification, "probe_blender_lifecycle", lifecycle)
+
+    _verify_live(bundle, inspection, hostile, probe)
+
+    assert events == ["snapshot", "inspect", "runtime-tree", "live", "snapshot"]
+    assert handle.closed and handle.terminated and handle.waited == 2.0
 
 
-@pytest.mark.parametrize("change", ["omitted", "extra", "reordered"])
-def test_live_rejects_noncanonical_managed_target_tuple(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+def test_live_rejects_requested_receipt_mismatch_before_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     session = Session()
     bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
-    paths = inspection.managed_targets
-    forged = {
-        "omitted": paths[:-1],
-        "extra": (*paths, tmp_path / "foreign"),
-        "reordered": tuple(reversed(paths)),
-    }[change]
 
-    with pytest.raises(InstallerError, match="invalid installation inspection"):
-        verify_live(
-            bundle,
-            replace(inspection, managed_targets=forged),
-            inspection.runtime_command,
-            inspection.host.codex_bin,
-            hostile,
-            probe,
+    with pytest.raises(InstallerError, match="verification receipt is not active"):
+        _verify_live(
+            bundle, inspection, hostile, probe, tmp_path / "foreign-receipt.json"
         )
     assert probe.command is None and not handle.opened
 
@@ -1301,14 +1307,7 @@ def test_live_accepts_exact_observed_initialize_contract(
     session = Session(initialize_result=_observed_initialize())
     bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
 
-    result = verify_live(
-        bundle,
-        inspection,
-        inspection.runtime_command,
-        inspection.host.codex_bin,
-        hostile,
-        probe,
-    )
+    result = _verify_live(bundle, inspection, hostile, probe)
 
     assert result.tool_count == 26
     assert handle.closed and handle.terminated and handle.waited == 2.0
@@ -1362,14 +1361,7 @@ def test_live_rejects_any_observed_initialize_schema_drift(
     )
 
     with pytest.raises(InstallerError, match="MCP handshake failed"):
-        verify_live(
-            bundle,
-            inspection,
-            inspection.runtime_command,
-            inspection.host.codex_bin,
-            hostile,
-            probe,
-        )
+        _verify_live(bundle, inspection, hostile, probe)
     assert handle.closed and handle.terminated and handle.waited == 2.0
 
 
@@ -1432,14 +1424,7 @@ def test_live_rejects_malformed_or_wrong_initialize_contract(
     bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
 
     with pytest.raises(InstallerError, match="MCP handshake failed"):
-        verify_live(
-            bundle,
-            inspection,
-            inspection.runtime_command,
-            inspection.host.codex_bin,
-            hostile,
-            probe,
-        )
+        _verify_live(bundle, inspection, hostile, probe)
     assert handle.closed and handle.terminated and handle.waited == 2.0
 
 
@@ -1450,14 +1435,7 @@ def test_live_rejects_listener_not_uniquely_owned_by_selected_blender(
     session = Session()
     bundle, inspection, probe, _, hostile = _live(tmp_path, monkeypatch, session, listener=listener)
     with pytest.raises(InstallerError, match="selected Blender listener verification failed"):
-        verify_live(
-            bundle,
-            inspection,
-            inspection.runtime_command,
-            inspection.host.codex_bin,
-            hostile,
-            probe,
-        )
+        _verify_live(bundle, inspection, hostile, probe)
     assert not session.calls
 
 
@@ -1477,14 +1455,7 @@ def test_live_rejects_any_catalog_difference_and_cleans_up(
     session = Session(tools)
     bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
     with pytest.raises(InstallerError, match="MCP catalog verification failed"):
-        verify_live(
-            bundle,
-            inspection,
-            inspection.runtime_command,
-            inspection.host.codex_bin,
-            hostile,
-            probe,
-        )
+        _verify_live(bundle, inspection, hostile, probe)
     assert handle.closed and handle.terminated and handle.waited == 2.0
     assert all("execute" not in call[0] for call in session.calls)
 
@@ -1507,14 +1478,7 @@ def test_live_redacts_failures_and_always_closes_terminates_waits(
     session = Session(fail=failure)
     bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
     with pytest.raises(InstallerError, match=error) as caught:
-        verify_live(
-            bundle,
-            inspection,
-            inspection.runtime_command,
-            inspection.host.codex_bin,
-            hostile,
-            probe,
-        )
+        _verify_live(bundle, inspection, hostile, probe)
     assert "secret" not in str(caught.value)
     assert handle.closed and handle.terminated and handle.waited == 2.0
 
@@ -1529,14 +1493,7 @@ def test_owned_handle_cleans_every_post_spawn_transport_failure(
     )
 
     with pytest.raises(InstallerError, match="MCP handshake failed") as caught:
-        verify_live(
-            bundle,
-            inspection,
-            inspection.runtime_command,
-            inspection.host.codex_bin,
-            hostile,
-            probe,
-        )
+        _verify_live(bundle, inspection, hostile, probe)
     assert "secret" not in str(caught.value)
     assert handle.opened and handle.closed and handle.terminated and handle.waited == 2.0
 
@@ -1550,14 +1507,7 @@ def test_atomic_spawn_failure_has_no_unowned_child(
     )
 
     with pytest.raises(InstallerError, match="MCP spawn failed"):
-        verify_live(
-            bundle,
-            inspection,
-            inspection.runtime_command,
-            inspection.host.codex_bin,
-            hostile,
-            probe,
-        )
+        _verify_live(bundle, inspection, hostile, probe)
     assert probe.command == inspection.runtime_command
     assert not handle.opened and not handle.closed and not handle.terminated and not handle.waited
 
@@ -1571,14 +1521,7 @@ def test_cleanup_failure_supersedes_operation_failure(
     )
 
     with pytest.raises(InstallerError, match="MCP cleanup failed"):
-        verify_live(
-            bundle,
-            inspection,
-            inspection.runtime_command,
-            inspection.host.codex_bin,
-            hostile,
-            probe,
-        )
+        _verify_live(bundle, inspection, hostile, probe)
     assert handle.closed and handle.terminated and handle.waited == 2.0
 
 
@@ -1588,17 +1531,10 @@ def test_live_uses_fresh_authoritative_inspection_not_caller_flags(
     session = Session()
     bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
     fresh = replace(inspection, runtime=False)
-    monkeypatch.setattr(verification, "inspect_installation", lambda *args: fresh)
+    monkeypatch.setattr(verification, "_inspect", lambda *args: fresh)
 
     with pytest.raises(InstallerError, match="installation inspection is not exact"):
-        verify_live(
-            bundle,
-            inspection,
-            inspection.runtime_command,
-            inspection.host.codex_bin,
-            hostile,
-            probe,
-        )
+        _verify_live(bundle, inspection, hostile, probe)
     assert probe.command is None and not handle.opened
 
 
@@ -1611,17 +1547,10 @@ def test_live_rejects_fresh_snapshot_divergence_before_spawn(
         inspection,
         managed_images=("changed", *inspection.managed_images[1:]),
     )
-    monkeypatch.setattr(verification, "inspect_installation", lambda *args: fresh)
+    monkeypatch.setattr(verification, "_inspect", lambda *args: fresh)
 
     with pytest.raises(InstallerError, match="stale installation inspection"):
-        verify_live(
-            bundle,
-            inspection,
-            inspection.runtime_command,
-            inspection.host.codex_bin,
-            hostile,
-            probe,
-        )
+        _verify_live(bundle, inspection, hostile, probe)
     assert probe.command is None and not handle.opened
 
 
@@ -1638,33 +1567,8 @@ def test_live_detects_managed_target_change_after_cleanup(
 
     monkeypatch.setattr(handle, "close", mutating_close)
     with pytest.raises(InstallerError, match="managed targets changed during verification"):
-        verify_live(
-            bundle,
-            inspection,
-            inspection.runtime_command,
-            inspection.host.codex_bin,
-            hostile,
-            probe,
-        )
+        _verify_live(bundle, inspection, hostile, probe)
     assert handle.closed and handle.terminated and handle.waited == 2.0
-
-
-def test_live_rejects_unconfigured_command_before_start(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    session = Session()
-    bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
-    with pytest.raises(InstallerError, match="managed runtime command mismatch"):
-        verify_live(
-            bundle,
-            inspection,
-            (sys.executable, "-c", "print('foreign')"),
-            inspection.host.codex_bin,
-            hostile,
-            probe,
-        )
-    assert probe.command is None
-    assert not handle.opened
 
 
 def test_fixed_catalog_is_exactly_ordered_and_has_single_safe_probe() -> None:

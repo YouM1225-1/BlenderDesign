@@ -254,6 +254,71 @@ def test_ping_roundtrip(session):
     assert body["result"]["instance_id"] == session.instance_id
 
 
+def test_peer_disconnect_cancels_started_continuation(tmp_path):
+    started = threading.Event()
+    closed = threading.Event()
+    closed_on: list[threading.Thread] = []
+
+    class EndlessReader(FakeReader):
+        def snapshot_steps(self, *, include_collections=True,
+                           include_managed_objects=True):
+            try:
+                while True:
+                    started.set()
+                    time.sleep(0.005)
+                    yield
+            finally:
+                closed_on.append(threading.current_thread())
+                closed.set()
+
+    bridge = BridgeSession.start(tmp_path, EndlessReader(), blender_version="5.2.0")
+    pump = threading.Thread(target=lambda: _pump(bridge), daemon=True)
+    pump.start()
+    client = socket.socket(socket.AF_UNIX)
+    try:
+        client.connect(str(bridge.socket_path))
+        client.sendall(envelope.encode_request(
+            envelope.Request.new(bridge.token, "scene_summary", {})))
+        assert started.wait(1.0)
+        client.close()
+        assert closed.wait(1.0), "peer disconnect left scene continuation running"
+        assert closed_on == [pump]
+    finally:
+        client.close()
+        bridge.stop()
+        pump.join(timeout=2.0)
+
+
+def test_request_budget_clamps_bridge_continuation_deadline(tmp_path):
+    started = threading.Event()
+    closed = threading.Event()
+
+    class EndlessReader(FakeReader):
+        def snapshot_steps(self, *, include_collections=True,
+                           include_managed_objects=True):
+            try:
+                while True:
+                    started.set()
+                    time.sleep(0.005)
+                    yield
+            finally:
+                closed.set()
+
+    bridge = BridgeSession.start(tmp_path, EndlessReader(), blender_version="5.2.0")
+    pump = threading.Thread(target=lambda: _pump(bridge), daemon=True)
+    pump.start()
+    with socket.socket(socket.AF_UNIX) as client:
+        try:
+            client.connect(str(bridge.socket_path))
+            client.sendall(envelope.encode_request(envelope.Request.new(
+                bridge.token, "scene_summary", {}, budget_ms=40)))
+            assert started.wait(1.0)
+            assert closed.wait(1.0), "relative request budget was not enforced by bridge"
+        finally:
+            bridge.stop()
+            pump.join(timeout=2.0)
+
+
 def test_wrong_token_closed_without_response(session):
     assert _rpc(session, "ping", token="bad") == {"__closed__": True}
 

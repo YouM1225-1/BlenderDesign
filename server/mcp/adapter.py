@@ -33,7 +33,7 @@ INSTRUCTIONS = ("Blender 只读控制通道（Phase 0）。调用任何工具前
                 "describe_capabilities 可在 Blender 离线时回答。")
 _ACTIVE_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
     "bcx_request_deadline", default=None)
-_STATUS_AGGREGATION_LOCK = threading.Lock()
+_STATUS_ADMISSION = threading.BoundedSemaphore(8)
 _STATUS_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="bcx-status")
 _AUDIT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bcx-audit")
 _AUDIT_ADMISSION = threading.BoundedSemaphore(32)
@@ -236,11 +236,7 @@ def status_impl(discovery: Discovery, instance_selector: str | None = None) -> d
     results: dict[str, dict[str, Any]] = {}
     failures: dict[str, str] = {}
     invalidate = False
-    acquired = bool(live) and deadline > time.monotonic() and _STATUS_AGGREGATION_LOCK.acquire(
-        timeout=max(0.0, deadline - time.monotonic()))
-    if live and not acquired:
-        partial, skipped = True, skipped + len(live)
-    if acquired:
+    if live:
         def call_status(item: Instance) -> dict[str, Any]:
             timeout = min(envelope.METHOD_TIMEOUTS["status"], deadline - time.monotonic())
             if timeout <= 0:
@@ -261,7 +257,17 @@ def status_impl(discovery: Discovery, instance_selector: str | None = None) -> d
                 if time.monotonic() >= deadline:
                     partial, skipped = True, skipped + len(live) - index
                     break
-                futures[_STATUS_EXECUTOR.submit(call_status, item)] = item
+                if not _STATUS_ADMISSION.acquire(
+                        timeout=max(0.0, deadline - time.monotonic())):
+                    partial, skipped = True, skipped + len(live) - index
+                    break
+                try:
+                    future = _STATUS_EXECUTOR.submit(call_status, item)
+                except BaseException:
+                    _STATUS_ADMISSION.release()
+                    raise
+                future.add_done_callback(lambda _future: _STATUS_ADMISSION.release())
+                futures[future] = item
             complete = 0
             try:
                 for future in as_completed(futures, timeout=max(0.0, deadline - time.monotonic())):
@@ -280,7 +286,6 @@ def status_impl(discovery: Discovery, instance_selector: str | None = None) -> d
         finally:
             for future in futures:
                 future.cancel()
-            _STATUS_AGGREGATION_LOCK.release()
     if invalidate and not discovery.invalidate(deadline=deadline):
         partial, skipped = True, skipped + 1
     rows = []

@@ -695,10 +695,8 @@ def test_receipt_action_enum_transition_and_nullability() -> None:
         "data_root",
         "state_root",
         "codex_home",
-        "blender_resources",
         "blender_config",
         "blender_extensions",
-        "target_parent",
     )
     assert tuple(item.value for item in TargetRole) == (
         "runtime",
@@ -712,8 +710,6 @@ def test_receipt_action_enum_transition_and_nullability() -> None:
         "installed",
         "rollback_pending",
         "rolled_back",
-        "failed",
-        "conflict",
     )
     assert tuple(item.value for item in ActionKind) == (
         "bundle_stage",

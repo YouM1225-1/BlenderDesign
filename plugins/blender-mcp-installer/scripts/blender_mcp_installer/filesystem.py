@@ -277,7 +277,9 @@ class InstallerLock:
 
     @classmethod
     @contextmanager
-    def acquire(cls, state_root: SafeRoot) -> Iterator[InstallerLock]:
+    def acquire(
+        cls, state_root: SafeRoot, *, create: bool = True
+    ) -> Iterator[InstallerLock]:
         try:
             before = os.stat("installer.lock", dir_fd=state_root.fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -290,6 +292,8 @@ class InstallerLock:
                 raise ValueError("installer lock is not mode 0600")
         created = False
         if before is None:
+            if not create:
+                raise FileNotFoundError("installer lock is absent")
             try:
                 fd = os.open(
                     "installer.lock",
