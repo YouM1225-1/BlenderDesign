@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -647,6 +648,72 @@ def test_stage_deterministically_compiles_complete_pyc_provenance_and_rejects_ex
         pyc_images.append({entry.path: (entry.mode, entry.size, entry.sha256) for entry in pyc})
     assert pyc_images[0] == pyc_images[1]
 
+    change = changes[0]
+    payload_paths = {entry.path for entry in payload.entries}
+    extra_paths = {
+        entry.path for entry in change.extension_image.entries if entry.path not in payload_paths
+    }
+
+    def recorded_image(entries):
+        encoded = json.dumps(
+            [entry.to_dict() for entry in entries],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return replace(
+            change.extension_image,
+            uid=entries[0].uid,
+            entries=entries,
+            digest=hashlib.sha256(encoded).hexdigest(),
+        )
+
+    restarted_entries = tuple(
+        replace(
+            entry,
+            dev=entry.dev + 1,
+            ino=entry.ino + 1,
+            mtime_ns=entry.mtime_ns + 1,
+        )
+        if entry.path not in payload_paths
+        else entry
+        for entry in change.extension_image.entries
+    )
+    restarted_provenance = recorded_image(restarted_entries)
+    root, reference = _tree_ref(change.extension_path)
+    try:
+        comparison = compare_extension_tree(payload, reference, restarted_provenance)
+        assert not comparison.exact
+        assert set(comparison.changed) == extra_paths
+        assert comparison.disposable_pyc == ()
+        assert comparison.disposable_dirs == ()
+        verify_blender_payload(change.staged_state, payload, restarted_provenance)
+        with pytest.raises(InstallerError):
+            prepare_extension_for_restore(comparison, restarted_provenance)
+    finally:
+        root.close()
+
+    recorded_pyc = next(
+        entry for entry in change.extension_image.entries if entry.path.endswith(".pyc")
+    )
+    stable_drifts = (
+        {"size": recorded_pyc.size + 1},
+        {"sha256": "0" * 64},
+        {"mode": 0o600},
+        {"kind": "dir", "sha256": None},
+    )
+    for drift in stable_drifts:
+        entries = tuple(
+            replace(entry, **drift) if entry.path == recorded_pyc.path else entry
+            for entry in change.extension_image.entries
+        )
+        with pytest.raises(InstallerError):
+            verify_blender_payload(change.staged_state, payload, recorded_image(entries))
+    foreign_owned = tuple(
+        replace(entry, uid=entry.uid + 1) for entry in change.extension_image.entries
+    )
+    with pytest.raises(InstallerError):
+        verify_blender_payload(change.staged_state, payload, recorded_image(foreign_owned))
+
     recorded_uid = changes[0].extension_image.uid
     assert recorded_uid is not None
     root, reference = _tree_ref(changes[0].extension_path)
@@ -658,7 +725,6 @@ def test_stage_deterministically_compiles_complete_pyc_provenance_and_rejects_ex
     finally:
         root.close()
 
-    change = changes[0]
     foreign = change.extension_path / "__pycache__/cli.cpython-999.pyc"
     foreign.write_bytes(b"foreign")
     foreign.chmod(0o644)

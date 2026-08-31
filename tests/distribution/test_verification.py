@@ -110,6 +110,39 @@ def _probe_env(tmp_path: Path) -> dict[str, str]:
     }
 
 
+def test_codex_checks_accepts_omitted_empty_args() -> None:
+    desired = SimpleNamespace(
+        helper_dict=lambda: {"server": {"command": "/managed", "args": []}}, env={}
+    )
+    raw = b"""
+[mcp_servers.blender]
+command = "/managed"
+[mcp_servers.blender.env]
+[features.code_mode]
+direct_only_tool_namespaces = ["mcp__blender"]
+"""
+
+    assert verification._codex_checks(raw, desired) == (True, True)
+
+
+def test_codex_checks_still_requires_other_empty_lists() -> None:
+    desired = SimpleNamespace(
+        helper_dict=lambda: {
+            "server": {"command": "/managed", "args": [], "omit_tools_from": []}
+        },
+        env={},
+    )
+    raw = b"""
+[mcp_servers.blender]
+command = "/managed"
+[mcp_servers.blender.env]
+[features.code_mode]
+direct_only_tool_namespaces = ["mcp__blender"]
+"""
+
+    assert verification._codex_checks(raw, desired) == (False, True)
+
+
 def test_probe_host_uses_help_without_querying_unpublished_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

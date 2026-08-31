@@ -9,7 +9,7 @@ import stat
 import tomllib
 import zipfile
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePath, PurePosixPath
 from types import MappingProxyType
 from typing import Iterator, Mapping, Protocol, Sequence
@@ -1192,10 +1192,34 @@ def verify_blender_payload(
         comparison, _ = _current_comparison(state, expected_payload, provenance)
     except (OSError, ValueError, InstallerError) as exc:
         raise InstallerError("Blender file verification failed") from exc
+    identity_only = False
+    if (
+        provenance is not None
+        and not comparison.missing
+        and comparison.changed
+        and not comparison.foreign
+    ):
+        payload_paths = {entry.path for entry in expected_payload.entries}
+        recorded = {
+            entry.path: entry
+            for entry in provenance.entries
+            if entry.path not in payload_paths
+        }
+        actual = {entry.path: entry for entry in comparison.current_image.entries}
+        identity_only = set(comparison.changed) <= set(recorded) and all(
+            actual[path]
+            == replace(
+                recorded[path],
+                dev=actual[path].dev,
+                ino=actual[path].ino,
+                mtime_ns=actual[path].mtime_ns,
+            )
+            for path in comparison.changed
+        )
     if (
         manifest_id != expected_payload.manifest_id
         or manifest_version != expected_payload.manifest_version
-        or not comparison.exact
+        or not (comparison.exact or identity_only)
     ):
         raise InstallerError("Blender file verification failed")
 

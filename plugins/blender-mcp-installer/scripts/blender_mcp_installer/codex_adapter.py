@@ -1030,7 +1030,7 @@ def verify_codex_toml(raw: bytes, desired: ManagedCodexValues) -> None:
     expected_server = desired.helper_dict()["server"]
     assert isinstance(expected_server, dict)
     for key, expected in expected_server.items():
-        actual = server.get(key)
+        actual = server.get(key, [] if key == "args" else None)
         if key in {"startup_timeout_sec", "tool_timeout_sec"}:
             matches = type(actual) is float and actual == expected
         else:

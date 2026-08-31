@@ -706,7 +706,8 @@ def _codex_checks(raw: bytes, desired) -> tuple[bool, bool]:
         env = server["env"]
         expected = desired.helper_dict()["server"]
         policy = type(server) is dict and all(
-            type(server.get(key)) is type(item) and server.get(key) == item
+            type(server.get(key, [] if key == "args" else None)) is type(item)
+            and server.get(key, [] if key == "args" else None) == item
             for key, item in expected.items()
         )
         policy = (

@@ -361,6 +361,43 @@ def test_parsed_verification_rejects_duplicate_managed_namespace(tmp_path: Path)
     root.close()
 
 
+def test_parsed_verification_accepts_omitted_empty_args(tmp_path: Path) -> None:
+    root = _open_root(tmp_path / "codex")
+    desired = _desired(tmp_path)
+    _, _, change = _stage_config(root, desired, None)
+    raw = change.stage.path.read_bytes()
+    assert b"args = []\n" in raw
+
+    verify_codex_toml(raw.replace(b"args = []\n", b""), desired)
+    root.close()
+
+
+def test_parsed_verification_still_requires_other_empty_lists(tmp_path: Path) -> None:
+    root = _open_root(tmp_path / "codex")
+    desired = _desired(tmp_path)
+    _, _, change = _stage_config(root, desired, None)
+    raw = change.stage.path.read_bytes()
+    assert b"omit_tools_from = []\n" in raw
+
+    with pytest.raises(InstallerError, match="Codex managed configuration mismatch"):
+        verify_codex_toml(raw.replace(b"omit_tools_from = []\n", b""), desired)
+    root.close()
+
+
+@pytest.mark.parametrize("replacement", [b'args = ["foreign"]\n', b'args = "foreign"\n'])
+def test_parsed_verification_rejects_nonempty_or_invalid_args(
+    tmp_path: Path, replacement: bytes
+) -> None:
+    root = _open_root(tmp_path / "codex")
+    desired = _desired(tmp_path)
+    _, _, change = _stage_config(root, desired, None)
+    raw = change.stage.path.read_bytes()
+
+    with pytest.raises(InstallerError, match="Codex managed configuration mismatch"):
+        verify_codex_toml(raw.replace(b"args = []\n", replacement), desired)
+    root.close()
+
+
 @pytest.mark.parametrize(
     "raw",
     [b"\xff", b"[mcp_servers.blender\n", b"mcp_servers = 1\n"],
