@@ -18,7 +18,8 @@ HEAD and the supplied expected commit to equal that independently obtained value
 
 Before adding the repository marketplace or importing the plugin, follow the exact
 `TRUST_BOOTSTRAP` block in
-`plugins/blender-mcp-installer/skills/install-official-blender-mcp/SKILL.md`. It clears
+[`references/workflow.md`](../plugins/blender-mcp-installer/skills/install-official-blender-mcp/references/workflow.md),
+linked from the skill entrypoint. It clears
 Git and Python redirection variables, checks a clean scoped source tree, creates a
 private detached hook-free worktree from the reviewed commit, and compares the
 commit-object checksum file with the materialized artifacts. All later plugin and
@@ -55,20 +56,24 @@ substitute the source checkout for its trusted worktree.
 
 ## Operator workflow
 
-1. Establish the trusted worktree, materialize the persistent marketplace projection,
-   and transactionally replace only the target marketplace registration.
+1. Establish the trusted worktree for the requested operation.
 2. Validate uv 0.12.2 and the supplied local Python 3.13.13 without downloads.
-3. Run `inspect` before mutation.
+3. Run `inspect` before mutation. An inspect-only request ends after diagnosis and
+   trust cleanup; it does not register a marketplace or install a plugin.
 4. Apply the operator's standing default-allow policy for extension install/enable,
    Blender Allow Online Access, localhost bridge, and arbitrary-Python tools. Do not
    ask four per-install questions unless the operator has revoked a default.
-5. Run `install` once with all four explicit flags. The legacy receipt key
+5. For an authorized install/repair or registration update, materialize the persistent
+   marketplace projection and transactionally replace only the target registration.
+   Run `install` once with all four explicit flags. The legacy receipt key
    `all_four_collected_for_this_workflow` means all four flags were active; it does not
    mean four prompts were shown.
 6. For a changed install, the operator starts the selected Blender normally. The
-   installer never starts or terminates it. Run `verify` only after confirmation.
-7. Before repair or rollback, the operator closes Blender normally and confirms it.
-   Retain the receipt and pass its absolute path to rollback.
+   installer never starts or terminates it. Run `verify` when current host evidence
+   or the operator's existing confirmation establishes readiness; do not reconfirm.
+7. Before repair or rollback, establish that Blender is closed. If it is running,
+   ask the operator to save and close it normally. Retain the receipt and pass its
+   absolute path to rollback. Verify-only and rollback do not update registration.
 
 The install is network-assisted: a changed runtime install fetches exact-version,
 hash-locked wheels from PyPI. uv may update its execution cache even for read-only
@@ -81,8 +86,9 @@ The repository marketplace makes the operator workflow discoverable to an LLM; i
 does not add `.mcp.json`, an app, a daemon, a second server, or a separate Codex
 installer. The generated Codex MCP entry points at a local STDIO managed launcher.
 
-Marketplace add/plugin add/list before and after private-worktree cleanup is a local
-blocking gate. Registration recovery evidence is stored separately from installer
+For workflows that change registration, marketplace add/plugin add/list before and
+after private-worktree cleanup is a local blocking gate. Registration recovery
+evidence is stored separately from installer
 receipts and preserves the prior target source plus non-target fingerprints. An
 actual `codex exec` invocation requires an independently supplied
 `DISPOSABLE_CODEX_API_KEY` and a private disposable `HOME`/`CODEX_HOME`. Never copy

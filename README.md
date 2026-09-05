@@ -98,5 +98,6 @@ docs/                          当前架构、安装、使用、验证和技术�
 - [官方 Blender MCP 分发与安装](docs/distribute-official-blender-mcp.md)
 - [官方 Blender MCP 使用](docs/use-official-blender-mcp.md)
 - [验证说明](docs/validation.md)
+- [Agent 工作流](docs/agent-workflow.md)
 
 仓库只保留当前正式文档；`docs/acceptance/`、其判定核心实施计划，以及根目录中绑定旧提交的 V3.1 对抗性审计是明确列出的演进档案例外。其余历史计划、审计和实验结论通过 Git 历史追溯，均不作为当前运行时输入。

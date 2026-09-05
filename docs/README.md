@@ -9,6 +9,7 @@
 - [官方 Blender MCP 分发与安装](distribute-official-blender-mcp.md)：受审分发、信任边界、安装和回滚入口。
 - [官方 Blender MCP 使用](use-official-blender-mcp.md)：安装后的安全使用方式。
 - [验证说明](validation.md)：自动化门禁、手工验证与结论边界。
+- [Agent 工作流](agent-workflow.md)：GPT-6 Astra 指令对齐、技能范围和维护场景。
 
 ## 资产验收方案
 

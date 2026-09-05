@@ -15,6 +15,7 @@ import pytest
 ROOT = Path(__file__).parents[2]
 PLUGIN = ROOT / "plugins/blender-mcp-installer"
 SKILL = PLUGIN / "skills/install-official-blender-mcp/SKILL.md"
+WORKFLOW = SKILL.parent / "references/workflow.md"
 MARKETPLACE = ROOT / ".agents/plugins/marketplace.json"
 GUIDE = ROOT / "docs/distribute-official-blender-mcp.md"
 MARKETPLACE_PROJECTOR = PLUGIN / "scripts/project_marketplace.py"
@@ -72,7 +73,7 @@ def test_marketplace_entry_resolves_to_intact_plugin_artifacts() -> None:
     assert marketplace["name"] == "official-blender-mcp"
     assert (
         'plugin add "blender-mcp-installer@official-blender-mcp"'
-        in SKILL.read_text()
+        in WORKFLOW.read_text()
     )
     entry = marketplace["plugins"]
     assert len(entry) == 1
@@ -96,7 +97,8 @@ def test_skill_has_valid_frontmatter_and_no_machine_paths() -> None:
     frontmatter = text.split("---", 2)[1]
     assert "name: install-official-blender-mcp" in frontmatter
     assert "description:" in frontmatter
-    for path in (SKILL, GUIDE):
+    assert "(references/workflow.md)" in text
+    for path in (SKILL, WORKFLOW, GUIDE):
         content = path.read_text()
         assert "/Users/" not in content
         assert "/home/" not in content
@@ -104,7 +106,7 @@ def test_skill_has_valid_frontmatter_and_no_machine_paths() -> None:
 
 
 def test_trust_bootstrap_is_fail_fast_commit_derived_and_hook_free() -> None:
-    block = _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP")
+    block = _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP")
     required_in_order = [
         "set -euo pipefail",
         'OPERATOR_PATH="$PATH"',
@@ -169,7 +171,7 @@ def test_trust_bootstrap_is_fail_fast_commit_derived_and_hook_free() -> None:
     assert "$(git " not in block and "\ngit " not in block
     assert '--git-dir="$SOURCE_GIT_DIR"' not in block
     assert '-C "$SOURCE_DISTRIBUTION_ROOT"' not in block
-    cleanup = _shell_block(SKILL.read_text(), "TRUST_CLEANUP")
+    cleanup = _shell_block(WORKFLOW.read_text(), "TRUST_CLEANUP")
     assert "trap - EXIT" in cleanup
     assert '"${GIT_PRIVATE[@]}" worktree remove' in cleanup
     assert "\ngit " not in cleanup
@@ -253,8 +255,8 @@ def test_trust_bootstrap_executes_without_source_hooks_or_redirected_environment
 ) -> None:
     repo, commit = _trust_fixture(tmp_path)
     env, hook_sentinel, python_sentinel = _trust_env(repo, commit, tmp_path)
-    bootstrap = _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP")
-    cleanup = _shell_block(SKILL.read_text(), "TRUST_CLEANUP")
+    bootstrap = _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP")
+    cleanup = _shell_block(WORKFLOW.read_text(), "TRUST_CLEANUP")
     script = "\n".join(
         (
             bootstrap,
@@ -282,8 +284,8 @@ def test_trust_bootstrap_ignores_hostile_operator_path(tmp_path: Path) -> None:
     env["PATH"] = f"{hostile_bin}:{env['PATH']}"
     script = "\n".join(
         (
-            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
-            _shell_block(SKILL.read_text(), "TRUST_CLEANUP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_CLEANUP"),
         )
     )
     subprocess.run(["bash", "-c", script], env=env, check=True, capture_output=True, text=True)
@@ -388,17 +390,17 @@ int main(int argc, char **argv) {
         script = "\n".join(
             (
                 "{",
-                _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+                _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
                 "} >&2",
-                _shell_block(SKILL.read_text(), "UV_BOOTSTRAP"),
+                _shell_block(WORKFLOW.read_text(), "UV_BOOTSTRAP"),
                 'INSPECT_OUTPUT="$(',
-                _shell_block(SKILL.read_text(), "INSPECT"),
+                _shell_block(WORKFLOW.read_text(), "INSPECT"),
                 ')"',
                 'test -z "$(find "$TRUSTED_DISTRIBUTION_ROOT" -type d -name __pycache__ -print -quit)"',
                 'test -z "$(find "$TRUSTED_DISTRIBUTION_ROOT" -type f \\( -name "*.pyc" -o -name "*.pyo" \\) -print -quit)"',
                 'test -z "$("${GIT_TRUSTED[@]}" status --porcelain=v1 --untracked-files=all)"',
                 'printf "%s\\n" "$INSPECT_OUTPUT"',
-                _shell_block(SKILL.read_text(), "TRUST_CLEANUP"),
+                _shell_block(WORKFLOW.read_text(), "TRUST_CLEANUP"),
             )
         )
         env = os.environ.copy()
@@ -459,9 +461,9 @@ def test_trust_bootstrap_never_executes_git_fsmonitor_config(tmp_path: Path, sou
         _git(repo, "config", "core.fsmonitor", str(helper))
     script = "\n".join(
         (
-            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
             'test ! -e "$CONFIG_SENTINEL"',
-            _shell_block(SKILL.read_text(), "TRUST_CLEANUP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_CLEANUP"),
         )
     )
     env["CONFIG_SENTINEL"] = str(sentinel)
@@ -487,9 +489,9 @@ def test_trust_bootstrap_ignores_source_filter_and_info_attributes(tmp_path: Pat
     env["CONFIG_SENTINEL"] = str(sentinel)
     script = "\n".join(
         (
-            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
             'test ! -e "$CONFIG_SENTINEL"',
-            _shell_block(SKILL.read_text(), "TRUST_CLEANUP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_CLEANUP"),
         )
     )
     subprocess.run(["bash", "-c", script], env=env, check=True, capture_output=True, text=True)
@@ -510,9 +512,9 @@ def test_trust_bootstrap_rejects_tree_replace_attack_before_materialization(
     env["MATERIALIZED_EVIDENCE"] = str(evidence)
     script = "\n".join(
         (
-            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
             'cat "$PLUGIN_ROOT/scripts/install.py" > "$MATERIALIZED_EVIDENCE"',
-            _shell_block(SKILL.read_text(), "TRUST_CLEANUP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_CLEANUP"),
         )
     )
     result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
@@ -537,10 +539,10 @@ def test_trust_bootstrap_rejects_dirty_tracked_source_hidden_by_index_flag(
     )
     script = "\n".join(
         (
-            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
             'touch "$PLUGIN_IMPORT_SENTINEL"',
             'cat "$PLUGIN_ROOT/scripts/install.py" > "$MATERIALIZED_EVIDENCE"',
-            _shell_block(SKILL.read_text(), "TRUST_CLEANUP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_CLEANUP"),
         )
     )
     result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
@@ -569,7 +571,7 @@ def test_trust_bootstrap_rejects_dirty_or_tampered_source_before_import(
         )
     env, _, _ = _trust_env(repo, commit, tmp_path)
     result = subprocess.run(
-        ["bash", "-c", _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP")],
+        ["bash", "-c", _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP")],
         env=env,
         capture_output=True,
         text=True,
@@ -579,7 +581,7 @@ def test_trust_bootstrap_rejects_dirty_or_tampered_source_before_import(
 
 
 def test_disposable_marketplace_smoke_is_isolated_and_schema_checked() -> None:
-    text = SKILL.read_text()
+    text = WORKFLOW.read_text()
     smoke = _shell_block(text, "MARKETPLACE_SMOKE")
     for fragment in (
         'SMOKE_HOME="$(mktemp -d /private/tmp/blender-mcp-marketplace.XXXXXX)"',
@@ -623,7 +625,7 @@ def test_marketplace_list_validator_fails_actionably(
 ) -> None:
     listing = tmp_path / "plugins.json"
     listing.write_text(json.dumps(payload))
-    validator = _marketplace_validator(SKILL.read_text())
+    validator = _marketplace_validator(WORKFLOW.read_text())
     result = subprocess.run(
         [sys.executable, "-I", "-c", validator, str(listing)],
         capture_output=True,
@@ -643,7 +645,7 @@ def test_marketplace_list_validator_accepts_one_installed_plugin(tmp_path: Path)
             }
         )
     )
-    validator = _marketplace_validator(SKILL.read_text())
+    validator = _marketplace_validator(WORKFLOW.read_text())
     subprocess.run(
         [sys.executable, "-I", "-c", validator, str(listing)],
         check=True,
@@ -653,7 +655,7 @@ def test_marketplace_list_validator_accepts_one_installed_plugin(tmp_path: Path)
 
 
 def test_uv_bootstrap_is_local_only_and_repeated_before_every_command() -> None:
-    text = SKILL.read_text()
+    text = WORKFLOW.read_text()
     trust = _shell_block(text, "TRUST_BOOTSTRAP")
     block = _shell_block(text, "UV_BOOTSTRAP")
     assert ': "${PYTHON_BIN:?set absolute Python 3.13.13 executable}"' in trust
@@ -687,7 +689,8 @@ def test_uv_bootstrap_is_local_only_and_repeated_before_every_command() -> None:
     assert "curl " not in block and "brew " not in block and "pip " not in block
 
     commands = _marked(text, "INSTALLER_COMMANDS")
-    assert commands.count("run_uv_bootstrap") == 4
+    for command in ("INSPECT", "INSTALL", "VERIFY", "ROLLBACK"):
+        assert _shell_block(commands, command).splitlines()[0] == "run_uv_bootstrap"
     assert commands.count('"$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN"') == 4
     assert commands.count("--no-python-downloads --no-sync") == 4
     assert commands.count('python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts"') == 4
@@ -730,7 +733,7 @@ def _run_uv_bootstrap(
         (
             "set -euo pipefail",
             'OPERATOR_PATH="$PATH"',
-            _shell_block(SKILL.read_text(), "UV_BOOTSTRAP"),
+            _shell_block(WORKFLOW.read_text(), "UV_BOOTSTRAP"),
             "run_uv_bootstrap",
             'printf "%s\\n" "$PYTHON_BIN"',
         )
@@ -823,7 +826,7 @@ def test_uv_bootstrap_rejects_foreign_python_owner_before_execution(
 
 
 def test_installer_commands_use_exact_real_parser_arguments_and_consents() -> None:
-    commands = _marked(SKILL.read_text(), "INSTALLER_COMMANDS")
+    commands = _marked(WORKFLOW.read_text(), "INSTALLER_COMMANDS")
     common = (
         '--bundle-root "$BUNDLE_ROOT"',
         '--expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT"',
@@ -846,7 +849,7 @@ def test_installer_commands_use_exact_real_parser_arguments_and_consents() -> No
 
 
 def test_skill_defaults_four_authorizations_and_keeps_lifecycle_checkpoints() -> None:
-    text = SKILL.read_text()
+    text = SKILL.read_text() + WORKFLOW.read_text()
     assert "Do not ask four per-install authorization questions" in text
     assert "standing default-allow policy" in text
     for wording in (
@@ -860,13 +863,13 @@ def test_skill_defaults_four_authorizations_and_keeps_lifecycle_checkpoints() ->
     assert "all_four_collected_for_this_workflow" in text
     assert "Ask separately and wait for an explicit answer to each checkpoint" not in text
     assert "May the installer" not in text
-    assert "Start the selected Blender normally, then confirm it is running" in text
-    assert "Close Blender normally and confirm it is closed before repair or rollback" in text
+    assert "a successful read-only host check is sufficient" in text
+    assert "closed. If it is running, ask the operator to save work and close it normally" in text
     assert "Never start, terminate, or force-close Blender" in text
 
 
 def test_docs_state_security_side_effects_delivery_and_canary_limits() -> None:
-    skill = SKILL.read_text()
+    skill = SKILL.read_text() + WORKFLOW.read_text()
     guide = GUIDE.read_text()
     combined = skill + guide
     for wording in (
@@ -1066,7 +1069,7 @@ def _persistent_marketplace_env(
 
 
 def test_persistent_marketplace_contract_is_commit_bound_and_transactional() -> None:
-    text = SKILL.read_text()
+    text = WORKFLOW.read_text()
     block = _shell_block(text, "PERSISTENT_MARKETPLACE")
     projector = MARKETPLACE_PROJECTOR.read_text()
     required = (
@@ -1107,7 +1110,7 @@ def test_trust_bootstrap_rejects_audit_checkout_at_a_different_head(
     _git(repo, "commit", "-qm", "audit head")
     env, _, _ = _trust_env(repo, reviewed_commit, tmp_path)
     result = subprocess.run(
-        ["bash", "-c", _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP")],
+        ["bash", "-c", _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP")],
         env=env,
         capture_output=True,
         text=True,
@@ -1122,15 +1125,15 @@ def test_persistent_marketplace_survives_private_cleanup_and_lists_normally(
     recorded_root = tmp_path / "persistent-root"
     script = "\n".join(
         (
-            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
             'run_uv_bootstrap() { :; }',
-            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
-            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
+            _shell_block(WORKFLOW.read_text(), "PERSISTENT_MARKETPLACE"),
+            _shell_block(WORKFLOW.read_text(), "PERSISTENT_MARKETPLACE"),
             'printf "%s\\n" "$PERSISTENT_MARKETPLACE_ROOT" > "$RECORDED_ROOT"',
-            _shell_block(SKILL.read_text(), "TRUST_CLEANUP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_CLEANUP"),
             'test ! -e "$TRUST_PARENT"',
             'test -d "$PERSISTENT_MARKETPLACE_ROOT"',
-            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE_VERIFY"),
+            _shell_block(WORKFLOW.read_text(), "PERSISTENT_MARKETPLACE_VERIFY"),
         )
     )
     env["RECORDED_ROOT"] = str(recorded_root)
@@ -1193,9 +1196,9 @@ def test_marketplace_registration_failure_restores_only_previous_target(
         env["FAIL_PLUGIN_ADD"] = "1"
     script = "\n".join(
         (
-            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
             'run_uv_bootstrap() { :; }',
-            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
+            _shell_block(WORKFLOW.read_text(), "PERSISTENT_MARKETPLACE"),
         )
     )
     result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
@@ -1218,10 +1221,10 @@ def test_persistent_marketplace_rejects_checksum_drift_before_registration(
     )
     script = "\n".join(
         (
-            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
             'printf "%064d  payload\\n" 0 > "$TRUSTED_CHECKSUMS"',
             'run_uv_bootstrap() { :; }',
-            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
+            _shell_block(WORKFLOW.read_text(), "PERSISTENT_MARKETPLACE"),
         )
     )
     result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
@@ -1247,9 +1250,9 @@ def test_persistent_marketplace_always_revalidates_the_python_runner(
     )
     script = "\n".join(
         (
-            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
             'run_uv_bootstrap() { PYTHON_BIN="$VALID_PYTHON"; touch "$BOOTSTRAP_SENTINEL"; }',
-            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
+            _shell_block(WORKFLOW.read_text(), "PERSISTENT_MARKETPLACE"),
         )
     )
     result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
@@ -1269,9 +1272,9 @@ def test_persistent_marketplace_rejects_writable_profile_paths(
     target.chmod(0o777 if target.is_dir() else 0o666)
     script = "\n".join(
         (
-            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
             'run_uv_bootstrap() { :; }',
-            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
+            _shell_block(WORKFLOW.read_text(), "PERSISTENT_MARKETPLACE"),
         )
     )
     result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
@@ -1291,9 +1294,9 @@ def test_failed_restore_is_reported_and_never_claimed_success(tmp_path: Path) ->
     )
     script = "\n".join(
         (
-            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
             'run_uv_bootstrap() { :; }',
-            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
+            _shell_block(WORKFLOW.read_text(), "PERSISTENT_MARKETPLACE"),
         )
     )
     result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
@@ -1308,9 +1311,9 @@ def test_marketplace_registration_is_serialized_per_codex_home(tmp_path: Path) -
     env["SLEEP_MARKETPLACE_ADD"] = "0.2"
     script = "\n".join(
         (
-            _shell_block(SKILL.read_text(), "TRUST_BOOTSTRAP"),
+            _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
             'run_uv_bootstrap() { :; }',
-            _shell_block(SKILL.read_text(), "PERSISTENT_MARKETPLACE"),
+            _shell_block(WORKFLOW.read_text(), "PERSISTENT_MARKETPLACE"),
         )
     )
     processes = [

@@ -2,6 +2,10 @@
 
 ## 自动化门禁
 
+开发过程中按改动选择最小有效检查；已有环境可用 `bash scripts/checks-fast.sh`
+快速反馈。纯文档修改检查引用、命令和技能结构，不新增匹配措辞的测试。
+提交前运行下述完整入口一次；通过后，仅在后续改动、失败或未解决疑虑涉及其覆盖范围时重跑。
+
 仓库唯一的完整验证入口是：
 
 ```bash
@@ -17,6 +21,7 @@ bash scripts/checks.sh
 - core/protocol 不导入 `bpy`；
 - protocol vendor 生成与一致性；
 - 嵌套导入 smoke；
+- sdist 文件白名单；
 - unit 与 contract 测试；
 - 官方分发 installer 测试。
 
@@ -24,7 +29,7 @@ bash scripts/checks.sh
 插件验证器默认从 `$HOME/.codex/skills/.system/plugin-creator` 读取，也可通过
 `PLUGIN_CREATOR_ROOT` 指定。该检查不再跳过。
 
-正式发行门禁使用：
+修改上游补丁、runtime 依赖、固定产物或正式发布 runtime 时，额外使用发行门禁：
 
 ```bash
 RELEASE=1 \
@@ -37,6 +42,12 @@ bash scripts/checks.sh
 MCP SDK `1.28.1` 和 `2.0.0` 执行上游质量门禁及非 Blender 测试，运行 Bandit、
 detect-secrets 与 pip-audit，进行两次确定性构建，并逐字节比对仓库发行物。缺少任一
 输入、验证器或扫描器都会失败。
+
+仅更新指令、技能或文档的分发包同步，若固定 runtime 产物逐字节未变，运行完整入口、
+技能验证、提交内容与 ZIP 解包比对及校验和检查即可；这不产生新的 runtime 或现场验收结论。
+
+最后一次仓库文件修改后执行 `graft build .`，交付前 `graft check .` 必须退出 0。
+`graft/` 保留为未跟踪的本地缓存，不进入提交或分发包；不默认使用 `--deep`。
 
 ## Blender 验证
 
