@@ -16,8 +16,10 @@
 | CLAUDE 与 graft 强制所有任务先查图，禁止必要的源码复核 | 按问题选检索工具；弱命中直接读源码或用 `rg` |
 | graft 声称始终新鲜、固定延迟，并强制汇报估算节省 | 删除无条件性能承诺和无关汇报要求；交付仍检查图新鲜度 |
 | graft 的“不需要 build”与 AGENTS 冲突 | 统一为最后修改后 build、交付前 check |
-| 安装技能入口混入全部命令和发行验收细节 | 入口从 505 行减为 59 行；11 个 Bash 命令块原样移入按需参考文件 |
+| 安装技能入口混入全部命令和发行验收细节 | 将原 505 行入口改为操作路由；11 个 Bash 命令块原样移入按需参考文件 |
 | 检查操作前先注册 marketplace，扩大只读任务范围 | 按操作选择命令；仅授权安装或注册更新才准备 marketplace |
+| 仅注册更新仍被操作文档引向 runtime 安装 | 注册使用独立命令顺序，不执行 installer；隔离测试实际执行文档中的注册步骤，检查未创建 runtime 或 receipt |
+| 安装等待 Blender 时未明确注册收尾顺序 | 等待前完成 trust cleanup 和注册验证；后续 verify 重建 trust，不重复注册或安装 |
 | 已有授权、启动或关闭证据仍触发重复确认 | 复用授权和当前宿主证据；仅缺少必要状态或确需用户操作时暂停 |
 | 普通验证、发行验证和正式现场证据混用 | 开发时最小检查、提交前完整检查；runtime 发行和现场验收分别触发 |
 
@@ -27,11 +29,13 @@
 ## 维护与验证
 
 修改入口时检查这些实际场景：已知文件的小改动能直接开始；仅检查安装状态不会注册插件；
+仅注册插件不会安装 Blender 扩展或 runtime；
 安装请求复用四项已有授权；已运行的 Blender 可直接 verify；仍在运行时回滚会要求用户保存并退出；
 缺少第二台 Mac 不阻止普通安装；中途补充要求不会丢失原任务。
 
 安装命令位于 [workflow.md](../plugins/blender-mcp-installer/skills/install-official-blender-mcp/references/workflow.md)，
-`tests/distribution/test_plugin_contract.py` 直接提取并执行其中的信任、runner 和注册代码，
+`tests/distribution/test_plugin_contract.py` 按文档的 operation recipes 执行首次 inspect 和注册操作，
+并直接提取其中的信任、runner 和注册代码，
 覆盖不可信 Git 配置、脏索引、路径重定向、注册回滚和清理后持久性。不要为措辞本身新增测试。
 技能入口需通过 skill-creator 的 `quick_validate.py`；完整验证和分发要求见 [验证说明](validation.md)。
 

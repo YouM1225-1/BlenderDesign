@@ -11,7 +11,7 @@
 ## 定位与边界
 
 - 从已知文件开始；文字、配置和完整引用搜索使用 `rg`。跨模块调用关系可用 graft；命中不全、索引陈旧或上下文不足时直接查源码，不把图摘要当作完整实现。
-- 官方分发入口：`plugins/blender-mcp-installer/skills/install-official-blender-mcp/SKILL.md`。只在安装、检查安装状态、验证或回滚该分发时加载。
+- 官方分发入口：`plugins/blender-mcp-installer/skills/install-official-blender-mcp/SKILL.md`。只在注册、安装、修复、检查安装状态、验证或回滚该分发时加载。
 - 自研 Phase 0 通道：`protocol/`、`bridge/`、`server/`；`bridge/core` 与 `protocol` 不得导入 `bpy`。修改跨端协议时检查 bridge/server 消费方；`bridge/_vendor/` 由 `scripts/vendor_protocol.py` 生成。
 - `acceptance/` 是未完成的资产验收核心，不进入 wheel/sdist。当前规范见 `docs/README.md`；历史方案和审计记录不作为日常执行指令，也不代表通用资产已可自动发布。
 - 版本、工具目录和产物哈希以 `pyproject.toml`、锁文件及官方分发 `artifacts/manifest.json` 为准。仅按当前任务加载相关文档。
@@ -20,7 +20,7 @@
 
 - 开发中运行能覆盖改动的最小检查；纯文档调整检查链接、命令和技能结构，不新增复述文案的测试。修 bug 要有能复现行为的回归验证。
 - 提交前运行一次 `bash scripts/checks.sh` 并确认 `ALL CHECKS PASSED`。通过后仅在再次改动、出现失败或仍有未解决疑虑时重跑相关检查。
-- `bash scripts/checks-fast.sh` 仅供现有环境中的快速反馈；正式发行使用 `RELEASE=1`，现场 Blender 验收另见 `docs/validation.md`。普通编辑不需要运行这些额外门禁。
+- `bash scripts/checks-fast.sh` 仅供现有环境中的快速反馈；runtime 发行使用 `RELEASE=1`，指令包同步和现场 Blender 验收的门禁见 `docs/validation.md`。普通编辑不需要运行额外现场门禁。
 - 完全干净的 Git 工作树是正式 Phase 0 证据链的前提，不是开始编辑或普通测试的前提。提交和推送按用户授权执行，证据和临时产物放在仓库外。
 
 ## Graft Map

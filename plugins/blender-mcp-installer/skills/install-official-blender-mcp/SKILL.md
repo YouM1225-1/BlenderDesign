@@ -1,6 +1,6 @@
 ---
 name: install-official-blender-mcp
-description: Inspect, install, verify, repair, or roll back the reviewed official Blender MCP distribution on a supported Mac. Use for distribution setup and installation health, not scene modeling or general repository development.
+description: Register, inspect, install, verify, repair, or roll back the reviewed official Blender MCP distribution on a supported Mac. Use for distribution setup and installation health, not scene modeling or general repository development.
 ---
 
 # Install Official Blender MCP
@@ -28,21 +28,25 @@ an inspection request does not authorize installation or marketplace changes.
 
 ## Choose the operation
 
-Read the applicable sections of [the command reference](references/workflow.md).
+Select the requested recipe in [the command reference](references/workflow.md#operation-recipes).
 Use the exact fenced blocks: they are exercised by distribution tests. Run trust
 bootstrap and define the runner once per fail-fast Bash session; call
 `run_uv_bootstrap` before each installer command. Keep that session and its trust
 objects alive through the selected operation, then run the bounded cleanup.
 
-- **Inspect:** trust + runner + `INSPECT` + cleanup. No marketplace registration.
+- **Inspect:** read installation state; no marketplace registration.
+- **Register:** prepare the persistent marketplace, clean up trust, then run
+  `PERSISTENT_MARKETPLACE_VERIFY`. This updates only Codex plugin registration;
+  skip installer inspect/install/verify/rollback commands and Blender configuration.
 - **Install/repair:** inspect first, apply existing authorization, prepare the
-  persistent marketplace, then run `INSTALL` once. Preserve the receipt. Verify
-  when the operator has started Blender normally; repair requires Blender closed.
-- **Verify:** trust + runner + `VERIFY` + cleanup. A running selected Blender is
+  persistent marketplace, then run `INSTALL` once. Preserve the receipt and complete
+  `TRUST_CLEANUP` plus `PERSISTENT_MARKETPLACE_VERIFY` before waiting for Blender.
+  Then use the verify recipe when ready. Repair requires Blender closed.
+- **Verify:** a running selected Blender is
   required; inspect its state or reuse current user confirmation instead of asking
   for the same confirmation again. Verification does not update registration.
-- **Rollback:** trust + runner + `ROLLBACK` with the original absolute receipt path,
-  then cleanup. Establish that Blender is closed; ask the operator to save and close
+- **Rollback:** use the original absolute receipt path.
+  Establish that Blender is closed; ask the operator to save and close
   it only if needed. The receipt does not authorize a new install.
 
 For ordinary inspect/verify/rollback, skip marketplace preparation and release

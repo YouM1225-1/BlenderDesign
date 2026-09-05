@@ -24,7 +24,8 @@ Git and Python redirection variables, checks a clean scoped source tree, creates
 private detached hook-free worktree from the reviewed commit, and compares the
 commit-object checksum file with the materialized artifacts. All later plugin and
 bundle execution paths must come from that private worktree in the same fail-fast
-shell session. Before installer execution, the bundled helper uses the same private
+shell session. For an authorized install/repair or registration update, the bundled
+helper uses the same private
 Git/archive/checksum boundary to create an owner-controlled, commit-addressed
 persistent marketplace projection under `$HOME/.local/share/blender-mcp-installer`.
 Its private mode-0700 Git admin has empty config, hooks, templates, and info
@@ -58,19 +59,25 @@ substitute the source checkout for its trusted worktree.
 
 1. Establish the trusted worktree for the requested operation.
 2. Validate uv 0.12.2 and the supplied local Python 3.13.13 without downloads.
-3. Run `inspect` before mutation. An inspect-only request ends after diagnosis and
-   trust cleanup; it does not register a marketplace or install a plugin.
+3. Select the requested [operation recipe](../plugins/blender-mcp-installer/skills/install-official-blender-mcp/references/workflow.md#operation-recipes).
+   Inspect-only ends after diagnosis and trust cleanup. Registration-only prepares
+   the marketplace, cleans up trust, verifies the registration, then finishes;
+   it does not invoke the installer or change Blender/runtime configuration.
 4. Apply the operator's standing default-allow policy for extension install/enable,
    Blender Allow Online Access, localhost bridge, and arbitrary-Python tools. Do not
    ask four per-install questions unless the operator has revoked a default.
-5. For an authorized install/repair or registration update, materialize the persistent
+5. For an authorized install/repair, run `inspect`, materialize the persistent
    marketplace projection and transactionally replace only the target registration.
    Run `install` once with all four explicit flags. The legacy receipt key
    `all_four_collected_for_this_workflow` means all four flags were active; it does not
    mean four prompts were shown.
-6. For a changed install, the operator starts the selected Blender normally. The
+6. After install (including no-op), retain the receipt and finish trust cleanup plus
+   persistent registration verification before waiting for Blender startup.
+   The operator starts the selected Blender normally. The
    installer never starts or terminates it. Run `verify` when current host evidence
    or the operator's existing confirmation establishes readiness; do not reconfirm.
+   A new verify session repeats only the trust and runner bootstraps and the verify
+   recipe; it does not repeat marketplace preparation or installation.
 7. Before repair or rollback, establish that Blender is closed. If it is running,
    ask the operator to save and close it normally. Retain the receipt and pass its
    absolute path to rollback. Verify-only and rollback do not update registration.

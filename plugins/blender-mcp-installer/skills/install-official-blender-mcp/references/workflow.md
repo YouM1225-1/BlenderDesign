@@ -7,6 +7,28 @@ is only for an authorized install or registration update; release checks are
 only for release acceptance. Keep dependent blocks in the same fail-fast Bash
 session. A new session must repeat the trust bootstrap.
 
+## Operation recipes
+
+Each name below identifies one fenced Bash block in this file. Execute only the
+requested recipe after its prerequisites are satisfied. `register` updates the
+Codex marketplace/plugin registration; it does not install or repair the Blender
+extension or MCP runtime. Installer commands are not prerequisites for registration.
+
+| Operation | Blocks in order |
+|---|---|
+| inspect | `TRUST_BOOTSTRAP` → `UV_BOOTSTRAP` → `INSPECT` → `TRUST_CLEANUP` |
+| register | `TRUST_BOOTSTRAP` → `UV_BOOTSTRAP` → `PERSISTENT_MARKETPLACE` → `TRUST_CLEANUP` → `PERSISTENT_MARKETPLACE_VERIFY` |
+| install | `TRUST_BOOTSTRAP` → `UV_BOOTSTRAP` → `INSPECT` → `PERSISTENT_MARKETPLACE` → `INSTALL` → `TRUST_CLEANUP` → `PERSISTENT_MARKETPLACE_VERIFY` |
+| verify | `TRUST_BOOTSTRAP` → `UV_BOOTSTRAP` → `VERIFY` → `TRUST_CLEANUP` |
+| rollback | `TRUST_BOOTSTRAP` → `UV_BOOTSTRAP` → `ROLLBACK` → `TRUST_CLEANUP` |
+
+Repair uses the install recipe with Blender closed. After install (including a
+no-op), retain its receipt and complete registration cleanup/verification before
+waiting for user action. Then run the verify recipe when Blender is ready. A new
+shell reconstructs trust and runner state; it does not repeat registration or
+installation. Release acceptance may additionally insert `MARKETPLACE_SMOKE`
+before cleanup; it is not part of ordinary operation recipes.
+
 ## 1. Establish the trusted distribution
 
 Use already supplied or validated local paths where available; ask only for missing
@@ -263,8 +285,9 @@ run_uv_bootstrap() {
 
 ## 3. Inspect and select the requested operation
 
-Run inspect first. It is read-only for managed targets; its uv launcher has the
-cache caveat above.
+Run inspect for an inspect request and before install/repair. It is read-only for
+managed targets; its uv launcher has the cache caveat above. Standalone register,
+verify and rollback follow their own recipes.
 
 <!-- INSTALLER_COMMANDS_BEGIN -->
 <!-- INSPECT_BEGIN -->
@@ -302,9 +325,11 @@ The receipt key `all_four_collected_for_this_workflow` is retained for schema
 compatibility and means all four authorization flags were active; it does not mean four
 prompts were shown.
 
-For an authorized install or registration update, create and register the immutable
-commit-addressed projection after inspect succeeds and before install. Skip this
-block for inspect-only, verify-only, and rollback requests. New commits are verified before target-only replacement;
+For an authorized install/repair, prepare the immutable commit-addressed projection
+after inspect succeeds and before install. For a registration-only request, run
+this block and its cleanup/verification recipe, then finish without `INSTALL`.
+Skip this block for inspect-only, verify-only, and rollback requests.
+New commits are verified before target-only replacement;
 mode-0600 recovery evidence is receipt-independent. The helper then runs
 `plugin add "blender-mcp-installer@official-blender-mcp"`.
 <!-- PERSISTENT_MARKETPLACE_BEGIN -->
@@ -345,11 +370,12 @@ run_uv_bootstrap
 ```
 <!-- INSTALL_END -->
 
-For a changed install reporting `requires_blender_start`, use current host evidence
-to check readiness. If Blender is not running, ask the operator to start the selected
-Blender normally. Once it is running, execute verify; an earlier explicit confirmation
-or a successful read-only host check is sufficient. Do not ask again just to repeat
-that evidence:
+Finish the install recipe's cleanup and registration verification first, even when
+it reports `requires_blender_start`. For subsequent live verification, use current
+host evidence to check readiness. If Blender is not running, ask the operator to
+start the selected Blender normally. An earlier explicit confirmation or
+a successful read-only host check is sufficient. Do not ask again just to repeat
+that evidence. Run the separate verify recipe, which includes this command:
 
 <!-- VERIFY_BEGIN -->
 ```bash

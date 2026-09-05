@@ -35,6 +35,12 @@ def _shell_block(text: str, name: str) -> str:
     return marked.split("```bash", 1)[1].split("```", 1)[0].strip()
 
 
+def _operation_recipe(operation: str) -> list[str]:
+    rows = re.findall(rf"^\| {operation} \| ([^|]+) \|$", WORKFLOW.read_text(), re.M)
+    assert len(rows) == 1, f"missing or ambiguous operation recipe: {operation}"
+    return re.findall(r"`([A-Z_]+)`", rows[0])
+
+
 def _marketplace_validator(text: str) -> str:
     smoke = _shell_block(text, "MARKETPLACE_SMOKE")
     return smoke.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
@@ -97,7 +103,7 @@ def test_skill_has_valid_frontmatter_and_no_machine_paths() -> None:
     frontmatter = text.split("---", 2)[1]
     assert "name: install-official-blender-mcp" in frontmatter
     assert "description:" in frontmatter
-    assert "(references/workflow.md)" in text
+    assert "(references/workflow.md#operation-recipes)" in text
     for path in (SKILL, WORKFLOW, GUIDE):
         content = path.read_text()
         assert "/Users/" not in content
@@ -387,22 +393,21 @@ int main(int argc, char **argv) {
         ):
             path.mkdir(parents=True, exist_ok=True, mode=0o700)
             path.chmod(0o700)
-        script = "\n".join(
-            (
-                "{",
-                _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
-                "} >&2",
-                _shell_block(WORKFLOW.read_text(), "UV_BOOTSTRAP"),
-                'INSPECT_OUTPUT="$(',
-                _shell_block(WORKFLOW.read_text(), "INSPECT"),
-                ')"',
-                'test -z "$(find "$TRUSTED_DISTRIBUTION_ROOT" -type d -name __pycache__ -print -quit)"',
-                'test -z "$(find "$TRUSTED_DISTRIBUTION_ROOT" -type f \\( -name "*.pyc" -o -name "*.pyo" \\) -print -quit)"',
-                'test -z "$("${GIT_TRUSTED[@]}" status --porcelain=v1 --untracked-files=all)"',
-                'printf "%s\\n" "$INSPECT_OUTPUT"',
-                _shell_block(WORKFLOW.read_text(), "TRUST_CLEANUP"),
-            )
-        )
+        blocks = []
+        for name in _operation_recipe("inspect"):
+            block = _shell_block(WORKFLOW.read_text(), name)
+            if name == "TRUST_BOOTSTRAP":
+                block = "{\n" + block + "\n} >&2"
+            if name == "TRUST_CLEANUP":
+                blocks.extend(
+                    (
+                        'test -z "$(find "$TRUSTED_DISTRIBUTION_ROOT" -type d -name __pycache__ -print -quit)"',
+                        'test -z "$(find "$TRUSTED_DISTRIBUTION_ROOT" -type f \\( -name "*.pyc" -o -name "*.pyo" \\) -print -quit)"',
+                        'test -z "$("${GIT_TRUSTED[@]}" status --porcelain=v1 --untracked-files=all)"',
+                    )
+                )
+            blocks.append(block)
+        script = "\n".join(blocks)
         env = os.environ.copy()
         env.update(
             SOURCE_DISTRIBUTION_ROOT=str(source),
@@ -1178,6 +1183,26 @@ def test_persistent_marketplace_survives_private_cleanup_and_lists_normally(
     lock = codex_home / ".blender-mcp-marketplace.lock"
     assert lock.stat().st_mode & 0o777 == 0o600
     assert not (home / ".local/state/blender-mcp-installer/receipts").exists()
+
+
+def test_documented_registration_only_does_not_invoke_installer(tmp_path: Path) -> None:
+    env, home, codex_home, _, _ = _persistent_marketplace_env(tmp_path)
+    uv, log = _fake_uv(tmp_path, _python_31313())
+    env["UV_BIN"] = str(uv)
+    # This runner accepts version/help probes but rejects installer execution.
+    # The fixture's install.py is deliberately not executable Python either.
+    script = "\n".join(
+        _shell_block(WORKFLOW.read_text(), name) for name in _operation_recipe("register")
+    )
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert (codex_home / "installed").read_text() == "blender-mcp-installer@official-blender-mcp"
+    assert "install.py" not in log.read_text()
+    state = home / ".local/state/blender-mcp-installer"
+    assert not (state / "receipts").exists()
+    assert not (home / ".local/share/blender-lab-mcp").exists()
+    evidence = tuple((state / "marketplace-recovery").glob("registration.*/plugins-after-cleanup.json"))
+    assert len(evidence) == 1
 
 
 @pytest.mark.parametrize("failure", ["marketplace_add", "plugin_add"])
