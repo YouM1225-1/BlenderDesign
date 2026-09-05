@@ -166,7 +166,30 @@ def _mcp_server(catalog: list[str], commands: Path) -> int:
             method == "tools/call"
             and request.get("params", {}).get("name") == "get_blendfile_summary_datablocks"
         ):
-            result = {"content": [{"type": "text", "text": "{}"}]}
+            summary = {
+                "status": "ok",
+                "result": {
+                    "status": "ok",
+                    "datablock_counts": {"scenes": 1, "workspaces": 1},
+                    "render_engine": "BLENDER_EEVEE_NEXT",
+                    "scene_name": "Scene",
+                    "workspaces": ["Layout"],
+                    "active_workspace": "Layout",
+                },
+            }
+            result = {
+                "_meta": None,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(summary, indent=2),
+                        "annotations": None,
+                        "_meta": None,
+                    }
+                ],
+                "structuredContent": summary,
+                "isError": False,
+            }
         else:
             response = {
                 "jsonrpc": "2.0",

@@ -8,12 +8,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from acceptance.strict_json import (
-    finite_json_float as finite_json_float,
-    reject_duplicate_keys as reject_duplicate_keys,
-    reject_json_constant as reject_json_constant,
-    strict_json_loads as strict_json_loads,
-)
+from acceptance.strict_json import strict_json_loads as strict_json_loads
 from smoke.process_registry import read_private_bytes, require_private_directory
 
 

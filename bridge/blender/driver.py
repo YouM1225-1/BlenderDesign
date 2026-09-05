@@ -38,9 +38,16 @@ def _on_load_pre(_filepath) -> None:
 
 def _tick_guard() -> float | None:                  # §3.6：护栏不可省略
     s = _state["session"]
-    if s is None or s.stopped:
+    if s is None:
         return None                                  # 会话没了 → timer 自然注销
     try:
+        if s.stopped:
+            # Keep this timer registered until cleanup succeeds, including close
+            # retries. Returning None unregisters it after the last cleanup pass.
+            if s.stop(unregister_handlers=_unregister_handlers):
+                _state.update(session=None, counter=None)
+                return None
+            return 0.1
         return s.tick(50)
     except Exception:
         _diag.exception("tick failed")

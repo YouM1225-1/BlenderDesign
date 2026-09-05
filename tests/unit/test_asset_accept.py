@@ -1,6 +1,9 @@
 import json
+import hashlib
 import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -160,6 +163,8 @@ def test_real_input_reaches_r2_not_tested_boundary(tmp_path):
     wired = [c for c in summary["checks"] if c["id"].startswith(("r0.", "r1.", "r5."))]
     assert len(wired) == 9
     assert all(c["effective_status"] == "Pass" for c in wired)
+    assert summary["runner_provenance"]["input_digest"] == hashlib.sha256(
+        asset.read_bytes()).hexdigest()
     # R2 起尚未接入 → NotTested → 整体仍 fail-closed
     assert summary["failure_code"] in {"check_failed", "runner_internal_error"}
 
@@ -190,9 +195,9 @@ def test_input_fifo_is_reported_not_hung(tmp_path):
     # 回归测试(修复前会挂起):`_input_digest()` 曾经对 `--input` 做无条件
     # `read_bytes()`,发生在 run_r1 之前;指向一个没有写入方的 FIFO 会让 main()
     # 永久阻塞在不可中断的 I/O 等待里(实测 >30s,只能 kill -9)。修好之后
-    # `_input_digest()` 先用 lstat() 确认是普通文件、非普通文件直接给哨兵值,
-    # 判定交给对同一路径立即返回的 run_r1——这条测试能秒回就是修复本身的判别力
-    # 证明(仓库已在 pyproject.toml 配置 pytest-timeout 全局 30s 兜底)。
+    # `_input_digest()` 先用 lstat() 确认是普通文件,非普通文件直接返回失败结果;
+    # run_r1 只消费该结果,不再打开路径。这条测试能秒回就是修复本身的判别力证明
+    # (仓库已在 pyproject.toml 配置 pytest-timeout 全局 30s 兜底)。
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     fifo_path = candidate / "asset.blend"
@@ -212,6 +217,176 @@ def test_input_fifo_is_reported_not_hung(tmp_path):
     r1_link = next(c for c in summary["checks"] if c["id"] == "r1.input.no_link_or_device")
     assert r1_link["raw_status"] == "Fail"
     assert any(f["code"] == "input_not_regular_file" for f in r1_link["findings"])
+    r1_digest = next(c for c in summary["checks"] if c["id"] == "r1.input.digest_recorded")
+    assert r1_digest["raw_status"] == "Fail"
+
+
+def test_r1_has_no_second_path_open_for_an_inode_replacement(tmp_path):
+    asset = _input_path(tmp_path)
+    asset.write_bytes(b"BLENDER-fake")
+    contract = _contract_file(tmp_path)
+    evidence = tmp_path / "evidence"
+    repo_root = Path(__file__).resolve().parents[2]
+    script = tmp_path / "race.py"
+    script.write_text(
+        "import os\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from scripts import asset_accept\n"
+        "target = Path(sys.argv[2])\n"
+        "original_lstat = Path.lstat\n"
+        "calls = 0\n"
+        "def racing_lstat(self):\n"
+        "    global calls\n"
+        "    info = original_lstat(self)\n"
+        "    if self == target:\n"
+        "        calls += 1\n"
+        "        if calls == 2:\n"
+        "            self.unlink()\n"
+        "            os.mkfifo(self)\n"
+        "    return info\n"
+        "Path.lstat = racing_lstat\n"
+        "asset_accept._present_tools = lambda contract: {'acceptance', 'blender'}\n"
+        "code = asset_accept.main([\n"
+        "    '--contract', sys.argv[1], '--input', sys.argv[2],\n"
+        "    '--evidence-root', sys.argv[3]])\n"
+        "raise SystemExit(0 if code == 1 else 4)\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [sys.executable, str(script), str(contract), str(asset), str(evidence)],
+        cwd=repo_root, capture_output=True, text=True, timeout=2.0, check=False,
+        env=os.environ | {"PYTHONPATH": str(repo_root)},
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_input_inode_replacement_cannot_produce_a_digest(tmp_path, monkeypatch):
+    asset = _input_path(tmp_path)
+    asset.write_bytes(b"original")
+    original_lstat = Path.lstat
+    replaced = False
+
+    def replace_after_stat(path: Path):
+        nonlocal replaced
+        info = original_lstat(path)
+        if path == asset and not replaced:
+            replaced = True
+            path.unlink()
+            os.mkfifo(path)
+        return info
+
+    monkeypatch.setattr(Path, "lstat", replace_after_stat)
+    result = asset_accept._input_digest(asset)
+    assert result.digest is None
+    assert result.identity_finding is not None
+    assert result.identity_finding.code == "input_identity_changed"
+
+
+def test_digest_read_failure_is_propagated_to_r1(tmp_path, monkeypatch):
+    asset = _input_path(tmp_path)
+    asset.write_bytes(b"BLENDER-fake")
+    real_read = os.read
+    failed = False
+
+    def fail_first_read(descriptor: int, count: int) -> bytes:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("forced digest read failure")
+        return real_read(descriptor, count)
+
+    monkeypatch.setattr(asset_accept.os, "read", fail_first_read)
+    _, summary = _run(tmp_path)
+    assert summary["runner_provenance"]["input_digest"] == "0" * 64
+    digest_check = next(
+        check for check in summary["checks"] if check["id"] == "r1.input.digest_recorded")
+    assert digest_check["raw_status"] == "Fail"
+    assert any(finding["code"] == "input_unreadable" for finding in digest_check["findings"])
+
+
+def test_digest_fstat_failure_is_structured_and_closes_fd(tmp_path, monkeypatch):
+    asset = _input_path(tmp_path)
+    asset.write_bytes(b"BLENDER-fake")
+    real_close = os.close
+    closed: list[int] = []
+
+    def fail_fstat(_descriptor: int):
+        raise OSError("forced digest fstat failure")
+
+    def track_close(descriptor: int) -> None:
+        closed.append(descriptor)
+        real_close(descriptor)
+
+    monkeypatch.setattr(asset_accept.os, "fstat", fail_fstat)
+    monkeypatch.setattr(asset_accept.os, "close", track_close)
+    result = asset_accept._input_digest(asset)
+    assert result.digest is None
+    assert result.digest_finding is not None
+    assert result.digest_finding.code == "input_unreadable"
+    assert len(closed) == 1
+
+
+def test_digest_size_is_the_completed_byte_count_when_file_grows(tmp_path, monkeypatch):
+    asset = _input_path(tmp_path)
+    asset.write_bytes(b"1234")
+    real_read = os.read
+    grew = False
+
+    def grow_after_first_read(descriptor: int, count: int) -> bytes:
+        nonlocal grew
+        chunk = real_read(descriptor, count)
+        if chunk and not grew:
+            grew = True
+            with asset.open("ab") as stream:
+                stream.write(b"5678")
+        return chunk
+
+    monkeypatch.setattr(asset_accept, "_INPUT_DIGEST_CHUNK_BYTES", 4)
+    monkeypatch.setattr(asset_accept.os, "read", grow_after_first_read)
+    result = asset_accept._input_digest(asset)
+    assert result.digest == hashlib.sha256(b"12345678").hexdigest()
+    assert result.size == 8
+    contract = asset_accept.load_contract(
+        _contract_file(tmp_path), candidate_root=asset.parent)
+    contract.raw["budget"]["max_file_bytes"] = 4
+    findings = asset_accept.stages.run_r1(contract, result)
+    assert [f.code for f in findings["r1.input.size_within_limit"]] == ["input_too_large"]
+
+
+@pytest.mark.parametrize("bad_limit", [None, True, -1, 1.0, "1"])
+def test_invalid_budget_is_classified_before_r1(tmp_path, bad_limit):
+    asset = _input_path(tmp_path)
+    asset.write_bytes(b"BLENDER-fake")
+    value = _valid()
+    value["budget"]["max_file_bytes"] = bad_limit
+    contract = tmp_path / "contract.json"
+    contract.write_text(json.dumps(value), encoding="utf-8")
+    evidence = tmp_path / "evidence"
+    code = asset_accept.main([
+        "--contract", str(contract), "--input", str(asset),
+        "--evidence-root", str(evidence),
+    ])
+    summary = json.loads((evidence / "summary.json").read_text(encoding="utf-8"))
+    assert code == 1
+    assert summary["failure_code"] == "contract_invalid"
+    assert not any(check["id"].startswith("r1.") for check in summary["checks"])
+
+
+def test_cli_classifies_bom_contract_as_contract_invalid(tmp_path):
+    asset = _input_path(tmp_path)
+    asset.write_bytes(b"BLENDER-fake")
+    contract = _contract_file(tmp_path)
+    contract.write_bytes(json.dumps(_valid()).encode("utf-8-sig"))
+    evidence = tmp_path / "evidence"
+    code = asset_accept.main([
+        "--contract", str(contract), "--input", str(asset),
+        "--evidence-root", str(evidence),
+    ])
+    summary = json.loads((evidence / "summary.json").read_text(encoding="utf-8"))
+    assert code == 1
+    assert summary["failure_code"] == "contract_invalid"
+    assert summary["checks"] == []
 
 
 def test_contract_mutated_after_load_fails_digest_stable(tmp_path, monkeypatch):
@@ -264,3 +439,6 @@ def test_oversized_input_digest_falls_back_to_sentinel(tmp_path, monkeypatch):
     # 两条机制互相独立。
     r1_size = next(c for c in summary["checks"] if c["id"] == "r1.input.size_within_limit")
     assert r1_size["raw_status"] == "Pass"
+    r1_digest = next(c for c in summary["checks"] if c["id"] == "r1.input.digest_recorded")
+    assert r1_digest["raw_status"] == "Fail"
+    assert any(f["severity"] == "error" for f in r1_digest["findings"])

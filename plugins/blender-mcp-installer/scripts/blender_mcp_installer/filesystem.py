@@ -1101,14 +1101,19 @@ def _sync_prefix(
 
 def _sync_parents(references: tuple[TargetRef, ...]) -> None:
     parents: list[SafeRoot] = []
+    identities: set[tuple[int, int]] = set()
     try:
         for reference in references:
             parent_fd, _ = reference.root.open_parent(reference.relative)
             parent = SafeRoot(reference.path.parent, reference.root.owner_uid, parent_fd)
-            if all(parent.fd != opened.fd for opened in parents):
-                parents.append(parent)
-            else:
+            parents.append(parent)
+            info = os.fstat(parent.fd)
+            identity = (info.st_dev, info.st_ino)
+            if identity in identities:
                 parent.close()
+                parents.pop()
+            else:
+                identities.add(identity)
         for parent in parents:
             os.fsync(parent.fd)
     finally:

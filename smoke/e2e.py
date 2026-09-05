@@ -479,7 +479,7 @@ def _tracked_sources(deadline: float, required: set[Path]) -> set[Path]:
     return files
 
 
-def _current_provenance(deadline: float) -> dict[str, Any]:
+def _current_provenance(deadline: float, blender: str) -> dict[str, Any]:
     _remaining(deadline)
     git_status = _git_text(
         deadline, "status", "--porcelain=v1", "--untracked-files=all")
@@ -502,7 +502,7 @@ def _current_provenance(deadline: float) -> dict[str, Any]:
     _, manifest_sha = _canonical(source_files)
 
     blender_version = subprocess.run(
-        [BLENDER, "--version"], check=True, text=True,
+        [blender, "--version"], check=True, text=True,
         timeout=min(10.0, _remaining(deadline)),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     ).stdout.strip()
@@ -524,7 +524,7 @@ def _current_provenance(deadline: float) -> dict[str, Any]:
             "uv_lock_sha256": source_files["uv.lock"],
         },
         "blender": {
-            "executable": BLENDER,
+            "executable": blender,
             "version_output": blender_version,
             "version_output_sha256": hashlib.sha256(
                 blender_version.encode()).hexdigest(),
@@ -538,7 +538,7 @@ def _current_provenance(deadline: float) -> dict[str, Any]:
         "commands": {
             "mcp_server": [UV, "--directory", str(ROOT), "run", "--frozen",
                            "blender-codex-server"],
-            "blender_recovery": [BLENDER, "--factory-startup", "--python-exit-code",
+            "blender_recovery": [blender, "--factory-startup", "--python-exit-code",
                                  "1", "--python", "smoke/runner.py"],
         },
     }
@@ -1117,6 +1117,7 @@ def _start_blender(
     stop: Path,
     process_record: Path,
     registry_marker: str,
+    blender: str,
 ) -> tuple[subprocess.Popen[bytes], tuple[Path, int, int]]:
     reservation, device, inode = reserve_publication(process_record)
     env = os.environ | {
@@ -1130,7 +1131,7 @@ def _start_blender(
              REPLACE_MODE,
              str(process_record), str(reservation), str(device), str(inode),
              registry_marker,
-             BLENDER, "--factory-startup", "--python-exit-code", "1",
+             blender, "--factory-startup", "--python-exit-code", "1",
              "--python", "smoke/runner.py"],
             cwd=ROOT,
             env=env,
@@ -1146,8 +1147,6 @@ def _start_blender(
 
 async def _wait_process(process: subprocess.Popen[bytes], deadline: float) -> int:
     while process.poll() is None:
-        if _remaining(deadline) <= 0:
-            raise TimeoutError(f"process {process.pid} did not exit")
         await asyncio.sleep(min(0.05, _remaining(deadline)))
     return process.returncode
 
@@ -1195,7 +1194,7 @@ async def _stop_process(process: subprocess.Popen[bytes]) -> None:
 
 async def _run_recovery(
     runtime_root: Path, process_registry: Path, registry_marker: str,
-    registry_not_before_ns: int, deadline: float,
+    registry_not_before_ns: int, deadline: float, blender: str,
 ) -> dict[str, Any]:
     first: subprocess.Popen[bytes] | None = None
     second: subprocess.Popen[bytes] | None = None
@@ -1212,7 +1211,7 @@ async def _run_recovery(
         try:
             first, first_publication = _start_blender(
                 runtime_root, first_ready, first_stop,
-                first_record, registry_marker)
+                first_record, registry_marker, blender)
             initial = await _wait_ready(
                 first_ready, first, min(deadline, time.monotonic() + 30.0))
             initial_id = initial["instance_id"]
@@ -1267,7 +1266,7 @@ async def _run_recovery(
 
                     second, second_publication = _start_blender(
                         runtime_root, second_ready, second_stop,
-                        second_record, registry_marker)
+                        second_record, registry_marker, blender)
                     restarted = await _wait_ready(
                         second_ready, second, min(deadline, time.monotonic() + 30.0))
                     restarted_id = restarted["instance_id"]
@@ -1372,7 +1371,7 @@ async def _run(
             args.registry_not_before_ns, deadline)
     return await _run_recovery(
         runtime_root, process_registry, args.registry_marker,
-        args.registry_not_before_ns, deadline)
+        args.registry_not_before_ns, deadline, args.blender)
 
 
 async def _run_bounded(args: argparse.Namespace) -> dict[str, Any]:
@@ -1404,6 +1403,20 @@ async def _run_bounded(args: argparse.Namespace) -> dict[str, Any]:
             loop.remove_signal_handler(sig)
 
 
+def _blender_executable(value: str) -> str:
+    path = Path(value)
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError("--blender must be an absolute path")
+    try:
+        path = path.resolve(strict=True)
+    except OSError as exc:
+        raise argparse.ArgumentTypeError(f"Blender executable not found: {value}") from exc
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise argparse.ArgumentTypeError(
+            f"Blender path is not an executable file: {path}")
+    return str(path)
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("nfr", "recovery"))
@@ -1412,6 +1425,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--instance")
     parser.add_argument("--offline-root")
     parser.add_argument("--process-registry", required=True)
+    parser.add_argument("--blender", type=_blender_executable, default=BLENDER)
     parser.add_argument("--timeout-seconds", required=True, type=float)
     parser.add_argument("--registry-marker")
     parser.add_argument("--registry-not-before-ns", type=int)
@@ -1497,7 +1511,7 @@ def _worker_main(args: argparse.Namespace) -> int:
     }
     args.deadline = time.monotonic() + args.timeout_seconds
     try:
-        artifact["provenance"] = _current_provenance(args.deadline)
+        artifact["provenance"] = _current_provenance(args.deadline, args.blender)
         artifact.update(asyncio.run(_run_bounded(args)))
     except asyncio.CancelledError:
         artifact["error"] = "CancelledError: termination requested"
@@ -1517,6 +1531,7 @@ def _recovery_worker_command(
         sys.executable, str(Path(__file__).resolve()), WORKER_MODE, "recovery",
         "--root", args.root, "--output", args.output,
         "--process-registry", args.process_registry,
+        "--blender", args.blender,
         "--timeout-seconds", str(args.timeout_seconds),
         "--registry-marker", marker,
         "--registry-not-before-ns", str(not_before_ns),

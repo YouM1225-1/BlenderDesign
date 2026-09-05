@@ -12,6 +12,22 @@ def test_integer_and_float_with_same_value_serialise_identically():
     assert canonicalize({"x": 1}) == canonicalize({"x": 1.0}) == b'{"x":1}'
 
 
+def test_exact_large_integer_uses_the_float_ecmascript_format():
+    assert canonicalize(10**21) == canonicalize(float(10**21)) == b"1e+21"
+
+
+@pytest.mark.parametrize("value", [2**53 + 1, -(2**53 + 1), 10**400])
+def test_integer_not_exactly_representable_as_binary64_is_rejected(value):
+    with pytest.raises(CanonicalError):
+        canonicalize(value)
+
+
+def test_integer_overflow_above_decimal_digit_limit_has_bounded_error():
+    with pytest.raises(CanonicalError) as caught:
+        canonicalize(10**5000)
+    assert str(caught.value) == "integer is outside finite binary64"
+
+
 def test_negative_zero_is_normalised_to_zero():
     assert canonicalize({"x": -0.0}) == b'{"x":0}'
 

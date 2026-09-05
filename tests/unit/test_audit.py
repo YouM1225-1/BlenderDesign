@@ -1,4 +1,5 @@
 import datetime
+import errno
 import fcntl
 import hashlib
 import json
@@ -614,7 +615,7 @@ def test_request_deadline_is_checked_between_serialization_steps(tmp_path, monke
     with pytest.raises(TimeoutError, match="audit deadline expired"):
         open_log.record("tool", "slow-open", ok=True, duration_ms=1.0,
                         deadline=time.monotonic() + 0.01)
-    assert fchmod_calls == []
+    assert [mode for _fd, mode in fchmod_calls] == [0o600]
     assert next((tmp_path / "open-logs").glob("server-*.jsonl")).read_bytes() == b""
 
     monkeypatch.setattr(audit_module.os, "open", real_open)
@@ -722,6 +723,124 @@ def test_fdopen_close_failure_does_not_close_reused_foreign_fd(tmp_path, monkeyp
         os.write(state["fd"], b"foreign")
     finally:
         os.close(state["fd"])
+
+
+@pytest.mark.parametrize("fault_phase", ["write", "flush", "complete_close"])
+def test_failed_append_recovers_only_its_incomplete_tail(
+        tmp_path, monkeypatch, fault_phase):
+    import server.core.audit as audit_module
+
+    log = AuditLog(tmp_path / "logs")
+    log.record("tool", "first", ok=True, duration_ms=1.0)
+    path = next((tmp_path / "logs").glob("server-*.jsonl"))
+    first = path.read_bytes()
+    real_fdopen = audit_module.os.fdopen
+    real_ftruncate = audit_module.os.ftruncate
+    rollbacks = []
+
+    def truncate_under_lock(fd, size):
+        # A distinct open must stay excluded even after the stream fd closed.
+        probe = os.open(path, os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(probe)
+        rollbacks.append(size)
+        return real_ftruncate(fd, size)
+
+    class FailingWriter:
+        def __init__(self, fd, mode, encoding):
+            self._inner = real_fdopen(fd, mode, encoding=encoding)
+            self._line = None
+
+        def __enter__(self):
+            return self
+
+        def write(self, value):
+            if fault_phase == "complete_close":
+                return self._inner.write(value)
+            self._line = value
+            if fault_phase == "write":
+                self._partial_write()
+
+        def _partial_write(self):
+            midpoint = len(self._line) // 2
+            self._inner.write(self._line[:midpoint])
+            self._inner.flush()
+            # Closing must finish this buffered portion before any rollback.
+            self._inner.write(self._line[midpoint:midpoint + 5])
+            raise OSError(errno.ENOSPC, "injected partial append")
+
+        def __exit__(self, *args):
+            try:
+                if fault_phase == "flush":
+                    self._partial_write()
+            finally:
+                self._inner.close()
+            if fault_phase == "complete_close":
+                raise OSError(errno.ENOSPC, "injected close failure")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(audit_module.os, "fdopen", FailingWriter)
+        fault.setattr(audit_module.os, "ftruncate", truncate_under_lock)
+        with pytest.raises(OSError) as error:
+            log.record("工具", "failed", ok=True, duration_ms=1.0)
+        assert error.value.errno == errno.ENOSPC
+    assert rollbacks == ([] if fault_phase == "complete_close" else [len(first)])
+
+    log.record("tool", "retry", ok=True, duration_ms=1.0)
+    raw = path.read_bytes()
+    assert raw.startswith(first)
+    rows = [json.loads(line) for line in raw.splitlines()]
+    expected = ["first", "failed", "retry"] if fault_phase == "complete_close" else [
+        "first", "retry"]
+    assert [row["request_id"] for row in rows] == expected
+
+
+def test_preexisting_incomplete_tail_is_preserved_and_rejected(tmp_path):
+    log = AuditLog(tmp_path / "logs")
+    log.record("tool", "first", ok=True, duration_ms=1.0)
+    path = next((tmp_path / "logs").glob("server-*.jsonl"))
+    with path.open("ab") as stream:
+        stream.write(b'{"request_id": "crashed')
+    evidence = path.read_bytes()
+
+    with pytest.raises(OSError, match="incomplete audit tail"):
+        log.record("tool", "retry", ok=True, duration_ms=1.0)
+    assert path.read_bytes() == evidence
+
+
+def test_created_file_deadline_under_restrictive_umask_allows_retry(
+        tmp_path, monkeypatch):
+    import server.core.audit as audit_module
+
+    log = AuditLog(tmp_path / "logs")
+    real_open = audit_module.os.open
+    clock = [time.monotonic()]
+
+    def expired_create(name, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(name, flags, mode, dir_fd=dir_fd)
+        if flags & os.O_EXCL:
+            clock[0] += 2.0
+        return fd
+
+    previous_umask = os.umask(0o777)
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(audit_module.os, "open", expired_create)
+            fault.setattr(audit_module.time, "monotonic", lambda: clock[0])
+            with pytest.raises(TimeoutError, match="audit deadline expired"):
+                log.record("tool", "expired", ok=True, duration_ms=1.0,
+                           deadline=clock[0] + 1.0)
+    finally:
+        os.umask(previous_umask)
+
+    log.record("tool", "retry", ok=True, duration_ms=1.0)
+    path = next((tmp_path / "logs").glob("server-*.jsonl"))
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert [json.loads(line)["request_id"] for line in path.read_bytes().splitlines()] == [
+        "retry"]
 
 
 def test_concurrent_records_remain_complete_jsonl_lines(tmp_path, monkeypatch):

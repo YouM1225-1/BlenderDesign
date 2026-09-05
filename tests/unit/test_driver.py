@@ -1,6 +1,9 @@
 # tests/unit/test_driver.py
 import importlib
+import socket
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -402,3 +405,113 @@ def test_disconnect_retains_session_until_cleanup_retry_succeeds(monkeypatch):
     assert session.stop_calls == 4
     assert driver._state["session"] is session and driver.running() is True
     driver._state.update(session=None, counter=None)
+
+
+@pytest.mark.parametrize("cleanup_action", ["timer", "restart"])
+def test_failed_io_session_cleans_up_on_main_thread_and_restarts(
+        tmp_path, monkeypatch, cleanup_action):
+    import bridge.core.lifecycle as lc
+    from protocol import envelope
+    from tests.unit.test_lifecycle import FakeReader
+
+    driver, depsgraph, load_pre, timers, _session = _load_driver(monkeypatch, "none")
+    clock = types.SimpleNamespace(now=0.0)
+    clock.monotonic = lambda: clock.now
+    owner = threading.get_ident()
+    closed_on = []
+    steps_on = []
+
+    class Reader(FakeReader):
+        def snapshot_steps(self, **_kwargs):
+            try:
+                while True:
+                    steps_on.append(threading.get_ident())
+                    clock.now += 0.1
+                    yield
+            finally:
+                closed_on.append(threading.get_ident())
+
+    monkeypatch.setattr(driver, "BridgeSession", lc.BridgeSession)
+    monkeypatch.setattr(driver, "BpySceneReader", lambda _counter: Reader())
+    monkeypatch.setattr(driver, "_runtime_root", lambda: tmp_path)
+    driver.start()
+    failed = driver.session()
+    failed._queue._clock = clock
+    real_selector = lc.selectors.DefaultSelector
+
+    def fail_selector():
+        raise OSError("permanent monitor failure")
+
+    try:
+        with socket.socket(socket.AF_UNIX) as peer:
+            peer.connect(str(failed.socket_path))
+            for method in ("scene_summary", "ping"):
+                peer.sendall(envelope.encode_request(
+                    envelope.Request.new(failed.token, method, {})))
+            deadline = time.monotonic() + 2.0
+            while failed._queue.pending != 2 and time.monotonic() < deadline:
+                time.sleep(0.005)
+            assert failed._queue.pending == 2
+            driver._tick_guard()
+            assert steps_on == [owner] and closed_on == []
+            assert failed._queue.pending == 2
+
+            monkeypatch.setattr(lc.selectors, "DefaultSelector", fail_selector)
+            failed._wake()
+            failed._io.join(timeout=2.0)
+            assert not failed._io.is_alive()
+            assert not driver.running()
+            assert closed_on == []  # The I/O worker must not close continuations.
+
+            monkeypatch.setattr(lc.selectors, "DefaultSelector", real_selector)
+            if cleanup_action == "timer":
+                close_listener = failed._close_listener
+                attempts = []
+
+                def fail_close_once():
+                    attempts.append(threading.get_ident())
+                    if len(attempts) == 1:
+                        raise OSError("transient close failure")
+                    close_listener()
+
+                monkeypatch.setattr(failed, "_close_listener", fail_close_once)
+                assert driver._tick_guard() == 0.1
+                assert driver.session() is failed and not failed.cleanup_complete
+                assert closed_on == [owner] and failed._queue.pending == 0
+                assert timers.is_registered(driver._tick_guard)
+                assert failed.socket_path.exists()
+                assert (failed.session_dir / "session.json").exists()
+                assert driver._tick_guard() is None
+                # Blender removes a timer when its callback returns None.
+                timers.unregister(driver._tick_guard)
+                assert attempts == [owner, owner]
+                assert driver.session() is None
+                assert depsgraph == [] and load_pre == []
+            driver.start()
+            peer.settimeout(2.0)
+            assert peer.recv(1) == b""  # Pending requests are discarded without replies.
+
+        assert closed_on == [owner] and failed._queue.pending == 0
+        assert failed.cleanup_complete and failed._transport_closed()
+        assert not failed.socket_path.exists() and not failed.session_dir.exists()
+        assert driver.session() is not failed and driver.running()
+        assert timers.is_registered(driver._tick_guard)
+        assert depsgraph == [driver._on_depsgraph] and load_pre == [driver._on_load_pre]
+        restarted = driver.session()
+        with socket.socket(socket.AF_UNIX) as peer:
+            peer.settimeout(0.02)
+            peer.connect(str(restarted.socket_path))
+            peer.sendall(envelope.encode_request(
+                envelope.Request.new(restarted.token, "ping", {})))
+            response = b""
+            deadline = time.monotonic() + 2.0
+            while not response and time.monotonic() < deadline:
+                driver._tick_guard()
+                try:
+                    response = peer.recv(65536)
+                except TimeoutError:
+                    pass
+            assert restarted.instance_id.encode() in response
+    finally:
+        assert driver.stop()
+        assert failed.stop()

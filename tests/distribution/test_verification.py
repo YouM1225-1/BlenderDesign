@@ -963,13 +963,48 @@ class LifecycleRunner:
         raise AssertionError(args)
 
 
+_SUMMARY = {
+    "status": "ok",
+    "result": {
+        "status": "ok",
+        "datablock_counts": {"scenes": 1, "workspaces": 1},
+        "render_engine": "BLENDER_EEVEE_NEXT",
+        "scene_name": "Scene",
+        "workspaces": ["Layout"],
+        "active_workspace": "Layout",
+    },
+}
+
+
+def _tool_result(payload: object) -> dict[str, object]:
+    return {
+        "_meta": None,
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(payload, indent=2),
+                "annotations": None,
+                "_meta": None,
+            }
+        ],
+        "structuredContent": payload,
+        "isError": False,
+    }
+
+
 class Session:
     def __init__(
-        self, tools=MANIFEST.tools, *, fail: str | None = None, initialize_result=None
+        self,
+        tools=MANIFEST.tools,
+        *,
+        fail: str | None = None,
+        initialize_result=None,
+        tool_result=None,
     ) -> None:
         self.tools = tools
         self.fail = fail
         self.initialize_result = initialize_result
+        self.tool_result = _tool_result(_SUMMARY) if tool_result is None else tool_result
         self.calls: list[tuple[str, object]] = []
 
     def initialize(self):
@@ -998,7 +1033,7 @@ class Session:
             raise ValueError("secret call failure")
         if self.fail == "call_result":
             return {"isError": True, "content": [{"type": "text", "text": "secret"}]}
-        return {"content": [{"type": "text", "text": "{}"}]}
+        return self.tool_result
 
 
 def _observed_initialize():
@@ -1111,7 +1146,7 @@ def test_official_probe_uses_runtime_python_and_returns_closed_results(
             "serverInfo": {"name": "blender-mcp", "version": "1.0.0"},
         },
         "tools": list(MANIFEST.tools),
-        "call": {"content": [{"type": "text", "text": "{}"}]},
+        "call": _tool_result(_SUMMARY),
     }
     process = _ProbeProcess(json.dumps(payload).encode())
     seen: list[tuple[tuple[str, ...], dict[str, object]]] = []
@@ -1343,6 +1378,73 @@ def test_live_accepts_exact_observed_initialize_contract(
     result = _verify_live(bundle, inspection, hostile, probe)
 
     assert result.tool_count == 26
+    assert handle.closed and handle.terminated and handle.waited == 2.0
+
+
+def test_live_rejects_real_sdk_error_envelope_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = Session(
+        tool_result=_tool_result({"status": "error", "message": "reader failed"})
+    )
+    bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
+
+    with pytest.raises(InstallerError, match="Blender read-only verification failed"):
+        _verify_live(bundle, inspection, hostile, probe)
+
+    assert handle.closed and handle.terminated and handle.waited == 2.0
+
+
+@pytest.mark.parametrize(
+    "tool_result",
+    [
+        {"isError": False, "content": _tool_result(_SUMMARY)["content"]},
+        {
+            "isError": False,
+            "structuredContent": {},
+            "content": [{"type": "text", "text": "{}"}],
+        },
+        {"isError": False, "structuredContent": _SUMMARY},
+        {
+            "isError": False,
+            "structuredContent": _SUMMARY,
+            "content": [{"type": "text", "text": "not-json"}],
+        },
+        {
+            "isError": False,
+            "structuredContent": _SUMMARY,
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps({"status": "error", "message": "reader failed"}),
+                }
+            ],
+        },
+        _tool_result(
+            {
+                "status": "ok",
+                "result": {**_SUMMARY["result"], "scene_name": 1},
+            }
+        ),
+    ],
+    ids=(
+        "missing-structured",
+        "empty",
+        "missing-text",
+        "malformed-text",
+        "contradictory-text",
+        "malformed-summary",
+    ),
+)
+def test_live_rejects_missing_malformed_or_contradictory_summary_payloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool_result: object
+) -> None:
+    session = Session(tool_result=tool_result)
+    bundle, inspection, probe, handle, hostile = _live(tmp_path, monkeypatch, session)
+
+    with pytest.raises(InstallerError, match="Blender read-only verification failed"):
+        _verify_live(bundle, inspection, hostile, probe)
+
     assert handle.closed and handle.terminated and handle.waited == 2.0
 
 

@@ -9,6 +9,8 @@ from collections.abc import Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Literal
 
+import anyio
+from anyio.from_thread import check_cancelled
 from mcp.server import MCPServer
 from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
 from mcp.shared.exceptions import MCPError
@@ -91,16 +93,19 @@ async def _await_audit(call: Callable[[], None], deadline: float) -> None:
     queued = True
     while not submitted.done():
         try:
-            if queued:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    if submitted.running():
-                        queued = False
-                        continue
-                    raise TimeoutError("audit deadline expired in queue")
-                await asyncio.wait_for(done.wait(), remaining)
-            else:
-                await done.wait()
+            # Observe cancellation once, then shield level-triggered scope cancellation
+            # while retaining ownership until the submitted audit has finished.
+            with anyio.CancelScope(shield=cancelled is not None):
+                if queued:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        if submitted.running():
+                            queued = False
+                            continue
+                        raise TimeoutError("audit deadline expired in queue")
+                    await asyncio.wait_for(done.wait(), remaining)
+                else:
+                    await done.wait()
         except TimeoutError:
             if submitted.running():
                 queued = False
@@ -305,6 +310,14 @@ def status_impl(discovery: Discovery, instance_selector: str | None = None) -> d
             "skipped_count": skipped, "instances": rows}
 
 
+def _check_summary_cancelled() -> None:
+    try:
+        check_cancelled()
+    except anyio.NoEventLoopError:
+        # Direct synchronous clients have no SDK request scope.
+        pass
+
+
 def scene_summary_impl(discovery: Discovery, instance_id: str, include_collections: bool = True,
                        include_managed_objects: bool = True) -> dict[str, Any]:
     deadline = _deadline(SCENE_SUMMARY_BUDGET)
@@ -320,7 +333,8 @@ def scene_summary_impl(discovery: Discovery, instance_id: str, include_collectio
     try:
         result = instance.client.call("scene_summary", {
             "include_collections": include_collections, "include_managed_objects": include_managed_objects,
-        }, timeout=max(0.0, deadline - time.monotonic()), deadline=deadline)
+        }, timeout=max(0.0, deadline - time.monotonic()), deadline=deadline,
+           check_cancelled=_check_summary_cancelled)
     except BridgeError as exc:
         discovery.invalidate(deadline=deadline)
         raise ToolFailure(exc.code, str(exc), exc.retryable) from exc

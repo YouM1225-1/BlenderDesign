@@ -1,8 +1,7 @@
 """coordinator 自算的三个 stage(规范 §7.1 中 writer == coordinator 且不依赖外部进程的部分)。"""
 from __future__ import annotations
 
-import stat
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 from acceptance.contract import Contract
@@ -11,6 +10,16 @@ from acceptance.decide import Finding
 
 def _error(code: str, detail: str) -> Finding:
     return Finding(code=code, severity="error", detail=detail)
+
+
+@dataclass(frozen=True, slots=True)
+class InputResult:
+    """一次安全打开得到的输入摘要、大小与失败证据。"""
+
+    digest: str | None
+    size: int | None
+    digest_finding: Finding | None = None
+    identity_finding: Finding | None = None
 
 
 def run_r0(contract: Contract, *, tools_present: set[str]) -> dict[str, list[Finding]]:
@@ -26,38 +35,20 @@ def run_r0(contract: Contract, *, tools_present: set[str]) -> dict[str, list[Fin
     }
 
 
-def run_r1(contract: Contract, input_path: Path) -> dict[str, list[Finding]]:
-    """R1:输入身份与预算(规范 §7.1)。
-
-    lstat() 只证明路径存在与其类型,不证明内容可读(Task 7 修过同一陷阱:chmod 000 的
-    文件 is_file()/lstat() 均成立,只有真正 open()/read() 才会因权限被拒)。故对确认为
-    普通文件的路径额外尝试读取一字节;symlink/设备等已由下面的类型判定单独报告,不在此
-    重复探测,避免对 FIFO 等特殊文件的读取造成阻塞。
-    """
-    digest_findings: list[Finding] = []
-    link_findings: list[Finding] = []
+def run_r1(contract: Contract, input_result: InputResult) -> dict[str, list[Finding]]:
+    """R1:只消费摘要读取时绑定到同一 fd/inode 的结果。"""
+    digest_findings = [] if input_result.digest is not None else [
+        input_result.digest_finding
+        or _error("input_unreadable", "input digest was not completed")
+    ]
+    link_findings = (
+        [] if input_result.identity_finding is None else [input_result.identity_finding]
+    )
     size_findings: list[Finding] = []
-    try:
-        info = input_path.lstat()
-    except OSError as exc:
-        digest_findings.append(_error("input_missing", f"cannot stat input: {exc}"))
-        return {"r1.input.digest_recorded": digest_findings,
-                "r1.input.no_link_or_device": link_findings,
-                "r1.input.size_within_limit": size_findings}
-    if stat.S_ISLNK(info.st_mode):
-        link_findings.append(_error("input_is_symlink", str(input_path)))
-    elif not stat.S_ISREG(info.st_mode):
-        link_findings.append(_error("input_not_regular_file", str(input_path)))
-    else:
-        try:
-            with input_path.open("rb") as handle:
-                handle.read(1)
-        except OSError as exc:
-            digest_findings.append(_error("input_unreadable", f"cannot read input: {exc}"))
-    limit = int(contract.raw["budget"]["max_file_bytes"])
-    if info.st_size > limit:
+    limit = contract.raw["budget"]["max_file_bytes"]
+    if input_result.size is not None and input_result.size > limit:
         size_findings.append(
-            _error("input_too_large", f"{info.st_size} bytes exceeds {limit}"))
+            _error("input_too_large", f"{input_result.size} bytes exceeds {limit}"))
     return {"r1.input.digest_recorded": digest_findings,
             "r1.input.no_link_or_device": link_findings,
             "r1.input.size_within_limit": size_findings}

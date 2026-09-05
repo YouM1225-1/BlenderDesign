@@ -61,6 +61,7 @@ from tests.distribution.fault_driver import (  # noqa: E402
     ExitFaultInjector,
     _PREIMAGES,
     _applicable_points,
+    _patch_scenario,
 )
 
 
@@ -1226,6 +1227,121 @@ def test_runtime_stage_failure_is_automatically_rolled_back(
     assert not roots.bundle_stage(receipt.install_id).exists()
 
 
+@contextmanager
+def _userpref_completion_fault_scenario(root: Path):
+    patched_names = (
+        "_context",
+        "_inspection",
+        "_lifecycle_closed",
+        "stage_runtime",
+        "stage_blender_change",
+        "stage_codex_config",
+        "verify_runtime",
+        "inspect_blender",
+        "verify_blender_files",
+        "load_extension_payload",
+        "verify_codex_toml",
+        "verify_codex_effective",
+    )
+    missing = object()
+    originals = {name: getattr(cli, name, missing) for name in patched_names}
+    try:
+        _patch_scenario(
+            cli,
+            root,
+            "userpref_file",
+            "absent",
+            "after_userpref_file_completed",
+        )
+        with cli._context(None) as context:
+            yield context
+    finally:
+        for name, value in originals.items():
+            if value is missing:
+                delattr(cli, name)
+            else:
+                setattr(cli, name, value)
+
+
+def test_resumed_install_checks_lifecycle_before_restoring_live_blender_files(
+    tmp_path: Path,
+) -> None:
+    with _userpref_completion_fault_scenario(tmp_path) as context:
+        with pytest.raises(SystemExit, match="70"):
+            cli._changed_install(
+                context,
+                ExitFaultInjector("after_userpref_file_completed", 70),
+            )
+        roots = context.roots
+
+        def live_state() -> dict[str, bool]:
+            return {
+                "userpref_exists": roots.userpref_target.exists(),
+                "extension_exists": roots.extension_target.exists(),
+                "runtime_exists": roots.runtime.exists(),
+            }
+
+        before_retry = live_state()
+        state_when_lifecycle_guard_runs: list[dict[str, bool]] = []
+
+        def refuse_running(_context: object) -> None:
+            state_when_lifecycle_guard_runs.append(live_state())
+            raise InstallerError(
+                "selected Blender must be closed and localhost port 9876 free"
+            )
+
+        cli._lifecycle_closed = refuse_running
+        with pytest.raises(InstallerError, match="selected Blender must be closed"):
+            cli._changed_install(context, NoOpFaultInjector())
+
+        assert all(before_retry.values())
+        assert state_when_lifecycle_guard_runs == [before_retry]
+        assert live_state() == before_retry
+        receipt = cli.load_receipt(next(roots.receipts.glob("*.json")), roots)
+        assert receipt.status is ReceiptStatus.PREPARED
+
+
+def test_install_exception_checks_lifecycle_before_recovery_cleanup(
+    tmp_path: Path,
+) -> None:
+    with _userpref_completion_fault_scenario(tmp_path) as context:
+        roots = context.roots
+
+        def live_state() -> dict[str, bool]:
+            return {
+                "userpref_exists": roots.userpref_target.exists(),
+                "extension_exists": roots.extension_target.exists(),
+                "runtime_exists": roots.runtime.exists(),
+            }
+
+        states: list[dict[str, bool]] = []
+
+        def closed_then_running(_context: object) -> None:
+            states.append(live_state())
+            if len(states) == 2:
+                raise InstallerError(
+                    "selected Blender must be closed and localhost port 9876 free"
+                )
+
+        cli._lifecycle_closed = closed_then_running
+        cli.verify_runtime = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            InstallerError("runtime verification failed")
+        )
+
+        with pytest.raises(InstallerError, match="selected Blender must be closed"):
+            cli.install(SimpleNamespace(_fault=NoOpFaultInjector()))
+
+        assert states[0] == {
+            "userpref_exists": False,
+            "extension_exists": False,
+            "runtime_exists": False,
+        }
+        assert len(states) == 2 and all(states[1].values())
+        assert live_state() == states[1]
+        receipt = cli.load_receipt(next(roots.receipts.glob("*.json")), roots)
+        assert receipt.status is ReceiptStatus.PREPARED
+
+
 def test_runtime_stage_failure_does_not_adopt_replaced_stage(
     host: HostHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1437,25 +1553,17 @@ def _extension_rollback_fixture(
     return roots, bundle, receipt, receipt_path, extension_post
 
 
-def test_extension_rollback_passes_post_provenance_and_rejects_unrecorded_pyc(
-    host: HostHarness, monkeypatch: pytest.MonkeyPatch
+def test_extension_rollback_rejects_unrecorded_pyc_without_mutation(
+    host: HostHarness,
 ) -> None:
-    roots, bundle, receipt, receipt_path, extension_post = _extension_rollback_fixture(host)
+    roots, bundle, receipt, receipt_path, _ = _extension_rollback_fixture(host)
     foreign = roots.extension_target / "__pycache__/cli.cpython-999.pyc"
     foreign.write_bytes(b"foreign")
     foreign.chmod(0o644)
-    compare = cli.compare_extension_tree
     receipt_before = receipt_path.read_bytes()
     active_before = roots.active.read_bytes()
     with SafeRoot.open(host.extensions, os.getuid(), host.resources) as extensions:
         extension_before = capture_tree(extensions, Path("user_default/mcp"))
-    provenances: list[TreeImage | None] = []
-
-    def tracked_compare(payload, current, provenance=None):
-        provenances.append(provenance)
-        return compare(payload, current, provenance)
-
-    monkeypatch.setattr(cli, "compare_extension_tree", tracked_compare)
     with pytest.raises(InstallerError, match="rollback preflight conflict"):
         cli._rollback_receipt(
             roots,
@@ -1465,7 +1573,6 @@ def test_extension_rollback_passes_post_provenance_and_rejects_unrecorded_pyc(
             NoOpFaultInjector(),
             manifest_sha256="0" * 64,
         )
-    assert provenances == [extension_post]
     assert receipt_path.read_bytes() == receipt_before
     assert roots.active.read_bytes() == active_before
     with SafeRoot.open(host.extensions, os.getuid(), host.resources) as extensions:

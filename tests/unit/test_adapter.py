@@ -17,7 +17,7 @@ class FakeClient:
     def __init__(self, results: dict):
         self._r = results
 
-    def call(self, method, params=None, timeout=None, *, deadline=None):
+    def call(self, method, params=None, timeout=None, *, deadline=None, check_cancelled=None):
         return self._r[method]
 
 
@@ -390,7 +390,7 @@ def test_scene_summary_uses_one_end_to_end_deadline(monkeypatch):
     from server.core.bridge_client import BridgeError
 
     class SlowClient:
-        def call(self, method, params=None, timeout=None, *, deadline=None):
+        def call(self, method, params=None, timeout=None, *, deadline=None, check_cancelled=None):
             time.sleep(timeout if timeout is not None else 0.25)
             raise BridgeError("BRIDGE_TIMEOUT", method, retryable=True)
 
@@ -411,7 +411,7 @@ def test_scene_summary_preserves_busy_retryability():
     from server.core.bridge_client import BridgeError
 
     class BusyClient:
-        def call(self, method, params=None, timeout=None, *, deadline=None):
+        def call(self, method, params=None, timeout=None, *, deadline=None, check_cancelled=None):
             raise BridgeError("BRIDGE_BUSY", "queue full", retryable=True)
 
     with pytest.raises(ToolFailure) as exc:
@@ -967,8 +967,10 @@ async def test_slow_audit_does_not_block_the_event_loop(audit, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("audit_failure", [False, True])
+@pytest.mark.parametrize("cancellation", ["asyncio", "anyio"])
 async def test_cancelled_summary_waits_for_exactly_one_audit_before_release(
-        audit, monkeypatch, audit_failure):
+        audit, monkeypatch, audit_failure, cancellation):
+    import anyio
     import server.mcp.adapter as adapter
     from mcp import Client
     from mcp.shared.exceptions import MCPError
@@ -1019,12 +1021,19 @@ async def test_cancelled_summary_waits_for_exactly_one_audit_before_release(
             while not first_entered.is_set() and time.monotonic() < deadline:
                 await asyncio.sleep(0.001)
             assert first_entered.is_set()
-            request = asyncio.create_task(client.call_tool(
-                "get_scene_summary", {"instance_id": "gui-1-aa"}))
+            scopes = []
+
+            async def summary():
+                with anyio.CancelScope() as scope:
+                    scopes.append(scope)
+                    return await client.call_tool(
+                        "get_scene_summary", {"instance_id": "gui-1-aa"})
+
+            request = asyncio.create_task(summary())
             await asyncio.wait_for(second_submitted.wait(), 0.5)
-            request.cancel()
+            (request.cancel if cancellation == "asyncio" else scopes[0].cancel)()
             await asyncio.sleep(0.04)
-            request.cancel()
+            (request.cancel if cancellation == "asyncio" else scopes[0].cancel)()
             await asyncio.sleep(0.04)
             assert not request.done()
             assert admission.acquire(blocking=False) is False
@@ -1035,9 +1044,11 @@ async def test_cancelled_summary_waits_for_exactly_one_audit_before_release(
                 with pytest.raises(MCPError) as exc:
                     await request
                 assert exc.value.data == {"code": "AUDIT_UNAVAILABLE", "retryable": True}
-            else:
+            elif cancellation == "asyncio":
                 with pytest.raises(asyncio.CancelledError):
                     await request
+            else:
+                assert await request is None
     finally:
         release_first.set()
 

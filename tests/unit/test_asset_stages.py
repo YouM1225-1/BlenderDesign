@@ -3,6 +3,7 @@ from pathlib import Path
 
 from acceptance import stages
 from acceptance.contract import load_contract
+from scripts import asset_accept
 from tests.unit.test_asset_contract import _valid
 
 
@@ -30,8 +31,10 @@ def test_r1_passes_for_a_real_regular_file(tmp_path):
     candidate.mkdir()
     asset = candidate / "asset.blend"
     asset.write_bytes(b"x" * 16)
-    findings = stages.run_r1(_contract(tmp_path), asset)
+    input_result = asset_accept._input_digest(asset)
+    findings = stages.run_r1(_contract(tmp_path), input_result)
     assert all(v == [] for v in findings.values())
+    assert input_result.digest is not None
 
 
 def test_r1_rejects_a_symlink(tmp_path):
@@ -41,8 +44,9 @@ def test_r1_rejects_a_symlink(tmp_path):
     real.write_bytes(b"x")
     link = candidate / "asset.blend"
     link.symlink_to(real)
-    findings = stages.run_r1(_contract(tmp_path), link)
+    findings = stages.run_r1(_contract(tmp_path), asset_accept._input_digest(link))
     assert [f.code for f in findings["r1.input.no_link_or_device"]] == ["input_is_symlink"]
+    assert findings["r1.input.digest_recorded"]
 
 
 def test_r1_rejects_oversized_input(tmp_path):
@@ -52,7 +56,7 @@ def test_r1_rejects_oversized_input(tmp_path):
     asset.write_bytes(b"x" * 32)
     contract = _contract(tmp_path)
     contract.raw["budget"]["max_file_bytes"] = 16
-    findings = stages.run_r1(contract, asset)
+    findings = stages.run_r1(contract, asset_accept._input_digest(asset))
     assert [f.code for f in findings["r1.input.size_within_limit"]] == ["input_too_large"]
 
 

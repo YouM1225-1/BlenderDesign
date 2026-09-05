@@ -29,7 +29,13 @@ def _number(value: float | int) -> str:
     if isinstance(value, bool):
         raise CanonicalError("bool must be handled before number")
     if isinstance(value, int):
-        return str(value)
+        try:
+            binary64 = float(value)
+        except OverflowError as exc:
+            raise CanonicalError("integer is outside finite binary64") from exc
+        if not math.isfinite(binary64) or int(binary64) != value:
+            raise CanonicalError(f"integer is not exactly representable as binary64: {value!r}")
+        return _number(binary64)
     if not math.isfinite(value):
         raise CanonicalError(f"non-finite number: {value!r}")
     if value == 0.0:

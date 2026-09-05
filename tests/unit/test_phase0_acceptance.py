@@ -52,8 +52,16 @@ def _write_log(path: Path, stage: str) -> None:
     path.chmod(0o600)
 
 
+def _write_executable(path: Path, output: str = "") -> Path:
+    path.write_text(f"#!/bin/sh\nprintf '%s\\n' {output!r}\n", encoding="utf-8")
+    path.chmod(0o700)
+    return path.resolve()
+
+
 def test_blender_exit_zero_artifact_fail_is_not_accepted(tmp_path, monkeypatch):
     root = tmp_path / "evidence"
+    blender = _write_executable(tmp_path / "blender")
+    uv = _write_executable(tmp_path / "uv")
     calls = []
 
     def fake_run(stage, _command, *, env, log_path, timeout):
@@ -66,7 +74,9 @@ def test_blender_exit_zero_artifact_fail_is_not_accepted(tmp_path, monkeypatch):
 
     monkeypatch.setattr(acceptance, "_run_command", fake_run)
     monkeypatch.setattr(acceptance, "_require_clean_worktree", lambda _env: None)
-    assert acceptance.main(["--evidence-root", str(root)]) == 1
+    assert acceptance.main([
+        "--evidence-root", str(root), "--blender", str(blender), "--uv", str(uv),
+    ]) == 1
     assert [call[0] for call in calls] == [
         "vendor_generate", "vendor_check", "background", "gui",
     ]
@@ -92,6 +102,8 @@ def test_reused_evidence_root_is_rejected_without_touching_it(tmp_path, monkeypa
 
 def test_success_requires_all_three_artifacts_and_writes_hashes(tmp_path, monkeypatch):
     root = tmp_path / "evidence"
+    blender = _write_executable(tmp_path / "blender")
+    uv = _write_executable(tmp_path / "uv")
     calls = []
 
     def fake_run(stage, _command, *, env, log_path, timeout):
@@ -106,7 +118,9 @@ def test_success_requires_all_three_artifacts_and_writes_hashes(tmp_path, monkey
 
     monkeypatch.setattr(acceptance, "_run_command", fake_run)
     monkeypatch.setattr(acceptance, "_require_clean_worktree", lambda _env: None)
-    assert acceptance.main(["--evidence-root", str(root)]) == 0
+    assert acceptance.main([
+        "--evidence-root", str(root), "--blender", str(blender), "--uv", str(uv),
+    ]) == 0
     assert calls == [
         "vendor_generate", "vendor_check", "background", "gui", "recovery",
     ]
@@ -114,6 +128,74 @@ def test_success_requires_all_three_artifacts_and_writes_hashes(tmp_path, monkey
     assert summary["success"] is True
     assert set(summary["artifacts"]) == {"gui", "nfr", "recovery"}
     assert all(len(item["sha256"]) == 64 for item in summary["artifacts"].values())
+
+
+@pytest.mark.parametrize("fixture_name", ["blender-one", "blender-two"])
+def test_selected_blender_and_private_stage_environment_reach_all_smokes(
+    tmp_path, monkeypatch, fixture_name,
+):
+    root = tmp_path / "evidence"
+    blender = _write_executable(tmp_path / fixture_name, fixture_name)
+    uv = _write_executable(tmp_path / "uv")
+    calls = {}
+
+    def fake_run(stage, command, *, env, log_path, timeout):
+        calls[stage] = (command, env)
+        _write_log(log_path, stage)
+        if stage == "gui":
+            _write_json(root / "gui.json", _gui_artifact(True))
+            _write_json(root / "nfr.json", _formal_artifact("nfr"))
+        elif stage == "recovery":
+            _write_json(root / "recovery.json", _formal_artifact("recovery"))
+        return 0
+
+    monkeypatch.setattr(acceptance, "_run_command", fake_run)
+    monkeypatch.setattr(acceptance, "_require_clean_worktree", lambda _env: None)
+    assert acceptance.main([
+        "--evidence-root", str(root), "--blender", str(blender), "--uv", str(uv),
+    ]) == 0
+
+    assert str(blender) != str(acceptance.DEFAULT_BLENDER)
+    assert calls["background"][0][0] == str(blender)
+    assert calls["gui"][0][0] == str(blender)
+    recovery_command = calls["recovery"][0]
+    assert recovery_command[recovery_command.index("--blender") + 1] == str(blender)
+
+    user_keys = {
+        "BLENDER_USER_CONFIG", "BLENDER_USER_SCRIPTS",
+        "BLENDER_USER_EXTENSIONS", "BLENDER_USER_DATAFILES",
+        "BLENDER_USER_RESOURCES",
+    }
+    stage_paths = []
+    for stage in ("background", "gui", "recovery"):
+        env = calls[stage][1]
+        paths = {key: Path(env[key]) for key in user_keys}
+        assert len(set(paths.values())) == len(user_keys)
+        assert env["TMPDIR"] == env["TMP"] == env["TEMP"]
+        paths["TMPDIR"] = Path(env["TMPDIR"])
+        assert all(root in path.parents for path in paths.values())
+        assert all(path.is_dir() and path.stat().st_mode & 0o777 == 0o700
+                   for path in paths.values())
+        stage_paths.append(set(paths.values()))
+    assert len(set().union(*stage_paths)) == sum(len(paths) for paths in stage_paths)
+
+
+def test_non_executable_blender_fails_before_process_spawn(tmp_path, monkeypatch):
+    root = tmp_path / "evidence"
+    blender = tmp_path / "not-executable"
+    blender.write_text("fixture", encoding="utf-8")
+    blender.chmod(0o600)
+    uv = _write_executable(tmp_path / "uv")
+    monkeypatch.setattr(
+        acceptance, "_run_command",
+        lambda *_args, **_kwargs: pytest.fail("no process may start"),
+    )
+
+    assert acceptance.main([
+        "--evidence-root", str(root), "--blender", str(blender), "--uv", str(uv),
+    ]) == 1
+    summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+    assert summary["failure_code"] == "invalid_blender"
 
 
 def test_gui_runner_publishes_success_in_its_artifact():

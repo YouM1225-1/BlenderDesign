@@ -35,6 +35,13 @@ GUI_REQUIRED_TRUE = (
     "timer_tick", "revision_bump", "fields", "hash_scope", "cycles_leak_free",
     "large_scene", "large_scene_budget_ok", "nfr_p1",
 )
+BLENDER_PRIVATE_DIRECTORIES = {
+    "BLENDER_USER_CONFIG": "user-config",
+    "BLENDER_USER_SCRIPTS": "user-scripts",
+    "BLENDER_USER_EXTENSIONS": "user-extensions",
+    "BLENDER_USER_DATAFILES": "user-datafiles",
+    "BLENDER_USER_RESOURCES": "user-resources",
+}
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -165,10 +172,20 @@ def _execute(args: argparse.Namespace, root: Path) -> dict[str, Any]:
     base_env = _clean_environment(uv)
     _require_clean_worktree(base_env)
     runtime = {}
+    blender_env = {}
     for name in ("background", "gui", "recovery"):
         path = root / f"{name}-runtime"
         _create_private_directory(path)
         runtime[name] = path
+        stage_env = {}
+        for key, suffix in BLENDER_PRIVATE_DIRECTORIES.items():
+            path = root / f"{name}-{suffix}"
+            _create_private_directory(path)
+            stage_env[key] = str(path)
+        temporary = root / f"{name}-temp"
+        _create_private_directory(temporary)
+        stage_env.update({key: str(temporary) for key in ("TMPDIR", "TMP", "TEMP")})
+        blender_env[name] = stage_env
     recovery_registry = root / "recovery-processes"
     _create_private_directory(recovery_registry)
 
@@ -192,7 +209,9 @@ def _execute(args: argparse.Namespace, root: Path) -> dict[str, Any]:
         "background",
         [str(blender), "--background", "--factory-startup", "--python-exit-code", "1",
          "--python", "smoke/bg_check.py"],
-        env=base_env | {"BLENDERCODEX_ROOT": str(runtime["background"])},
+        env=base_env | blender_env["background"] | {
+            "BLENDERCODEX_ROOT": str(runtime["background"]),
+        },
         log_path=background_log, timeout=args.background_timeout_seconds,
     )
     stages["background"] = {"exit_code": rc}
@@ -204,7 +223,7 @@ def _execute(args: argparse.Namespace, root: Path) -> dict[str, Any]:
         "gui",
         [str(blender), "--factory-startup", "--python-exit-code", "1",
          "--python", "smoke/runner.py"],
-        env=base_env | {
+        env=base_env | blender_env["gui"] | {
             "BLENDERCODEX_ROOT": str(runtime["gui"]),
             "BLENDERCODEX_SMOKE_OUT": str(gui_path),
             "BLENDERCODEX_NFR_OUT": str(nfr_path),
@@ -223,8 +242,9 @@ def _execute(args: argparse.Namespace, root: Path) -> dict[str, Any]:
         [str(uv), "run", "--frozen", "python", "smoke/e2e.py", "recovery",
          "--root", str(runtime["recovery"]), "--output", str(recovery_path),
          "--process-registry", str(recovery_registry),
+         "--blender", str(blender),
          "--timeout-seconds", str(args.recovery_timeout_seconds)],
-        env=base_env, log_path=recovery_log,
+        env=base_env | blender_env["recovery"], log_path=recovery_log,
         timeout=args.recovery_timeout_seconds + 30.0,
     )
     stages["recovery"] = {"exit_code": rc}

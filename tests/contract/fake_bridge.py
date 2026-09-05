@@ -16,7 +16,6 @@ class FakeSceneReader:
         self._v = blender_version
         self._n = n_collections
         self._raise = raise_on_snapshot
-        self.snapshot_calls = 0
 
     def blender_version(self) -> str:
         return self._v
@@ -24,22 +23,9 @@ class FakeSceneReader:
     def status_info(self):
         return (None, 1)
 
-    def snapshot(self) -> SceneSnapshot:
-        """Counterfactual for regression tests: the old Router called this synchronously."""
-        self.snapshot_calls += 1
-        if self._raise is not None:
-            raise self._raise
-        return SceneSnapshot(
-            scene_revision=1, scene_hash="sha256:fake", scene_name="Scene",
-            scene_path=None, units_system="METRIC", units_scale_length=1.0,
-            object_count=0, mesh_count=0, camera_count=0, light_count=0,
-            collections=tuple(f"C{i:06d}" for i in range(self._n)),
-        )
-
     def snapshot_steps(self, *, include_collections: bool = True,
                        include_managed_objects: bool = True
                        ) -> Generator[None, None, SceneSnapshot]:
-        self.snapshot_calls += 1
         if self._raise is not None:
             raise self._raise
         collections: list[str] = []

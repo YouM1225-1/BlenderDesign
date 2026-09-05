@@ -190,7 +190,7 @@ Pass | Fail | Warning | NotTested | NotApplicableByContract | Crash | Truncated 
 
 ### 2.5.1 摘要规范化(冻结算法)
 
-所有进入 digest 的 JSON 对象一律按 **[RFC 8785 JSON Canonicalization Scheme (JCS)](https://www.rfc-editor.org/rfc/rfc8785.html)** 序列化后取 SHA-256:UTF-8 无 BOM、对象键按 UTF-16 码元升序、无多余空白、数字按 ECMAScript `Number::toString` 规则(故 `1` 与 `1.0` 同形)。补充四条项目内规则:
+所有进入 digest 的 JSON 对象一律按 **[RFC 8785 JSON Canonicalization Scheme (JCS)](https://www.rfc-editor.org/rfc/rfc8785.html)** 序列化后取 SHA-256:UTF-8 无 BOM、对象键按 UTF-16 码元升序、无多余空白、数字按 ECMAScript `Number::toString` 规则(故 `1` 与 `1.0` 同形)。整数仅在可精确表示为有限 IEEE-754 binary64 时进入摘要域,并与其等值浮点数走同一格式化路径;不可精确表示或转换溢出的整数 → `contract_invalid`。补充四条项目内规则:
 
 1. **禁止**:重复键、`NaN`/`Infinity`、未规范化 Unicode(输入先做 NFC,否则 `contract_invalid`)、`-0`(一律写 `0`);
 2. **数组顺序有语义**,不排序;需要顺序无关的集合在**写入合同前**即规范化,顺序不符 → `contract_invalid`。排序键必须是**全序**:`checks[]` 按 `(stage_index, order, id)` 三元组升序(`stage_index`:R0→0 … R5→5,由 ID 前缀推导;`order` 只在同 stage 内唯一——实测 `order=10` 在六个 stage 各出现一次,单独使用**不构成全序**);`na_check_ids`、`failed_check_ids`、`platform_blocklist` 等字符串数组按字典序(UTF-16 码元序,与 JCS 键序一致);

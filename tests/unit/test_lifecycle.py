@@ -4,17 +4,21 @@ import logging
 import os
 import socket
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 from collections import deque
 from collections.abc import Generator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from bridge.core.contracts import SceneSnapshot
 from bridge.core.lifecycle import MAX_CONNECTIONS, BridgeSession
 from protocol import envelope, framing
+from server.core.bridge_client import BridgeClient
 
 
 class FakeReader:
@@ -64,6 +68,98 @@ def _rpc(s: BridgeSession, method: str, token: str | None = None) -> dict:
             frames = buf.feed(data)
             if frames:
                 return json.loads(frames[0])
+
+
+def _fd_bridge_roundtrip(runtime_root: str, high_fd: bool) -> None:
+    import errno
+    import resource
+
+    descriptors: list[int] = []
+    bridge = None
+    pump = None
+    stopped_cleanly = False
+    pump_alive = False
+    diagnostic_logger = logging.getLogger("bcx.bridge")
+    diagnostics_disabled = diagnostic_logger.disabled
+    diagnostic_logger.disabled = True
+    try:
+        if high_fd:
+            target_fd = 1030
+            required_limit = target_fd + 1 + 32  # directories, transport, selector and client
+            soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+            if hard_limit != resource.RLIM_INFINITY and hard_limit < required_limit:
+                raise SystemExit(77)
+            if soft_limit != resource.RLIM_INFINITY and soft_limit < required_limit:
+                try:
+                    resource.setrlimit(resource.RLIMIT_NOFILE,
+                                       (required_limit, hard_limit))
+                except (OSError, ValueError):
+                    raise SystemExit(77) from None
+            try:
+                while not descriptors or descriptors[-1] < target_fd:
+                    descriptors.append(os.open(os.devnull, os.O_RDONLY))
+            except OSError as exc:
+                if exc.errno == errno.EMFILE:
+                    raise SystemExit(77) from None
+                raise
+
+        bridge = BridgeSession.start(Path(runtime_root), FakeReader(),
+                                     blender_version="5.2.0")
+        assert bridge._listener is not None
+        if high_fd:
+            assert bridge._listener.fileno() >= 1024
+        else:
+            assert bridge._listener.fileno() < 1024
+        pump = threading.Thread(target=lambda: _pump(bridge), daemon=True)
+        pump.start()
+
+        client = BridgeClient({"socket_path": str(bridge.socket_path),
+                               "token": bridge.token})
+        assert client.call("ping", timeout=1.0)["instance_id"] == bridge.instance_id
+    finally:
+        try:
+            if bridge is not None:
+                stopped_cleanly = bridge.stop()
+        finally:
+            if pump is not None:
+                pump.join(timeout=2.0)
+                pump_alive = pump.is_alive()
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+            diagnostic_logger.disabled = diagnostics_disabled
+
+    assert bridge is not None
+    assert stopped_cleanly and not pump_alive
+    assert not bridge.socket_path.exists()
+    assert not bridge.session_dir.exists()
+    assert not [thread for thread in threading.enumerate()
+                if thread.name.startswith("bcx-")]
+
+
+@pytest.mark.parametrize("high_fd,low_soft_limit", [(False, False), (True, False),
+                                                  (True, True)],
+                         ids=["low-fd", "high-fd", "high-fd-low-soft-limit"])
+def test_bridge_roundtrip_with_high_numbered_descriptors_in_subprocess(
+        tmp_path, high_fd, low_soft_limit):
+    mode = "high" if high_fd else "low"
+    code = (
+        "from tests.unit.test_lifecycle import _fd_bridge_roundtrip; import sys; "
+        "_fd_bridge_roundtrip(sys.argv[1], sys.argv[2] == 'high')"
+    )
+    if low_soft_limit:
+        code = (
+            "import resource\n"
+            "soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)\n"
+            "if hard != resource.RLIM_INFINITY and hard < 1063: raise SystemExit(77)\n"
+            "resource.setrlimit(resource.RLIMIT_NOFILE, (1024, hard))\n"
+        ) + code
+    completed = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path), mode],
+        capture_output=True, text=True, timeout=15.0,
+    )
+    if completed.returncode == 77:
+        pytest.skip("OS resource limits cannot provide descriptor 1024")
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_start_creates_private_files(session, tmp_path):
@@ -473,7 +569,21 @@ def test_accept_failure_closes_unowned_socket_and_retries_close(monkeypatch):
     session._conns = {}
     session._conns_lock = threading.Lock()
     session._pending_close = []
-    monkeypatch.setattr(lc.select, "select", lambda *_args: ([session._listener], [], []))
+    class FakeSelector:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def register(self, *_args):
+            pass
+
+        def select(self, **_kwargs):
+            key = SimpleNamespace(fileobj=session._listener)
+            return [(key, lc.selectors.EVENT_READ)]
+
+    monkeypatch.setattr(lc.selectors, "DefaultSelector", FakeSelector)
 
     session._io_iterate()
     assert accepted.close_calls == 1 and session._conns == {}
@@ -511,8 +621,21 @@ def test_drop_retains_connection_when_close_fails_then_retries():
     session._drop(conn)
     assert session._conns[7] is conn and conn.closing is True
     assert conn.outbox_bytes == 0 and not conn.outbox
+    class FakeSelector:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def register(self, *_args):
+            pass
+
+        def select(self, **_kwargs):
+            return []
+
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(lc.select, "select", lambda *_args: ([], [], []))
+    monkeypatch.setattr(lc.selectors, "DefaultSelector", FakeSelector)
     try:
         session._io_iterate()
     finally:
@@ -650,6 +773,32 @@ def test_io_loop_rechecks_stop_between_iterations():
 
     assert not worker.is_alive()
     assert calls == 1
+
+
+def test_io_loop_exits_after_permanent_monitoring_failure(tmp_path, monkeypatch, caplog):
+    import bridge.core.lifecycle as lc
+
+    calls = 0
+
+    def fail():
+        nonlocal calls
+        calls += 1
+        raise OSError("permanent monitor failure")
+
+    monkeypatch.setattr(lc.selectors, "DefaultSelector", fail)
+    with caplog.at_level(logging.ERROR, logger="bcx.bridge"):
+        session = BridgeSession.start(tmp_path, FakeReader(), blender_version="5.2.0")
+        try:
+            session._io.join(timeout=2.0)
+            assert not session._io.is_alive()
+            assert session.stopped
+            assert calls == 1
+            assert sum(record.message == "io loop iteration failed"
+                       for record in caplog.records) == 1
+        finally:
+            assert session.stop()
+    assert session.cleanup_complete and session._transport_closed()
+    assert not session.socket_path.exists() and not session.session_dir.exists()
 
 
 def test_transport_close_performs_final_io_thread_join():

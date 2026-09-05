@@ -343,7 +343,7 @@ class Discovery:
                 candidates.append((d, sess, identity))
         if not candidates:
             return out
-        return out + self._probe_all(candidates, deadline, stats)
+        return self._probe_all(candidates, deadline, stats)
 
     def _open_run_dir(self, deadline: float | None = None) -> int:
         """Open the configured run directory through its identity-bound parent."""

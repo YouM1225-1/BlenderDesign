@@ -62,9 +62,8 @@ def _acceptance_provenance() -> tuple[str, list[dict[str, str]]]:
     return "acc-" + accumulator.hexdigest()[:12], files
 
 
-def _input_digest(path: Path) -> str:
-    """输入不存在、不可读、不是普通文件、或超过硬上限时返回哨兵值,使 provenance 形状
-    恒定,真正的放行判定交给 R1 的 check。
+def _input_digest(path: Path) -> stages.InputResult:
+    """安全打开一次输入并返回绑定到该 fd/inode 的摘要、大小与失败证据。
 
     有界流式读取,不做 `read_bytes()` 式的无界一次性读入(700 MiB 输入曾把峰值 RSS
     推到 724.7 MiB,且早于 load_contract()/run_r1 的 size_within_limit 之前跑完):
@@ -79,19 +78,59 @@ def _input_digest(path: Path) -> str:
     """
     try:
         before = path.lstat()
-    except OSError:
-        return _UNREADABLE_DIGEST
+    except OSError as exc:
+        return stages.InputResult(
+            None, None,
+            Finding("input_missing", "error", detail=f"cannot stat input: {exc}"),
+        )
+    if stat.S_ISLNK(before.st_mode):
+        return stages.InputResult(
+            None, before.st_size,
+            Finding("input_unreadable", "error", detail="input is a symlink"),
+            Finding("input_is_symlink", "error", detail=str(path)),
+        )
     if not stat.S_ISREG(before.st_mode):
-        return _UNREADABLE_DIGEST
+        return stages.InputResult(
+            None, before.st_size,
+            Finding("input_unreadable", "error", detail="input is not a regular file"),
+            Finding("input_not_regular_file", "error", detail=str(path)),
+        )
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        return _UNREADABLE_DIGEST
+    except OSError as exc:
+        identity_finding = None
+        try:
+            current = path.lstat()
+            if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+                identity_finding = Finding(
+                    "input_identity_changed", "error", detail=str(path))
+        except OSError:
+            identity_finding = Finding("input_identity_changed", "error", detail=str(path))
+        return stages.InputResult(
+            None, before.st_size,
+            Finding("input_unreadable", "error", detail=f"cannot open input: {exc}"),
+            identity_finding,
+        )
+    opened_size: int | None = None
     try:
         opened = os.fstat(descriptor)
+        opened_size = opened.st_size
         if (not stat.S_ISREG(opened.st_mode)
                 or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
-            return _UNREADABLE_DIGEST
+            return stages.InputResult(
+                None, None,
+                Finding("input_unreadable", "error", detail="input identity changed"),
+                Finding("input_identity_changed", "error", detail=str(path)),
+            )
+        if opened.st_size > _MAX_INPUT_DIGEST_BYTES:
+            return stages.InputResult(
+                None, opened.st_size,
+                Finding(
+                    "input_digest_too_large", "error",
+                    detail=(f"{opened.st_size} bytes exceeds digest size limit "
+                            f"{_MAX_INPUT_DIGEST_BYTES}"),
+                ),
+            )
         hasher = hashlib.sha256()
         total = 0
         while True:
@@ -100,11 +139,21 @@ def _input_digest(path: Path) -> str:
                 break
             total += len(chunk)
             if total > _MAX_INPUT_DIGEST_BYTES:
-                return _UNREADABLE_DIGEST
+                return stages.InputResult(
+                    None, total,
+                    Finding(
+                        "input_digest_too_large", "error",
+                        detail=(f"input exceeded digest size limit "
+                                f"{_MAX_INPUT_DIGEST_BYTES} while reading"),
+                    ),
+                )
             hasher.update(chunk)
-        return hasher.hexdigest()
-    except OSError:
-        return _UNREADABLE_DIGEST
+        return stages.InputResult(hasher.hexdigest(), total)
+    except OSError as exc:
+        return stages.InputResult(
+            None, opened_size,
+            Finding("input_unreadable", "error", detail=f"cannot read input: {exc}"),
+        )
     finally:
         os.close(descriptor)
 
@@ -147,19 +196,19 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         version, files = _acceptance_provenance()
-        input_digest = _input_digest(args.input)
+        input_result = _input_digest(args.input)
         provenance = {
             "acceptance_files": files,
             "tools": [{"id": "acceptance", "version": version},
                       {"id": "python", "version": platform.python_version()}],
-            "input_digest": input_digest,
+            "input_digest": input_result.digest or _UNREADABLE_DIGEST,
         }
         contract = load_contract(args.contract, candidate_root=args.input.parent)
         # Task 8:9 条 coordinator-owned check(R0/R1/R5,规范 §7.1 中不依赖外部进程的部分)
         # 真实接入;其余 stage(R2-R4 与外部工具)由后续计划接入,维持 NotTested。
         collected: dict[str, list[Finding]] = {}
         collected.update(stages.run_r0(contract, tools_present=_present_tools(contract)))
-        collected.update(stages.run_r1(contract, args.input))
+        collected.update(stages.run_r1(contract, input_result))
         # 规范 §2.5.1 与 §2.6 条款 1:R5 必须用同一算法对同一合同路径**重算** digest 再
         # 比对(TOCTOU 检查),不能拿 R0 时记下的 contract.digest 跟它自己比——那样构造
         # 上永远不可能失败。复算失败(例如合同在此期间被删除或改坏)按既有 fail-closed

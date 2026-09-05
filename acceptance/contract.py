@@ -1,6 +1,8 @@
 """规范 §7.3 contract.json 的封闭加载与 §2.5.1 的 digest。"""
 from __future__ import annotations
 
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,8 @@ _TOP_LEVEL = frozenset({
 })
 _KINDS = frozenset({"blend_native", "interchange"})
 _GRADES = ("local-trusted", "isolated", "attested")
+_MAX_CONTRACT_BYTES = 1024 * 1024
+_CONTRACT_READ_CHUNK_BYTES = 64 * 1024
 PROJECTION_FIELDS: tuple[str, ...] = (
     "p01_object_count", "p02_triangle_count", "p03_bbox", "p04_vertex_count",
     "p05_uv_layers", "p06_material_slot_count", "p07_pbr_factors",
@@ -32,6 +36,34 @@ PROJECTION_FIELDS: tuple[str, ...] = (
 
 def _fail(message: str) -> AcceptanceFailure:
     return AcceptanceFailure("contract_invalid", message)
+
+
+def _read_contract(path: Path) -> bytes:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise _fail(f"cannot safely open contract: {exc}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise _fail("contract must be a regular file")
+        if opened.st_size > _MAX_CONTRACT_BYTES:
+            raise _fail(
+                f"contract exceeds size limit {_MAX_CONTRACT_BYTES}: {opened.st_size} bytes")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, _CONTRACT_READ_CHUNK_BYTES)
+            if not chunk:
+                return b"".join(chunks)
+            total += len(chunk)
+            if total > _MAX_CONTRACT_BYTES:
+                raise _fail(f"contract exceeds size limit {_MAX_CONTRACT_BYTES} while reading")
+            chunks.append(chunk)
+    except OSError as exc:
+        raise _fail(f"cannot read contract: {exc}") from exc
+    finally:
+        os.close(descriptor)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,14 +105,14 @@ class Contract:
 def load_contract(path: Path, *, candidate_root: Path) -> Contract:
     try:
         resolved = path.resolve(strict=True)
-    except FileNotFoundError as exc:
+    except OSError as exc:
         raise _fail(f"contract file not found: {exc}") from exc
     root = candidate_root.expanduser().resolve()
     if resolved == root or root in resolved.parents:
         raise _fail("contract must live outside the candidate input tree")
     try:
-        value = strict_json_loads(resolved.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        value = strict_json_loads(_read_contract(resolved).decode("utf-8"))
+    except ValueError as exc:
         raise _fail(f"unreadable or invalid JSON: {exc}") from exc
     if type(value) is not dict:
         raise _fail("contract must be a JSON object")
@@ -99,6 +131,13 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
         raise _fail("profile must be static_render in P0")
     if type(value["required_isolation_grade"]) is not str or value["required_isolation_grade"] not in _GRADES:
         raise _fail(f"required_isolation_grade must be one of {list(_GRADES)}")
+
+    budget = value["budget"]
+    if type(budget) is not dict:
+        raise _fail("budget must be an object")
+    max_file_bytes = budget.get("max_file_bytes")
+    if type(max_file_bytes) is not int or max_file_bytes < 0:
+        raise _fail("budget.max_file_bytes must be a nonnegative integer")
 
     expected_specs = sorted(reg.checks_for_kind(kind), key=reg.sort_key)
     declared = value["checks"]
@@ -155,9 +194,8 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
         if not isinstance(tool["sha256"], str) or len(tool["sha256"]) != 64:
             raise _fail("tools[].sha256 must be a 64-char hex string")
 
-    body = {k: v for k, v in value.items() if k != "contract_digest"}
     try:
-        computed = canonical_digest("contract", body)
+        computed = canonical_digest("contract", value)
     except CanonicalError as exc:
         raise _fail(f"contract is not canonicalizable: {exc}") from exc
     return Contract(raw=value, digest=computed)

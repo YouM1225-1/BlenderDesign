@@ -689,6 +689,7 @@ def _step() -> float | None:
                     "smoke/e2e.py", "nfr", "--root", str(root),
                     "--instance", session.instance_id, "--output", NFR_OUT,
                     "--process-registry", str(process_dir),
+                    "--blender", str(Path(bpy.app.binary_path).resolve(strict=True)),
                     "--offline-root", str(offline_root),
                     "--timeout-seconds", str(NFR_TIMEOUT - NFR_CLEANUP_MARGIN),
                     "--registry-marker", registry_marker,

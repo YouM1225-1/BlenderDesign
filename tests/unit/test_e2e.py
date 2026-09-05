@@ -46,6 +46,13 @@ def _clear_vendor_bytecode() -> None:
             path.unlink()
 
 
+def _write_blender_fixture(path: Path, version: str) -> Path:
+    path.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' {version!r}\n", encoding="utf-8")
+    path.chmod(0o700)
+    return path.resolve()
+
+
 def _row(tool, arguments, ok=True, error=None, instance_id=None, request_id=1):
     _, digest = e2e._canonical(arguments)
     return {
@@ -217,13 +224,14 @@ def test_private_artifact_write_preserves_exact_0600(tmp_path, monkeypatch):
     args = SimpleNamespace(
         mode="nfr", timeout_seconds=15.0,
         registry_marker="0" * 32, registry_not_before_ns=1,
-        output=str(artifact),
+        output=str(artifact), blender=str(
+            _write_blender_fixture(tmp_path / "blender", "Blender worker")),
     )
     monkeypatch.setattr(e2e, "MAX_FAILURE_GROUP_DEPTH", 2)
     monkeypatch.setattr(e2e, "MAX_FAILURE_LEAVES", 4)
     monkeypatch.setattr(e2e, "MAX_FAILURE_MESSAGE_CHARS", 16)
     monkeypatch.setattr(e2e, "MAX_FAILURE_ERROR_CHARS", 160)
-    monkeypatch.setattr(e2e, "_current_provenance", lambda _deadline: {})
+    monkeypatch.setattr(e2e, "_current_provenance", lambda _deadline, _blender: {})
     monkeypatch.setattr(e2e, "_run_bounded", grouped_failure)
     assert e2e._worker_main(args) == 1
     failed = json.loads(artifact.read_text())
@@ -529,6 +537,8 @@ def test_server_params_reserves_first_publication_before_spawn(
             root=str(lexical_runtime_root), mode=mode,
             offline_root=str(offline_root), instance="gui-1-deadbeef",
             registry_marker=marker, registry_not_before_ns=not_before_ns,
+            blender=str(_write_blender_fixture(
+                tmp_path / f"{mode}-blender", f"Blender {mode}")),
         ), registry, time.monotonic() + 1.0))
     assert seen_roots == [
         ("nfr", lexical_runtime_root),
@@ -546,8 +556,75 @@ def test_server_params_reserves_first_publication_before_spawn(
     with pytest.raises(RuntimeError, match="pre-spawn failure"):
         e2e._start_blender(
             runtime_root, tmp_path / "ready", tmp_path / "stop",
-            failed_record, marker)
+            failed_record, marker, "/private/selected/blender")
     assert list(registry.iterdir()) == []
+
+
+def test_recovery_blender_spawn_uses_explicit_executable(tmp_path, monkeypatch):
+    tmp_path.chmod(0o700)
+    process_record = tmp_path / "blender.json"
+    captured = {}
+
+    class Process:
+        pass
+
+    monkeypatch.setattr(
+        e2e.subprocess, "Popen",
+        lambda command, **kwargs: captured.update(command=command, kwargs=kwargs) or Process(),
+    )
+    blender = _write_blender_fixture(tmp_path / "selected-blender", "Blender selected")
+    _, publication = e2e._start_blender(
+        tmp_path, tmp_path / "ready", tmp_path / "stop", process_record,
+        process_registry.new_marker(), str(blender),
+    )
+    process_registry.finish_publication_reservation(*publication)
+
+    command = captured["command"]
+    assert command[command.index(process_registry.REPLACE_MODE) + 6] == str(blender)
+    assert str(e2e.BLENDER) not in command
+
+
+def test_runner_passes_actual_host_executable_to_nfr_helper():
+    runner = Path(__file__).resolve().parents[2] / "smoke" / "runner.py"
+    tree = ast.parse(runner.read_text(encoding="utf-8"))
+    step = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_step"
+    )
+    command = next(
+        node for node in ast.walk(step)
+        if isinstance(node, ast.List)
+        and any(isinstance(item, ast.Constant) and item.value == "smoke/e2e.py"
+                for item in node.elts)
+    )
+    option = next(
+        index for index, item in enumerate(command.elts)
+        if isinstance(item, ast.Constant) and item.value == "--blender"
+    )
+    assert ast.unparse(command.elts[option + 1]) == (
+        "str(Path(bpy.app.binary_path).resolve(strict=True))")
+
+
+def test_helper_parser_validates_explicit_blender_before_dispatch(tmp_path, monkeypatch):
+    blender = _write_blender_fixture(tmp_path / "blender", "Blender parser")
+    common = [
+        "nfr", "--root", str(tmp_path), "--output", str(tmp_path / "out.json"),
+        "--instance", "gui-1-deadbeef", "--offline-root", str(tmp_path / "offline"),
+        "--process-registry", str(tmp_path / "registry"),
+        "--timeout-seconds", "15", "--blender",
+    ]
+    args = e2e._parse_args([*common, str(blender)])
+    assert args.blender == str(blender)
+
+    invalid = tmp_path / "not-executable"
+    invalid.write_text("fixture", encoding="utf-8")
+    invalid.chmod(0o600)
+    monkeypatch.setattr(
+        e2e.subprocess, "Popen",
+        lambda *_args, **_kwargs: pytest.fail("no process may start"),
+    )
+    with pytest.raises(SystemExit):
+        e2e._parse_args([*common, str(invalid)])
 
 
 def test_stdlib_bootstrap_publishes_identity_before_target_runs(tmp_path):
@@ -1703,7 +1780,8 @@ def test_recovery_supervisor_rejects_completion_observed_after_deadline(
     monkeypatch.setattr(e2e, "cleanup_registry", lambda *_args, **_kwargs: None)
     args = SimpleNamespace(
         root=str(tmp_path), output=str(output), process_registry=str(registry),
-        timeout_seconds=1.0,
+        timeout_seconds=1.0, blender=str(
+            _write_blender_fixture(tmp_path / "blender", "Blender late")),
     )
     assert e2e._supervise_recovery(args) == 1
     artifact = json.loads(output.read_text())
@@ -1875,7 +1953,8 @@ def test_recovery_supervisor_signal_is_safe_during_poll_and_registry_cleanup(
         monkeypatch.setattr(e2e, "cleanup_registry", cleanup)
         args = SimpleNamespace(
             root=str(tmp_path), output=str(output), process_registry=str(registry),
-            timeout_seconds=1.0,
+            timeout_seconds=1.0, blender=str(_write_blender_fixture(
+                tmp_path / f"blender-{window}", f"Blender {window}")),
         )
         assert e2e._supervise_recovery(args) == 1
         artifact = json.loads(output.read_text())
@@ -1943,11 +2022,40 @@ def test_recovery_supervisor_reaps_resistant_worker_and_registered_group(
     assert artifact["success"] is False and artifact["worker_timed_out"] is True
 
 
+@pytest.mark.parametrize(
+    ("fixture_name", "version"),
+    [("blender-one", "Blender Fixture One"),
+     ("blender-two", "Blender Fixture Two")],
+)
+def test_provenance_uses_explicit_blender_version_output(
+    tmp_path, monkeypatch, fixture_name, version,
+):
+    blender = _write_blender_fixture(tmp_path / fixture_name, version)
+    monkeypatch.setattr(
+        e2e, "_git_text",
+        lambda _deadline, *args, **_kwargs: "" if args[0] == "status" else "fixed",
+    )
+    monkeypatch.setattr(
+        e2e, "_tracked_sources",
+        lambda *_args: {e2e.ROOT / "pyproject.toml", e2e.ROOT / "uv.lock"},
+    )
+
+    provenance = e2e._current_provenance(
+        time.monotonic() + 2.0, str(blender))
+
+    assert str(blender) != e2e.BLENDER
+    assert provenance["blender"] == {
+        "executable": str(blender),
+        "version_output": version,
+        "version_output_sha256": hashlib.sha256(version.encode()).hexdigest(),
+    }
+    assert provenance["commands"]["blender_recovery"][0] == str(blender)
+
+
 def test_provenance_ignores_ignored_untracked_python(monkeypatch):
     ignored = e2e.ROOT / "tests/__pycache__/ignored-source.py"
     ignored.parent.mkdir(exist_ok=True)
     ignored.write_text("must not enter the source manifest")
-    monkeypatch.setattr(e2e, "BLENDER", "/bin/echo")
     original_git_text = e2e._git_text
     original_git_bytes = e2e._git_bytes
 
@@ -1969,7 +2077,8 @@ def test_provenance_ignores_ignored_untracked_python(monkeypatch):
     monkeypatch.setattr(e2e, "_git_bytes", existing_sources)
     _clear_vendor_bytecode()
     try:
-        provenance = e2e._current_provenance(time.monotonic() + 10.0)
+        provenance = e2e._current_provenance(
+            time.monotonic() + 10.0, "/bin/echo")
     finally:
         ignored.unlink(missing_ok=True)
     assert str(ignored.relative_to(e2e.ROOT)) not in provenance["sources"]["files"]
@@ -1993,7 +2102,7 @@ def test_provenance_rejects_vendor_extra_or_content_drift(monkeypatch):
 
         monkeypatch.setattr(e2e, "_git_text", unrelated_dirty)
         with pytest.raises(RuntimeError, match="clean Git worktree"):
-            e2e._current_provenance(time.monotonic() + 1.0)
+            e2e._current_provenance(time.monotonic() + 1.0, "/bin/echo")
     monkeypatch.setattr(e2e, "_git_text", original_git_text)
     required = {e2e.ROOT / "pyproject.toml", e2e.ROOT / "uv.lock"}
     _clear_vendor_bytecode()

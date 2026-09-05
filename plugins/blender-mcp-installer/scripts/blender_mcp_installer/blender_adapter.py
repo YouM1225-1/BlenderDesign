@@ -886,18 +886,6 @@ def compare_extension_tree(
     )
 
 
-def _entry_matches(info: os.stat_result, entry: TreeEntry, digest: str | None = None) -> bool:
-    return (
-        info.st_dev == entry.dev
-        and info.st_ino == entry.ino
-        and info.st_uid == entry.uid
-        and stat.S_IMODE(info.st_mode) == entry.mode
-        and info.st_size == entry.size
-        and info.st_mtime_ns == entry.mtime_ns
-        and (digest is None or digest == entry.sha256)
-    )
-
-
 def prepare_extension_for_restore(
     comparison: ExtensionComparison, expected_image: TreeImage | None = None
 ) -> TreeImage:
@@ -914,104 +902,7 @@ def prepare_extension_for_restore(
     reference = comparison.current
     if reference.capture() != comparison.current_image:
         raise InstallerError("extension payload changed before cleanup")
-    entries = {entry.path: entry for entry in comparison.current_image.entries}
-    preserved = (
-        set() if expected_image is None else {entry.path for entry in expected_image.entries}
-    )
-    removable_pyc = tuple(path for path in comparison.disposable_pyc if path not in preserved)
-    removable_dirs = tuple(path for path in comparison.disposable_dirs if path not in preserved)
-    for path in removable_pyc:
-        relative = PurePath(*reference.relative.parts, *PurePosixPath(path).parts)
-        parent_fd, name = reference.root.open_parent(relative)
-        try:
-            expected = entries[path]
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
-            try:
-                info = os.fstat(fd)
-                digest = hashlib.sha256()
-                while chunk := os.read(fd, 1024 * 1024):
-                    digest.update(chunk)
-                if not _entry_matches(info, expected, digest.hexdigest()):
-                    raise InstallerError("extension payload changed before cleanup")
-            finally:
-                os.close(fd)
-            linked = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-            if not _entry_matches(linked, expected):
-                raise InstallerError("extension payload changed before cleanup")
-            os.unlink(name, dir_fd=parent_fd)
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
-    for path in removable_dirs:
-        relative = PurePath(*reference.relative.parts, *PurePosixPath(path).parts)
-        parent_fd, name = reference.root.open_parent(relative)
-        try:
-            expected = entries[path]
-            info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-            if (
-                not stat.S_ISDIR(info.st_mode)
-                or info.st_dev != expected.dev
-                or info.st_ino != expected.ino
-                or info.st_uid != expected.uid
-                or stat.S_IMODE(info.st_mode) != expected.mode
-            ):
-                raise InstallerError("extension cache directory changed before cleanup")
-            fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
-            try:
-                if os.listdir(fd):
-                    raise InstallerError("extension cache directory is not empty")
-            finally:
-                os.close(fd)
-            os.rmdir(name, dir_fd=parent_fd)
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
     result = reference.capture()
-    if expected_image is not None:
-        expected_entries = {entry.path: entry for entry in expected_image.entries}
-        result_entries = {entry.path: entry for entry in result.entries}
-        affected_dirs = {
-            parent.as_posix()
-            for path in (*removable_pyc, *removable_dirs)
-            for parent in PurePosixPath(path).parents
-            if parent != PurePosixPath(".")
-        }
-        for path in sorted(affected_dirs, key=lambda item: (-len(PurePosixPath(item).parts), item)):
-            expected_entry = expected_entries.get(path)
-            result_entry = result_entries.get(path)
-            if expected_entry is None or result_entry == expected_entry:
-                continue
-            if (
-                result_entry is None
-                or result_entry.kind != "dir"
-                or expected_entry.kind != "dir"
-                or (
-                    result_entry.dev,
-                    result_entry.ino,
-                    result_entry.uid,
-                    result_entry.mode,
-                    result_entry.size,
-                )
-                != (
-                    expected_entry.dev,
-                    expected_entry.ino,
-                    expected_entry.uid,
-                    expected_entry.mode,
-                    expected_entry.size,
-                )
-            ):
-                raise InstallerError("extension payload conflict after cleanup")
-            relative = PurePath(*reference.relative.parts, *PurePosixPath(path).parts)
-            fd = reference.root.open_directory(relative)
-            try:
-                info = os.fstat(fd)
-                if not _entry_matches(info, result_entry):
-                    raise InstallerError("extension directory changed before metadata restore")
-                os.utime(fd, ns=(info.st_atime_ns, expected_entry.mtime_ns))
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        result = reference.capture()
     if expected_image is not None and result != expected_image:
         if (
             expected_image.state is not ImageState.PRESENT

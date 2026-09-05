@@ -1,9 +1,13 @@
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
 from acceptance import check_registry as reg
+from acceptance import contract as contract_module
 from acceptance.contract import load_contract
 from acceptance.primitives import AcceptanceFailure
 
@@ -54,6 +58,93 @@ def test_valid_contract_loads_and_has_stable_digest(tmp_path):
     second = load_contract(path, candidate_root=tmp_path / "candidate")
     assert first.digest == second.digest
     assert first.artifact_kind == "blend_native"
+
+
+def test_contract_fifo_is_rejected_without_blocking(tmp_path):
+    fifo = tmp_path / "contract.json"
+    os.mkfifo(fifo)
+    repo_root = Path(__file__).resolve().parents[2]
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from acceptance.contract import load_contract\n"
+        "from acceptance.primitives import AcceptanceFailure\n"
+        "try:\n"
+        "    load_contract(Path(sys.argv[1]), candidate_root=Path(sys.argv[2]))\n"
+        "except AcceptanceFailure as exc:\n"
+        "    raise SystemExit(0 if exc.code == 'contract_invalid' else 3)\n"
+        "raise SystemExit(2)\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(fifo), str(tmp_path / "candidate")],
+        cwd=repo_root, capture_output=True, text=True, timeout=2.0, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_contract_read_has_an_explicit_size_cap(tmp_path, monkeypatch):
+    raw = json.dumps(_valid()).encode("utf-8")
+    path = tmp_path / "contract.json"
+    path.write_bytes(raw)
+    monkeypatch.setattr(contract_module, "_MAX_CONTRACT_BYTES", len(raw) - 1)
+    with pytest.raises(AcceptanceFailure, match="size limit") as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16", "utf-32"])
+def test_contract_requires_strict_utf8_without_bom(tmp_path, encoding):
+    path = tmp_path / "contract.json"
+    path.write_bytes(json.dumps(_valid()).encode(encoding))
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_huge_integer_token_is_contract_invalid(tmp_path):
+    raw = json.dumps(_valid()).replace(
+        '"max_triangles": 1000000', '"max_triangles": 1' + "0" * 5000)
+    path = tmp_path / "contract.json"
+    path.write_text(raw, encoding="utf-8")
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+@pytest.mark.parametrize("bad_budget", [None, True, 1, 1.0, "budget", []])
+def test_budget_must_be_an_object(tmp_path, bad_budget):
+    bad = _valid()
+    bad["budget"] = bad_budget
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+@pytest.mark.parametrize("bad_limit", [None, True, -1, 1.0, "1", [], {}])
+def test_max_file_bytes_must_be_a_precise_nonnegative_integer(tmp_path, bad_limit):
+    bad = _valid()
+    bad["budget"]["max_file_bytes"] = bad_limit
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_max_file_bytes_is_required(tmp_path):
+    bad = _valid()
+    del bad["budget"]["max_file_bytes"]
+    path = _write(tmp_path, bad)
+    with pytest.raises(AcceptanceFailure) as caught:
+        load_contract(path, candidate_root=tmp_path / "candidate")
+    assert caught.value.code == "contract_invalid"
+
+
+def test_zero_max_file_bytes_is_valid(tmp_path):
+    value = _valid()
+    value["budget"]["max_file_bytes"] = 0
+    contract = load_contract(_write(tmp_path, value), candidate_root=tmp_path / "candidate")
+    assert contract.raw["budget"]["max_file_bytes"] == 0
 
 
 def test_unknown_top_level_field_is_rejected(tmp_path):

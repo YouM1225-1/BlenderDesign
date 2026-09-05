@@ -96,7 +96,8 @@ def test_error_frame_maps_to_bridge_error(live):
     assert ei.value.code == "UNKNOWN_METHOD"
 
 
-def test_slow_drip_respects_total_deadline():
+@pytest.mark.parametrize("poll", [False, True])
+def test_slow_drip_respects_total_deadline(poll):
     # audit F-02：对端每 20ms 滴 1 字节。逐次 settimeout 会被无限续命；
     # 总 deadline 必须在 ~0.3s 止损（滴完整帧需 ~1.2s）
     socket_dir = Path(tempfile.mkdtemp(prefix="bcx-"))
@@ -124,7 +125,7 @@ def test_slow_drip_respects_total_deadline():
     c = BridgeClient({"socket_path": str(sock_path), "token": "t"})
     t0 = time.monotonic()
     with pytest.raises(BridgeError) as ei:
-        c.call("ping", timeout=0.3)
+        c.call("ping", timeout=0.3, check_cancelled=(lambda: None) if poll else None)
     elapsed = time.monotonic() - t0
     try:
         assert ei.value.code == "BRIDGE_TIMEOUT"
@@ -294,3 +295,153 @@ def test_malformed_response_shape_maps_to_bridge_unavailable(response_cases):
         worker.join(timeout=1.0)
         sock_path.unlink(missing_ok=True)
         socket_dir.rmdir()
+
+
+@pytest.mark.parametrize("stage", ["connect", "connecting", "send"])
+def test_cancellation_interrupts_socket_stalls(stage, monkeypatch):
+    import asyncio
+    import errno
+
+    import server.core.bridge_client as client_module
+
+    cancelled_at = time.monotonic() + 0.1
+    closed = []
+
+    def check_cancelled():
+        if time.monotonic() >= cancelled_at:
+            raise asyncio.CancelledError()
+
+    class StalledSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            closed.append(True)
+
+        def settimeout(self, timeout):
+            self.timeout = timeout
+
+        def setblocking(self, blocking):
+            self.timeout = None if blocking else 0
+
+        def connect(self, _path):
+            if stage == "connecting":
+                raise BlockingIOError(errno.EINPROGRESS, "connecting")
+            if stage == "connect":
+                if self.timeout == 0:
+                    raise BlockingIOError(errno.EAGAIN, "backlog full")
+                time.sleep(min(self.timeout, 0.5))
+                raise socket.timeout()
+
+        def sendall(self, _data):
+            time.sleep(min(self.timeout, 0.5))
+            raise socket.timeout()
+
+        def send(self, _data):
+            time.sleep(min(self.timeout, 0.5))
+            raise socket.timeout()
+
+    class PendingSelector:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def register(self, *_args):
+            pass
+
+        def select(self, timeout):
+            time.sleep(timeout)
+            return []
+
+    monkeypatch.setattr(client_module.selectors, "DefaultSelector", PendingSelector)
+    monkeypatch.setattr(client_module.socket, "socket", lambda *_args: StalledSocket())
+    client = BridgeClient({"socket_path": "unused", "token": "t"})
+    with pytest.raises(asyncio.CancelledError):
+        client.call("scene_summary", check_cancelled=check_cancelled)
+    assert time.monotonic() - cancelled_at < 0.3
+    assert closed == [True]
+
+
+def test_polling_preserves_partial_send_and_receive_frames():
+    sent = bytearray()
+    response = envelope.ok_frame("request", {"pong": True})
+
+    class FragmentedSocket:
+        sends = 0
+        receives = 0
+
+        def settimeout(self, timeout):
+            assert 0 < timeout <= 0.05
+
+        def send(self, pending):
+            self.sends += 1
+            if self.sends == 2:
+                raise socket.timeout()
+            chunk = pending[:3]
+            sent.extend(chunk)
+            return len(chunk)
+
+        def recv(self, _size):
+            self.receives += 1
+            if self.receives == 1:
+                return response[:3]
+            if self.receives == 2:
+                raise socket.timeout()
+            return response[3:]
+
+    client = FragmentedSocket()
+    deadline = time.monotonic() + 1
+    BridgeClient._send(client, b"complete-request-frame", deadline, lambda: None)
+    assert sent == b"complete-request-frame"
+    payload = BridgeClient._receive(client, deadline, lambda: None)
+    assert envelope.decode_response(payload)["result"] == {"pong": True}
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_real_full_uds_backlog_fails_or_remains_cancellable_and_deadline_bound(cancel):
+    import asyncio
+    import errno
+
+    with tempfile.TemporaryDirectory(prefix="bcx-backlog-") as directory:
+        path = str(Path(directory) / "bridge.sock")
+        fillers = []
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(path)
+            server.listen(1)
+            try:
+                # Linux can report EAGAIN; macOS can refuse excess UDS connections.
+                for _ in range(10):
+                    filler = socket.socket(socket.AF_UNIX)
+                    fillers.append(filler)
+                    filler.setblocking(False)
+                    result = filler.connect_ex(path)
+                    if result in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINPROGRESS,
+                                  errno.ECONNREFUSED):
+                        break
+                    assert result == 0
+                else:
+                    pytest.fail("could not fill UDS backlog")
+                started = time.monotonic()
+
+                def check_cancelled():
+                    if time.monotonic() - started >= 0.1:
+                        raise asyncio.CancelledError()
+
+                client = BridgeClient({"socket_path": path, "token": "t"})
+                if result == errno.ECONNREFUSED:
+                    with pytest.raises(BridgeError) as exc:
+                        client.call("scene_summary", check_cancelled=check_cancelled if cancel else None)
+                    assert exc.value.code == envelope.BRIDGE_UNAVAILABLE
+                elif cancel:
+                    with pytest.raises(asyncio.CancelledError):
+                        client.call("scene_summary", check_cancelled=check_cancelled)
+                else:
+                    with pytest.raises(BridgeError) as exc:
+                        client.call("scene_summary", timeout=0.15)
+                    assert exc.value.code == envelope.BRIDGE_TIMEOUT
+                assert time.monotonic() - started < 0.5
+            finally:
+                for filler in fillers:
+                    filler.close()

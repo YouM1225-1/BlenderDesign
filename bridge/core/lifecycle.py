@@ -6,7 +6,7 @@ import hashlib
 import logging
 import os
 import secrets
-import select
+import selectors
 import socket
 import stat as stat_mod
 import threading
@@ -298,7 +298,7 @@ class BridgeSession:
                 self._wake_w.send(b"x")
                 self._wake_pending = True
             except BlockingIOError:
-                self._wake_pending = True   # 已有字节占满缓冲区，同样会唤醒 select
+                self._wake_pending = True   # 已有字节占满缓冲区，同样会唤醒 selector
             except OSError:
                 pass
 
@@ -322,8 +322,12 @@ class BridgeSession:
             try:
                 if self._io_iterate():
                     return
-            except Exception:                            # 规则 5：护栏，绝不带走线程
+            except Exception:
+                # The main-thread lifecycle owner drains Blender continuations and
+                # retries cleanup; the I/O worker must neither join itself nor drain.
+                self.stopped = True
                 _diag.exception("io loop iteration failed")
+                return
 
     def _io_iterate(self) -> bool:
         assert self._listener is not None and self._wake_r is not None
@@ -335,12 +339,20 @@ class BridgeSession:
         with self._conns_lock:
             conns = [c for c in self._conns.values() if not c.closing]
             pending_close = bool(self._pending_close)
-        rlist: list[socket.socket] = [self._wake_r]
-        if not pending_close:
-            rlist.insert(0, self._listener)
-        rlist += [c.sock for c in conns]
-        wlist = [c.sock for c in conns if c.outbox]
-        ready_r, ready_w, _ = select.select(rlist, wlist, [], 1.0)
+        with selectors.DefaultSelector() as selector:
+            selector.register(self._wake_r, selectors.EVENT_READ)
+            if not pending_close:
+                selector.register(self._listener, selectors.EVENT_READ)
+            for conn in conns:
+                events = selectors.EVENT_READ
+                if conn.outbox:
+                    events |= selectors.EVENT_WRITE
+                selector.register(conn.sock, events)
+            ready = selector.select(timeout=1.0)
+        ready_r = {key.fileobj for key, events in ready
+                   if events & selectors.EVENT_READ}
+        ready_w = {key.fileobj for key, events in ready
+                   if events & selectors.EVENT_WRITE}
         if self._wake_r in ready_r:
             self._drain_wake()
             if self.stopped:
@@ -500,7 +512,7 @@ class BridgeSession:
                 return True
             failed = False
             steps: list[Callable[[], object]] = [
-                self._wake,                                  # 2 唤醒 select
+                self._wake,                                  # 2 唤醒 selector
                 self._join_io,                               # 3 join I/O 线程
                 self._close_all_conns,                       # 4 关闭活跃连接（含丢弃 outbox）
                 self._close_listener,                        # 5 关监听与 socketpair

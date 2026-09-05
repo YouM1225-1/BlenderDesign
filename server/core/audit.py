@@ -354,7 +354,8 @@ class AuditLog:
         line = json.dumps(row, ensure_ascii=False) + "\n"
         _check_deadline(deadline)
         try:
-            line_bytes = len(line.encode("utf-8"))
+            encoded_line = line.encode("utf-8")
+            line_bytes = len(encoded_line)
         except UnicodeEncodeError as exc:
             raise ValueError("invalid audit row encoding") from exc
         if line_bytes > MAX_AUDIT_LINE_BYTES:
@@ -378,14 +379,13 @@ class AuditLog:
                 logs_fd = _open_private_directory(
                     self._dir.name, self._dir, self._dir_identity, deadline, root_fd)
                 _check_deadline(deadline)
-                flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
+                flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
                 created = True
                 expected: tuple[int, int] | None = None
                 try:
                     _check_deadline(deadline)
                     fd = os.open(path.name, flags | os.O_CREAT | os.O_EXCL, 0o600,
                                  dir_fd=logs_fd)
-                    _check_deadline(deadline)
                 except FileExistsError:
                     created = False
                     existing = _wait_private_file(path.name, logs_fd, path, deadline)
@@ -402,7 +402,8 @@ class AuditLog:
                     if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid()
                             or stat.S_IMODE(st.st_mode) & ~0o600):
                         raise PermissionError(f"private audit file required: {path}")
-                    _check_deadline(deadline)
+                    # Finish private initialization of our O_EXCL-created inode
+                    # even if open crossed the deadline; never repair existing files.
                     os.fchmod(fd, 0o600)
                     _check_deadline(deadline)
                     st = os.fstat(fd)
@@ -418,12 +419,27 @@ class AuditLog:
                         or (expected is not None
                             and (st.st_dev, st.st_ino) != expected)):
                     raise PermissionError(f"private audit file required: {path}")
-                owned_fd = fd
-                fd = None  # fdopen owns the descriptor from this point onward
-                stream = os.fdopen(owned_fd, "a", encoding="utf-8")
-                with stream as f:
-                    _check_deadline(deadline)
-                    f.write(line)
+                start = st.st_size
+                if start and os.pread(fd, 1, start - 1) != b"\n":
+                    raise OSError(f"incomplete audit tail: {path}")
+                _check_deadline(deadline)
+                # Retain the locked descriptor through stream close and recovery.
+                # fdopen owns only the duplicate, including on constructor failure.
+                try:
+                    stream = os.fdopen(os.dup(fd), "a", encoding="utf-8")
+                    with stream as f:
+                        _check_deadline(deadline)
+                        f.write(line)
+                except BaseException:
+                    # Stream close must finish before truncation, or its buffered
+                    # writes could append again. Cooperating writers remain locked
+                    # out; preserve complete rows and any unrecognized evidence.
+                    end = os.fstat(fd).st_size
+                    if start < end < start + line_bytes:
+                        tail = os.pread(fd, end - start, start)
+                        if tail == encoded_line[:end - start]:
+                            os.ftruncate(fd, start)
+                    raise
                 # Regular-file I/O cannot be preempted once inside the kernel, but a
                 # slow write/flush/close must not be reported as an in-budget audit.
                 _check_deadline(deadline)

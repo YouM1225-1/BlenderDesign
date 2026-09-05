@@ -56,6 +56,7 @@ detect-secrets 与 pip-audit，进行两次确定性构建，并逐字节比对�
 ```bash
 uv run --python 3.13.13 --frozen python scripts/run_phase0_acceptance.py \
   --evidence-root /absolute/new/path/outside/the/repository \
+  --blender /Applications/Blender.app/Contents/MacOS/Blender \
   --uv /absolute/reviewed/uv
 ```
 
@@ -64,6 +65,11 @@ vendor generate/check、background smoke、GUI/NFR 和 kill/restart recovery；�
 产物缺失/非 0600 普通文件、严格 JSON/schema/`success` 无效、进程组或 registry 残留都会
 失败。汇总文件记录三份 JSON 与五份日志的 SHA-256。必须显式使用 Python 3.13.13，其他
 patch 版本以 `wrong_python_patch` 失败。
+
+`--blender` 默认使用上面的标准 macOS 路径；显式选择时必须为可执行文件，解析后的绝对
+路径会贯穿 background、GUI/NFR、recovery 及其 provenance。三个 Blender 阶段分别在
+证据根下创建 0700 的 user config/scripts/extensions/datafiles/resources 与临时目录，并向
+所有子 Blender 进程传入对应的 `BLENDER_USER_*`、`TMPDIR`、`TMP` 和 `TEMP`。
 
 该入口只闭合本仓库 Phase 0 验收，不实现通用资产方案的 trust policy、signed contract、
 双 child repeatability、semantic manifest、Reviewer、attestation 或 Publisher。

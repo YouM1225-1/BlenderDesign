@@ -1855,6 +1855,125 @@ def test_native_rename_wrappers_map_closed_errors_and_fsync_both_parents(
         assert fsync_calls == [left.fd, right.fd]
 
 
+def test_sync_parents_deduplicates_same_directory_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _safe(tmp_path) as root:
+        references = (
+            TargetRef(root, PurePath("first")),
+            TargetRef(root, PurePath("second")),
+        )
+        synced: list[tuple[int, int]] = []
+        real_fsync = os.fsync
+
+        def record_fsync(fd: int) -> None:
+            info = os.fstat(fd)
+            synced.append((info.st_dev, info.st_ino))
+            real_fsync(fd)
+
+        monkeypatch.setattr(filesystem.os, "fsync", record_fsync)
+        filesystem._sync_parents(references)
+
+        root_info = os.fstat(root.fd)
+        assert synced == [(root_info.st_dev, root_info.st_ino)]
+
+
+def test_sync_parents_syncs_each_distinct_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "left").mkdir()
+    (tmp_path / "right").mkdir()
+    with _safe(tmp_path) as root:
+        references = (
+            TargetRef(root, PurePath("left/first")),
+            TargetRef(root, PurePath("right/second")),
+        )
+        synced: list[tuple[int, int]] = []
+        real_fsync = os.fsync
+
+        def record_fsync(fd: int) -> None:
+            info = os.fstat(fd)
+            synced.append((info.st_dev, info.st_ino))
+            real_fsync(fd)
+
+        monkeypatch.setattr(filesystem.os, "fsync", record_fsync)
+        filesystem._sync_parents(references)
+
+        assert synced == [
+            (tmp_path.stat().st_dev, (tmp_path / "left").stat().st_ino),
+            (tmp_path.stat().st_dev, (tmp_path / "right").stat().st_ino),
+        ]
+
+
+def test_sync_parents_closes_all_handles_when_parent_identity_lookup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "left").mkdir()
+    (tmp_path / "right").mkdir()
+    opened: list[int] = []
+    real_open_parent = SafeRoot.open_parent
+    real_fstat = os.fstat
+
+    def tracked_open_parent(root: SafeRoot, relative: PurePath) -> tuple[int, str]:
+        fd, name = real_open_parent(root, relative)
+        opened.append(fd)
+        return fd, name
+
+    def fail_second_parent_identity(fd: int):
+        if len(opened) == 2 and fd == opened[-1]:
+            raise OSError(errno.EIO, "injected parent identity failure")
+        return real_fstat(fd)
+
+    monkeypatch.setattr(SafeRoot, "open_parent", tracked_open_parent)
+    monkeypatch.setattr(filesystem.os, "fstat", fail_second_parent_identity)
+    with _safe(tmp_path) as root:
+        references = (
+            TargetRef(root, PurePath("left/first")),
+            TargetRef(root, PurePath("right/second")),
+        )
+        with pytest.raises(OSError, match="injected parent identity failure"):
+            filesystem._sync_parents(references)
+
+    assert len(opened) == 2
+    for fd in opened:
+        with pytest.raises(OSError) as caught:
+            real_fstat(fd)
+        assert caught.value.errno == errno.EBADF
+
+
+def test_sync_parents_closes_all_handles_when_fsync_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "left").mkdir()
+    (tmp_path / "right").mkdir()
+    opened: list[int] = []
+    real_open_parent = SafeRoot.open_parent
+
+    def tracked_open_parent(root: SafeRoot, relative: PurePath) -> tuple[int, str]:
+        fd, name = real_open_parent(root, relative)
+        opened.append(fd)
+        return fd, name
+
+    def fail_fsync(_fd: int) -> None:
+        raise OSError("injected fsync failure")
+
+    monkeypatch.setattr(SafeRoot, "open_parent", tracked_open_parent)
+    monkeypatch.setattr(filesystem.os, "fsync", fail_fsync)
+    with _safe(tmp_path) as root:
+        references = (
+            TargetRef(root, PurePath("left/first")),
+            TargetRef(root, PurePath("right/second")),
+        )
+        with pytest.raises(OSError, match="injected fsync failure"):
+            filesystem._sync_parents(references)
+
+    assert len(opened) == 2
+    for fd in opened:
+        with pytest.raises(OSError) as caught:
+            os.fstat(fd)
+        assert caught.value.errno == errno.EBADF
+
+
 def test_rename_excl_preserves_concurrent_destination(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2242,15 +2361,6 @@ def test_absent_tree_publish_and_ar1_retry(tmp_path: Path) -> None:
         assert recovery.capture().state is ImageState.ABSENT
 
 
-class _CrashAt:
-    def __init__(self, point: str):
-        self.point = point
-
-    def hit(self, point: str) -> None:
-        if point == self.point:
-            raise _InjectedCrash(point)
-
-
 @pytest.mark.parametrize(
     "point",
     ["after_native_rename", "after_source_parent_fsync", "after_destination_parent_fsync"],
@@ -2298,10 +2408,10 @@ def test_recognized_cross_parent_prefix_redrives_both_parent_fsyncs(
             )
         if row in {"p1", "p2", "a1"}:
             with pytest.raises(_InjectedCrash):
-                forward_file(target, pre, stage, recovery, _CrashAt(point))
+                forward_file(target, pre, stage, recovery, _PointFault(point))
         else:
             with pytest.raises(_InjectedCrash):
-                restore_file(target, pre, post, stage, recovery, _CrashAt(point))
+                restore_file(target, pre, post, stage, recovery, _PointFault(point))
 
         synced: list[int] = []
         real_fsync = os.fsync
@@ -2583,7 +2693,7 @@ def test_tree_recovery_cleanup_retries_exact_deletion_prefix(
                 post,
                 stage,
                 recovery,
-                _CrashAt("after_cleanup_entry"),
+                _PointFault("after_cleanup_entry"),
             )
         remaining = recovery.capture()
         assert remaining.state is ImageState.PRESENT
@@ -2790,7 +2900,7 @@ def test_conditional_remove_tree_retries_exact_prefix_and_fault_boundary(tmp_pat
                 reference,
                 expected,
                 ((guard, guard_image),),
-                _CrashAt("after_cleanup_entry"),
+                _PointFault("after_cleanup_entry"),
             )
         remaining = reference.capture()
         assert remaining.state is ImageState.PRESENT
@@ -2800,7 +2910,7 @@ def test_conditional_remove_tree_retries_exact_prefix_and_fault_boundary(tmp_pat
                 reference,
                 expected,
                 ((guard, guard_image),),
-                _CrashAt("after_installer_cleanup"),
+                _PointFault("after_installer_cleanup"),
             )
         assert reference.capture() == TreeImage.absent()
         conditional_remove_tree(reference, expected, ((guard, guard_image),), NoOpFaultInjector())

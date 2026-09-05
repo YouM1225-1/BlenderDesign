@@ -1034,6 +1034,74 @@ def _valid_initialize(value: object, manifest: ReleaseManifest) -> bool:
     return _exact_value(value, current)
 
 
+def _valid_summary_tool_result(value: object) -> bool:
+    if (
+        type(value) is not dict
+        or value.get("isError") is not False
+        or "error" in value
+        or type(value.get("structuredContent")) is not dict
+        or type(value.get("content")) is not list
+        or len(value["content"]) != 1
+    ):
+        return False
+    content = value["content"][0]
+    if (
+        type(content) is not dict
+        or content.get("type") != "text"
+        or type(content.get("text")) is not str
+    ):
+        return False
+    try:
+        text_payload = json.loads(content["text"])
+    except (json.JSONDecodeError, TypeError):
+        return False
+    payload = value["structuredContent"]
+    if not _exact_value(text_payload, payload) or set(payload) - {
+        "status",
+        "result",
+        "stdout",
+        "stderr",
+    }:
+        return False
+    if payload.get("status") != "ok" or type(payload.get("result")) is not dict:
+        return False
+    if any(type(payload[key]) is not str for key in ("stdout", "stderr") if key in payload):
+        return False
+    summary = payload["result"]
+    expected = {
+        "status",
+        "datablock_counts",
+        "render_engine",
+        "scene_name",
+        "workspaces",
+        "active_workspace",
+    }
+    if set(summary) != expected or summary.get("status") != "ok":
+        return False
+    counts = summary["datablock_counts"]
+    workspaces = summary["workspaces"]
+    active = summary["active_workspace"]
+    return (
+        type(counts) is dict
+        and bool(counts)
+        and all(
+            type(name) is str
+            and bool(name)
+            and type(count) is int
+            and count > 0
+            for name, count in counts.items()
+        )
+        and type(summary["render_engine"]) is str
+        and bool(summary["render_engine"])
+        and type(summary["scene_name"]) is str
+        and bool(summary["scene_name"])
+        and type(workspaces) is list
+        and bool(workspaces)
+        and all(type(name) is str and bool(name) for name in workspaces)
+        and (active is None or (type(active) is str and active in workspaces))
+    )
+
+
 def verify_live(
     bundle: StagedBundle,
     roots: InstallRoots,
@@ -1113,7 +1181,7 @@ def verify_live(
             raise InstallerError("MCP catalog verification failed")
         try:
             result = client.call_tool("get_blendfile_summary_datablocks", {})
-            if type(result) is not dict or result.get("isError") is True or "error" in result:
+            if not _valid_summary_tool_result(result):
                 raise ValueError("invalid tool result")
         except Exception as exc:
             raise InstallerError("Blender read-only verification failed") from exc
