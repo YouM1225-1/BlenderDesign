@@ -24,6 +24,7 @@ test -x "$UV_BIN" || { echo "FAIL: $UV_BIN 不可执行"; exit 1; }
 echo "toolchain: uv=$($UV_BIN --version 2>&1)"
 
 "$UV_BIN" sync --frozen --python "$PYTHON_VERSION"  # ADR：锁定依赖与解释器，禁止隐式升级
+"$UV_BIN" run --frozen python scripts/update_installer_version.py --check
 
 # venv 健康探针：iCloud「桌面与文稿」同步会给点开头的条目打 UF_HIDDEN，.venv 内的
 # .pth 随之变 hidden，CPython 的 site.addsitedir 直接跳过 → editable 安装失效，
@@ -41,7 +42,8 @@ fi
   plugins/blender-mcp-installer/scripts/blender_mcp_installer/__init__.py \
   plugins/blender-mcp-installer/scripts/blender_mcp_installer/codex_adapter.py \
   plugins/blender-mcp-installer/scripts/install.py \
-  plugins/blender-mcp-installer/scripts/project_marketplace.py
+  plugins/blender-mcp-installer/scripts/project_marketplace.py \
+  scripts/update_installer_version.py
 PLUGIN_CREATOR_ROOT="${PLUGIN_CREATOR_ROOT:-$HOME/.codex/skills/.system/plugin-creator}"
 PLUGIN_VALIDATOR="$PLUGIN_CREATOR_ROOT/scripts/validate_plugin.py"
 test -f "$PLUGIN_VALIDATOR" || {

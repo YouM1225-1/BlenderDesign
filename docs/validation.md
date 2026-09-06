@@ -15,6 +15,7 @@ bash scripts/checks.sh
 该入口依次验证：
 
 - frozen 依赖同步；
+- 安装器改动必须带有更大的插件版本号；
 - Ruff；
 - strict mypy；
 - 插件结构（缺少官方插件验证器时失败）；
@@ -28,6 +29,32 @@ bash scripts/checks.sh
 脚本按 `UV_BIN`、`PATH`、`$HOME/.local/bin/uv` 的顺序解析 uv。
 插件验证器默认从 `$HOME/.codex/skills/.system/plugin-creator` 读取，也可通过
 `PLUGIN_CREATOR_ROOT` 指定。该检查不再跳过。
+
+### 安装器版本自动更新
+
+每个开发克隆启用一次仓库提交钩子：
+
+```bash
+git config --local core.hooksPath .githooks
+```
+
+提交与合并提交钩子按暂存区检查 `plugins/blender-mcp-installer/` 的所有文件。每次提交的一组改动
+自动更新一次 `.codex-plugin/plugin.json`，保留 `1.0.0+codex.YYYYMMDDHHMMSS` 格式，
+使用 UTC 时间并确保大于所有父提交的版本；普通提交已更新的版本不会重复增加，
+合并提交生成新的版本。钩子只额外暂存版本文件，
+需要自动更新时，若该文件还有未暂存的修改则停止，避免把其他编辑带入提交。
+仓库其他目录的修改不触发更新。
+
+提交前需要检查尚未提交的安装器修改时，先运行：
+
+```bash
+python3 scripts/update_installer_version.py
+```
+
+完整检查和快速检查均运行只读的 `--check` 校验，漏更新、回退或非法版本会失败。
+工作树中没有安装器修改时，会检查最近一次安装器提交与其父提交，绕过钩子的漏更新
+不会因之后提交无关文件而漏检。浅克隆缺少比较历史时失败，需要先补齐历史。
+这些规则由本地钩子和检查入口执行；新克隆需启用钩子，不能以跳过检查代替验证。
 
 修改上游补丁、runtime 依赖、固定产物或正式发布 runtime 时，额外使用发行门禁：
 
