@@ -1,7 +1,7 @@
 """规范 §7.1 的 check registry。本文件即该表的唯一机器可读形式。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +59,49 @@ CHECKS: tuple[CheckSpec, ...] = (
     CheckSpec("r5.evidence.hashes_match", "R5", 20, 1, "all", "coordinator"),
     CheckSpec("r5.contract.digest_stable", "R5", 30, 1, "all", "coordinator"),
 )
+
+_V2_IMPL = {
+    "r0.contract.schema_closed": 2,
+    "r0.contract.tools_locked": 2,
+    "r0.contract.na_set_declared": 1,
+    "r1.input.digest_recorded": 2,
+    "r1.input.no_link_or_device": 2,
+    "r1.input.size_within_limit": 2,
+    "r2.inventory.coverage_complete": 2,
+    "r2.inventory.no_nan_inf": 1,
+    "r2.inventory.no_reserved_props": 1,
+    "r2.geometry.validate_clean": 2,
+    "r2.geometry.manifest_written": 2,
+    "r2.material.slots_resolved": 2,
+    "r2.dependency.all_present": 2,
+    "r2.source.digest_stable": 2,
+    "r3.export.file_nonempty": 1,
+    "r3.export.source_unchanged": 1,
+    "r3.validator.no_error": 1,
+    "r3.validator.resources_read": 1,
+    "r3.validator.report_complete": 1,
+    "r3.extension.none_forbidden": 1,
+    "r3.budget.within_limits": 2,
+    "r4.reopen.offline_ok": 2,
+    "r4.reopen.dependencies_resolved": 2,
+    "r4.reopen.manifest_matches_source": 2,
+    "r4.import.manifest_written": 2,
+    "r4.projection.preserved_fields_match": 2,
+    "r4.projection.transformed_within_tolerance": 2,
+    "r4.projection.undeclared_loss": 2,
+    "r4.projection.ambiguous_object_names": 2,
+    "r4.visual.scene_not_empty": 2,
+    "r4.visual.all_views_rendered": 2,
+    "r4.visual.self_determinism": 2,
+    "r4.visual.platform_key_known": 2,
+    "r4.visual.source_import_match": 2,
+    "r5.evidence.manifest_closed": 2,
+    "r5.evidence.hashes_match": 2,
+    "r5.contract.digest_stable": 2,
+}
+if set(_V2_IMPL) != {spec.id for spec in CHECKS}:
+    raise RuntimeError("v2 implementation table is not the exact check registry")
+CHECKS = tuple(replace(spec, impl=_V2_IMPL[spec.id]) for spec in CHECKS)
 
 _STAGE_INDEX = {"R0": 0, "R1": 1, "R2": 2, "R3": 3, "R4": 4, "R5": 5}
 
