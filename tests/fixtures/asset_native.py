@@ -109,6 +109,8 @@ variants = (
     "shared_mesh",
     "shared_reserved",
     "multiview",
+    "cycles_output",
+    "eevee_output",
 )
 
 
@@ -224,6 +226,9 @@ def mutate(variant):
         image.reload()
         assert len(image.pixels[:4]) == 4
         image.pack()
+    if variant in {"cycles_output", "eevee_output"}:
+        target = "CYCLES" if variant == "cycles_output" else "EEVEE"
+        body.data.materials[0].node_tree.nodes["Material Output"].target = target
 
 
 def postload(variant):
@@ -260,6 +265,9 @@ def postload(variant):
         hashes = [hashlib.sha256(bytes(p.packed_file.data)).hexdigest() for p in image.packed_files]
         assert len(set(hashes)) == 2
         write("multiview_payloads", hashes)
+    if variant in {"cycles_output", "eevee_output"}:
+        target = "CYCLES" if variant == "cycles_output" else "EEVEE"
+        assert body.data.materials[0].node_tree.nodes["Material Output"].target == target
 
     if variant == "missing_bottom":
         assert "Bottom" not in bpy.data.objects
@@ -375,6 +383,7 @@ for name, prefix in [
     ("multiview", "image-multiview:"),
     ("multiview", "image-multiple-packed-files:"),
     ("missing_dependency", "external-image:"),
+    ("cycles_output", "material-output-target:Body material:Material Output:CYCLES"),
 ]:
     assert any(gap.startswith(prefix) for gap in results[name]["scope_gaps"]), (name, prefix)
     assert not results[name]["occurrences_complete"]
@@ -382,6 +391,10 @@ for name, prefix in [
         check for check in inspect_checks(results[name], True)
         if check["id"] == "r2.inventory.coverage_complete"
     )["findings"], name
+assert not results["eevee_output"]["scope_gaps"]
+assert results["eevee_output"]["occurrences_complete"]
+assert not any(c["findings"] for c in inspect_checks(results["eevee_output"], True))
+assert not scene_geometry_findings(results["eevee_output"])
 for name, kind in [
     ("offscene_object", "objects"),
     ("orphan_mesh", "meshes"),

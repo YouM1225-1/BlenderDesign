@@ -254,6 +254,15 @@ def collect(
                 gaps.append("material-node-muted:" + mat.name + ":" + node.name)
             if node.type not in {"BSDF_PRINCIPLED", "OUTPUT_MATERIAL", "TEX_IMAGE"}:
                 gaps.append("material-node:" + mat.name + ":" + node.type)
+            if node.type == "OUTPUT_MATERIAL" and node.target not in {"ALL", "EEVEE"}:
+                gaps.append(
+                    "material-output-target:"
+                    + mat.name
+                    + ":"
+                    + node.name
+                    + ":"
+                    + node.target
+                )
             item = {"name": node.name, "type": node.type, "inputs": {}}
             for socket in node.inputs:
                 if hasattr(socket, "default_value"):
