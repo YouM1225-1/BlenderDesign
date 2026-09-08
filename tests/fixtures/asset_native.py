@@ -59,7 +59,6 @@ root.mkdir(parents=True, exist_ok=False)
 def base():
     bpy.ops.wm.read_factory_settings(use_empty=True)
     mat = bpy.data.materials.new("Body material")
-    mat.use_nodes = True
     mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (0.8, 0.2, 0.05, 1)
     for name, location, scale in [
         ("Body", (0, 0, 0), (1, 1, 0.7)),
@@ -98,6 +97,8 @@ variants = (
     "plain_collection",
     "holdout",
     "indirect_only",
+    "object_holdout",
+    "object_shadow_catcher",
     "muted_node",
     "reserved_tree",
     "reserved_master",
@@ -130,6 +131,10 @@ def mutate(variant):
         body.modifiers.new("Triangulate", "TRIANGULATE")
     if variant == "bevel":
         body.modifiers.new("Bevel", "BEVEL")
+    if variant == "object_holdout":
+        body.is_holdout = True
+    if variant == "object_shadow_catcher":
+        body.is_shadow_catcher = True
     if variant == "packed_image":
         image = bpy.data.images.new("Packed color", width=2, height=2)
         image.pixels[:] = [0.8, 0.2, 0.1, 1] * 4
@@ -229,6 +234,10 @@ def postload(variant):
         assert math.isnan(body.data.vertices[0].co.x)
     if variant in {"holdout", "indirect_only"}:
         assert getattr(bpy.context.view_layer.layer_collection.children["Parts/Assembly"], variant)
+    if variant == "object_holdout":
+        assert body.is_holdout
+    if variant == "object_shadow_catcher":
+        assert body.is_shadow_catcher
     if variant == "muted_node":
         assert body.data.materials[0].node_tree.nodes["Principled BSDF"].mute
     if variant == "reserved_tree":
@@ -356,6 +365,8 @@ for name, prefix in [
     ("curve", "object-type:"),
     ("holdout", "layer-holdout:"),
     ("indirect_only", "layer-indirect-only:"),
+    ("object_holdout", "object-holdout:Body"),
+    ("object_shadow_catcher", "object-shadow-catcher:Body"),
     ("muted_node", "material-node-muted:"),
     ("tree_driver", "animation:"),
     ("offscene_object", "uncollected:objects:"),
@@ -367,6 +378,10 @@ for name, prefix in [
 ]:
     assert any(gap.startswith(prefix) for gap in results[name]["scope_gaps"]), (name, prefix)
     assert not results[name]["occurrences_complete"]
+    assert next(
+        check for check in inspect_checks(results[name], True)
+        if check["id"] == "r2.inventory.coverage_complete"
+    )["findings"], name
 for name, kind in [
     ("offscene_object", "objects"),
     ("orphan_mesh", "meshes"),

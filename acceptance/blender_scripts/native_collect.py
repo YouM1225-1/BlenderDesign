@@ -239,7 +239,7 @@ def collect(
             }
         )
     for mat in sorted(bpy.data.materials, key=lambda x: x.name):
-        if not mat.use_nodes or mat.node_tree is None:
+        if mat.node_tree is None:
             gaps.append("material-without-principled:" + mat.name)
             continue
         nodes = list(mat.node_tree.nodes)
@@ -321,6 +321,10 @@ def collect(
             gaps.append("viewport-evaluation-disabled:" + obj.name)
         if obj.instance_type != "NONE" or obj.constraints:
             gaps.append("instancer-or-constraint:" + obj.name)
+        if obj.is_holdout:
+            gaps.append("object-holdout:" + obj.name)
+        if obj.is_shadow_catcher:
+            gaps.append("object-shadow-catcher:" + obj.name)
         modifiers = []
         for mod in obj.modifiers:
             fields = MODIFIERS.get(mod.type)
