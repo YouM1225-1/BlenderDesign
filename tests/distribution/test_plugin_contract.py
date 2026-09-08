@@ -1379,3 +1379,25 @@ def test_marketplace_registration_is_serialized_per_codex_home(tmp_path: Path) -
     retry = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
     assert retry.returncode == 0, retry.stderr
     assert "[marketplaces.other]" in (codex_home / "config.toml").read_text()
+
+
+def test_entry_prelude_generation_detects_drift_and_preserves_entry_bodies(tmp_path):
+    scripts = PLUGIN / "scripts"
+    generator = "generate_entry_preludes.py"
+    entries = ("install.py", "project_marketplace.py")
+    assert (scripts / generator).is_file(), "missing deterministic entry prelude generator"
+    for name in (generator, "entry_lease.py", *entries):
+        shutil.copyfile(scripts / name, tmp_path / name)
+    command = [sys.executable, "-I", "-B", str(tmp_path / generator)]
+    original = {name: (tmp_path / name).read_bytes() for name in entries}
+    assert subprocess.run([*command, "--check"], capture_output=True).returncode == 0
+    for name in entries:
+        path = tmp_path / name
+        path.write_bytes(original[name].replace(b"_fcntl.LOCK_SH", b"_fcntl.LOCK_EX", 1))
+    drifted = {name: (tmp_path / name).read_bytes() for name in entries}
+    check = subprocess.run([*command, "--check"], capture_output=True, text=True)
+    assert check.returncode == 1 and "drift" in check.stdout
+    assert {name: (tmp_path / name).read_bytes() for name in entries} == drifted
+    assert subprocess.run(command, capture_output=True).returncode == 0
+    assert {name: (tmp_path / name).read_bytes() for name in entries} == original
+    assert subprocess.run([*command, "--check"], capture_output=True).returncode == 0

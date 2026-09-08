@@ -25,6 +25,7 @@ echo "toolchain: uv=$($UV_BIN --version 2>&1)"
 
 "$UV_BIN" sync --frozen --python "$PYTHON_VERSION"  # ADR：锁定依赖与解释器，禁止隐式升级
 "$UV_BIN" run --frozen python scripts/update_installer_version.py --check
+"$UV_BIN" run --frozen python plugins/blender-mcp-installer/scripts/generate_entry_preludes.py --check
 
 # venv 健康探针：iCloud「桌面与文稿」同步会给点开头的条目打 UF_HIDDEN，.venv 内的
 # .pth 随之变 hidden，CPython 的 site.addsitedir 直接跳过 → editable 安装失效，

@@ -1,6 +1,7 @@
 # ruff: noqa: E402 -- cache lease must precede installer imports
 from __future__ import annotations
 
+# BEGIN GENERATED ENTRY LEASE (from entry_lease.py; run generate_entry_preludes.py)
 import atexit as _atexit
 import fcntl as _fcntl
 import hashlib as _hashlib
@@ -68,6 +69,7 @@ def _entry_lease() -> int | None:
 
 
 _SCRIPT_USAGE_FD = _entry_lease()
+# END GENERATED ENTRY LEASE
 
 
 import argparse
@@ -569,6 +571,20 @@ def _restore(
         raise RuntimeError("restored marketplace registration differs from prior state")
 
 
+def _write_restore_instructions(
+    recovery: Path, codex: Path, home: Path, codex_home: Path
+) -> None:
+    restore_lines = [
+        "Read the upgrades journal before any recovery action; cleanup_pending/complete may retire local program rollback.",
+        "Use project_marketplace.py restore with this recovery directory and recorded HOME/CODEX_HOME/CODEX_BIN.",
+        "This operation restores only marketplace source. It does not restore the installed plugin version or cache.",
+        f"CODEX_BIN: {codex}",
+        f"HOME: {home}",
+        f"CODEX_HOME: {codex_home}",
+    ]
+    _atomic_write(recovery / "RESTORE.txt", ("\n".join(restore_lines) + "\n").encode())
+
+
 def _register(
     projection: Path,
     recovery_root: Path,
@@ -595,15 +611,7 @@ def _register(
         before, non_target_before = _marketplace_snapshot(config)
         _atomic_json(recovery / "before.json", before)
         _atomic_json(recovery / "non-target-before.json", non_target_before)
-    restore_lines = [
-        "Read the upgrades journal before any recovery action; cleanup_pending/complete may retire local program rollback.",
-        "Use project_marketplace.py restore with this recovery directory and recorded HOME/CODEX_HOME/CODEX_BIN.",
-        "This operation restores only marketplace source. It does not restore the installed plugin version or cache.",
-        f"CODEX_BIN: {codex}",
-        f"HOME: {home}",
-        f"CODEX_HOME: {codex_home}",
-    ]
-    _atomic_write(recovery / "RESTORE.txt", ("\n".join(restore_lines) + "\n").encode())
+    _write_restore_instructions(recovery, codex, home, codex_home)
 
     current, _ = _marketplace_snapshot(config)
     changed = current.get("source") != str(projection)
@@ -821,10 +829,7 @@ def _run_workflow(
                 ("non-target-after.json", others),
             ):
                 _atomic_json(recovery / name, value)
-            _atomic_write(
-                recovery / "RESTORE.txt",
-                b"Inspect the upgrade journal before source-only restore. Plugin program rollback may be retired.\n",
-            )
+            _write_restore_instructions(recovery, Path(args.codex), roots.home, roots.codex_home)
             doc = update_record(
                 state, roots, doc, registration={"id": doc["id"], "state": "registered"}
             )

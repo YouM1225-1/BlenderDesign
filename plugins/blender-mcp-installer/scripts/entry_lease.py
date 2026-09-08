@@ -1,5 +1,3 @@
-# ruff: noqa: E402 -- cache lease must precede installer imports
-# BEGIN GENERATED ENTRY LEASE (from entry_lease.py; run generate_entry_preludes.py)
 import atexit as _atexit
 import fcntl as _fcntl
 import hashlib as _hashlib
@@ -67,10 +65,3 @@ def _entry_lease() -> int | None:
 
 
 _SCRIPT_USAGE_FD = _entry_lease()
-# END GENERATED ENTRY LEASE
-
-from blender_mcp_installer.cli import main
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

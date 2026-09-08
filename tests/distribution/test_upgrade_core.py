@@ -1413,7 +1413,10 @@ def test_full_finalize_probes_live_once_and_rechecks_snapshot(prepared, monkeypa
     assert live == ["live"] and len(fingerprints) >= 4
 
 
-def test_exact_registration_creates_migration_journal_when_old_cache_remains(prepared, monkeypatch):
+@pytest.mark.parametrize("interrupt_before_cleanup", [False, True])
+def test_exact_registration_creates_migration_journal_when_old_cache_remains(
+    prepared, monkeypatch, interrupt_before_cleanup, capsys
+):
     from types import SimpleNamespace
     from blender_mcp_installer import upgrade_integration
     from blender_mcp_installer.upgrade_state import record_ids
@@ -1430,18 +1433,56 @@ def test_exact_registration_creates_migration_journal_when_old_cache_remains(pre
     )
     (plugin / "artifacts/manifest.json").write_text(json.dumps({"bundle_version": "1.0.0"}))
     called = []
-    snapshot = {"present": True, "source_type": "local", "source": str(projection)}
+    config = roots.codex_home / "config.toml"
+    config_text = (
+        '[marketplaces.official-blender-mcp]\nsource_type = "local"\n'
+        f"source = {json.dumps(str(projection))}\n"
+    )
+    config.write_text(config_text)
     monkeypatch.setattr(upgrade_integration, "inspect_registration", lambda *_args: None)
     monkeypatch.setattr(upgrade_integration, "discover_candidates", lambda *_args: ([row], []))
     monkeypatch.setattr(upgrade_integration, "other_references", lambda *_args: ())
     monkeypatch.setattr(marketplace, "inspect_registration", lambda *_args: None)
     monkeypatch.setattr(marketplace, "discover_candidates", lambda *_args: ([row], []))
-    monkeypatch.setattr(marketplace, "_marketplace_snapshot", lambda *_args: (snapshot, {}))
     monkeypatch.setattr(
         marketplace, "_register", lambda *_args, **_kwargs: called.append("register")
     )
     args = SimpleNamespace(reviewed_commit="b" * 40, codex="/fake/codex", workflow_id=None)
-    result = marketplace._run_workflow(args, state, roots, projection)
-    assert result["status"] == "complete" and not old.exists()
-    assert result["workflow_id"] != prior["id"]
+    if interrupt_before_cleanup:
+        def interrupt(*_args):
+            raise InstallerError("interrupted before cleanup")
+
+        monkeypatch.setattr(marketplace, "finalize_register_locked", interrupt)
+        with pytest.raises(InstallerError, match="interrupted before cleanup"):
+            marketplace._run_workflow(args, state, roots, projection)
+        identity, = set(record_ids(state)) - {prior["id"]}
+        recovery = roots.state / "marketplace-recovery" / ("registration." + identity)
+        codex_calls = []
+
+        def codex_stub(codex, home, codex_home, *arguments):
+            assert (codex, home, codex_home) == (Path(args.codex), roots.home, roots.codex_home)
+            codex_calls.append(arguments)
+            if arguments == marketplace.REMOVE_MARKETPLACE:
+                config.write_text("")
+            else:
+                assert arguments == ("plugin", "marketplace", "add", str(projection))
+                config.write_text(config_text)
+            return ""
+
+        monkeypatch.setattr(marketplace, "_codex", codex_stub)
+        marketplace._restore_evidence(SimpleNamespace(
+            home=str(roots.home), codex_home=str(roots.codex_home),
+            codex=args.codex, recovery=str(recovery),
+        ))
+        assert json.loads(capsys.readouterr().out)["marketplace_source_restored"] is True
+        assert len(codex_calls) == 2 and config.read_text() == config_text
+        assert old.exists()
+        assert load_record(state, roots, identity)["status"] == "awaiting_verification"
+        for field, value in (("HOME", roots.home), ("CODEX_HOME", roots.codex_home),
+                             ("CODEX_BIN", args.codex)):
+            assert f"{field}: {value}" in (recovery / "RESTORE.txt").read_text().splitlines()
+    else:
+        result = marketplace._run_workflow(args, state, roots, projection)
+        assert result["status"] == "complete" and not old.exists()
+        assert result["workflow_id"] != prior["id"]
     assert len(record_ids(state)) == 2 and called == []

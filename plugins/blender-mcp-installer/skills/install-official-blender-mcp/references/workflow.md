@@ -26,9 +26,10 @@ extension or MCP runtime. Installer commands are not prerequisites for registrat
 | rollback | `TRUST_BOOTSTRAP` → `UV_BOOTSTRAP` → `ROLLBACK` → `TRUST_CLEANUP` |
 
 Repair uses the install recipe with Blender closed. After install (including a
-no-op), retain its receipt and complete registration cleanup/verification before
-waiting for user action. Then run the verify recipe when Blender is ready. A new
-shell reconstructs trust and runner state; it does not repeat registration or
+no-op), retain its receipt and trust evidence while waiting for Blender startup.
+When Blender is ready, continue with `VERIFY` and `FINALIZE`, then `TRUST_CLEANUP`
+and `PERSISTENT_MARKETPLACE_VERIFY`. A new shell uses the standalone finalize
+recipe to reconstruct trust and runner state without repeating registration or
 installation. Release acceptance may additionally insert `MARKETPLACE_SMOKE`
 before cleanup; it is not part of ordinary operation recipes.
 
@@ -410,6 +411,7 @@ run_uv_bootstrap
 <!-- FINALIZE_BEGIN -->
 ```bash
 run_uv_bootstrap
+NORMAL_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 if test -n "$WORKFLOW_ID"; then
   FINALIZE_RC=0
   if FINALIZE_JSON="$("$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" \

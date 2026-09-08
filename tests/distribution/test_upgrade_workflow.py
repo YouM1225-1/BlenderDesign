@@ -327,6 +327,8 @@ from pathlib import Path
 with open(os.environ['ORDER_LOG'],'a') as out: out.write(sys.argv[1]+'\\n')
 if sys.argv[1] == 'verify':
     assert not Path(os.environ['TRUST_PARENT']).exists()
+    assert sys.argv[sys.argv.index('--home') + 1] == os.environ['HOME']
+    assert sys.argv[sys.argv.index('--codex-home') + 1] == os.environ['CODEX_HOME']
     assert ('--recovery' in sys.argv) == (os.environ['WITH_RECOVERY'] == '1')
     print('{}')
 else:
@@ -351,7 +353,7 @@ else:
     env = dict(
         os.environ,
         HOME=str(home),
-        CODEX_HOME=str(home / ".codex"),
+        CODEX_HOME=str(home / "recorded-codex-profile"),
         PYTHON_BIN=sys.executable,
         UV_BIN=str(uv),
         PLUGIN_ROOT=str(scripts.parent),
@@ -375,9 +377,9 @@ else:
         WORKFLOW_JSON=json.dumps(payload),
         PERSISTENT_MARKETPLACE_ROOT=str(projection),
         REGISTRATION_RECOVERY_DIR=str(recovery) if with_recovery else "",
-        NORMAL_CODEX_HOME=str(home / ".codex"),
         FAKE_GIT=str(git),
     )
+    env.pop("NORMAL_CODEX_HOME", None)
     script = "\n".join(
         (
             "set -euo pipefail",
