@@ -7,12 +7,12 @@ import re
 import stat
 import subprocess
 import sys
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePath
 from types import MappingProxyType
-from typing import Iterator, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 from uuid import UUID, uuid4
 
 from .blender_adapter import (
@@ -93,6 +93,16 @@ from .model import (
     parse_receipt,
 )
 from .runtime import stage_runtime, verify_runtime
+from .upgrade_cleanup import RollbackUnavailable, assert_rollback_available
+from .upgrade_handoff import LegacyHandoffRequired, RuntimeInUse, runtime_quiescence
+from .upgrade_integration import (
+    bind_receipt,
+    finalize_install_locked,
+    record_recovery_usage,
+    select_install_workflow,
+)
+from .upgrade_locks import ensure_usage_lock, mutation_locks
+from .upgrade_state import UpgradeRoots, load_record
 from .verification import (
     EXACT_CHECK_NAMES,
     HostCapabilities,
@@ -110,6 +120,10 @@ _SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 class _ArgumentError(Exception):
+    pass
+
+
+class _RuntimeRecheck(Exception):
     pass
 
 
@@ -138,6 +152,9 @@ class _Context:
     host: HostCapabilities
     blender: BlenderState
     roots: InstallRoots
+    distribution_commit: str
+    workflow_id: str | None = None
+    handoff_id: str | None = None
 
 
 @dataclass
@@ -209,14 +226,17 @@ def _receipt_path(value: str) -> Path:
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="install.py")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("inspect", "install", "verify", "rollback"):
+    for command in ("inspect", "install", "verify", "rollback", "finalize"):
         subparser = subparsers.add_parser(command)
         subparser.add_argument("--bundle-root", required=True, type=_bundle_root)
         subparser.add_argument("--expected-distribution-commit", required=True, type=_commit)
         subparser.add_argument("--blender", required=True, type=_executable)
         subparser.add_argument("--codex", required=True, type=_executable)
         subparser.add_argument("--uv", required=True, type=_executable)
+        if command in {"install", "finalize"}:
+            subparser.add_argument("--workflow-id", required=command == "finalize")
         if command == "install":
+            subparser.add_argument("--handoff-id")
             for flag in (
                 "allow-extension-install",
                 "allow-online-access",
@@ -333,6 +353,13 @@ def _context(args: argparse.Namespace) -> Iterator[_Context]:
             )
             if roots.bundle_root != args.bundle_root.resolve():
                 raise InstallerError("bundle root does not match derived paths")
+            upgrade_roots = UpgradeRoots(roots.home, roots.codex_home)
+            if host.python_bin.is_relative_to(
+                upgrade_roots.caches
+            ) or host.python_bin.is_relative_to(roots.runtime.parent):
+                raise InstallerError(
+                    "bootstrap Python cannot be supplied by a cleanup candidate tree"
+                )
             yield _Context(
                 verified,
                 StagedBundle(checkout.bundle_root, verified.manifest),
@@ -344,6 +371,9 @@ def _context(args: argparse.Namespace) -> Iterator[_Context]:
                 host,
                 blender,
                 roots,
+                args.expected_distribution_commit,
+                getattr(args, "workflow_id", None),
+                getattr(args, "handoff_id", None),
             )
     except InstallerError:
         raise
@@ -1334,351 +1364,408 @@ def _cleanup_bundle(journal: _Journal, state: SafeRoot) -> None:
 def _changed_install(context: _Context, fault: FaultInjector) -> dict[str, object]:
     roots = context.roots
     _ensure_mutation_roots(roots)
-    with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
-        with InstallerLock.acquire(state):
-            reconcile_selectors(
-                roots,
-                context.source_bundle,
-                context.blender,
-                fault,
-                manifest_sha256=context.manifest_sha256,
-            )
+    upgrade_roots = UpgradeRoots(roots.home, roots.codex_home)
+    with mutation_locks(upgrade_roots) as state:
+        while True:
             inspection = _inspection(context)
-            if not inspection.exact:
-                _lifecycle_closed(context)
-            recovery = recover_active(
-                roots,
-                context.source_bundle,
-                context.blender,
-                fault,
-                manifest_sha256=context.manifest_sha256,
-            )
-            if not inspection.exact and recovery["recovered"]:
-                inspection = _inspection(context)
-            context = replace(
-                context, blender=getattr(inspection, "blender_state", context.blender)
-            )
-            if inspection.exact:
-                assert inspection.receipt_path is not None
-                return {
-                    "command": "install",
-                    "changed": False,
-                    "no_op": True,
-                    "bundle_version": context.verified.manifest.bundle_version,
-                    "receipt": str(inspection.receipt_path),
-                    "requires_blender_start": True,
-                }
-            active = load_active(roots.active, roots)
-            generation = 1 if active is None else active.generation + 1
-            install_id = uuid4()
-            for relative in (
-                PurePath("receipts"),
-                PurePath("backups", str(install_id)),
-                PurePath("stages", str(install_id)),
-            ):
-                fd = state.open_directory(relative, create=True)
-                os.close(fd)
-            with _refs(roots, state) as refs:
-                receipt = _install_receipt(context, state, refs, active, install_id, generation)
-                pending = PendingSelector(
-                    1,
-                    generation,
-                    install_id,
-                    f"{install_id}.json",
-                    context.manifest_sha256,
-                    active,
-                )
-                pending_image = write_atomic_json(
-                    refs["pending"],
-                    capture_file(state, PurePath("pending.json")),
-                    pending.to_dict(),
-                    install_id,
-                    fault=fault,
-                )
-                del pending_image
-                fault.hit("after_pending_publish")
-                journal = _Journal(
+            workflow = select_install_workflow(state, context, exact=inspection.exact)
+            workflow_id = None if workflow is None else workflow["id"]
+            barrier = (
+                nullcontext(None)
+                if inspection.exact
+                else runtime_quiescence(
                     state,
-                    roots,
-                    fault,
-                    receipt,
-                    FileImage.absent(),
-                )
-                journal.write(receipt)
-                fault.hit("after_receipt_publish")
-                new_active = _selector(active, install_id, generation)
-                prior_image = capture_file(state, PurePath("active.json"))
-                retain = (
-                    None
-                    if active is None
-                    else TargetRef(
-                        state,
-                        PurePath("backups", str(install_id), "previous-active.json"),
-                    )
-                )
-                active_image = write_atomic_json(
-                    refs["active"],
-                    prior_image,
-                    new_active.to_dict(),
-                    install_id,
-                    retain,
-                    fault=_SelectorFault(
-                        fault,
-                        "after_active_publish" if active is None else "after_active_swap",
-                    ),
-                )
-                if active is not None:
-                    fault.hit("after_active_park")
-                fault.hit("after_active_parent_fsync")
-                receipt = _replace_target(
-                    journal.receipt,
-                    TargetRole.ACTIVE_SELECTOR,
-                    install_post=active_image,
-                    recovery_path=None if active is None else roots.previous_active(install_id),
-                    recovery_hash=None if active is None else _image_hash(prior_image),
-                )
-                journal.write(receipt)
-                _remove_pending(state, roots, pending, fault)
-                bundle_action = _planned(
-                    journal,
-                    ActionKind.BUNDLE_STAGE,
-                    roots.bundle_stage(install_id),
-                    roots.bundle_stage(install_id),
-                    None,
-                    TreeImage.absent(),
-                )
-                staged_bundle = context.verified.materialize(roots.bundle_stage(install_id))
-                bundle_image = capture_tree(state, PurePath("stages", str(install_id), "bundle"))
-                bundle_action = replace(
-                    bundle_action, state=ActionState.STAGED, intended_post=bundle_image
-                )
-                journal.action(bundle_action)
-                fault.hit("after_bundle_stage_stage")
-
-                runtime_pre = next(
-                    target.pre
-                    for target in journal.receipt.targets
-                    if target.role is TargetRole.RUNTIME
-                )
-                runtime_action = _planned(
-                    journal,
-                    ActionKind.RUNTIME_TREE,
+                    upgrade_roots,
                     roots.runtime,
-                    roots.runtime_stage(install_id),
-                    roots.runtime_recovery(install_id),
-                    runtime_pre,
+                    context.host.codex_bin,
+                    context.handoff_id,
                 )
-                runtime_stage = create_deterministic_stage(
-                    refs["runtime"].root,
-                    roots.runtime_stage(install_id).name,
-                    TreeImage.absent(),
-                    fault,
-                )
-                assert isinstance(runtime_stage, StagedTree)
-                profile = ManagedProfile(
-                    roots.home,
-                    roots.blender.user_resources,
-                    roots.blender.user_config,
-                    roots.blender.user_extensions,
-                    roots.blender.executable,
-                )
-                try:
-                    runtime_post = stage_runtime(
-                        staged_bundle,
-                        context.host.uv_bin,
-                        context.host.python_bin,
-                        profile,
-                        runtime_stage,
-                        context.host.runner,
+            )
+            try:
+                with barrier as handoff:
+                    result = _changed_install_locked(
+                        context, fault, state, workflow_id, handoff
                     )
-                except Exception as exc:
-                    runtime_post = runtime_stage.capture()
-                    if runtime_post.state is not ImageState.PRESENT or (
-                        runtime_post.dev,
-                        runtime_post.ino,
-                        runtime_post.uid,
-                        runtime_post.mode,
-                    ) != (
-                        runtime_stage.image.dev,
-                        runtime_stage.image.ino,
-                        runtime_stage.image.uid,
-                        runtime_stage.image.mode,
-                    ):
-                        raise InstallerError("runtime stage identity changed") from exc
-                    runtime_action = replace(
-                        runtime_action,
-                        state=ActionState.STAGED,
-                        intended_post=runtime_post,
-                    )
-                    journal.action(runtime_action)
-                    raise
-                runtime_stage = runtime_stage.with_image(runtime_post)
-                runtime_action = replace(
-                    runtime_action, state=ActionState.STAGED, intended_post=runtime_post
-                )
-                journal.action(runtime_action)
-                fault.hit("after_runtime_tree_stage")
-                runtime_action = _publish_action(
-                    journal,
-                    runtime_action,
-                    refs["runtime"],
-                    runtime_stage,
-                    TreeRef(
-                        refs["runtime"].root,
-                        PurePath(roots.runtime_recovery(install_id).name),
-                    ),
-                )
-                journal.write(
-                    _replace_target(
-                        journal.receipt,
-                        TargetRole.RUNTIME,
-                        install_post=runtime_post,
-                        recovery_path=(
-                            roots.runtime_recovery(install_id)
-                            if runtime_pre.state is ImageState.PRESENT
-                            else None
-                        ),
-                        recovery_hash=(
-                            _image_hash(runtime_pre)
-                            if runtime_pre.state is ImageState.PRESENT
-                            else None
-                        ),
-                    )
-                )
+            except _RuntimeRecheck:
+                continue
+            break
+    if workflow_id is not None:
+        result["workflow_id"] = workflow_id
+    return result
 
-                extension_action, userpref_action = _stage_blender_actions(
-                    context, journal, state, refs, staged_bundle
-                )
-                for role, action, recovery in (
-                    (
-                        TargetRole.BLENDER_EXTENSION,
-                        extension_action,
-                        roots.extension_recovery(install_id),
-                    ),
-                    (
-                        TargetRole.BLENDER_USERPREF,
-                        userpref_action,
-                        roots.userpref_recovery(install_id),
-                    ),
-                ):
-                    journal.write(
-                        _replace_target(
-                            journal.receipt,
-                            role,
-                            install_post=action.actual_post,
-                            recovery_path=(
-                                recovery if action.pre.state is ImageState.PRESENT else None
-                            ),
-                            recovery_hash=(
-                                _image_hash(action.pre)
-                                if action.pre.state is ImageState.PRESENT
-                                else None
-                            ),
-                        )
-                    )
 
-                codex_pre = next(
-                    target.pre
-                    for target in journal.receipt.targets
-                    if target.role is TargetRole.CODEX_CONFIG
-                )
-                codex_action = _planned(
-                    journal,
-                    ActionKind.CODEX_FILE,
-                    roots.codex_config,
-                    roots.codex_stage(install_id),
-                    roots.codex_recovery(install_id),
-                    codex_pre,
-                )
-                codex_stage = create_deterministic_stage(
-                    refs["codex"].root,
-                    roots.codex_stage(install_id).name,
-                    FileImage.absent(),
-                    fault,
-                )
-                assert isinstance(codex_stage, StagedFile)
-                desired = desired_codex_values(
-                    roots.runtime / "bin/blender-mcp-managed",
-                    profile,
-                    context.verified.manifest.tools,
-                )
-                live_fd = _open_live_file(refs["codex"], codex_pre)
-                try:
-                    codex_change = stage_codex_config(
-                        live_fd,
-                        codex_pre,
-                        desired,
-                        roots.runtime / "bin/python",
-                        codex_stage,
-                    )
-                finally:
-                    if live_fd is not None:
-                        os.close(live_fd)
-                codex_action = replace(
-                    codex_action,
-                    state=ActionState.STAGED,
-                    intended_post=codex_change.post,
-                )
-                journal.action(codex_action)
-                fault.hit("after_codex_file_stage")
-                codex_action = _publish_action(
-                    journal,
-                    codex_action,
-                    refs["codex"],
-                    codex_change.stage,
-                    TargetRef(
-                        refs["codex"].root,
-                        PurePath(roots.codex_recovery(install_id).name),
+def finalize(args: argparse.Namespace) -> dict[str, object]:
+    with _context(args) as context:
+        roots = UpgradeRoots(context.roots.home, context.roots.codex_home)
+        with mutation_locks(roots) as state:
+            result = finalize_install_locked(
+                state, context, args.workflow_id, args._fault
+            )
+    return {"command": "finalize", **result}
+
+
+def _changed_install_locked(
+    context: _Context, fault: FaultInjector, state: SafeRoot,
+    workflow_id: str | None, runtime_handoff: dict[str, Any] | None,
+) -> dict[str, object]:
+    roots = context.roots
+    reconcile_selectors(
+        roots,
+        context.source_bundle,
+        context.blender,
+        fault,
+        manifest_sha256=context.manifest_sha256,
+    )
+    inspection = _inspection(context)
+    if not inspection.exact:
+        _lifecycle_closed(context)
+    recovery = recover_active(
+        roots,
+        context.source_bundle,
+        context.blender,
+        fault,
+        manifest_sha256=context.manifest_sha256,
+    )
+    if not inspection.exact and recovery["recovered"]:
+        # Recovery may retire the workflow selected before the barrier, and may
+        # also replace the runtime inode protected by that barrier. Re-enter the
+        # wrapper so both identities are selected from the recovered state.
+        raise _RuntimeRecheck
+    context = replace(
+        context, blender=getattr(inspection, "blender_state", context.blender)
+    )
+    if inspection.exact:
+        assert inspection.receipt_path is not None
+        if workflow_id is not None:
+            doc = load_record(state, UpgradeRoots(roots.home, roots.codex_home), workflow_id)
+            if doc is not None and doc["install_id"] is None:
+                bind_receipt(state, context, workflow_id, UUID(inspection.receipt_path.stem))
+        return {
+            "command": "install",
+            "changed": False,
+            "no_op": True,
+            "bundle_version": context.verified.manifest.bundle_version,
+            "receipt": str(inspection.receipt_path),
+            "requires_blender_start": True,
+        }
+    active = load_active(roots.active, roots)
+    generation = 1 if active is None else active.generation + 1
+    install_id = uuid4()
+    if workflow_id is None:
+        raise InstallerError("changed installation requires workflow journal")
+    bind_receipt(state, context, workflow_id, install_id)
+    for relative in (
+        PurePath("receipts"),
+        PurePath("backups", str(install_id)),
+        PurePath("stages", str(install_id)),
+    ):
+        fd = state.open_directory(relative, create=True)
+        os.close(fd)
+    with _refs(roots, state) as refs:
+        receipt = _install_receipt(context, state, refs, active, install_id, generation)
+        _lifecycle_closed(context)
+        record_recovery_usage(state, receipt, runtime_handoff)
+        pending = PendingSelector(
+            1,
+            generation,
+            install_id,
+            f"{install_id}.json",
+            context.manifest_sha256,
+            active,
+        )
+        pending_image = write_atomic_json(
+            refs["pending"],
+            capture_file(state, PurePath("pending.json")),
+            pending.to_dict(),
+            install_id,
+            fault=fault,
+        )
+        del pending_image
+        fault.hit("after_pending_publish")
+        journal = _Journal(
+            state,
+            roots,
+            fault,
+            receipt,
+            FileImage.absent(),
+        )
+        journal.write(receipt)
+        fault.hit("after_receipt_publish")
+        new_active = _selector(active, install_id, generation)
+        prior_image = capture_file(state, PurePath("active.json"))
+        retain = (
+            None
+            if active is None
+            else TargetRef(
+                state,
+                PurePath("backups", str(install_id), "previous-active.json"),
+            )
+        )
+        active_image = write_atomic_json(
+            refs["active"],
+            prior_image,
+            new_active.to_dict(),
+            install_id,
+            retain,
+            fault=_SelectorFault(
+                fault,
+                "after_active_publish" if active is None else "after_active_swap",
+            ),
+        )
+        if active is not None:
+            fault.hit("after_active_park")
+        fault.hit("after_active_parent_fsync")
+        receipt = _replace_target(
+            journal.receipt,
+            TargetRole.ACTIVE_SELECTOR,
+            install_post=active_image,
+            recovery_path=None if active is None else roots.previous_active(install_id),
+            recovery_hash=None if active is None else _image_hash(prior_image),
+        )
+        journal.write(receipt)
+        _remove_pending(state, roots, pending, fault)
+        bundle_action = _planned(
+            journal,
+            ActionKind.BUNDLE_STAGE,
+            roots.bundle_stage(install_id),
+            roots.bundle_stage(install_id),
+            None,
+            TreeImage.absent(),
+        )
+        staged_bundle = context.verified.materialize(roots.bundle_stage(install_id))
+        bundle_image = capture_tree(state, PurePath("stages", str(install_id), "bundle"))
+        bundle_action = replace(
+            bundle_action, state=ActionState.STAGED, intended_post=bundle_image
+        )
+        journal.action(bundle_action)
+        fault.hit("after_bundle_stage_stage")
+
+        runtime_pre = next(
+            target.pre
+            for target in journal.receipt.targets
+            if target.role is TargetRole.RUNTIME
+        )
+        runtime_action = _planned(
+            journal,
+            ActionKind.RUNTIME_TREE,
+            roots.runtime,
+            roots.runtime_stage(install_id),
+            roots.runtime_recovery(install_id),
+            runtime_pre,
+        )
+        runtime_stage = create_deterministic_stage(
+            refs["runtime"].root,
+            roots.runtime_stage(install_id).name,
+            TreeImage.absent(),
+            fault,
+        )
+        assert isinstance(runtime_stage, StagedTree)
+        profile = ManagedProfile(
+            roots.home,
+            roots.blender.user_resources,
+            roots.blender.user_config,
+            roots.blender.user_extensions,
+            roots.blender.executable,
+        )
+        try:
+            runtime_post = stage_runtime(
+                staged_bundle,
+                context.host.uv_bin,
+                context.host.python_bin,
+                profile,
+                runtime_stage,
+                context.host.runner,
+                codex_home=roots.codex_home,
+            )
+            ensure_usage_lock(state, runtime_post.dev, runtime_post.ino)
+        except Exception as exc:
+            runtime_post = runtime_stage.capture()
+            if runtime_post.state is not ImageState.PRESENT or (
+                runtime_post.dev,
+                runtime_post.ino,
+                runtime_post.uid,
+                runtime_post.mode,
+            ) != (
+                runtime_stage.image.dev,
+                runtime_stage.image.ino,
+                runtime_stage.image.uid,
+                runtime_stage.image.mode,
+            ):
+                raise InstallerError("runtime stage identity changed") from exc
+            runtime_action = replace(
+                runtime_action,
+                state=ActionState.STAGED,
+                intended_post=runtime_post,
+            )
+            journal.action(runtime_action)
+            raise
+        runtime_stage = runtime_stage.with_image(runtime_post)
+        runtime_action = replace(
+            runtime_action, state=ActionState.STAGED, intended_post=runtime_post
+        )
+        journal.action(runtime_action)
+        fault.hit("after_runtime_tree_stage")
+        runtime_action = _publish_action(
+            journal,
+            runtime_action,
+            refs["runtime"],
+            runtime_stage,
+            TreeRef(
+                refs["runtime"].root,
+                PurePath(roots.runtime_recovery(install_id).name),
+            ),
+        )
+        journal.write(
+            _replace_target(
+                journal.receipt,
+                TargetRole.RUNTIME,
+                install_post=runtime_post,
+                recovery_path=(
+                    roots.runtime_recovery(install_id)
+                    if runtime_pre.state is ImageState.PRESENT
+                    else None
+                ),
+                recovery_hash=(
+                    _image_hash(runtime_pre)
+                    if runtime_pre.state is ImageState.PRESENT
+                    else None
+                ),
+            )
+        )
+
+        extension_action, userpref_action = _stage_blender_actions(
+            context, journal, state, refs, staged_bundle
+        )
+        for role, action, recovery in (
+            (
+                TargetRole.BLENDER_EXTENSION,
+                extension_action,
+                roots.extension_recovery(install_id),
+            ),
+            (
+                TargetRole.BLENDER_USERPREF,
+                userpref_action,
+                roots.userpref_recovery(install_id),
+            ),
+        ):
+            journal.write(
+                _replace_target(
+                    journal.receipt,
+                    role,
+                    install_post=action.actual_post,
+                    recovery_path=(
+                        recovery if action.pre.state is ImageState.PRESENT else None
+                    ),
+                    recovery_hash=(
+                        _image_hash(action.pre)
+                        if action.pre.state is ImageState.PRESENT
+                        else None
                     ),
                 )
-                journal.write(
-                    _replace_target(
-                        journal.receipt,
-                        TargetRole.CODEX_CONFIG,
-                        install_post=codex_action.actual_post,
-                        recovery_path=(
-                            roots.codex_recovery(install_id)
-                            if codex_pre.state is ImageState.PRESENT
-                            else None
-                        ),
-                        recovery_hash=(
-                            _image_hash(codex_pre)
-                            if codex_pre.state is ImageState.PRESENT
-                            else None
-                        ),
-                    )
-                )
+            )
 
-                verify_runtime(
-                    refs["runtime"], staged_bundle.manifest, profile, context.host.runner
-                )
-                fresh_blender = getattr(_inspection(context), "blender_state", context.blender)
-                if not isinstance(extension_action.actual_post, TreeImage):
-                    raise InstallerError("invalid extension postimage")
-                verify_blender_files(
-                    fresh_blender,
-                    load_extension_payload(staged_bundle.extension_path),
-                    extension_action.actual_post,
-                )
-                verify_codex_toml(roots.codex_config.read_bytes(), desired)
-                verify_codex_effective(context.host.codex_bin, desired, context.host.env)
-                journal.write(
-                    replace(
-                        journal.receipt,
-                        status=ReceiptStatus.INSTALLED,
-                        verification=MappingProxyType({"configured": True, "live": "not_run"}),
-                    )
-                )
-                fault.hit("after_receipt_installed")
-                _cleanup_bundle(journal, state)
-                return {
-                    "command": "install",
-                    "changed": True,
-                    "no_op": False,
-                    "bundle_version": staged_bundle.manifest.bundle_version,
-                    "receipt": str(roots.receipt(install_id)),
-                    "requires_blender_start": True,
-                }
+        codex_pre = next(
+            target.pre
+            for target in journal.receipt.targets
+            if target.role is TargetRole.CODEX_CONFIG
+        )
+        codex_action = _planned(
+            journal,
+            ActionKind.CODEX_FILE,
+            roots.codex_config,
+            roots.codex_stage(install_id),
+            roots.codex_recovery(install_id),
+            codex_pre,
+        )
+        codex_stage = create_deterministic_stage(
+            refs["codex"].root,
+            roots.codex_stage(install_id).name,
+            FileImage.absent(),
+            fault,
+        )
+        assert isinstance(codex_stage, StagedFile)
+        desired = desired_codex_values(
+            roots.runtime / "bin/blender-mcp-managed",
+            profile,
+            context.verified.manifest.tools,
+        )
+        live_fd = _open_live_file(refs["codex"], codex_pre)
+        try:
+            codex_change = stage_codex_config(
+                live_fd,
+                codex_pre,
+                desired,
+                roots.runtime / "bin/python",
+                codex_stage,
+            )
+        finally:
+            if live_fd is not None:
+                os.close(live_fd)
+        codex_action = replace(
+            codex_action,
+            state=ActionState.STAGED,
+            intended_post=codex_change.post,
+        )
+        journal.action(codex_action)
+        fault.hit("after_codex_file_stage")
+        codex_action = _publish_action(
+            journal,
+            codex_action,
+            refs["codex"],
+            codex_change.stage,
+            TargetRef(
+                refs["codex"].root,
+                PurePath(roots.codex_recovery(install_id).name),
+            ),
+        )
+        journal.write(
+            _replace_target(
+                journal.receipt,
+                TargetRole.CODEX_CONFIG,
+                install_post=codex_action.actual_post,
+                recovery_path=(
+                    roots.codex_recovery(install_id)
+                    if codex_pre.state is ImageState.PRESENT
+                    else None
+                ),
+                recovery_hash=(
+                    _image_hash(codex_pre)
+                    if codex_pre.state is ImageState.PRESENT
+                    else None
+                ),
+            )
+        )
+
+        verify_runtime(
+            refs["runtime"], staged_bundle.manifest, profile, context.host.runner
+        )
+        fresh_blender = getattr(_inspection(context), "blender_state", context.blender)
+        if not isinstance(extension_action.actual_post, TreeImage):
+            raise InstallerError("invalid extension postimage")
+        verify_blender_files(
+            fresh_blender,
+            load_extension_payload(staged_bundle.extension_path),
+            extension_action.actual_post,
+        )
+        verify_codex_toml(roots.codex_config.read_bytes(), desired)
+        verify_codex_effective(context.host.codex_bin, desired, context.host.env)
+        journal.write(
+            replace(
+                journal.receipt,
+                status=ReceiptStatus.INSTALLED,
+                verification=MappingProxyType({"configured": True, "live": "not_run"}),
+            )
+        )
+        fault.hit("after_receipt_installed")
+        _cleanup_bundle(journal, state)
+        return {
+            "command": "install",
+            "changed": True,
+            "no_op": False,
+            "bundle_version": staged_bundle.manifest.bundle_version,
+            "receipt": str(roots.receipt(install_id)),
+            "requires_blender_start": True,
+        }
 
 
 def install(args: argparse.Namespace) -> dict[str, object]:
@@ -1686,23 +1773,22 @@ def install(args: argparse.Namespace) -> dict[str, object]:
     with _context(args) as context:
         try:
             return _changed_install(context, fault)
+        except (RuntimeInUse, LegacyHandoffRequired):
+            raise
         except Exception as exc:
             _lifecycle_closed(context)
             try:
                 _ensure_mutation_roots(context.roots)
-                with SafeRoot.open(
-                    context.roots.state_root,
-                    os.getuid(),
-                    context.roots.state_root,
-                ) as state:
-                    with InstallerLock.acquire(state):
-                        recover_active(
-                            context.roots,
-                            context.source_bundle,
-                            context.blender,
-                            NoOpFaultInjector(),
-                            manifest_sha256=context.manifest_sha256,
-                        )
+                with mutation_locks(
+                    UpgradeRoots(context.roots.home, context.roots.codex_home)
+                ):
+                    recover_active(
+                        context.roots,
+                        context.source_bundle,
+                        context.blender,
+                        NoOpFaultInjector(),
+                        manifest_sha256=context.manifest_sha256,
+                    )
             except Exception as recovery_exc:
                 raise InstallerError("installation recovery failed") from recovery_exc
             if isinstance(exc, InstallerError):
@@ -2022,6 +2108,11 @@ def _preflight_rollback(
     state: SafeRoot,
     refs: Mapping[str, TargetRef],
 ) -> None:
+    assert_rollback_available(
+        state,
+        UpgradeRoots(roots.home, roots.codex_home),
+        install_id=str(receipt.install_id),
+    )
     if (
         receipt.bundle.get("version") != bundle.manifest.bundle_version
         or receipt.bundle.get("manifest_sha256") != manifest_sha256
@@ -2477,113 +2568,61 @@ def rollback(args: argparse.Namespace) -> dict[str, object]:
     fault = getattr(args, "_fault", NoOpFaultInjector())
     with _context(args) as context:
         roots = context.roots
-        with SafeRoot.open(roots.state_root, os.getuid(), roots.state_root) as state:
-            with InstallerLock.acquire(state):
-                requested = load_receipt(args.receipt, roots)
-                if args.receipt != roots.receipt(requested.install_id):
-                    raise InstallerError("rollback receipt path is invalid")
-                if requested.status not in {
-                    ReceiptStatus.INSTALLED,
-                    ReceiptStatus.PREPARED,
-                    ReceiptStatus.ROLLBACK_PENDING,
-                    ReceiptStatus.ROLLED_BACK,
-                }:
-                    raise InstallerError("rollback receipt status is invalid")
-                active = load_active(roots.active, roots)
-                pending = load_pending(roots.pending, roots)
-                selector = next(
-                    target
-                    for target in requested.targets
-                    if target.role is TargetRole.ACTIVE_SELECTOR
-                )
-                active_image = capture_file(state, PurePath("active.json"))
-                previous_image = capture_file(
+        with mutation_locks(UpgradeRoots(roots.home, roots.codex_home)) as state:
+            requested = load_receipt(args.receipt, roots)
+            if args.receipt != roots.receipt(requested.install_id):
+                raise InstallerError("rollback receipt path is invalid")
+            if requested.status not in {
+                ReceiptStatus.INSTALLED,
+                ReceiptStatus.PREPARED,
+                ReceiptStatus.ROLLBACK_PENDING,
+                ReceiptStatus.ROLLED_BACK,
+            }:
+                raise InstallerError("rollback receipt status is invalid")
+            active = load_active(roots.active, roots)
+            pending = load_pending(roots.pending, roots)
+            selector = next(
+                target
+                for target in requested.targets
+                if target.role is TargetRole.ACTIVE_SELECTOR
+            )
+            active_image = capture_file(state, PurePath("active.json"))
+            previous_image = capture_file(
+                state,
+                PurePath("backups", str(requested.install_id), "previous-active.json"),
+            )
+            direct_authority = (
+                active is not None
+                and active.install_id == requested.install_id
+                and active.receipt_basename == args.receipt.name
+            )
+            reversed_authority = (
+                isinstance(selector.pre, FileImage)
+                and isinstance(selector.install_post, FileImage)
+                and (active_image, previous_image) == (selector.pre, selector.install_post)
+            )
+            if requested.status is not ReceiptStatus.ROLLED_BACK and (
+                not (direct_authority or reversed_authority)
+                or (pending is not None and pending.install_id != requested.install_id)
+            ):
+                raise InstallerError("rollback receipt is not active")
+            _lifecycle_closed(context)
+            with _refs(roots, state) as refs:
+                _preflight_rollback(
+                    roots,
+                    context.source_bundle,
+                    context.manifest_sha256,
+                    requested,
                     state,
-                    PurePath("backups", str(requested.install_id), "previous-active.json"),
+                    refs,
                 )
-                direct_authority = (
-                    active is not None
-                    and active.install_id == requested.install_id
-                    and active.receipt_basename == args.receipt.name
-                )
-                reversed_authority = (
-                    isinstance(selector.pre, FileImage)
-                    and isinstance(selector.install_post, FileImage)
-                    and (active_image, previous_image) == (selector.pre, selector.install_post)
-                )
-                if requested.status is not ReceiptStatus.ROLLED_BACK and (
-                    not (direct_authority or reversed_authority)
-                    or (pending is not None and pending.install_id != requested.install_id)
-                ):
-                    raise InstallerError("rollback receipt is not active")
-                _lifecycle_closed(context)
-                with _refs(roots, state) as refs:
-                    _preflight_rollback(
-                        roots,
-                        context.source_bundle,
-                        context.manifest_sha256,
-                        requested,
-                        state,
-                        refs,
-                    )
-                if (
-                    requested.status is ReceiptStatus.ROLLED_BACK
-                    and previous_image == FileImage.absent()
-                ):
-                    roles = [
-                        action.target_role.value
-                        for action in requested.actions
-                        if action.target_role is not None
-                    ]
-                    return {
-                        "command": "rollback",
-                        "receipt": str(args.receipt),
-                        "status": "rolled_back",
-                        "restored_roles": roles,
-                    }
-                reconcile_selectors(
-                    roots,
-                    context.source_bundle,
-                    context.blender,
-                    fault,
-                    manifest_sha256=context.manifest_sha256,
-                )
-                recover_active(
-                    roots,
-                    context.source_bundle,
-                    context.blender,
-                    fault,
-                    manifest_sha256=context.manifest_sha256,
-                    expected_install_id=requested.install_id,
-                )
-                requested = load_receipt(args.receipt, roots)
-                if requested.status is ReceiptStatus.ROLLED_BACK:
-                    roles = [
-                        action.target_role.value
-                        for action in requested.actions
-                        if action.target_role is not None
-                    ]
-                    return {
-                        "command": "rollback",
-                        "receipt": str(args.receipt),
-                        "status": "rolled_back",
-                        "restored_roles": roles,
-                    }
-                active = load_active(roots.active, roots)
-                if active is None or args.receipt != roots.receipt(active.install_id):
-                    raise InstallerError("rollback receipt is not active")
-                receipt = requested
-                rolled = _rollback_receipt(
-                    roots,
-                    context.source_bundle,
-                    context.blender,
-                    receipt,
-                    fault,
-                    manifest_sha256=context.manifest_sha256,
-                )
+            if (
+                requested.status is ReceiptStatus.ROLLED_BACK
+                and previous_image == FileImage.absent()
+            ):
                 roles = [
                     action.target_role.value
-                    for action in rolled.actions
+                    for action in requested.actions
                     if action.target_role is not None
                 ]
                 return {
@@ -2592,6 +2631,57 @@ def rollback(args: argparse.Namespace) -> dict[str, object]:
                     "status": "rolled_back",
                     "restored_roles": roles,
                 }
+            reconcile_selectors(
+                roots,
+                context.source_bundle,
+                context.blender,
+                fault,
+                manifest_sha256=context.manifest_sha256,
+            )
+            recover_active(
+                roots,
+                context.source_bundle,
+                context.blender,
+                fault,
+                manifest_sha256=context.manifest_sha256,
+                expected_install_id=requested.install_id,
+            )
+            requested = load_receipt(args.receipt, roots)
+            if requested.status is ReceiptStatus.ROLLED_BACK:
+                roles = [
+                    action.target_role.value
+                    for action in requested.actions
+                    if action.target_role is not None
+                ]
+                return {
+                    "command": "rollback",
+                    "receipt": str(args.receipt),
+                    "status": "rolled_back",
+                    "restored_roles": roles,
+                }
+            active = load_active(roots.active, roots)
+            if active is None or args.receipt != roots.receipt(active.install_id):
+                raise InstallerError("rollback receipt is not active")
+            receipt = requested
+            rolled = _rollback_receipt(
+                roots,
+                context.source_bundle,
+                context.blender,
+                receipt,
+                fault,
+                manifest_sha256=context.manifest_sha256,
+            )
+            roles = [
+                action.target_role.value
+                for action in rolled.actions
+                if action.target_role is not None
+            ]
+            return {
+                "command": "rollback",
+                "receipt": str(args.receipt),
+                "status": "rolled_back",
+                "restored_roles": roles,
+            }
 
 
 def run_cli(argv: Sequence[str], fault: FaultInjector) -> int:
@@ -2603,11 +2693,24 @@ def run_cli(argv: Sequence[str], fault: FaultInjector) -> int:
     except SystemExit as exc:
         return int(exc.code)
     args._fault = fault
-    handler = {"inspect": inspect, "install": install, "verify": verify, "rollback": rollback}[
-        args.command
-    ]
+    handler = {
+        "inspect": inspect,
+        "install": install,
+        "verify": verify,
+        "rollback": rollback,
+        "finalize": finalize,
+    }[args.command]
     try:
         result = handler(args)
+    except (RollbackUnavailable, RuntimeInUse, LegacyHandoffRequired) as exc:
+        print(
+            json.dumps(
+                {"error": exc.code, "reason": str(exc)},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return 1
     except InstallerError:
         print(json.dumps({"error": "installer error"}, sort_keys=True, separators=(",", ":")))
         return 1
@@ -2619,7 +2722,7 @@ def run_cli(argv: Sequence[str], fault: FaultInjector) -> int:
         )
         return 1
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    return 0
+    return 3 if result.get("status") == "cleanup_pending" else 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

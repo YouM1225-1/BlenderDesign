@@ -109,20 +109,93 @@ def _install_env(profile: ManagedProfile) -> dict[str, str]:
 
 def _launcher_source(environment: Mapping[str, str]) -> bytes:
     clean = dict(sorted(environment.items()))
+    bootstrap = Path(clean.pop("BLENDER_MCP_BOOTSTRAP_PYTHON"))
+    codex_home = Path(clean.pop("BLENDER_MCP_CODEX_HOME"))
+    if not codex_home.is_absolute() or ".." in codex_home.parts:
+        raise InstallerError("Codex home must be an absolute owned root")
+    if not bootstrap.is_absolute() or ".." in bootstrap.parts:
+        raise InstallerError("bootstrap Python must be an absolute external executable")
+    managed = Path(clean["HOME"]) / ".local/share/blender-lab-mcp"
+    caches = codex_home / "plugins/cache/official-blender-mcp/blender-mcp-installer"
+    if bootstrap.is_relative_to(managed) or bootstrap.is_relative_to(caches):
+        raise InstallerError("bootstrap Python cannot live in a retired program tree")
     shell_environment = " ".join(f"{key}={shlex.quote(value)}" for key, value in clean.items())
+    gate = r'''
+import fcntl
+import hashlib
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+def directory(path):
+    if not path.is_absolute() or '..' in path.parts:
+        raise SystemExit(75)
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+def json_file(parent, name):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 33554432:
+            raise SystemExit(75)
+        return json.loads(stream.read(33554433))
+
+runtime = Path(__file__).absolute().parent.parent
+root_fd = directory(runtime)
+root_info = os.fstat(root_fd)
+state_fd = directory(Path(environment['HOME']) / '.local/state/blender-mcp-installer')
+usage_fd = os.open('usage', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=state_fd)
+name = hashlib.sha256(f'tree:{root_info.st_dev}:{root_info.st_ino}'.encode()).hexdigest() + '.lock'
+lease_fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW, dir_fd=usage_fd)
+lease_info = os.fstat(lease_fd)
+if (not stat.S_ISREG(lease_info.st_mode) or lease_info.st_uid != os.getuid()
+        or stat.S_IMODE(lease_info.st_mode) != 0o600 or lease_info.st_nlink != 1):
+    raise SystemExit(75)
+try:
+    fcntl.flock(lease_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit(75)
+check_fd = directory(runtime)
+if (os.fstat(check_fd).st_dev, os.fstat(check_fd).st_ino) != (root_info.st_dev, root_info.st_ino):
+    raise SystemExit(75)
+active = json_file(state_fd, 'active.json')
+identifier = active.get('install_id')
+import uuid
+if not isinstance(identifier, str) or str(uuid.UUID(identifier)) != identifier:
+    raise SystemExit(75)
+receipts_fd = os.open('receipts', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=state_fd)
+receipt = json_file(receipts_fd, identifier + '.json')
+if receipt.get('status') != 'installed' or receipt.get('install_id') != identifier:
+    raise SystemExit(75)
+matching = [row for row in receipt.get('targets', []) if row.get('role') == 'runtime']
+if len(matching) != 1 or matching[0].get('path') != str(runtime):
+    raise SystemExit(75)
+post = matching[0].get('install_post') or {}
+if (post.get('dev'), post.get('ino')) != (root_info.st_dev, root_info.st_ino):
+    raise SystemExit(75)
+for fd in (root_fd, state_fd, usage_fd, check_fd, receipts_fd):
+    os.close(fd)
+os.set_inheritable(lease_fd, True)
+runtime_python = runtime / 'bin/python'
+entry_point = runtime / 'bin/blender-mcp'
+os.execve(str(runtime_python), [str(runtime_python), '-B', str(entry_point), *sys.argv[1:]], environment)
+'''
     return (
         "#!/bin/sh\n"
-        f"'''exec' /usr/bin/env -i {shell_environment} "
-        '"${0%/*}/python" "$0" "$@"\n'
+        f"'''exec' /usr/bin/env -i {shell_environment} {shlex.quote(str(bootstrap))} \"$0\" \"$@\"\n"
         "' '''\n"
-        "import os\n"
-        "import sys\n"
-        "from pathlib import Path\n\n"
-        f"environment = {clean!r}\n"
-        "runtime_python = Path(__file__).with_name('python')\n"
-        "entry_point = Path(__file__).with_name('blender-mcp')\n"
-        'os.execve(str(runtime_python), [str(runtime_python), "-B", str(entry_point), '
-        "*sys.argv[1:]], environment)\n"
+        f"environment = {clean!r}\n" + gate
     ).encode()
 
 
@@ -555,6 +628,8 @@ def stage_runtime(
     profile: ManagedProfile,
     stage: StagedTree,
     runner: Runner,
+    *,
+    codex_home: Path | None = None,
 ) -> TreeImage:
     uv_bin = _absolute(uv_bin, "uv executable")
     python_bin = _absolute(python_bin, "Python executable")
@@ -674,10 +749,27 @@ def stage_runtime(
             check_stage()
             metadata = _probe_runtime(runtime, expected, bundle.manifest.tools, profile, runner)
             check_stage()
-            launcher_environment = _profile_env(profile)
+            bootstrap_python = python_bin.resolve(strict=True)
+            selected_codex_home = _absolute(
+                codex_home or profile.home / ".codex", "Codex home"
+            )
+            managed_caches = (
+                selected_codex_home
+                / "plugins/cache/official-blender-mcp/blender-mcp-installer"
+            )
+            if bootstrap_python.is_relative_to(
+                runtime.parent
+            ) or bootstrap_python.is_relative_to(managed_caches):
+                raise InstallerError("bootstrap Python must remain outside managed runtime trees")
+            launcher_environment = {
+                **_profile_env(profile),
+                "BLENDER_MCP_BOOTSTRAP_PYTHON": str(bootstrap_python),
+                "BLENDER_MCP_CODEX_HOME": str(selected_codex_home),
+            }
             launcher = runtime / _LAUNCHER
             _write_exclusive(launcher, _launcher_source(launcher_environment), 0o700)
             _write_exclusive(runtime / _LOCK_COPY, lock_raw, 0o600)
+            _write_exclusive(runtime / ".blender-mcp-usage-v1", b"inode-v1\n", 0o600)
             entry_point_raw = _read_stable(runtime / PurePath(metadata["entry_point_relative"]))
             module_raw = _read_stable(runtime / PurePath(metadata["module_relative"]))
             _sync_tree(runtime)
@@ -849,6 +941,24 @@ def _state(runtime_root: TargetRef, manifest: ReleaseManifest, *, strict: bool) 
                 blender_path=Path(environment["BLENDER_PATH"]),
             )
         )
+        bootstrap = _absolute(
+            Path(environment["BLENDER_MCP_BOOTSTRAP_PYTHON"]), "bootstrap Python"
+        )
+        selected_codex_home = _absolute(
+            Path(environment["BLENDER_MCP_CODEX_HOME"]), "Codex home"
+        )
+        managed_caches = (
+            selected_codex_home
+            / "plugins/cache/official-blender-mcp/blender-mcp-installer"
+        )
+        if (
+            bootstrap.is_relative_to(runtime.parent)
+            or bootstrap.is_relative_to(managed_caches)
+            or not bootstrap.is_file()
+        ):
+            raise InstallerError("runtime bootstrap is not external")
+        expected_environment["BLENDER_MCP_BOOTSTRAP_PYTHON"] = str(bootstrap)
+        expected_environment["BLENDER_MCP_CODEX_HOME"] = str(selected_codex_home)
         if environment != expected_environment:
             raise InstallerError("invalid runtime launcher environment")
         expected_server = str(manifest.server["version"])
@@ -889,7 +999,13 @@ def verify_runtime(
         or probed["entry_point"] != state.entry_point
         or runtime_root.path / PurePath(probed["entry_point_relative"]) != state.entry_point_path
         or runtime_root.path / PurePath(probed["module_relative"]) != state.module_path
-        or state.launcher_environment != _profile_env(profile)
+        or {
+            key: value
+            for key, value in state.launcher_environment.items()
+            if key
+            not in {"BLENDER_MCP_BOOTSTRAP_PYTHON", "BLENDER_MCP_CODEX_HOME"}
+        }
+        != _profile_env(profile)
     ):
         raise InstallerError("runtime verification failed")
     return state

@@ -244,6 +244,7 @@ def _patch_scenario(cli, root: Path, fixture_kind: str, preimage: str, point: st
         capabilities,
         blender,
         roots,
+        "a" * 40,
     )
 
     @contextmanager
@@ -261,16 +262,24 @@ def _patch_scenario(cli, root: Path, fixture_kind: str, preimage: str, point: st
         except Exception:
             receipt = None
         force = root / "force-change"
+        force_seen = root / ".force-change-seen"
         forced = force.exists()
         if forced:
-            force.unlink()
+            if force_seen.exists():
+                force.unlink()
+                force_seen.unlink()
+            else:
+                force_seen.write_text("1\n")
         exact = receipt is not None and receipt.status is ReceiptStatus.INSTALLED and not forced
         return SimpleNamespace(
             exact=exact,
             receipt_path=None if receipt is None else roots.receipt(receipt.install_id),
         )
 
-    def fake_runtime(_bundle, _uv, _python, _profile, stage, _runner):
+    def fake_runtime(
+        _bundle, _uv, _python, _profile, stage, _runner, *, codex_home=None
+    ):
+        assert codex_home == roots.codex_home
         import tomlkit
 
         (stage.path / "bin").mkdir()
@@ -291,6 +300,7 @@ def _patch_scenario(cli, root: Path, fixture_kind: str, preimage: str, point: st
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
         (stage.path / "bin/blender-mcp-managed").write_bytes(b"launcher")
+        (stage.path / ".blender-mcp-usage-v1").write_bytes(b"inode-v1\n")
         return capture_tree(stage.root, stage.relative)
 
     def fake_blender(_state, _zip, work: Path, _authorizations, _runner):
@@ -346,6 +356,14 @@ def _patch_scenario(cli, root: Path, fixture_kind: str, preimage: str, point: st
             if fixture_kind in {"runtime_tree", "extension_tree"}:
                 selected.mkdir()
                 (selected / "preimage").write_bytes(b"preimage")
+                if fixture_kind == "runtime_tree":
+                    from blender_mcp_installer.upgrade_locks import ensure_usage_lock
+                    from blender_mcp_installer.upgrade_state import UpgradeRoots, state_root
+
+                    (selected / ".blender-mcp-usage-v1").write_bytes(b"inode-v1\n")
+                    image = selected.stat()
+                    with state_root(UpgradeRoots(roots.home, roots.codex_home)) as state:
+                        ensure_usage_lock(state, image.st_dev, image.st_ino)
             else:
                 selected.write_bytes(b'foreign = "SECRET-SENTINEL"\n')
         marker.write_text("seeded\n")

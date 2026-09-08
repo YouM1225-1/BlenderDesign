@@ -483,16 +483,35 @@ def discover_candidates(
                         }
                     )
                     continue
+                proofs = [proof, parent_proof]
+                known_lease = lease_protocol(target.pre)
+                try:
+                    usage, usage_proof = read_proof(
+                        state, PurePath("receipts", identity + ".usage.json")
+                    )
+                except FileNotFoundError:
+                    usage = None
+                if usage is not None:
+                    field = "runtime" if role is TargetRole.RUNTIME else "extension"
+                    if (
+                        usage.get("schema_version") != 1
+                        or usage.get("install_id") != identity
+                        or usage.get("selected_blender_closed") is not True
+                        or usage.get(field) != target.pre.to_dict()
+                    ):
+                        raise InstallerError("recovery usage proof mismatch")
+                    known_lease = True
+                    proofs.append(usage_proof)
                 row = {
                     "key": key,
                     "kind": kind,
                     "owner": identity,
                     "version": None,
                     "expected": target.pre.to_dict(),
-                    "proofs": [proof, parent_proof],
+                    "proofs": proofs,
                     "content_source": None,
                     "content_sha256": None,
-                    "lease_known": lease_protocol(target.pre),
+                    "lease_known": known_lease,
                     "state": "pending",
                     "reason": "",
                 }

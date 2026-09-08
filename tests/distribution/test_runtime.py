@@ -5,8 +5,10 @@ import os
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path, PurePath
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -39,6 +41,8 @@ from blender_mcp_installer.runtime import (  # noqa: E402
     stage_runtime,
     verify_runtime,
 )
+from blender_mcp_installer.upgrade_locks import ensure_usage_lock  # noqa: E402
+from blender_mcp_installer.upgrade_state import UpgradeRoots, state_root  # noqa: E402
 
 
 def _inspect_runtime(runtime_root: TreeRef, manifest):
@@ -226,6 +230,36 @@ def _stage(tmp_path: Path, bundle: StagedBundle):
     return root, created.with_image(image), runner
 
 
+@contextmanager
+def _installed_launcher(stage: StagedTree, profile: ManagedProfile):
+    profile.home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    codex_home = profile.home / ".codex"
+    codex_home.mkdir(mode=0o700, exist_ok=True)
+    roots = UpgradeRoots(profile.home, codex_home)
+    identifier = str(uuid4())
+    info = stage.path.stat()
+    with state_root(roots) as state:
+        ensure_usage_lock(state, info.st_dev, info.st_ino)
+        (state.path / "receipts").mkdir()
+        (state.path / "active.json").write_text(json.dumps({"install_id": identifier}))
+        (state.path / "receipts" / f"{identifier}.json").write_text(
+            json.dumps(
+                {
+                    "install_id": identifier,
+                    "status": "installed",
+                    "targets": [
+                        {
+                            "role": "runtime",
+                            "path": str(stage.path),
+                            "install_post": {"dev": info.st_dev, "ino": info.st_ino},
+                        }
+                    ],
+                }
+            )
+        )
+        yield
+
+
 def test_runtime_syncs_full_tree_once_then_only_marker_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -385,20 +419,21 @@ def test_actual_launcher_discards_hostile_parent_and_selects_managed_identity(
                 "BLENDER_OTHER": "hostile",
             }
         )
-        completed = subprocess.run(
-            [stage.path / "bin/blender-mcp-managed", "one", "two"],
-            env=hostile,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        profile = _profile(tmp_path)
+        with _installed_launcher(stage, profile):
+            completed = subprocess.run(
+                [stage.path / "bin/blender-mcp-managed", "one", "two"],
+                env=hostile,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
         assert completed.returncode == 0, completed.stderr
         assert (
-            'os.execve(str(runtime_python), [str(runtime_python), "-B", str(entry_point), '
+            "os.execve(str(runtime_python), [str(runtime_python), '-B', str(entry_point), "
             "*sys.argv[1:]], environment)" in (stage.path / "bin/blender-mcp-managed").read_text()
         )
         payload = json.loads(completed.stdout)
-        profile = _profile(tmp_path)
         assert payload["argv"] == ["one", "two"]
         assert payload["entrypoint"] == str(stage.path / "bin/blender-mcp")
         shell_env = payload["env"]
@@ -476,15 +511,16 @@ def test_real_launcher_keeps_verified_runtime_bytecode_free(tmp_path: Path) -> N
             "BLENDER_MCP_HOST": "hostile.invalid",
             "BLENDER_MCP_PORT": "1",
         }
-        completed = subprocess.run(
-            [stage.path / "bin/blender-mcp-managed"],
-            input="".join(json.dumps(message) + "\n" for message in messages),
-            env=hostile,
-            text=True,
-            capture_output=True,
-            timeout=10,
-            check=True,
-        )
+        with _installed_launcher(stage, _profile(tmp_path)):
+            completed = subprocess.run(
+                [stage.path / "bin/blender-mcp-managed"],
+                input="".join(json.dumps(message) + "\n" for message in messages),
+                env=hostile,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=True,
+            )
         responses = {value["id"]: value for value in map(json.loads, completed.stdout.splitlines())}
         assert responses[1]["result"]["protocolVersion"] == "2025-06-18"
         assert tuple(tool["name"] for tool in responses[2]["result"]["tools"]) == (

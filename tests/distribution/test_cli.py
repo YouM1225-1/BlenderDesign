@@ -749,6 +749,7 @@ def _install_context(host: HostHarness) -> tuple[cli._Context, BlenderState, Ins
             capabilities,
             blender,
             roots,
+            COMMIT,
         ),
         blender,
         roots,
@@ -896,10 +897,14 @@ def test_changed_install_restages_exact_external_blender_with_codex_drift(
             blender_state=inspect_blender(host.blender, context.host.env, runner),
         )
 
-    def fake_runtime(_bundle, _uv, _python, _profile, stage, _runner):
+    def fake_runtime(
+        _bundle, _uv, _python, _profile, stage, _runner, *, codex_home=None
+    ):
+        assert codex_home == roots.codex_home
         (stage.path / "bin").mkdir()
         (stage.path / "bin/python").write_bytes(b"python")
         (stage.path / "bin/blender-mcp-managed").write_bytes(b"launcher")
+        (stage.path / ".blender-mcp-usage-v1").write_bytes(b"inode-v1\n")
         return capture_tree(stage.root, stage.relative)
 
     def fake_codex(_fd, _current, _desired, _runtime_python, stage: StagedFile):
@@ -957,6 +962,71 @@ def test_changed_install_restages_exact_external_blender_with_codex_drift(
     assert not (roots.state_root / "stages" / str(receipt.install_id) / "blender-work").exists()
 
 
+@pytest.mark.parametrize("lease_protocol", [False, True])
+def test_prepublication_runtime_barrier_preserves_managed_targets(
+    host: HostHarness, monkeypatch: pytest.MonkeyPatch, lease_protocol: bool
+) -> None:
+    from blender_mcp_installer.upgrade_handoff import LegacyHandoffRequired, RuntimeInUse
+    from blender_mcp_installer.upgrade_locks import ensure_usage_lock, usage_lock
+    from blender_mcp_installer.upgrade_state import UpgradeRoots, record_ids, state_root
+
+    context, _, roots = _install_context(host)
+    roots.runtime.mkdir(parents=True)
+    (roots.runtime / "old-runtime").write_bytes(b"runtime-before")
+    if lease_protocol:
+        (roots.runtime / ".blender-mcp-usage-v1").write_bytes(b"inode-v1\n")
+    roots.extension_target.mkdir(parents=True)
+    (roots.extension_target / "old-extension").write_bytes(b"extension-before")
+    roots.codex_config.parent.mkdir(parents=True, exist_ok=True)
+    roots.codex_config.write_bytes(b"codex-before")
+
+    def images() -> tuple[TreeImage, TreeImage, FileImage]:
+        with SafeRoot.open(roots.home, os.getuid(), roots.home) as home:
+            runtime = capture_tree(home, roots.runtime.relative_to(roots.home))
+        boundary = roots.blender.user_resources
+        with SafeRoot.open(boundary, os.getuid(), boundary) as resources:
+            extension = capture_tree(
+                resources, roots.extension_target.relative_to(boundary)
+            )
+        with SafeRoot.open(roots.codex_home, os.getuid(), roots.codex_home) as codex:
+            config = capture_file(codex, roots.codex_config.relative_to(roots.codex_home))
+        return runtime, extension, config
+
+    monkeypatch.setattr(
+        cli,
+        "_inspection",
+        lambda _context: SimpleNamespace(exact=False, blender_state=context.blender),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_lifecycle_closed",
+        lambda _context: (_ for _ in ()).throw(
+            AssertionError("publication barrier must run before lifecycle recovery")
+        ),
+    )
+
+    before = images()
+    upgrade_roots = UpgradeRoots(roots.home, roots.codex_home)
+    expected = RuntimeInUse if lease_protocol else LegacyHandoffRequired
+    with state_root(upgrade_roots) as state:
+        if lease_protocol:
+            ensure_usage_lock(state, before[0].dev, before[0].ino)
+        lease = (
+            usage_lock(state, before[0].dev, before[0].ino, exclusive=False)
+            if lease_protocol
+            else nullcontext(True)
+        )
+        with lease as acquired:
+            assert acquired
+            with pytest.raises(expected):
+                cli._changed_install(context, NoOpFaultInjector())
+        assert len(record_ids(state)) == 1
+        assert not (state.path / "active.json").exists()
+        assert not (state.path / "pending.json").exists()
+        assert not (state.path / "receipts").exists()
+    assert images() == before
+
+
 def test_first_install_orchestrates_journaled_adapters(
     host: HostHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -969,10 +1039,14 @@ def test_first_install_orchestrates_journaled_adapters(
     )
     monkeypatch.setattr(cli, "_lifecycle_closed", lambda _context: None)
 
-    def fake_runtime(_bundle, _uv, _python, _profile, stage, _runner):
+    def fake_runtime(
+        _bundle, _uv, _python, _profile, stage, _runner, *, codex_home=None
+    ):
+        assert codex_home == roots.codex_home
         (stage.path / "bin").mkdir()
         (stage.path / "bin/python").write_bytes(b"python")
         (stage.path / "bin/blender-mcp-managed").write_bytes(b"launcher")
+        (stage.path / ".blender-mcp-usage-v1").write_bytes(b"inode-v1\n")
         return capture_tree(stage.root, stage.relative)
 
     def fake_blender(_state, _zip, work: Path, _authorizations, _runner):
@@ -1208,7 +1282,10 @@ def test_runtime_stage_failure_is_automatically_rolled_back(
     )
     monkeypatch.setattr(cli, "_lifecycle_closed", lambda _context: None)
 
-    def fail_runtime(_bundle, _uv, _python, _profile, stage, _runner):
+    def fail_runtime(
+        _bundle, _uv, _python, _profile, stage, _runner, *, codex_home=None
+    ):
+        assert codex_home == roots.codex_home
         (stage.path / "bin").mkdir()
         (stage.path / "bin/python").write_bytes(b"partial-runtime")
         raise InstallerError("runtime metadata probe failed")
@@ -1218,7 +1295,7 @@ def test_runtime_stage_failure_is_automatically_rolled_back(
     with pytest.raises(InstallerError, match="runtime metadata probe failed"):
         cli.install(SimpleNamespace(_fault=NoOpFaultInjector()))
 
-    receipts = tuple(roots.receipts.glob("*.json"))
+    receipts = tuple(path for path in roots.receipts.glob("*.json") if not path.name.endswith(".usage.json"))
     assert len(receipts) == 1
     receipt = cli.load_receipt(receipts[0], roots)
     assert receipt.status is ReceiptStatus.ROLLED_BACK
@@ -1297,7 +1374,14 @@ def test_resumed_install_checks_lifecycle_before_restoring_live_blender_files(
         assert all(before_retry.values())
         assert state_when_lifecycle_guard_runs == [before_retry]
         assert live_state() == before_retry
-        receipt = cli.load_receipt(next(roots.receipts.glob("*.json")), roots)
+        receipt = cli.load_receipt(
+            next(
+                path
+                for path in roots.receipts.glob("*.json")
+                if not path.name.endswith(".usage.json")
+            ),
+            roots,
+        )
         assert receipt.status is ReceiptStatus.PREPARED
 
 
@@ -1318,7 +1402,7 @@ def test_install_exception_checks_lifecycle_before_recovery_cleanup(
 
         def closed_then_running(_context: object) -> None:
             states.append(live_state())
-            if len(states) == 2:
+            if len(states) == 3:
                 raise InstallerError(
                     "selected Blender must be closed and localhost port 9876 free"
                 )
@@ -1336,9 +1420,18 @@ def test_install_exception_checks_lifecycle_before_recovery_cleanup(
             "extension_exists": False,
             "runtime_exists": False,
         }
-        assert len(states) == 2 and all(states[1].values())
-        assert live_state() == states[1]
-        receipt = cli.load_receipt(next(roots.receipts.glob("*.json")), roots)
+        assert len(states) == 3
+        assert states[1] == states[0]
+        assert all(states[2].values())
+        assert live_state() == states[2]
+        receipt = cli.load_receipt(
+            next(
+                path
+                for path in roots.receipts.glob("*.json")
+                if not path.name.endswith(".usage.json")
+            ),
+            roots,
+        )
         assert receipt.status is ReceiptStatus.PREPARED
 
 
@@ -1355,7 +1448,10 @@ def test_runtime_stage_failure_does_not_adopt_replaced_stage(
     monkeypatch.setattr(cli, "_lifecycle_closed", lambda _context: None)
     replacement = b"foreign-runtime"
 
-    def replace_then_fail(_bundle, _uv, _python, _profile, stage, _runner):
+    def replace_then_fail(
+        _bundle, _uv, _python, _profile, stage, _runner, *, codex_home=None
+    ):
+        assert codex_home == roots.codex_home
         stage.path.rename(stage.path.with_name(f"{stage.path.name}.original"))
         stage.path.mkdir()
         (stage.path / "foreign").write_bytes(replacement)
@@ -1366,7 +1462,7 @@ def test_runtime_stage_failure_does_not_adopt_replaced_stage(
     with pytest.raises(InstallerError, match="installation recovery failed"):
         cli.install(SimpleNamespace(_fault=NoOpFaultInjector()))
 
-    receipts = tuple(roots.receipts.glob("*.json"))
+    receipts = tuple(path for path in roots.receipts.glob("*.json") if not path.name.endswith(".usage.json"))
     assert len(receipts) == 1
     receipt = cli.load_receipt(receipts[0], roots)
     assert receipt.status is ReceiptStatus.PREPARED
@@ -1863,7 +1959,11 @@ _FAULT_CASES = tuple(
 def _crash_receipt_path(state_root: Path, requested: Path | None) -> Path | None:
     if requested is not None:
         return requested
-    receipts = tuple((state_root / "receipts").glob("[0-9a-f]*.json"))
+    receipts = tuple(
+        path
+        for path in (state_root / "receipts").glob("[0-9a-f]*.json")
+        if not path.name.endswith(".usage.json")
+    )
     for candidate in sorted(receipts, key=lambda path: path.stat().st_mtime_ns, reverse=True):
         if json.loads(candidate.read_text())["status"] in {"rollback_pending", "rolled_back"}:
             return candidate

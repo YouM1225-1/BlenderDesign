@@ -48,6 +48,7 @@ from tests.distribution.test_filesystem import (
     _roots,
 )
 from tests.distribution.test_runtime import _bundle as _runtime_bundle
+from tests.distribution.test_runtime import _installed_launcher
 from tests.distribution.test_runtime import _profile as _runtime_profile
 
 
@@ -1184,11 +1185,12 @@ def test_official_probe_keeps_locked_runtime_tree_and_marker_exact(tmp_path: Pat
         def run(argv, *, cwd: Path, env):
             return subprocess.run(argv, cwd=cwd, env=env, text=True, capture_output=True)
 
+        profile = _runtime_profile(tmp_path)
         image = stage_runtime(
             bundle,
             Path(os.environ["UV"]).resolve(strict=True),
             Path(sys.executable).resolve(strict=True),
-            _runtime_profile(tmp_path),
+            profile,
             created,
             run,
         )
@@ -1204,20 +1206,24 @@ def test_official_probe_keeps_locked_runtime_tree_and_marker_exact(tmp_path: Pat
             )
 
         bytecode_before = bytecode_paths()
-        handle = OfficialMCPProbe(stage.path / "bin/python").spawn(
-            (str(stage.path / "bin/blender-mcp-managed"),),
-            env={"HOME": str(tmp_path / "hostile-home"), "PYTHONDONTWRITEBYTECODE": "0"},
-        )
-        try:
-            client = handle.open_client()
-            initialized = client.initialize()
-            assert verification._valid_initialize(initialized, bundle.manifest)
-            assert tuple(client.list_tools()) == bundle.manifest.tools
-            assert type(client.call_tool("get_blendfile_summary_datablocks", {})) is dict
-        finally:
-            handle.close()
-            handle.terminate()
-            assert handle.wait(2.0) == 0
+        with _installed_launcher(stage, profile):
+            handle = OfficialMCPProbe(stage.path / "bin/python").spawn(
+                (str(stage.path / "bin/blender-mcp-managed"),),
+                env={
+                    "HOME": str(tmp_path / "hostile-home"),
+                    "PYTHONDONTWRITEBYTECODE": "0",
+                },
+            )
+            try:
+                client = handle.open_client()
+                initialized = client.initialize()
+                assert verification._valid_initialize(initialized, bundle.manifest)
+                assert tuple(client.list_tools()) == bundle.manifest.tools
+                assert type(client.call_tool("get_blendfile_summary_datablocks", {})) is dict
+            finally:
+                handle.close()
+                handle.terminate()
+                assert handle.wait(2.0) == 0
 
         assert stage.capture() == image
         assert marker.read_bytes() == marker_raw

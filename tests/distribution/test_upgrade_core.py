@@ -1355,3 +1355,59 @@ def test_changed_journal_snapshot_cannot_authorize_cleanup(
             roots,
             registration_ref="marketplace-recovery/registration." + registration_id,
         )
+
+
+def test_full_finalize_probes_live_once_and_rechecks_snapshot(prepared, monkeypatch):
+    from types import SimpleNamespace
+
+    from blender_mcp_installer import upgrade_integration as integration
+    from blender_mcp_installer import verification
+
+    roots, state, prior, row, old = prepared
+    profile = {
+        "executable": str(roots.home / "Blender"),
+        "architecture": "arm64",
+        "version": "5.2.0",
+        "resources": str(roots.home / "profile"),
+        "config": str(roots.home / "profile/config"),
+        "extensions": str(roots.home / "profile/extensions"),
+    }
+    document = new_record(roots, "install", prior["desired"])
+    document["profile"] = profile
+    document["registration"] = prior["registration"]
+    document["install_id"] = str(uuid4())
+    document = save_record(state, roots, None, document)
+    context = SimpleNamespace(
+        roots=SimpleNamespace(
+            home=roots.home,
+            codex_home=roots.codex_home,
+            runtime=roots.home / ".local/share/blender-lab-mcp/runtime",
+            receipt=lambda identifier: state.path / "receipts" / f"{identifier}.json",
+        ),
+        host=SimpleNamespace(codex_bin=Path("/fake/codex"), env={}),
+        source_bundle=object(),
+        blender=object(),
+    )
+    executable = context.roots.runtime / "bin/python"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    live = []
+    fingerprints = []
+    monkeypatch.setattr(integration, "desired_from_context", lambda _context: prior["desired"])
+    monkeypatch.setattr(integration, "profile_from_context", lambda _context: profile)
+    monkeypatch.setattr(
+        integration,
+        "installation_fingerprint",
+        lambda *_args: (fingerprints.append("read") or ("stable",)),
+    )
+    monkeypatch.setattr(verification, "verify_live", lambda *_args: live.append("live"))
+    monkeypatch.setattr(integration, "discover_candidates", lambda *_args: ([row], []))
+    monkeypatch.setattr(integration, "other_references", lambda *_args: ())
+
+    result = integration.finalize_install_locked(
+        state, context, document["id"], NoOpFaultInjector()
+    )
+
+    assert result["status"] == "complete" and not old.exists()
+    assert live == ["live"] and len(fingerprints) >= 4
