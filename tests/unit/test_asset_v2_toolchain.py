@@ -248,3 +248,200 @@ def test_process_limits_produce_controller_accidents(tmp_path, program, limit, e
             max_log_bytes=1024,
         )
     assert caught.value.code == expected
+
+
+@pytest.mark.parametrize("boundary", ["entry", "term"])
+def test_child_exit_during_cleanup_keeps_accident_and_observations(
+    tmp_path, monkeypatch, boundary,
+):
+    import os
+    import signal
+
+    real_stop, real_killpg = primitives.stop_group, os.killpg
+    children, os_errors = [], []
+    delayed = False
+
+    def killpg(group, sig):
+        nonlocal delayed
+        if children and boundary != "entry" and sig == signal.SIGTERM and not delayed:
+            delayed = True
+            time.sleep(0.3)
+        try:
+            return real_killpg(group, sig)
+        except OSError as exc:
+            os_errors.append(exc.errno)
+            raise
+
+    def stop(process):
+        children.append(process)
+        if boundary == "entry":
+            time.sleep(0.3)
+        real_stop(process)
+
+    monkeypatch.setattr(primitives, "stop_group", stop)
+    monkeypatch.setattr(primitives.os, "killpg", killpg)
+    observation = {}
+    try:
+        with pytest.raises(AcceptanceFailure) as caught:
+            _run(tmp_path.resolve(), "import time; time.sleep(0.1)",
+                 timeout=0.02, observation=observation)
+        assert caught.value.code == "tool_crashed"
+        assert "wall timeout" in str(caught.value)
+        assert observation["exit_code"] == 0
+        assert observation["memory_sampling"]["samples"] == 0
+        assert children[0].poll() == 0
+        assert not group_exists(observation["pid"])
+        if sys.platform == "darwin" and boundary != "entry":
+            assert errno.EPERM in os_errors
+    finally:
+        for process in children:
+            process.wait(timeout=1)
+
+
+def test_group_disappears_before_cleanup_signal(tmp_path, monkeypatch):
+    import os
+    import signal
+
+    real_stop, real_killpg = primitives.stop_group, os.killpg
+    children, os_errors = [], []
+
+    def stop(process):
+        children.append(process)
+        real_stop(process)
+
+    def killpg(group, sig):
+        if children and sig == signal.SIGTERM:
+            children[0].wait(timeout=1)
+        try:
+            return real_killpg(group, sig)
+        except OSError as exc:
+            os_errors.append(exc.errno)
+            raise
+
+    monkeypatch.setattr(primitives, "stop_group", stop)
+    monkeypatch.setattr(primitives.os, "killpg", killpg)
+    observation = {}
+    try:
+        with pytest.raises(AcceptanceFailure) as caught:
+            _run(tmp_path.resolve(), "import time; time.sleep(0.1)",
+                 timeout=0.02, observation=observation)
+        assert caught.value.code == "tool_crashed"
+        assert errno.ESRCH in os_errors
+        assert observation["exit_code"] == 0
+        assert "memory_sampling" in observation
+        assert not group_exists(observation["pid"])
+    finally:
+        for process in children:
+            process.wait(timeout=1)
+
+
+@pytest.mark.parametrize("earlier_failure", [True, False])
+def test_cleanup_permission_failure_is_visible_and_observation_finishes(
+    tmp_path, monkeypatch, earlier_failure,
+):
+    import os
+    import signal
+
+    real_stop, real_killpg = primitives.stop_group, os.killpg
+    children = []
+
+    def stop(process):
+        children.append(process)
+        real_stop(process)
+
+    def denied(group, sig):
+        if children:
+            raise PermissionError(errno.EPERM, "controlled cleanup denial")
+        return real_killpg(group, sig)
+
+    monkeypatch.setattr(primitives, "stop_group", stop)
+    monkeypatch.setattr(primitives.os, "killpg", denied)
+    observation = {}
+    try:
+        with pytest.raises(AcceptanceFailure) as caught:
+            # A caller's active exception must not become this command's failure.
+            try:
+                raise AcceptanceFailure("unrelated_caller_failure", "outside command")
+            except AcceptanceFailure:
+                _run(tmp_path.resolve(),
+                     "import time; time.sleep(2)" if earlier_failure else "pass",
+                     timeout=0.02 if earlier_failure else 1, observation=observation)
+        assert caught.value.code == (
+            "tool_crashed" if earlier_failure else "runner_internal_error"
+        )
+        assert "cleanup" in str(caught.value)
+        assert "controlled cleanup denial" in str(caught.value)
+        assert isinstance(caught.value.__cause__, PermissionError)
+        if earlier_failure:
+            assert "wall timeout" in str(caught.value)
+            assert children[0].poll() is None
+        assert "exit_code" in observation
+        assert "memory_sampling" in observation
+    finally:
+        for process in children:
+            try:
+                real_killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=1)
+
+
+def test_cleanup_kills_live_descendant_after_leader_exit(tmp_path):
+    import os
+    import signal
+
+    folder = tmp_path.resolve()
+    observation = {}
+    program = """
+import os, subprocess, sys, time
+child = subprocess.Popen([sys.executable, '-c',
+    'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+    'open("ready", "w").close(); time.sleep(3)'])
+while not os.path.exists('ready'):
+    time.sleep(0.005)
+print(child.pid, flush=True)
+"""
+    try:
+        with pytest.raises(AcceptanceFailure) as caught:
+            _run(folder, program, observation=observation)
+        assert caught.value.code == "tool_crashed"
+        assert "process group leak" in str(caught.value)
+        assert observation["exit_code"] == 0
+        assert not group_exists(observation["pid"])
+        descendant = int((folder / "log").read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(descendant, 0)
+    finally:
+        if "pid" in observation:
+            try:
+                os.killpg(observation["pid"], signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.parametrize("declared_limits", [None, _limits()])
+def test_file_limit_respects_lower_inherited_hard_limit(tmp_path, declared_limits):
+    folder = tmp_path.resolve()
+    program = f"""
+import json, resource, sys
+from pathlib import Path
+from acceptance.primitives import clean_environment, run_command
+resource.setrlimit(resource.RLIMIT_FSIZE, (4096, 4096))
+folder = Path({str(folder)!r})
+observation = {{}}
+rc = run_command('inherited-limit', [sys.executable, '-c',
+    'import json,resource; print(json.dumps(resource.getrlimit(resource.RLIMIT_FSIZE)))'],
+    cwd=folder, env=clean_environment(Path(sys.executable)),
+    log_path=folder / 'inner.log', timeout=2, max_log_bytes=8192,
+    limits={declared_limits!r}, observation=observation)
+assert rc == 0
+assert json.loads((folder / 'inner.log').read_text()) == [4096, 4096]
+assert observation['exit_code'] == 0
+print('inherited FSIZE 4096 applied')
+"""
+    report = subprocess.run(
+        [sys.executable, "-c", program], cwd=REPO,
+        capture_output=True, text=True, timeout=5,
+    )
+    assert report.returncode == 0, report.stderr
+    assert report.stdout.strip() == "inherited FSIZE 4096 applied"

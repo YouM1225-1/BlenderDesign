@@ -124,18 +124,35 @@ def group_exists(group_id: int) -> bool:
 
 
 def stop_group(process: subprocess.Popen[bytes]) -> None:
-    if group_exists(process.pid):
-        os.killpg(process.pid, signal.SIGTERM)
+    def signal_group(sig: int) -> bool:
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                os.killpg(process.pid, sig)
+                return True
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                # macOS can report EPERM for an unreaped, exiting group.
+                # Reap our child, then require a successful signal or ESRCH;
+                # persistent permission faults must still fail cleanup.
+                if process.poll() is None or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.02)
+
+    process.poll()
+    if signal_group(signal.SIGTERM):
         try:
             process.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
             pass
-    if group_exists(process.pid):
-        os.killpg(process.pid, signal.SIGKILL)
-        try:
-            process.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            pass
+    signal_group(signal.SIGKILL)
+    process.wait(timeout=5.0)
+    deadline = time.monotonic() + 5.0
+    while signal_group(0):
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"process group {process.pid} survived cleanup")
+        time.sleep(0.02)
 
 
 def run_command(
@@ -220,6 +237,7 @@ def run_command(
     deadline = time.monotonic() + timeout
     next_sample = 0.0
     peak, samples = 0, 0
+    failure: AcceptanceFailure | None = None
     try:
         while process.poll() is None:
             if limits is not None and time.monotonic() >= next_sample:
@@ -242,16 +260,27 @@ def run_command(
         if group_exists(process.pid):
             raise AcceptanceFailure("tool_crashed", f"{stage}: process group leak")
         return process.returncode
+    except AcceptanceFailure as exc:
+        failure = exc
+        raise
     finally:
-        process.poll()
-        stop_group(process)
-        if observation is not None:
-            observation["exit_code"] = process.returncode
-            observation["memory_sampling"] = {
-                "interval_seconds": 0.1,
-                "samples": samples,
-                "peak_observed_rss_bytes": peak,
-            }
+        try:
+            stop_group(process)
+        except Exception as exc:
+            detail = f"{stage}: process group cleanup failed: {exc}"
+            code = "runner_internal_error"
+            if failure is not None:
+                code = failure.code
+                detail = f"{failure}; {detail}"
+            raise AcceptanceFailure(code, detail) from exc
+        finally:
+            if observation is not None:
+                observation["exit_code"] = process.returncode
+                observation["memory_sampling"] = {
+                    "interval_seconds": 0.1,
+                    "samples": samples,
+                    "peak_observed_rss_bytes": peak,
+                }
 
 
 def require_zero(stage: str, returncode: int) -> None:
