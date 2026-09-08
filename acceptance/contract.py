@@ -1,201 +1,326 @@
-"""规范 §7.3 contract.json 的封闭加载与 §2.5.1 的 digest。"""
 from __future__ import annotations
 
-import os
-import stat
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
+import hashlib
+import math
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
+
 from acceptance import check_registry as reg
-from acceptance.canonical import CanonicalError, digest as canonical_digest
-from acceptance.primitives import (
-    AcceptanceFailure,
-    strict_json_loads,
-)
+from acceptance.canonical import canonicalize, digest
+from acceptance.input_bundle import read_bounded, source_digest, valid_id
+from acceptance.primitives import AcceptanceFailure
+from acceptance.strict_json import strict_json_loads
 
-_TOP_LEVEL = frozenset({
-    "schema_version", "contract_id", "artifact_kind", "profile",
-    "required_isolation_grade", "input", "export", "checks", "na_check_ids",
-    "warning_allowlist", "visual_thresholds", "platform_blocklist",
-    "texture_colorspace", "tolerated_unknown_types", "validator_config_path",
-    "budget", "projection", "tools", "limits", "golden",
-})
-_KINDS = frozenset({"blend_native", "interchange"})
-_GRADES = ("local-trusted", "isolated", "attested")
 _MAX_CONTRACT_BYTES = 1024 * 1024
-_CONTRACT_READ_CHUNK_BYTES = 64 * 1024
-PROJECTION_FIELDS: tuple[str, ...] = (
-    "p01_object_count", "p02_triangle_count", "p03_bbox", "p04_vertex_count",
-    "p05_uv_layers", "p06_material_slot_count", "p07_pbr_factors",
-    "p08_texture_pixels", "p09_object_identity", "p10_collection_hierarchy",
-    "p11_modifier_stack", "p12_custom_props", "p13_unit_system",
-    "p14_drivers_constraints",
-)
+_HEX = re.compile(r"[0-9a-f]{64}\Z")
+_TOP = {
+    "schema_version",
+    "contract_id",
+    "artifact_kind",
+    "profile",
+    "required_isolation_grade",
+    "input",
+    "checks",
+    "na_check_ids",
+    "warning_allowlist",
+    "tools",
+    "limits",
+    "budget",
+    "native",
+    "interchange",
+    "review",
+    "policy_baseline",
+}
 
 
-def _fail(message: str) -> AcceptanceFailure:
-    return AcceptanceFailure("contract_invalid", message)
+def freeze(value: Any) -> Any:
+    if type(value) is dict:
+        return MappingProxyType({k: freeze(v) for k, v in value.items()})
+    if type(value) is list:
+        return tuple(freeze(v) for v in value)
+    return value
 
 
-def _read_contract(path: Path) -> bytes:
+def thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {k: thaw(v) for k, v in value.items()}
+    if type(value) is tuple:
+        return [thaw(v) for v in value]
+    return value
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise AcceptanceFailure("contract_invalid", message)
+
+
+def fields(value: Any, expected: set[str], name: str) -> None:
+    require(type(value) is dict and set(value) == expected, f"{name}: closed fields required")
+
+
+def positive(value: Any) -> bool:
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError as exc:
-        raise _fail(f"cannot safely open contract: {exc}") from exc
-    try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode):
-            raise _fail("contract must be a regular file")
-        if opened.st_size > _MAX_CONTRACT_BYTES:
-            raise _fail(
-                f"contract exceeds size limit {_MAX_CONTRACT_BYTES}: {opened.st_size} bytes")
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = os.read(descriptor, _CONTRACT_READ_CHUNK_BYTES)
-            if not chunk:
-                return b"".join(chunks)
-            total += len(chunk)
-            if total > _MAX_CONTRACT_BYTES:
-                raise _fail(f"contract exceeds size limit {_MAX_CONTRACT_BYTES} while reading")
-            chunks.append(chunk)
-    except OSError as exc:
-        raise _fail(f"cannot read contract: {exc}") from exc
-    finally:
-        os.close(descriptor)
+        return type(value) in (int, float) and math.isfinite(value) and value > 0
+    except OverflowError:
+        return False
+
+
+def sha(value: Any) -> bool:
+    return type(value) is str and _HEX.fullmatch(value) is not None
+
+
+def validate_document(value: Any) -> None:
+    fields(value, _TOP, "contract")
+    require(
+        type(value["schema_version"]) is int and value["schema_version"] == 2,
+        "schema_version must be 2; v1 requires a new frozen candidate and contract",
+    )
+    require(valid_id(value["contract_id"]), "invalid contract_id")
+    require(value["artifact_kind"] in ("blend_native", "interchange"), "invalid artifact_kind")
+    require(value["profile"] == "static_render", "only static_render supported")
+    require(
+        value["required_isolation_grade"] == "local-trusted", "M1 has no isolated/attested runner"
+    )
+    source = value["input"]
+    fields(source, {"main", "sha256", "files"}, "input")
+    require(type(source["files"]) is list and sha(source["sha256"]), "invalid source identity")
+    require(source_digest(source["files"]) == source["sha256"], "input package digest mismatch")
+    require(type(source["main"]) is str, "main input id must be a string")
+    require(source["main"] in {row["id"] for row in source["files"]}, "main input is not a member")
+    specs = sorted(reg.checks_for_kind(value["artifact_kind"]), key=reg.sort_key)
+    expected = [{"id": s.id, "impl": s.impl, "order": s.order} for s in specs]
+    require(
+        type(value["checks"]) is list and value["checks"] == expected, "check registry mismatch"
+    )
+    require(
+        all(
+            type(r) is dict
+            and set(r) == {"id", "impl", "order"}
+            and type(r["impl"]) is int
+            and type(r["order"]) is int
+            for r in value["checks"]
+        ),
+        "check types must be exact",
+    )
+    require(
+        value["na_check_ids"] == list(reg.na_check_ids(value["artifact_kind"])),
+        "N/A registry mismatch",
+    )
+    require(type(value["warning_allowlist"]) is list, "warning_allowlist must be a list")
+    by_id = {s.id: s for s in specs}
+    seen = set()
+    for row in value["warning_allowlist"]:
+        fields(row, {"check_id", "warning_code", "tool_id", "tool_version"}, "warning")
+        require(all(type(v) is str and v for v in row.values()), "warning values must be strings")
+        require(
+            row["check_id"] in by_id
+            and row["warning_code"] in by_id[row["check_id"]].warning_codes,
+            "unknown warning rule",
+        )
+        require(
+            row["check_id"] != "r2.inventory.coverage_complete",
+            "unsupported coverage cannot be allowlisted",
+        )
+        key = tuple(sorted(row.items()))
+        require(key not in seen, "duplicate warning rule")
+        seen.add(key)
+    fields(
+        value["budget"],
+        {"max_files", "max_file_bytes", "max_total_bytes", "max_result_bytes"},
+        "budget",
+    )
+    require(
+        all(type(v) is int and v > 0 for v in value["budget"].values()),
+        "positive integer budgets required",
+    )
+    budget = value["budget"]
+    require(
+        len(source["files"]) <= budget["max_files"]
+        and sum(r["bytes"] for r in source["files"]) <= budget["max_total_bytes"]
+        and all(r["bytes"] <= budget["max_file_bytes"] for r in source["files"]),
+        "source exceeds budget",
+    )
+    fields(
+        value["limits"],
+        {
+            "timeout_seconds",
+            "cpu_seconds",
+            "rss_bytes",
+            "open_files",
+            "log_bytes",
+            "file_size_bytes",
+        },
+        "limits",
+    )
+    limits = value["limits"]
+    require(
+        type(limits["timeout_seconds"]) is dict
+        and all(type(k) is str and positive(v) for k, v in limits["timeout_seconds"].items()),
+        "invalid writer timeouts",
+    )
+    require(
+        all(type(limits[k]) is int and limits[k] > 0 for k in limits if k != "timeout_seconds"),
+        "resource limits must be positive integers",
+    )
+    require(type(value["tools"]) is list and bool(value["tools"]), "tools cannot be empty")
+    ids = set()
+    for tool in value["tools"]:
+        fields(tool, {"id", "path", "version", "sha256", "files"}, "tool")
+        require(
+            type(tool["id"]) is str
+            and tool["id"] in {"python", "acceptance", "blender", "node"}
+            and tool["id"] not in ids,
+            "unknown or repeated tool",
+        )
+        ids.add(tool["id"])
+        require(
+            type(tool["path"]) is str and Path(tool["path"]).is_absolute(),
+            "absolute tool path required",
+        )
+        require(
+            type(tool["version"]) is str and bool(tool["version"]) and sha(tool["sha256"]),
+            "invalid tool lock",
+        )
+        require(type(tool["files"]) is list, "tool files must be a list")
+        seen_paths = set()
+        for row in tool["files"]:
+            fields(row, {"path", "bytes", "sha256"}, "tool file")
+            require(
+                type(row["path"]) is str
+                and Path(row["path"]).is_absolute()
+                and row["path"] not in seen_paths
+                and sha(row["sha256"])
+                and type(row["bytes"]) is int
+                and row["bytes"] >= 0,
+                "invalid tool file",
+            )
+            seen_paths.add(row["path"])
+    require({"acceptance", "python", "blender"} <= ids, "required tool set is incomplete")
+    # M2/M3 replace only these two rejection rules with their pure-Python validators.
+    require(value["native"] is None, "native worker policy is not implemented in M1")
+    require(value["interchange"] is None, "interchange worker policy is not implemented in M1")
+    fields(value["review"], {"required", "reviewer_ids", "required_image_ids", "reason"}, "review")
+    review = value["review"]
+    require(
+        type(review["required"]) is bool
+        and type(review["reviewer_ids"]) is list
+        and all(valid_id(x) for x in review["reviewer_ids"])
+        and len(set(review["reviewer_ids"])) == len(review["reviewer_ids"])
+        and type(review["reason"]) is str
+        and bool(review["reason"]),
+        "invalid review policy",
+    )
+    require(
+        type(review["required_image_ids"]) is list
+        and all(valid_id(x) for x in review["required_image_ids"])
+        and len(set(review["required_image_ids"])) == len(review["required_image_ids"]),
+        "invalid required images",
+    )
+    require(
+        not review["required"] or bool(review["reviewer_ids"]), "required review needs reviewers"
+    )
+    require(
+        value["policy_baseline"] is None or type(value["policy_baseline"]) is str,
+        "policy baseline reference must be a string or null",
+    )
+    require(
+        value["policy_baseline"] is None
+        or value["policy_baseline"] in {r["id"] for r in source["files"]},
+        "policy baseline must be a frozen source reference",
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class Contract:
-    raw: dict[str, Any]
+    raw: Mapping[str, Any]
     digest: str
+    byte_sha256: str = ""
+
+    def __post_init__(self) -> None:
+        value = thaw(self.raw)
+        validate_document(value)
+        expected = digest("contract.v2", value)
+        require(self.digest == expected, "Contract digest inconsistent with fields")
+        object.__setattr__(self, "raw", freeze(value))
 
     @property
-    def artifact_kind(self) -> str:
-        try:
-            return str(self.raw["artifact_kind"])
-        except KeyError as exc:
-            raise _fail(f"missing required field: {exc}") from exc
+    def artifact_kind(self) -> Any:
+        return self.raw["artifact_kind"]
 
     @property
-    def na_check_ids(self) -> tuple[str, ...]:
-        try:
-            return tuple(self.raw["na_check_ids"])
-        except KeyError as exc:
-            raise _fail(f"missing required field: {exc}") from exc
+    def na_check_ids(self) -> Any:
+        return self.raw["na_check_ids"]
 
     @property
-    def required_isolation_grade(self) -> str:
-        try:
-            return str(self.raw["required_isolation_grade"])
-        except KeyError as exc:
-            raise _fail(f"missing required field: {exc}") from exc
+    def required_isolation_grade(self) -> Any:
+        return self.raw["required_isolation_grade"]
 
-    def allowlisted(self, check_id: str, code: str, tool_id: str, version: str) -> bool:
-        target = {"check_id": check_id, "warning_code": code,
-                  "tool_id": tool_id, "tool_version": version}
-        try:
-            allowlist = self.raw["warning_allowlist"]
-        except KeyError as exc:
-            raise _fail(f"missing required field: {exc}") from exc
-        return any(entry == target for entry in allowlist)
+    def allowlisted(self, check_id: Any, code: Any, tool_id: Any, version: Any) -> Any:
+        target = {
+            "check_id": check_id,
+            "warning_code": code,
+            "tool_id": tool_id,
+            "tool_version": version,
+        }
+        return any(dict(row) == target for row in self.raw["warning_allowlist"])
 
 
 def load_contract(path: Path, *, candidate_root: Path) -> Contract:
+    candidate_root = candidate_root.expanduser().absolute()
+    path = path.expanduser().absolute()
+    require(
+        ".." not in candidate_root.parts and ".." not in path.parts,
+        "managed paths cannot contain '..'",
+    )
     try:
-        resolved = path.resolve(strict=True)
-    except OSError as exc:
-        raise _fail(f"contract file not found: {exc}") from exc
-    root = candidate_root.expanduser().resolve()
-    if resolved == root or root in resolved.parents:
-        raise _fail("contract must live outside the candidate input tree")
-    try:
-        value = strict_json_loads(_read_contract(resolved).decode("utf-8"))
-    except ValueError as exc:
-        raise _fail(f"unreadable or invalid JSON: {exc}") from exc
-    if type(value) is not dict:
-        raise _fail("contract must be a JSON object")
-    unknown = set(value) - _TOP_LEVEL
-    if unknown:
-        raise _fail(f"unknown top-level fields: {sorted(unknown)}")
-    missing = _TOP_LEVEL - set(value)
-    if missing:
-        raise _fail(f"missing top-level fields: {sorted(missing)}")
-    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
-        raise _fail("schema_version must be 1")
-    kind = value["artifact_kind"]
-    if type(kind) is not str or kind not in _KINDS:
-        raise _fail(f"artifact_kind must be one of {sorted(_KINDS)}")
-    if type(value["profile"]) is not str or value["profile"] != "static_render":
-        raise _fail("profile must be static_render in P0")
-    if type(value["required_isolation_grade"]) is not str or value["required_isolation_grade"] not in _GRADES:
-        raise _fail(f"required_isolation_grade must be one of {list(_GRADES)}")
+        candidate_owner = candidate_root.resolve(strict=False)
+        path_owner = path.resolve(strict=True)
+        require(
+            path_owner != candidate_owner and candidate_owner not in path_owner.parents,
+            "contract must live outside candidate input tree",
+        )
+        raw = read_bounded(path, _MAX_CONTRACT_BYTES)
+        value: Any = strict_json_loads(raw.decode("utf-8"))
+        validate_document(value)
+        return Contract(value, digest("contract.v2", value), hashlib.sha256(raw).hexdigest())
+    except AcceptanceFailure as exc:
+        raise AcceptanceFailure("contract_invalid", str(exc)) from exc
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise AcceptanceFailure("contract_invalid", str(exc)) from exc
 
-    budget = value["budget"]
-    if type(budget) is not dict:
-        raise _fail("budget must be an object")
-    max_file_bytes = budget.get("max_file_bytes")
-    if type(max_file_bytes) is not int or max_file_bytes < 0:
-        raise _fail("budget.max_file_bytes must be a nonnegative integer")
 
-    expected_specs = sorted(reg.checks_for_kind(kind), key=reg.sort_key)
-    declared = value["checks"]
-    if type(declared) is not list or len(declared) != len(expected_specs):
-        raise _fail("checks must list exactly the registry entries for this kind")
-    for entry, spec in zip(declared, expected_specs, strict=True):
-        if entry != {"id": spec.id, "impl": spec.impl, "order": spec.order}:
-            raise _fail(f"checks entry mismatch or out of order at {spec.id}")
+_BASELINE_FIELDS = {
+    "tools",
+    "warning_allowlist",
+    "budget",
+    "limits",
+    "review",
+    "native",
+    "interchange",
+}
 
-    if type(value["na_check_ids"]) is not list:
-        raise _fail("na_check_ids must be a list")
-    if list(value["na_check_ids"]) != list(reg.na_check_ids(kind)):
-        raise _fail("na_check_ids must equal the derived not-applicable set")
 
-    warning_allowlist = value["warning_allowlist"]
-    if type(warning_allowlist) is not list:
-        raise _fail("warning_allowlist must be a list")
-    for entry in warning_allowlist:
-        if type(entry) is not dict:
-            raise _fail("warning_allowlist entries must be objects")
-        if set(entry) != {"check_id", "warning_code", "tool_id", "tool_version"}:
-            raise _fail("warning_allowlist entries must have check_id/warning_code/tool_id/tool_version")
-        for key in ("check_id", "warning_code", "tool_id", "tool_version"):
-            if type(entry[key]) is not str:
-                raise _fail(f"warning_allowlist entries[].{key} must be a string")
-
-    projection = value["projection"]
-    if type(projection) is not dict:
-        raise _fail("projection must be an object")
-    if set(projection) != {"preserved", "transformed", "lost"}:
-        raise _fail("projection must have preserved/transformed/lost")
-    union: list[str] = []
-    for group in ("preserved", "transformed", "lost"):
-        items = projection[group]
-        if type(items) is not list:
-            raise _fail(f"projection.{group} must be a list")
-        for item in items:
-            if type(item) is not str:
-                raise _fail(f"projection.{group} contains non-string element")
-        union.extend(items)
-    if kind == "interchange" and sorted(union) != sorted(PROJECTION_FIELDS):
-        raise _fail("projection union must be exactly p01..p14 for interchange")
-    if len(set(union)) != len(union):
-        raise _fail("projection field appears in more than one group")
-
-    tools = value["tools"]
-    if type(tools) is not list:
-        raise _fail("tools must be a list")
-    for tool in tools:
-        if type(tool) is not dict:
-            raise _fail("tools entries must be objects")
-        if set(tool) != {"id", "version", "sha256", "path"}:
-            raise _fail("tools entries must have id/version/sha256/path")
-        if not isinstance(tool["sha256"], str) or len(tool["sha256"]) != 64:
-            raise _fail("tools[].sha256 must be a 64-char hex string")
-
-    try:
-        computed = canonical_digest("contract", value)
-    except CanonicalError as exc:
-        raise _fail(f"contract is not canonicalizable: {exc}") from exc
-    return Contract(raw=value, digest=computed)
+def enforce_baseline(contract: Contract, input_files: Mapping[str, Any]) -> None:
+    reference = contract.raw["policy_baseline"]
+    if reference is None:
+        return
+    raw = read_bounded(input_files[reference].path, _MAX_CONTRACT_BYTES)
+    baseline: Any = strict_json_loads(raw.decode("utf-8"))
+    fields(baseline, {"schema_version", "kind", "constraints"}, "baseline")
+    require(
+        type(baseline["schema_version"]) is int
+        and baseline["schema_version"] == 2
+        and baseline["kind"] == "acceptance_policy_baseline",
+        "invalid baseline version/kind",
+    )
+    fields(baseline["constraints"], _BASELINE_FIELDS, "baseline constraints")
+    expected = {key: thaw(contract.raw[key]) for key in _BASELINE_FIELDS}
+    require(
+        canonicalize(baseline["constraints"]) == canonicalize(expected),
+        "policy differs from frozen deployment baseline; create a newly authorized baseline and run",
+    )

@@ -4,17 +4,22 @@ from pathlib import Path
 from acceptance import stages
 from acceptance.contract import load_contract
 from scripts import asset_accept
-from tests.unit.test_asset_contract import _valid
+from tests.unit.asset_v2_support import valid_document
 
 
-def _contract(tmp_path: Path):
+def _contract(tmp_path: Path, *, max_file_bytes: int | None = None):
+    value = valid_document(tmp_path)
+    if max_file_bytes is not None:
+        value["budget"]["max_file_bytes"] = max_file_bytes
     path = tmp_path / "contract.json"
-    path.write_text(json.dumps(_valid()), encoding="utf-8")
-    return load_contract(path, candidate_root=tmp_path / "candidate")
+    path.write_text(json.dumps(value), encoding="utf-8")
+    return load_contract(path, candidate_root=tmp_path / "source")
 
 
 def test_r0_all_pass_when_tools_present(tmp_path):
-    findings = stages.run_r0(_contract(tmp_path), tools_present={"blender"})
+    findings = stages.run_r0(
+        _contract(tmp_path), tools_present={"acceptance", "blender", "python"}
+    )
     assert set(findings) == {"r0.contract.schema_closed", "r0.contract.tools_locked",
                              "r0.contract.na_set_declared"}
     assert all(v == [] for v in findings.values())
@@ -53,9 +58,8 @@ def test_r1_rejects_oversized_input(tmp_path):
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     asset = candidate / "asset.blend"
-    asset.write_bytes(b"x" * 32)
-    contract = _contract(tmp_path)
-    contract.raw["budget"]["max_file_bytes"] = 16
+    asset.write_bytes(b"x" * 128)
+    contract = _contract(tmp_path, max_file_bytes=64)
     findings = stages.run_r1(contract, asset_accept._input_digest(asset))
     assert [f.code for f in findings["r1.input.size_within_limit"]] == ["input_too_large"]
 

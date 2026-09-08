@@ -8,7 +8,7 @@ import sys
 import pytest
 
 from scripts import asset_accept
-from tests.unit.test_asset_contract import _valid
+from tests.unit.asset_v2_support import valid_document
 
 
 @pytest.fixture(autouse=True)
@@ -20,14 +20,21 @@ def _tools_present(monkeypatch: pytest.MonkeyPatch) -> None:
     (见 `test_missing_tool_fails_r0_contract_tools_locked`)在测试体内再次
     monkeypatch 覆盖这个默认值。
     """
-    monkeypatch.setattr(asset_accept, "_present_tools", lambda contract: {"acceptance", "blender"})
+    monkeypatch.setattr(
+        asset_accept, "_present_tools", lambda contract: {"acceptance", "blender", "python"}
+    )
 
 
-def _contract_file(tmp_path: Path) -> Path:
+def _contract_file(
+    tmp_path: Path, *, max_file_bytes: int | None = None, asset_bytes: bytes | None = None
+) -> Path:
     # 合同必须位于候选输入目录**之外**(规范 §1 的合同权属条款,由 load_contract 强制)。
     # 因此输入放在 tmp_path/candidate/,合同留在 tmp_path/。
+    value = valid_document(tmp_path, asset_bytes=asset_bytes)
+    if max_file_bytes is not None:
+        value["budget"]["max_file_bytes"] = max_file_bytes
     path = tmp_path / "contract.json"
-    path.write_text(json.dumps(_valid()), encoding="utf-8")
+    path.write_text(json.dumps(value), encoding="utf-8")
     return path
 
 
@@ -37,10 +44,12 @@ def _input_path(tmp_path: Path) -> Path:
     return candidate / "asset.blend"
 
 
-def _run(tmp_path: Path, *extra: str) -> tuple[int, dict[str, object]]:
+def _run(
+    tmp_path: Path, *extra: str, contract_path: Path | None = None
+) -> tuple[int, dict[str, object]]:
     root = tmp_path / "evidence"
     code = asset_accept.main([
-        "--contract", str(_contract_file(tmp_path)),
+        "--contract", str(contract_path or _contract_file(tmp_path)),
         "--input", str(_input_path(tmp_path)),
         "--evidence-root", str(root),
         *extra,
@@ -286,6 +295,7 @@ def test_input_inode_replacement_cannot_produce_a_digest(tmp_path, monkeypatch):
 def test_digest_read_failure_is_propagated_to_r1(tmp_path, monkeypatch):
     asset = _input_path(tmp_path)
     asset.write_bytes(b"BLENDER-fake")
+    contract_path = _contract_file(tmp_path)
     real_read = os.read
     failed = False
 
@@ -297,7 +307,7 @@ def test_digest_read_failure_is_propagated_to_r1(tmp_path, monkeypatch):
         return real_read(descriptor, count)
 
     monkeypatch.setattr(asset_accept.os, "read", fail_first_read)
-    _, summary = _run(tmp_path)
+    _, summary = _run(tmp_path, contract_path=contract_path)
     assert summary["runner_provenance"]["input_digest"] == "0" * 64
     digest_check = next(
         check for check in summary["checks"] if check["id"] == "r1.input.digest_recorded")
@@ -348,8 +358,9 @@ def test_digest_size_is_the_completed_byte_count_when_file_grows(tmp_path, monke
     assert result.digest == hashlib.sha256(b"12345678").hexdigest()
     assert result.size == 8
     contract = asset_accept.load_contract(
-        _contract_file(tmp_path), candidate_root=asset.parent)
-    contract.raw["budget"]["max_file_bytes"] = 4
+        _contract_file(tmp_path, max_file_bytes=4, asset_bytes=b"lock"),
+        candidate_root=asset.parent,
+    )
     findings = asset_accept.stages.run_r1(contract, result)
     assert [f.code for f in findings["r1.input.size_within_limit"]] == ["input_too_large"]
 
@@ -358,7 +369,7 @@ def test_digest_size_is_the_completed_byte_count_when_file_grows(tmp_path, monke
 def test_invalid_budget_is_classified_before_r1(tmp_path, bad_limit):
     asset = _input_path(tmp_path)
     asset.write_bytes(b"BLENDER-fake")
-    value = _valid()
+    value = valid_document(tmp_path)
     value["budget"]["max_file_bytes"] = bad_limit
     contract = tmp_path / "contract.json"
     contract.write_text(json.dumps(value), encoding="utf-8")
@@ -377,7 +388,7 @@ def test_cli_classifies_bom_contract_as_contract_invalid(tmp_path):
     asset = _input_path(tmp_path)
     asset.write_bytes(b"BLENDER-fake")
     contract = _contract_file(tmp_path)
-    contract.write_bytes(json.dumps(_valid()).encode("utf-8-sig"))
+    contract.write_bytes(json.dumps(valid_document(tmp_path)).encode("utf-8-sig"))
     evidence = tmp_path / "evidence"
     code = asset_accept.main([
         "--contract", str(contract), "--input", str(asset),
@@ -400,10 +411,10 @@ def test_contract_mutated_after_load_fails_digest_stable(tmp_path, monkeypatch):
     contract_path = _contract_file(tmp_path)
 
     def _tamper_contract_then_report_tools(contract) -> set[str]:
-        tampered = _valid()
+        tampered = valid_document(tmp_path)
         tampered["contract_id"] = "tampered-after-initial-load"
         contract_path.write_text(json.dumps(tampered), encoding="utf-8")
-        return {"acceptance", "blender"}
+        return {"acceptance", "blender", "python"}
 
     monkeypatch.setattr(asset_accept, "_present_tools", _tamper_contract_then_report_tools)
     root = tmp_path / "evidence"

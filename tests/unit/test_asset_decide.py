@@ -7,17 +7,17 @@ from acceptance import check_registry as reg
 from acceptance.contract import load_contract
 from acceptance.decide import Finding, aggregate, decide
 from acceptance.primitives import AcceptanceFailure
+from tests.unit.asset_v2_support import valid_document
 
 CHECK = "r2.material.slots_resolved"
 
 
 def _contract(tmp_path: Path, allowlist: list[dict[str, str]] | None = None):
-    from tests.unit.test_asset_contract import _valid  # 复用同一构造器,避免两份真相
-    value = _valid()
+    value = valid_document(tmp_path)
     value["warning_allowlist"] = allowlist or []
     path = tmp_path / "contract.json"
     path.write_text(json.dumps(value), encoding="utf-8")
-    return load_contract(path, candidate_root=tmp_path / "candidate")
+    return load_contract(path, candidate_root=tmp_path / "source")
 
 
 def _warn(code: str = "empty_material_slot") -> Finding:
@@ -151,24 +151,24 @@ def test_file_set_mismatch_fails(tmp_path):
 
 def test_insufficient_isolation_fails(tmp_path):
     contract = _contract(tmp_path)
-    contract.raw["required_isolation_grade"] = "isolated"
     verdict = decide(contract=contract, outcomes=_all_pass(contract),
                      actual_files={"summary"}, expected_files={"summary"},
-                     achieved_grade="local-trusted", infra_failures=[])
+                     achieved_grade="local-trusted",
+                     infra_failures=["isolation_insufficient"])
     assert verdict.failure_code == "isolation_insufficient"
 
 
 def test_highest_priority_infra_family_wins(tmp_path):
     """规范 §7.2 规则 1:同时触发多个 infra family 时取优先级最高者。"""
     contract = _contract(tmp_path)
-    contract.raw["required_isolation_grade"] = "isolated"      # 优先级 12
     outcomes = _all_pass(contract)
     outcomes[0] = aggregate(outcomes[0].id, [], contract=contract, tool_id=None,
                             tool_version=None, source_truncated=False,
                             terminal="Crash")                   # 优先级 2
     verdict = decide(contract=contract, outcomes=outcomes,
                      actual_files={"summary"}, expected_files={"summary"},
-                     achieved_grade="local-trusted", infra_failures=[])
+                     achieved_grade="local-trusted",
+                     infra_failures=["isolation_insufficient"])
     assert verdict.failure_code == "tool_crashed"
 
 
@@ -235,13 +235,12 @@ def test_invalid_severity_is_rejected(tmp_path, bad_severity):
 
 
 def test_invalid_required_isolation_grade_is_rejected(tmp_path):
-    """contract.raw 可变,frozen 只冻结字段引用;损坏的 grade 必须 fail-closed,不是裸 KeyError。"""
-    contract = _contract(tmp_path)
-    contract.raw["required_isolation_grade"] = "totally-bogus-grade"
+    value = valid_document(tmp_path)
+    value["required_isolation_grade"] = "totally-bogus-grade"
+    path = tmp_path / "contract.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(AcceptanceFailure) as caught:
-        decide(contract=contract, outcomes=_all_pass(contract),
-               actual_files={"summary"}, expected_files={"summary"},
-               achieved_grade="local-trusted", infra_failures=[])
+        load_contract(path, candidate_root=tmp_path / "source")
     assert caught.value.code == "contract_invalid"
 
 
@@ -323,25 +322,21 @@ def test_valid_infra_families_work_normally(tmp_path):
 
 
 def test_invalid_artifact_kind_is_rejected(tmp_path):
-    """contract.raw 可变;artifact_kind 被篡改成非法值时 checks_for_kind 会静默缩小 expected_ids,必须 fail-closed。"""
-    contract = _contract(tmp_path)
-    outcomes = _all_pass(contract)
-    contract.raw["artifact_kind"] = "Bogus"
+    value = valid_document(tmp_path)
+    value["artifact_kind"] = "Bogus"
+    path = tmp_path / "contract.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(AcceptanceFailure) as caught:
-        decide(contract=contract, outcomes=outcomes,
-               actual_files={"summary"}, expected_files={"summary"},
-               achieved_grade="local-trusted", infra_failures=[])
+        load_contract(path, candidate_root=tmp_path / "source")
     assert caught.value.code == "contract_invalid"
 
 
 def test_na_check_ids_inconsistent_with_kind_is_rejected(tmp_path):
-    """contract.raw 可变;na_check_ids 与 artifact_kind 的派生互补集不一致会让真正适用的 check 被误判为 N/A,必须 fail-closed。"""
-    contract = _contract(tmp_path)
-    outcomes = _all_pass(contract)
-    applicable_id = reg.checks_for_kind(contract.artifact_kind)[0].id
-    contract.raw["na_check_ids"] = list(contract.raw["na_check_ids"]) + [applicable_id]
+    value = valid_document(tmp_path)
+    applicable_id = reg.checks_for_kind(value["artifact_kind"])[0].id
+    value["na_check_ids"].append(applicable_id)
+    path = tmp_path / "contract.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(AcceptanceFailure) as caught:
-        decide(contract=contract, outcomes=outcomes,
-               actual_files={"summary"}, expected_files={"summary"},
-               achieved_grade="local-trusted", infra_failures=[])
+        load_contract(path, candidate_root=tmp_path / "source")
     assert caught.value.code == "contract_invalid"
