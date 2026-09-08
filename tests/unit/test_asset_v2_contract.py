@@ -121,6 +121,31 @@ def test_declared_baseline_is_enforced_not_just_hashed(tmp_path):
         enforce_baseline(changed, inputs)
 
 
+@pytest.mark.parametrize("size_delta", [0, 1])
+def test_baseline_bytes_must_match_frozen_descriptor_and_bound_file(tmp_path, size_delta):
+    from acceptance.contract import _BASELINE_FIELDS
+
+    value = valid_document(tmp_path)
+    constraints = {key: deepcopy(value[key]) for key in _BASELINE_FIELDS}
+    inputs = _baseline_inputs(tmp_path, value, constraints)
+    contract = write_contract(tmp_path, value)
+    enforce_baseline(contract, inputs)
+
+    baseline_path = tmp_path / "source/baseline.json"
+    original = baseline_path.read_bytes()
+    baseline_path.write_bytes(b"x" * (len(original) + size_delta))
+    with pytest.raises(AcceptanceFailure) as caught:
+        enforce_baseline(contract, inputs)
+    assert caught.value.code == "hash_mismatch"
+
+    changed = measure_file(baseline_path, 1048576, file_id="policy")
+    replaced = dict(inputs)
+    replaced["policy"] = changed
+    with pytest.raises(AcceptanceFailure) as caught:
+        enforce_baseline(contract, replaced)
+    assert caught.value.code == "hash_mismatch"
+
+
 def test_baseline_distinguishes_boolean_from_integer(tmp_path):
     from acceptance.contract import _BASELINE_FIELDS
 

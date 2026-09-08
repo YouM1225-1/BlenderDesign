@@ -337,19 +337,21 @@ def test_warning_allowlist_entry_non_dict_is_rejected(tmp_path):
 
 def test_warning_allowlist_entry_missing_key_is_rejected(tmp_path):
     bad = _valid(tmp_path)
-    bad["warning_allowlist"] = [{"check_id": "foo", "warning_code": "bar", "tool_id": "baz"}]
+    bad["warning_allowlist"] = [_valid_warning_row()]
+    del bad["warning_allowlist"][0]["tool_version"]
     path = _write(tmp_path, bad)
-    with pytest.raises(AcceptanceFailure) as caught:
+    with pytest.raises(AcceptanceFailure, match="warning: closed fields required") as caught:
         load_contract(path, candidate_root=tmp_path / "candidate")
     assert caught.value.code == "contract_invalid"
 
 
 def test_warning_allowlist_entry_extra_key_is_rejected(tmp_path):
     bad = _valid(tmp_path)
-    bad["warning_allowlist"] = [{"check_id": "foo", "warning_code": "bar", "tool_id": "baz",
-                                 "tool_version": "1.0", "extra": "field"}]
+    row = _valid_warning_row()
+    row["extra"] = "field"
+    bad["warning_allowlist"] = [row]
     path = _write(tmp_path, bad)
-    with pytest.raises(AcceptanceFailure) as caught:
+    with pytest.raises(AcceptanceFailure, match="warning: closed fields required") as caught:
         load_contract(path, candidate_root=tmp_path / "candidate")
     assert caught.value.code == "contract_invalid"
 
@@ -357,13 +359,22 @@ def test_warning_allowlist_entry_extra_key_is_rejected(tmp_path):
 @pytest.mark.parametrize("key", ["check_id", "warning_code", "tool_id", "tool_version"])
 def test_warning_allowlist_entry_non_string_value_is_rejected(tmp_path, key):
     bad = _valid(tmp_path)
-    entry = {"check_id": "foo", "warning_code": "bar", "tool_id": "baz", "tool_version": "1.0"}
+    entry = _valid_warning_row()
     entry[key] = 123
     bad["warning_allowlist"] = [entry]
     path = _write(tmp_path, bad)
-    with pytest.raises(AcceptanceFailure) as caught:
+    with pytest.raises(AcceptanceFailure, match="warning values must be strings") as caught:
         load_contract(path, candidate_root=tmp_path / "candidate")
     assert caught.value.code == "contract_invalid"
+
+
+def _valid_warning_row():
+    return {
+        "check_id": "r2.material.slots_resolved",
+        "warning_code": "empty_material_slot",
+        "tool_id": "acceptance",
+        "tool_version": "1.0",
+    }
 
 
 def test_warning_allowlist_valid_entry_loads(tmp_path):

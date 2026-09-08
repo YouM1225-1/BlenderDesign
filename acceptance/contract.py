@@ -309,7 +309,18 @@ def enforce_baseline(contract: Contract, input_files: Mapping[str, Any]) -> None
     reference = contract.raw["policy_baseline"]
     if reference is None:
         return
-    raw = read_bounded(input_files[reference].path, _MAX_CONTRACT_BYTES)
+    descriptor = next(row for row in contract.raw["input"]["files"] if row["id"] == reference)
+    bound = input_files[reference]
+    if (
+        bound.id != reference
+        or bound.bytes != descriptor["bytes"]
+        or bound.sha256 != descriptor["sha256"]
+    ):
+        raise AcceptanceFailure("hash_mismatch", "baseline source identity differs from contract")
+    raw = read_bounded(bound.path, _MAX_CONTRACT_BYTES)
+    raw_sha256 = hashlib.sha256(raw).hexdigest()
+    if len(raw) != descriptor["bytes"] or raw_sha256 != descriptor["sha256"]:
+        raise AcceptanceFailure("hash_mismatch", "baseline bytes do not match frozen source identity")
     baseline: Any = strict_json_loads(raw.decode("utf-8"))
     fields(baseline, {"schema_version", "kind", "constraints"}, "baseline")
     require(
