@@ -26,6 +26,16 @@
 
 两份设计独立实施，目前均未改变代码行为。资产验收运行时仍为 schema v1，现行规范仍是 V3.8；后续按整合设计成套迁移到 V5 规范与 schema v2。设计中的目标能力不代表当前已完成，外部 V4 也不自动取得仓库规范地位。
 
+## 执行计划与对抗审计
+
+- [安装升级与自动清理执行计划](superpowers/plans/2026-09-08-installer-upgrade-cleanup.md)：独立实施；包含启动前使用锁、历史归属、孤儿缓存报告、验证后清理与崩溃续删。
+- [M0/M1 可信核心执行计划](superpowers/plans/2026-09-08-asset-acceptance-core-v2.md)：v2 规范迁移、冻结合同/输入、真实工具与进程边界、唯一判定和 E/V/Q/T。
+- [M2 原生闭环执行计划](superpowers/plans/2026-09-08-asset-acceptance-native.md)：依赖 M0/M1；真实重开、完整视觉、有效线框、参考门禁与签收/交付。
+- [M3 GLB 闭环执行计划](superpowers/plans/2026-09-08-asset-acceptance-interchange.md)：依赖 M2；真实 Validator、逐实例预算、有限表面投影及消费者门禁。
+- [计划对抗审计与实测记录](superpowers/reviews/2026-09-08-plans-adversarial-review.md)：记录发现、修复、复测范围及实施阶段仍需执行的现场门禁。
+
+上述计划含目标代码和完整回归步骤；仓库外原型实测用于核对计划可执行性，生产源码的当前状态仍以上文说明为准。
+
 ## 技术决策
 
 - [MCP SDK v2](decisions/2026-08-07-mcp-sdk-v2-selection.md)：自研 Phase 0 Server 的 SDK 选择。
