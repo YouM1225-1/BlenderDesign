@@ -201,8 +201,18 @@ def validate_document(value: Any) -> None:
             )
             seen_paths.add(row["path"])
     require({"acceptance", "python", "blender"} <= ids, "required tool set is incomplete")
-    # M2/M3 replace only these two rejection rules with their pure-Python validators.
-    require(value["native"] is None, "native worker policy is not implemented in M1")
+    if value["native"] is not None:
+        from acceptance.native_policy import validate_native_policy
+
+        try:
+            validate_native_policy(value["native"])
+        except ValueError as exc:
+            raise AcceptanceFailure("contract_invalid", str(exc)) from exc
+        input_ids = {item["id"] for item in value["input"]["files"]}
+        native_ids = {value["native"]["reference_manifest_id"], value["native"]["reference_authority"]}
+        native_ids.update(value["native"]["render"]["reference_images"].values())
+        require(native_ids <= input_ids, "native references must be frozen input members")
+        require(value["input"]["main"] == "asset", "native main file ID must be asset")
     require(value["interchange"] is None, "interchange worker policy is not implemented in M1")
     fields(value["review"], {"required", "reviewer_ids", "required_image_ids", "reason"}, "review")
     review = value["review"]
