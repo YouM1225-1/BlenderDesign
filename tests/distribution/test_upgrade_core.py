@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path, PurePath
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -20,6 +20,7 @@ from blender_mcp_installer.filesystem import (  # noqa: E402
     capture_file,
     capture_tree,
 )
+from blender_mcp_installer.model import BlenderPaths, InstallRoots  # noqa: E402
 from blender_mcp_installer import upgrade_cleanup, upgrade_registration  # noqa: E402
 from blender_mcp_installer.upgrade_cleanup import (  # noqa: E402
     RollbackUnavailable,
@@ -43,8 +44,120 @@ from blender_mcp_installer.upgrade_state import (  # noqa: E402
     new_record,
     save_record,
     state_root,
+    update_record,
     validate_record,
 )
+
+
+def _install_profile(roots: UpgradeRoots) -> dict[str, str]:
+    resources = roots.home / "blender/resources"
+    return {
+        "executable": str(roots.home / "bin/blender"),
+        "architecture": "arm64",
+        "version": "5.2.0",
+        "resources": str(resources),
+        "config": str(resources / "config"),
+        "extensions": str(resources / "extensions"),
+    }
+
+
+def _install_roots(roots: UpgradeRoots, doc: dict[str, object]) -> InstallRoots:
+    profile = doc["profile"]
+    assert isinstance(profile, dict)
+    blender = BlenderPaths(
+        Path(profile["executable"]),
+        profile["architecture"],
+        profile["version"],
+        Path(profile["resources"]),
+        Path(profile["config"]),
+        Path(profile["extensions"]),
+    )
+    source = Path(doc["desired"]["projection"])
+    return InstallRoots.discover(
+        roots.home,
+        roots.codex_home,
+        blender,
+        source_distribution_root=source,
+        distribution_root=source,
+    )
+
+
+def _write_receipt(
+    state: SafeRoot,
+    installed: InstallRoots,
+    install_id: str,
+    *,
+    generation: int,
+    parent_install_id: str | None,
+    status: str,
+    runtime_image=None,
+) -> Path:
+    from tests.distribution.test_filesystem import _receipt
+
+    value = _receipt(installed)
+    value.update(
+        install_id=install_id,
+        generation=generation,
+        parent_install_id=parent_install_id,
+        status=status,
+        actions=[],
+    )
+    if runtime_image is not None:
+        runtime = next(target for target in value["targets"] if target["role"] == "runtime")
+        runtime.update(
+            pre=runtime_image.to_dict(),
+            install_post=runtime_image.to_dict(),
+            recovery_path=str(installed.runtime_recovery(uuid4_from_text(install_id))),
+            recovery_hash=runtime_image.digest,
+        )
+    path = state.path / "receipts" / f"{install_id}.json"
+    path.parent.mkdir(exist_ok=True, mode=0o700)
+    path.write_text(json.dumps(value, sort_keys=True) + "\n")
+    path.chmod(0o600)
+    return path
+
+
+def _register_case(tmp_path: Path) -> tuple[UpgradeRoots, dict[str, object]]:
+    home, codex = tmp_path / "home", tmp_path / "codex"
+    home.mkdir(mode=0o700)
+    codex.mkdir(mode=0o700)
+    roots = UpgradeRoots(home, codex)
+    desired = {
+        "commit": "b" * 40,
+        "manifest_sha256": "c" * 64,
+        "bundle_version": "1.0.0",
+        "plugin_version": "2",
+        "projection": str(roots.projections / ("b" * 40)),
+    }
+    return roots, new_record(roots, "register", desired)
+
+
+def _registration_evidence(
+    state: SafeRoot,
+    roots: UpgradeRoots,
+    *,
+    version: str = "1",
+    after: dict[str, object] | None,
+) -> tuple[Path, Path, Path]:
+    projection = roots.projections / ("a" * 40)
+    plugin = projection / "plugins/blender-mcp-installer"
+    cache = roots.caches / version
+    manifest = json.dumps({"name": "blender-mcp-installer", "version": version})
+    for tree in (plugin, cache):
+        (tree / ".codex-plugin").mkdir(parents=True)
+        (tree / ".codex-plugin/plugin.json").write_text(manifest)
+        (tree / "payload").write_text("managed")
+    proof = state.path / "marketplace-recovery/registration.historical"
+    proof.mkdir(parents=True, mode=0o700)
+    if after is not None:
+        (proof / "after.json").write_text(json.dumps(after) + "\n")
+        (proof / "after.json").chmod(0o600)
+    return projection, plugin, cache
+
+
+def uuid4_from_text(value: object) -> UUID:
+    assert isinstance(value, str)
+    return UUID(value)
 
 
 @pytest.fixture
@@ -318,3 +431,373 @@ def test_root_inode_lease_survives_rename_and_exec(prepared):
         process.wait(timeout=5)
     with usage_lock(state, info["dev"], info["ino"], exclusive=True) as acquired:
         assert acquired
+
+
+def test_discovery_keeps_cache_without_historical_source(prepared):
+    from blender_mcp_installer.upgrade_discovery import discover_candidates
+
+    roots, state, doc, _row, old = prepared
+    candidates, findings = discover_candidates(state, roots, doc)
+    assert candidates == []
+    assert findings
+    assert old.exists()
+
+
+def test_register_mode_never_discovers_runtime_recovery(prepared):
+    from blender_mcp_installer.upgrade_discovery import discover_candidates
+
+    roots, state, doc, _row, _old = prepared
+    recovery = (
+        roots.home
+        / ".local/share/blender-lab-mcp/.blender-mcp-installer.fake.runtime.recovery"
+    )
+    recovery.mkdir(parents=True)
+    (recovery / "user-file").write_text("preserve")
+    candidates, _findings = discover_candidates(state, roots, doc)
+    assert all(row["kind"] == "plugin_cache" for row in candidates)
+    assert (recovery / "user-file").read_text() == "preserve"
+
+
+def test_exact_current_codex_home_discovers_proven_historical_cache(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import discover_candidates
+
+    roots, doc = _register_case(tmp_path)
+    with state_root(roots) as state:
+        projection, plugin, cache = _registration_evidence(
+            state,
+            roots,
+            after={
+                "present": True,
+                "source_type": "local",
+                "source": str(roots.projections / ("a" * 40)),
+            },
+        )
+        candidates, findings = discover_candidates(state, roots, doc)
+    assert findings == []
+    assert [row["key"] for row in candidates] == ["plugin_cache:1"]
+    assert candidates[0]["content_source"] == str(plugin)
+    assert candidates[0]["proofs"][0]["relative"].endswith("/after.json")
+    assert projection.exists() and cache.exists()
+
+
+def test_current_plugin_version_is_excluded_from_discovery(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import discover_candidates
+
+    roots, doc = _register_case(tmp_path)
+    with state_root(roots) as state:
+        _projection, _plugin, cache = _registration_evidence(
+            state,
+            roots,
+            version="2",
+            after={
+                "present": True,
+                "source_type": "local",
+                "source": str(roots.projections / ("a" * 40)),
+            },
+        )
+        candidates, findings = discover_candidates(state, roots, doc)
+    assert candidates == []
+    assert findings == []
+    assert (cache / "payload").read_text() == "managed"
+
+
+@pytest.mark.parametrize("missing", ["after", "source", "projection"])
+def test_incomplete_registration_evidence_keeps_cache(tmp_path, missing):
+    from blender_mcp_installer.upgrade_discovery import discover_candidates
+
+    roots, doc = _register_case(tmp_path)
+    after = None
+    if missing == "source":
+        after = {"present": True, "source_type": "local"}
+    elif missing == "projection":
+        after = {
+            "present": True,
+            "source_type": "local",
+            "source": str(roots.projections / ("d" * 40)),
+        }
+    with state_root(roots) as state:
+        _projection, _plugin, cache = _registration_evidence(
+            state, roots, after=after
+        )
+        candidates, findings = discover_candidates(state, roots, doc)
+    assert candidates == []
+    assert findings
+    assert (cache / "payload").read_text() == "managed"
+
+
+def test_foreign_cache_content_is_reported_and_retained(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import discover_candidates
+
+    roots, doc = _register_case(tmp_path)
+    with state_root(roots) as state:
+        projection, _plugin, cache = _registration_evidence(
+            state,
+            roots,
+            after={
+                "present": True,
+                "source_type": "local",
+                "source": str(roots.projections / ("a" * 40)),
+            },
+        )
+        (cache / "foreign").write_text("user")
+        candidates, findings = discover_candidates(state, roots, doc)
+    assert candidates == []
+    assert any("differs from projection" in row["reason"] for row in findings)
+    assert projection.exists()
+    assert (cache / "foreign").read_text() == "user"
+
+
+def test_orphan_cache_without_any_registration_is_unverified(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import discover_candidates
+
+    roots, doc = _register_case(tmp_path)
+    orphan = roots.caches / "orphan-1"
+    orphan.mkdir(parents=True)
+    (orphan / "user-file").write_text("preserve")
+    with state_root(roots) as state:
+        candidates, findings = discover_candidates(state, roots, doc)
+    assert candidates == []
+    assert any(item["path"] == str(orphan) for item in findings)
+    assert (orphan / "user-file").read_text() == "preserve"
+
+
+def test_cleanup_pending_reuses_original_image_after_partial_removal(prepared):
+    from blender_mcp_installer.upgrade_discovery import discover_candidates
+
+    roots, state, original, row, old = prepared
+    original = update_record(
+        state,
+        roots,
+        original,
+        status="cleanup_pending",
+        candidates=[row],
+        verification={"registration": "passed", "live": "not_run"},
+    )
+    current = save_record(state, roots, None, new_record(roots, "register", original["desired"]))
+    (old / "b").unlink()
+
+    candidates, _findings = discover_candidates(state, roots, current)
+
+    assert len(candidates) == 1
+    assert candidates[0]["expected"] == row["expected"]
+    assert candidates[0]["state"] == "pending"
+    assert candidates[0]["reason"] == "carried durable cleanup baseline"
+    assert not (old / "b").exists()
+
+
+def test_other_codex_home_references_are_protected_but_not_adopted(prepared):
+    from blender_mcp_installer.upgrade_discovery import (
+        discover_candidates,
+        other_references,
+    )
+
+    roots, state, doc, _row, old = prepared
+    foreign_home = roots.home / "second-codex"
+    foreign_home.mkdir(mode=0o700)
+    foreign_roots = UpgradeRoots(roots.home, foreign_home)
+    other = save_record(
+        state, foreign_roots, None, new_record(foreign_roots, "register", doc["desired"])
+    )
+
+    references = other_references(state, roots, doc)
+    candidates, _findings = discover_candidates(state, roots, doc)
+
+    assert foreign_roots.projections / other["desired"]["commit"] in references
+    assert foreign_roots.caches / other["desired"]["plugin_version"] in references
+    assert candidates == []
+    assert old.exists()
+
+
+def test_awaiting_install_references_include_targets_and_recoveries(prepared):
+    from blender_mcp_installer.upgrade_discovery import other_references
+
+    roots, state, current, _row, _old = prepared
+    other = new_record(roots, "install", current["desired"])
+    other["profile"] = _install_profile(roots)
+    other["install_id"] = str(uuid4())
+    other = save_record(state, roots, None, other)
+    installed = _install_roots(roots, other)
+
+    references = set(other_references(state, roots, current))
+
+    assert {
+        Path(other["desired"]["projection"]),
+        roots.caches / other["desired"]["plugin_version"],
+        installed.runtime,
+        installed.extension_target,
+        installed.runtime_recovery(uuid4_from_text(other["install_id"])),
+        installed.extension_recovery(uuid4_from_text(other["install_id"])),
+    } <= references
+
+
+def test_first_install_without_parent_does_not_prove_old_recovery(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import discover_candidates
+
+    roots, register_doc = _register_case(tmp_path)
+    doc = new_record(roots, "install", register_doc["desired"])
+    doc["profile"] = _install_profile(roots)
+    doc["install_id"] = str(uuid4())
+    installed = _install_roots(roots, doc)
+    recovery = installed.runtime_recovery(uuid4_from_text(doc["install_id"]))
+    recovery.mkdir(parents=True)
+    (recovery / "managed").write_text("old")
+    with state_root(roots) as state:
+        with SafeRoot.open(roots.home, os.getuid(), roots.home) as home:
+            image = capture_tree(home, recovery.relative_to(roots.home))
+        _write_receipt(
+            state,
+            installed,
+            doc["install_id"],
+            generation=1,
+            parent_install_id=None,
+            status="installed",
+            runtime_image=image,
+        )
+        candidates, findings = discover_candidates(state, roots, doc)
+    assert candidates == []
+    assert any("lacks exact managed parent provenance" in row["reason"] for row in findings)
+    assert (recovery / "managed").read_text() == "old"
+
+
+def test_exact_parent_postimage_proves_runtime_recovery(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import discover_candidates
+
+    roots, register_doc = _register_case(tmp_path)
+    doc = new_record(roots, "install", register_doc["desired"])
+    doc["profile"] = _install_profile(roots)
+    doc["install_id"] = str(uuid4())
+    parent_id = str(uuid4())
+    installed = _install_roots(roots, doc)
+    recovery = installed.runtime_recovery(uuid4_from_text(doc["install_id"]))
+    recovery.mkdir(parents=True)
+    (recovery / "managed").write_text("old")
+    with state_root(roots) as state:
+        with SafeRoot.open(roots.home, os.getuid(), roots.home) as home:
+            image = capture_tree(home, recovery.relative_to(roots.home))
+        _write_receipt(
+            state,
+            installed,
+            parent_id,
+            generation=1,
+            parent_install_id=None,
+            status="installed",
+            runtime_image=image,
+        )
+        _write_receipt(
+            state,
+            installed,
+            doc["install_id"],
+            generation=2,
+            parent_install_id=parent_id,
+            status="installed",
+            runtime_image=image,
+        )
+
+        candidates, findings = discover_candidates(state, roots, doc)
+
+    assert findings == []
+    assert [row["key"] for row in candidates] == [
+        "runtime_recovery:" + doc["install_id"]
+    ]
+    assert candidates[0]["expected"] == image.to_dict()
+    assert len(candidates[0]["proofs"]) == 2
+
+
+def test_missing_install_profile_preserves_recovery_tree(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import discover_candidates
+
+    roots, register_doc = _register_case(tmp_path)
+    doc = new_record(roots, "install", register_doc["desired"])
+    recovery = roots.home / ".local/share/blender-lab-mcp/unclassified.recovery"
+    recovery.mkdir(parents=True)
+    (recovery / "user-file").write_text("preserve")
+    with state_root(roots) as state:
+        with pytest.raises(InstallerError, match="installation profile is missing"):
+            discover_candidates(state, roots, doc)
+    assert (recovery / "user-file").read_text() == "preserve"
+
+
+def test_invalid_receipt_is_strictly_rejected_without_rewrite(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import discover_candidates
+
+    roots, register_doc = _register_case(tmp_path)
+    doc = new_record(roots, "install", register_doc["desired"])
+    doc["profile"] = _install_profile(roots)
+    doc["install_id"] = str(uuid4())
+    installed = _install_roots(roots, doc)
+    recovery = installed.runtime_recovery(uuid4_from_text(doc["install_id"]))
+    recovery.mkdir(parents=True)
+    (recovery / "managed").write_text("old")
+    with state_root(roots) as state:
+        with SafeRoot.open(roots.home, os.getuid(), roots.home) as home:
+            image = capture_tree(home, recovery.relative_to(roots.home))
+        receipt = _write_receipt(
+            state,
+            installed,
+            doc["install_id"],
+            generation=1,
+            parent_install_id=None,
+            status="installed",
+            runtime_image=image,
+        )
+        value = json.loads(receipt.read_text())
+        value["unknown"] = True
+        receipt.write_text(json.dumps(value, sort_keys=True) + "\n")
+        before = receipt.read_bytes()
+        with pytest.raises(ValueError, match="invalid receipt schema"):
+            discover_candidates(state, roots, doc)
+        assert receipt.read_bytes() == before
+    assert (recovery / "managed").read_text() == "old"
+
+
+def test_prepared_receipt_recovery_overrides_retirement_reference(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import other_references
+
+    roots, doc = _register_case(tmp_path)
+    install_id = str(uuid4())
+    install_doc = new_record(roots, "install", doc["desired"])
+    install_doc["profile"] = _install_profile(roots)
+    install_doc["install_id"] = install_id
+    installed = _install_roots(roots, install_doc)
+    recovery = installed.runtime_recovery(uuid4_from_text(install_id))
+    recovery.mkdir(parents=True)
+    (recovery / "managed").write_text("old")
+    with state_root(roots) as state:
+        with SafeRoot.open(roots.home, os.getuid(), roots.home) as home:
+            image = capture_tree(home, recovery.relative_to(roots.home))
+        receipt = _write_receipt(
+            state,
+            installed,
+            install_id,
+            generation=1,
+            parent_install_id=None,
+            status="prepared",
+            runtime_image=image,
+        )
+        before = receipt.read_bytes()
+        retired = copy.deepcopy(doc)
+        retired["retired_receipts"] = [install_id]
+        references = other_references(state, roots, retired)
+        assert receipt.read_bytes() == before
+    assert recovery in references
+
+
+def test_legacy_registration_before_protects_projection_and_cache(prepared):
+    from blender_mcp_installer.upgrade_discovery import other_references
+
+    roots, state, doc, row, old = prepared
+    plugin = Path(row["content_source"])
+    projection = plugin.parent.parent
+    (plugin / ".codex-plugin").mkdir()
+    (plugin / ".codex-plugin/plugin.json").write_text(json.dumps({"version": "1"}))
+    proof = state.path / "marketplace-recovery/registration.legacy-before-only"
+    proof.mkdir(mode=0o700)
+    (proof / "before.json").write_text(
+        json.dumps({"present": True, "source_type": "local", "source": str(projection)})
+    )
+    (proof / "before.json").chmod(0o600)
+
+    references = other_references(state, roots, doc)
+
+    assert projection in references
+    assert old in references
