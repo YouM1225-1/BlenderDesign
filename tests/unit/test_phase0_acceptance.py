@@ -1,10 +1,12 @@
 import ast
 import json
+import sys
 import time
 from pathlib import Path
 
 import pytest
 
+from acceptance.primitives import AcceptanceFailure
 from scripts import run_phase0_acceptance as acceptance
 from scripts import vendor_protocol
 from smoke import e2e
@@ -56,6 +58,31 @@ def _write_executable(path: Path, output: str = "") -> Path:
     path.write_text(f"#!/bin/sh\nprintf '%s\\n' {output!r}\n", encoding="utf-8")
     path.chmod(0o700)
     return path.resolve()
+
+
+def test_phase0_wrapper_reports_wall_timeout_as_tool_crash(tmp_path):
+    with pytest.raises(AcceptanceFailure) as caught:
+        acceptance._run_command(
+            "probe",
+            [sys.executable, "-c", "import time; time.sleep(3)"],
+            env=acceptance._clean_environment(Path(sys.executable)),
+            log_path=tmp_path / "timeout.log",
+            timeout=0.1,
+        )
+    assert caught.value.code == "tool_crashed"
+
+
+def test_phase0_wrapper_has_default_two_mib_log_budget(tmp_path):
+    with pytest.raises(AcceptanceFailure) as caught:
+        acceptance._run_command(
+            "probe",
+            [sys.executable, "-c", "import os; os.write(1, b'x' * (3 * 1024 * 1024))"],
+            env=acceptance._clean_environment(Path(sys.executable)),
+            log_path=tmp_path / "oversized.log",
+            timeout=3.0,
+        )
+    assert caught.value.code == "evidence_truncated"
+    assert (tmp_path / "oversized.log").stat().st_size <= 2 * 1024 * 1024
 
 
 def test_blender_exit_zero_artifact_fail_is_not_accepted(tmp_path, monkeypatch):

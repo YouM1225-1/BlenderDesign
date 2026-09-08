@@ -146,31 +146,112 @@ def run_command(
     env: dict[str, str],
     log_path: Path,
     timeout: float,
+    max_log_bytes: int = 2 * 1024 * 1024,
+    limits: dict[str, int] | None = None,
+    observation: dict[str, object] | None = None,
 ) -> int:
-    """与 Phase 0 版本逐行一致,仅把写死的 ROOT 换成 cwd 形参。"""
-    descriptor = os.open(
-        log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    import datetime
+    import resource
+
+    from acceptance.input_bundle import safe_open
+
+    if timeout <= 0 or max_log_bytes <= 0:
+        raise AcceptanceFailure("contract_invalid", "positive process budgets required")
+
+    def constrain() -> None:
+        def install(limit_id: int, requested: int) -> None:
+            hard = resource.getrlimit(limit_id)[1]
+            value = requested if hard == resource.RLIM_INFINITY else min(requested, hard)
+            resource.setrlimit(limit_id, (value, value))
+
+        file_limit = max_log_bytes if limits is None else limits["file_size_bytes"]
+        install(resource.RLIMIT_FSIZE, file_limit)
+        if limits is not None:
+            install(resource.RLIMIT_CPU, limits["cpu_seconds"])
+            install(resource.RLIMIT_NOFILE, limits["open_files"])
+
+    descriptor = safe_open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     try:
-        os.fchmod(descriptor, 0o600)
         process = subprocess.Popen(
-            command, cwd=cwd, env=env, stdout=descriptor,
-            stderr=subprocess.STDOUT, start_new_session=True, umask=0o077)
+            command,
+            cwd=cwd,
+            env=env,
+            stdout=descriptor,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            umask=0o077,
+            preexec_fn=constrain,
+        )
     finally:
         os.close(descriptor)
+    if observation is not None:
+        observation.update(
+            started=True,
+            pid=process.pid,
+            started_at=datetime.datetime.now(datetime.UTC).isoformat(),
+        )
+
+    def sample_rss() -> int:
+        try:
+            report = subprocess.run(
+                ["/bin/ps", "-axo", "pid=,pgid=,rss="],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                check=True,
+            )
+            if len(report.stdout) > 2 * 1024 * 1024:
+                raise AcceptanceFailure(
+                    "runner_internal_error", "RSS process inventory exceeded budget"
+                )
+            total = 0
+            for line in report.stdout.splitlines():
+                _pid, group, rss = map(int, line.split())
+                if group == process.pid:
+                    total += rss * 1024
+            return total
+        except AcceptanceFailure:
+            raise
+        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
+            raise AcceptanceFailure(
+                "runner_internal_error", f"RSS process inventory failed: {exc}"
+            ) from exc
+
+    deadline = time.monotonic() + timeout
+    next_sample = 0.0
+    peak, samples = 0, 0
     try:
-        returncode = process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
+        while process.poll() is None:
+            if limits is not None and time.monotonic() >= next_sample:
+                rss = sample_rss()
+                samples += 1
+                peak = max(peak, rss)
+                next_sample = time.monotonic() + 0.1
+                if rss > limits["rss_bytes"]:
+                    raise AcceptanceFailure(
+                        "resource_limit_exceeded",
+                        f"{stage}: sampled group RSS exceeded budget",
+                    )
+            if log_path.stat().st_size >= max_log_bytes:
+                raise AcceptanceFailure("evidence_truncated", f"{stage}: log budget reached")
+            if time.monotonic() >= deadline:
+                raise AcceptanceFailure("tool_crashed", f"{stage}: wall timeout")
+            time.sleep(0.02)
+        if log_path.stat().st_size >= max_log_bytes:
+            raise AcceptanceFailure("evidence_truncated", f"{stage}: log budget reached")
+        if group_exists(process.pid):
+            raise AcceptanceFailure("tool_crashed", f"{stage}: process group leak")
+        return process.returncode
+    finally:
+        process.poll()
         stop_group(process)
-        raise AcceptanceFailure(
-            f"{stage}_timeout", f"{stage} exceeded {timeout:g} seconds") from exc
-    except BaseException:
-        stop_group(process)
-        raise
-    if group_exists(process.pid):
-        stop_group(process)
-        raise AcceptanceFailure(
-            f"{stage}_process_group_leak", f"{stage} left a live process group")
-    return returncode
+        if observation is not None:
+            observation["exit_code"] = process.returncode
+            observation["memory_sampling"] = {
+                "interval_seconds": 0.1,
+                "samples": samples,
+                "peak_observed_rss_bytes": peak,
+            }
 
 
 def require_zero(stage: str, returncode: int) -> None:
