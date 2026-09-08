@@ -217,6 +217,13 @@ def _trust_fixture(tmp_path: Path) -> tuple[Path, str]:
             MARKETPLACE_PROJECTOR,
             repo / "plugins/blender-mcp-installer/scripts/project_marketplace.py",
         )
+    shutil.copytree(
+        PLUGIN / "scripts/blender_mcp_installer",
+        repo / "plugins/blender-mcp-installer/scripts/blender_mcp_installer",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    shutil.copy2(PLUGIN / ".blender-mcp-usage-v1", repo / "plugins/blender-mcp-installer/.blender-mcp-usage-v1")
+    (artifact_root / "manifest.json").write_text('{"bundle_version":"1.0.0"}\n')
     payload = b"payload\n"
     (artifact_root / "payload").write_bytes(payload)
     (artifact_root / "SHA256SUMS").write_text(f"{hashlib.sha256(payload).hexdigest()}  payload\n")
@@ -696,10 +703,13 @@ def test_uv_bootstrap_is_local_only_and_repeated_before_every_command() -> None:
     commands = _marked(text, "INSTALLER_COMMANDS")
     for command in ("INSPECT", "INSTALL", "VERIFY", "ROLLBACK"):
         assert _shell_block(commands, command).splitlines()[0] == "run_uv_bootstrap"
-    assert commands.count('"$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN"') == 4
-    assert commands.count("--no-python-downloads --no-sync") == 4
-    assert commands.count('python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts"') == 4
-    assert commands.count('"$PLUGIN_ROOT/scripts/install.py"') == 4
+    for name in ("INSPECT", "INSTALL", "VERIFY", "ROLLBACK", "FINALIZE"):
+        route = _shell_block(commands, name)
+        assert '"$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN"' in route
+        assert '--no-python-downloads --no-sync' in route
+        assert 'python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts"' in route
+    assert '"$PLUGIN_ROOT/scripts/project_marketplace.py" upgrade' in _shell_block(commands, "INSTALL")
+    assert '"$PLUGIN_ROOT/scripts/install.py" finalize' in _shell_block(commands, "FINALIZE")
 
 
 def _python_31313() -> Path:
@@ -837,11 +847,14 @@ def test_installer_commands_use_exact_real_parser_arguments_and_consents() -> No
         '--expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT"',
         '--blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN"',
     )
-    for command in ("inspect", "install", "verify", "rollback"):
+    for command in ("inspect", "verify", "rollback"):
         block = _shell_block(commands, command.upper())
         assert f'"$PLUGIN_ROOT/scripts/install.py" {command}' in block
         assert all(argument in block for argument in common)
     install = _shell_block(commands, "INSTALL")
+    assert '"$PLUGIN_ROOT/scripts/project_marketplace.py" upgrade' in install
+    assert '--reviewed-commit "$EXPECTED_DISTRIBUTION_COMMIT"' in install
+    assert '--workflow-id "$WORKFLOW_ID"' in _shell_block(commands, "FINALIZE")
     for flag in (
         "--allow-extension-install",
         "--allow-online-access",
@@ -868,7 +881,7 @@ def test_skill_defaults_four_authorizations_and_keeps_lifecycle_checkpoints() ->
     assert "all_four_collected_for_this_workflow" in text
     assert "Ask separately and wait for an explicit answer to each checkpoint" not in text
     assert "May the installer" not in text
-    assert "a successful read-only host check is sufficient" in text
+    assert "use current\nhost evidence to check readiness" in text
     assert "closed. If it is running, ask the operator to save work and close it normally" in text
     assert "Never start, terminate, or force-close Blender" in text
 
@@ -1025,7 +1038,15 @@ elif args[:2] == ["plugin", "list"] and "--json" in args:
     source = read_marketplaces().get(marketplace, {}).get("source")
     if not source or not (Path(source) / ".agents/plugins/marketplace.json").is_file():
         raise SystemExit(5)
-    names = [] if not installed.exists() else [{"name": installed.read_text().split("@", 1)[0]}]
+    plugin = Path(source) / "plugins/blender-mcp-installer"
+    version = json.loads((plugin / ".codex-plugin/plugin.json").read_text())["version"]
+    names = [] if not installed.exists() else [{
+        "name": "blender-mcp-installer", "pluginId": installed.read_text(),
+        "marketplaceName": marketplace, "version": version,
+        "installed": True, "enabled": True,
+        "source": {"source": "local", "path": str(plugin)},
+        "marketplaceSource": {"sourceType": "local", "source": source},
+    }]
     print(json.dumps({"installed": names, "available": []}))
 else:
     raise SystemExit(f"unexpected fake Codex arguments: {args!r}")
@@ -1069,6 +1090,7 @@ def _persistent_marketplace_env(
         CODEX_HOME=str(codex_home),
         CODEX_BIN=str(_fake_marketplace_codex(tmp_path)),
         PYTHON_BIN=sys.executable,
+        ISOLATED_RUNNER=re.search(r"ISOLATED_RUNNER='([^']+)'", _shell_block(WORKFLOW.read_text(), "UV_BOOTSTRAP")).group(1),
     )
     return env, home, codex_home, old_source, commit
 
@@ -1099,7 +1121,7 @@ def test_persistent_marketplace_contract_is_commit_bound_and_transactional() -> 
         "marketplace-recovery",
     )
     assert all(fragment in block for fragment in required)
-    assert all(fragment in projector for fragment in projector_required)
+    assert all(fragment in re.sub(r"\s+", " ", projector) for fragment in projector_required)
     assert 'plugin marketplace add "$DISTRIBUTION_ROOT"' not in text
     assert text.index("<!-- TRUST_CLEANUP_BEGIN -->") < text.index(
         "<!-- PERSISTENT_MARKETPLACE_VERIFY_BEGIN -->"
@@ -1172,11 +1194,12 @@ def test_persistent_marketplace_survives_private_cleanup_and_lists_normally(
     evidence = tuple(recovery.glob("registration.*/*.json"))
     assert evidence
     assert all(path.stat().st_mode & 0o777 == 0o600 for path in evidence)
-    cleanup_evidence = tuple(recovery.glob("registration.*/marketplaces-after-cleanup.json"))
-    assert len(cleanup_evidence) == 1
-    assert "other-source" not in cleanup_evidence[0].read_text()
+    assert not tuple(recovery.glob("registration.*/marketplaces-after-cleanup.json"))
     restore = tuple(recovery.glob("registration.*/RESTORE.txt"))
-    assert len(restore) == 2
+    assert len(restore) == 1
+    before = json.loads((restore[0].parent / "before.json").read_text())
+    assert before["source"].endswith("old-source")
+    assert "plugin marketplace remove" not in restore[0].read_text()
     assert all(f"CODEX_BIN: {env['CODEX_BIN']}" in path.read_text() for path in restore)
     assert all(f"HOME: {home}" in path.read_text() for path in restore)
     assert all(f"CODEX_HOME: {codex_home}" in path.read_text() for path in restore)
@@ -1201,8 +1224,10 @@ def test_documented_registration_only_does_not_invoke_installer(tmp_path: Path) 
     state = home / ".local/state/blender-mcp-installer"
     assert not (state / "receipts").exists()
     assert not (home / ".local/share/blender-lab-mcp").exists()
-    evidence = tuple((state / "marketplace-recovery").glob("registration.*/plugins-after-cleanup.json"))
-    assert len(evidence) == 1
+    journals = tuple((state / "upgrades").glob("*.json"))
+    assert len(journals) == 1
+    assert json.loads(journals[0].read_text())["status"] == "complete"
+    assert not tuple((state / "marketplace-recovery").glob("registration.*/plugins-after-cleanup.json"))
 
 
 @pytest.mark.parametrize("failure", ["marketplace_add", "plugin_add"])
@@ -1346,5 +1371,11 @@ def test_marketplace_registration_is_serialized_per_codex_home(tmp_path: Path) -
         for _ in range(2)
     ]
     results = [process.communicate(timeout=20) + (process.returncode,) for process in processes]
-    assert [result[2] for result in results] == [0, 0], results
+    assert any(result[2] == 0 for result in results), results
+    assert all(result[2] in (0, 1) for result in results), results
+    for _stdout, stderr, code in results:
+        if code:
+            assert "Resource temporarily unavailable" in stderr
+    retry = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    assert retry.returncode == 0, retry.stderr
     assert "[marketplaces.other]" in (codex_home / "config.toml").read_text()

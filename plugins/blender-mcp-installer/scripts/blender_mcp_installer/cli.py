@@ -97,6 +97,7 @@ from .upgrade_cleanup import RollbackUnavailable, assert_rollback_available
 from .upgrade_handoff import LegacyHandoffRequired, RuntimeInUse, runtime_quiescence
 from .upgrade_integration import (
     bind_receipt,
+    cancel_recovered_workflow,
     finalize_install_locked,
     record_recovery_usage,
     select_install_workflow,
@@ -1388,6 +1389,7 @@ def _changed_install(context: _Context, fault: FaultInjector) -> dict[str, objec
                         context, fault, state, workflow_id, handoff
                     )
             except _RuntimeRecheck:
+                cancel_recovered_workflow(state, context, workflow_id)
                 continue
             break
     if workflow_id is not None:

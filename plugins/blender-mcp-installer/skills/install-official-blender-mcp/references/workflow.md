@@ -18,8 +18,11 @@ extension or MCP runtime. Installer commands are not prerequisites for registrat
 |---|---|
 | inspect | `TRUST_BOOTSTRAP` → `UV_BOOTSTRAP` → `INSPECT` → `TRUST_CLEANUP` |
 | register | `TRUST_BOOTSTRAP` → `UV_BOOTSTRAP` → `PERSISTENT_MARKETPLACE` → `TRUST_CLEANUP` → `PERSISTENT_MARKETPLACE_VERIFY` |
-| install | `TRUST_BOOTSTRAP` → `UV_BOOTSTRAP` → `INSPECT` → `PERSISTENT_MARKETPLACE` → `INSTALL` → `TRUST_CLEANUP` → `PERSISTENT_MARKETPLACE_VERIFY` |
+| install | `TRUST_BOOTSTRAP` → `UV_BOOTSTRAP` → `INSPECT` → `INSTALL` → `VERIFY` → `FINALIZE` → `TRUST_CLEANUP` → `PERSISTENT_MARKETPLACE_VERIFY` |
 | verify | `TRUST_BOOTSTRAP` → `UV_BOOTSTRAP` → `VERIFY` → `TRUST_CLEANUP` |
+| finalize | `TRUST_BOOTSTRAP` → `UV_BOOTSTRAP` → `VERIFY` → `FINALIZE` → `TRUST_CLEANUP` → `PERSISTENT_MARKETPLACE_VERIFY` |
+| finalize-register | `TRUST_BOOTSTRAP` → `UV_BOOTSTRAP` → `REGISTER_FINALIZE` → `TRUST_CLEANUP` → `PERSISTENT_MARKETPLACE_VERIFY` |
+| begin-handoff | `TRUST_BOOTSTRAP` → `UV_BOOTSTRAP` → `BEGIN_HANDOFF` → `TRUST_CLEANUP` |
 | rollback | `TRUST_BOOTSTRAP` → `UV_BOOTSTRAP` → `ROLLBACK` → `TRUST_CLEANUP` |
 
 Repair uses the install recipe with Blender closed. After install (including a
@@ -325,9 +328,9 @@ The receipt key `all_four_collected_for_this_workflow` is retained for schema
 compatibility and means all four authorization flags were active; it does not mean four
 prompts were shown.
 
-For an authorized install/repair, prepare the immutable commit-addressed projection
-after inspect succeeds and before install. For a registration-only request, run
-this block and its cleanup/verification recipe, then finish without `INSTALL`.
+For a registration-only request, run this prepare block, which automatically verifies
+registration and finalizes cleanup without Blender, runtime, extension, or receipt changes.
+Full install/repair uses the single-process `INSTALL` upgrade block below.
 Skip this block for inspect-only, verify-only, and rollback requests.
 New commits are verified before target-only replacement;
 mode-0600 recovery evidence is receipt-independent. The helper then runs
@@ -336,46 +339,60 @@ mode-0600 recovery evidence is receipt-independent. The helper then runs
 ```bash
 run_uv_bootstrap
 NORMAL_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
-MARKETPLACE_PREPARE_JSON="$("$PYTHON_BIN" -I -B \
+WORKFLOW_RC=0
+if WORKFLOW_JSON="$("$PYTHON_BIN" -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
   "$PLUGIN_ROOT/scripts/project_marketplace.py" prepare \
-  --private-git-dir "$PRIVATE_GIT_DIR" \
-  --git-safe-home "$GIT_SAFE_HOME" \
-  --reviewed-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
-  --trusted-checksums "$TRUSTED_CHECKSUMS" \
-  --codex "$CODEX_BIN" --home "$HOME" --codex-home "$NORMAL_CODEX_HOME")"
-MARKETPLACE_NAME="$("$PYTHON_BIN" -I -c \
-  'import json,sys; print(json.loads(sys.argv[1])["marketplace"])' \
-  "$MARKETPLACE_PREPARE_JSON")"
-PERSISTENT_MARKETPLACE_ROOT="$("$PYTHON_BIN" -I -c \
-  'import json,sys; print(json.loads(sys.argv[1])["projection"])' \
-  "$MARKETPLACE_PREPARE_JSON")"
-REGISTRATION_RECOVERY_DIR="$("$PYTHON_BIN" -I -c \
-  'import json,sys; print(json.loads(sys.argv[1])["recovery"])' \
-  "$MARKETPLACE_PREPARE_JSON")"
+  --private-git-dir "$PRIVATE_GIT_DIR" --git-safe-home "$GIT_SAFE_HOME" \
+  --reviewed-commit "$EXPECTED_DISTRIBUTION_COMMIT" --trusted-checksums "$TRUSTED_CHECKSUMS" \
+  --codex "$CODEX_BIN" --home "$HOME" --codex-home "$NORMAL_CODEX_HOME")"; then
+  :
+else
+  WORKFLOW_RC=$?
+  case "$WORKFLOW_RC" in 3) ;; *) exit "$WORKFLOW_RC" ;; esac
+fi
+"$PYTHON_BIN" -I -c 'import json,sys; d=json.loads(sys.argv[1]); assert int(sys.argv[2]) != 3 or d.get("status") == "cleanup_pending"' "$WORKFLOW_JSON" "$WORKFLOW_RC"
+WORKFLOW_ID="$("$PYTHON_BIN" -I -c 'import json,sys,uuid; value=json.loads(sys.argv[1]).get("workflow_id"); print("" if value is None else str(uuid.UUID(value)))' "$WORKFLOW_JSON")"
+PERSISTENT_MARKETPLACE_ROOT="$("$PYTHON_BIN" -I -c 'import json,sys; print(json.loads(sys.argv[1])["projection"])' "$WORKFLOW_JSON")"
+REGISTRATION_RECOVERY_DIR="$("$PYTHON_BIN" -I -c 'import json,sys; print(json.loads(sys.argv[1]).get("recovery", ""))' "$WORKFLOW_JSON")"
+MARKETPLACE_NAME="official-blender-mcp"
 ```
 <!-- PERSISTENT_MARKETPLACE_END -->
 
 <!-- INSTALL_BEGIN -->
 ```bash
 run_uv_bootstrap
-"$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" \
+NORMAL_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+HANDOFF_ARGS=()
+if test -n "${HANDOFF_ID:-}"; then HANDOFF_ARGS+=(--handoff-id "$HANDOFF_ID"); fi
+WORKFLOW_RC=0
+if WORKFLOW_JSON="$("$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" \
   --no-python-downloads --no-sync \
   python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
-  "$PLUGIN_ROOT/scripts/install.py" install \
-  --bundle-root "$BUNDLE_ROOT" \
-  --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
-  --blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN" \
-  --allow-extension-install --allow-online-access \
-  --allow-localhost-bridge --approve-arbitrary-python
+  "$PLUGIN_ROOT/scripts/project_marketplace.py" upgrade \
+  --private-git-dir "$PRIVATE_GIT_DIR" --git-safe-home "$GIT_SAFE_HOME" \
+  --reviewed-commit "$EXPECTED_DISTRIBUTION_COMMIT" --trusted-checksums "$TRUSTED_CHECKSUMS" \
+  --codex "$CODEX_BIN" --home "$HOME" --codex-home "$NORMAL_CODEX_HOME" \
+  --bundle-root "$BUNDLE_ROOT" --blender "$BLENDER_BIN" --uv "$UV_BIN" \
+  ${HANDOFF_ARGS[@]+"${HANDOFF_ARGS[@]}"} \
+  --allow-extension-install --allow-online-access --allow-localhost-bridge --approve-arbitrary-python)"; then
+  :
+else
+  WORKFLOW_RC=$?
+  case "$WORKFLOW_RC" in 3) ;; *) exit "$WORKFLOW_RC" ;; esac
+fi
+"$PYTHON_BIN" -I -c 'import json,sys; d=json.loads(sys.argv[1]); assert int(sys.argv[2]) != 3 or d.get("status") == "cleanup_pending"' "$WORKFLOW_JSON" "$WORKFLOW_RC"
+WORKFLOW_ID="$("$PYTHON_BIN" -I -c 'import json,sys,uuid; value=json.loads(sys.argv[1]).get("workflow_id"); print("" if value is None else str(uuid.UUID(value)))' "$WORKFLOW_JSON")"
+PERSISTENT_MARKETPLACE_ROOT="$("$PYTHON_BIN" -I -c 'import json,sys; print(json.loads(sys.argv[1])["projection"])' "$WORKFLOW_JSON")"
+REGISTRATION_RECOVERY_DIR="$("$PYTHON_BIN" -I -c 'import json,sys; print(json.loads(sys.argv[1]).get("recovery", ""))' "$WORKFLOW_JSON")"
+MARKETPLACE_NAME="official-blender-mcp"
 ```
 <!-- INSTALL_END -->
 
-Finish the install recipe's cleanup and registration verification first, even when
-it reports `requires_blender_start`. For subsequent live verification, use current
-host evidence to check readiness. If Blender is not running, ask the operator to
-start the selected Blender normally. An earlier explicit confirmation or
-a successful read-only host check is sufficient. Do not ask again just to repeat
-that evidence. Run the separate verify recipe, which includes this command:
+Keep the trusted distribution, private Git directory and checksum evidence until live
+finalize finishes. When installation reports `requires_blender_start`, use current
+host evidence to check readiness. If needed, ask the operator to start the selected
+Blender normally. Reuse existing confirmation; do not repeat it. Run the read-only
+`VERIFY` block, then automatically run `FINALIZE` under the existing authorization.
 
 <!-- VERIFY_BEGIN -->
 ```bash
@@ -389,6 +406,77 @@ run_uv_bootstrap
   --blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN"
 ```
 <!-- VERIFY_END -->
+
+<!-- FINALIZE_BEGIN -->
+```bash
+run_uv_bootstrap
+if test -n "$WORKFLOW_ID"; then
+  FINALIZE_RC=0
+  if FINALIZE_JSON="$("$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" \
+    --no-python-downloads --no-sync \
+    python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
+    "$PLUGIN_ROOT/scripts/install.py" finalize \
+    --bundle-root "$BUNDLE_ROOT" \
+    --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
+    --blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN" \
+    --workflow-id "$WORKFLOW_ID")"; then
+    :
+  else
+    FINALIZE_RC=$?
+    case "$FINALIZE_RC" in 3) ;; *) exit "$FINALIZE_RC" ;; esac
+  fi
+  "$PYTHON_BIN" -I -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["workflow_id"] == sys.argv[3]; assert int(sys.argv[2]) != 3 or d.get("status") == "cleanup_pending"' "$FINALIZE_JSON" "$FINALIZE_RC" "$WORKFLOW_ID"
+  WORKFLOW_RC="$FINALIZE_RC"
+  WORKFLOW_JSON="$FINALIZE_JSON"
+fi
+```
+<!-- FINALIZE_END -->
+
+For a finalize retry, recover `WORKFLOW_ID`, `PERSISTENT_MARKETPLACE_ROOT`, and
+optional `REGISTRATION_RECOVERY_DIR` from the retained JSON of the matching original
+upgrade/prepare. Validate the UUID and keep the recorded HOME/CODEX_HOME and reviewed
+commit; never reuse unrelated session variables. Full finalize uses the live blocks
+above. Register-only retries use this block without Blender or runtime arguments:
+
+<!-- REGISTER_FINALIZE_BEGIN -->
+```bash
+run_uv_bootstrap
+NORMAL_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+WORKFLOW_RC=0
+if WORKFLOW_JSON="$("$PYTHON_BIN" -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
+  "$PLUGIN_ROOT/scripts/project_marketplace.py" finalize \
+  --workflow-id "$WORKFLOW_ID" \
+  --codex "$CODEX_BIN" --home "$HOME" --codex-home "$NORMAL_CODEX_HOME")"; then
+  :
+else
+  WORKFLOW_RC=$?
+  case "$WORKFLOW_RC" in 3) ;; *) exit "$WORKFLOW_RC" ;; esac
+fi
+"$PYTHON_BIN" -I -c 'import json,sys,uuid; d=json.loads(sys.argv[1]); assert str(uuid.UUID(d["workflow_id"])) == sys.argv[3]; assert int(sys.argv[2]) != 3 or d.get("status") == "cleanup_pending"' "$WORKFLOW_JSON" "$WORKFLOW_RC" "$WORKFLOW_ID"
+```
+<!-- REGISTER_FINALIZE_END -->
+
+For the first lease-less migration, run this reviewed entry from an external terminal:
+
+<!-- BEGIN_HANDOFF_BEGIN -->
+```bash
+run_uv_bootstrap
+NORMAL_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+HANDOFF_JSON="$("$PYTHON_BIN" -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
+  "$PLUGIN_ROOT/scripts/project_marketplace.py" begin-handoff \
+  --codex "$CODEX_BIN" --home "$HOME" --codex-home "$NORMAL_CODEX_HOME")"
+HANDOFF_ID="$("$PYTHON_BIN" -I -c 'import json,sys,uuid; print(uuid.UUID(json.loads(sys.argv[1])["handoff_id"]))' "$HANDOFF_JSON")"
+printf '%s\n' "$HANDOFF_JSON"
+```
+<!-- BEGIN_HANDOFF_END -->
+
+Save the positive process identities, then have the operator exit the recorded Codex
+clients and managed MCP processes normally. Pass `HANDOFF_ID` into upgrade or rollback;
+never shut down user applications automatically. A prior rollback can restore a lease-less
+runtime, so a repeated rollback may require a fresh begin-handoff and `--handoff-id`.
+Runtime handoff does not prove old Codex tasks reloaded: old caches without cooperative
+usage evidence remain pending.
+
 
 Verification succeeds only when parsed Codex policy, effective Codex MCP config,
 the exact MCP handshake/catalog, and the localhost Blender read-only summary call
@@ -406,6 +494,8 @@ set its absolute path as `RECEIPT_PATH`, and run:
 <!-- ROLLBACK_BEGIN -->
 ```bash
 run_uv_bootstrap
+HANDOFF_ARGS=()
+if test -n "${HANDOFF_ID:-}"; then HANDOFF_ARGS+=(--handoff-id "$HANDOFF_ID"); fi
 "$UV_BIN" run --quiet --no-project --python "$PYTHON_BIN" \
   --no-python-downloads --no-sync \
   python -I -B -c "$ISOLATED_RUNNER" "$PLUGIN_ROOT/scripts" \
@@ -413,7 +503,7 @@ run_uv_bootstrap
   --bundle-root "$BUNDLE_ROOT" \
   --expected-distribution-commit "$EXPECTED_DISTRIBUTION_COMMIT" \
   --blender "$BLENDER_BIN" --codex "$CODEX_BIN" --uv "$UV_BIN" \
-  --receipt "$RECEIPT_PATH"
+  --receipt "$RECEIPT_PATH" ${HANDOFF_ARGS[@]+"${HANDOFF_ARGS[@]}"}
 ```
 <!-- ROLLBACK_END -->
 <!-- INSTALLER_COMMANDS_END -->
@@ -502,16 +592,24 @@ rmdir "$TRUST_PARENT"
 <!-- TRUST_CLEANUP_END -->
 
 If this session prepared a persistent marketplace projection, after private trust
-cleanup verify both normal-profile listings and retain their credential-safe
-summaries and fingerprints beside the independent recovery evidence. Otherwise
+cleanup verify both normal-profile listings read-only. Preserve journal, registration
+recovery, cleanup logs, historical projections and receipts. `cleanup_pending` / exit 3
+still runs explicit trust cleanup and persistent verification before returning 3;
+ordinary errors fail immediately. Later install/register/finalize retries cleanup. Otherwise
 skip this block; inspect-only, verify-only, and rollback do not register a plugin.
 <!-- PERSISTENT_MARKETPLACE_VERIFY_BEGIN -->
 ```bash
-"$PYTHON_BIN" -I -B \
-  "$PERSISTENT_MARKETPLACE_ROOT/plugins/blender-mcp-installer/scripts/project_marketplace.py" \
-  verify --projection "$PERSISTENT_MARKETPLACE_ROOT" \
-  --recovery "$REGISTRATION_RECOVERY_DIR" \
+REGISTRATION_VERIFY_ARGS=()
+if test -n "${REGISTRATION_RECOVERY_DIR:-}"; then
+  REGISTRATION_VERIFY_ARGS+=(--recovery "$REGISTRATION_RECOVERY_DIR")
+fi
+PERSISTENT_SCRIPTS="$PERSISTENT_MARKETPLACE_ROOT/plugins/blender-mcp-installer/scripts"
+"$PYTHON_BIN" -I -B -c "$ISOLATED_RUNNER" "$PERSISTENT_SCRIPTS" \
+  "$PERSISTENT_SCRIPTS/project_marketplace.py" verify \
+  --projection "$PERSISTENT_MARKETPLACE_ROOT" ${REGISTRATION_VERIFY_ARGS[@]+"${REGISTRATION_VERIFY_ARGS[@]}"} \
   --codex "$CODEX_BIN" --home "$HOME" --codex-home "$NORMAL_CODEX_HOME"
+printf '%s\n' "$WORKFLOW_JSON"
+if test "$WORKFLOW_RC" -eq 3; then exit 3; fi
 ```
 <!-- PERSISTENT_MARKETPLACE_VERIFY_END -->
 

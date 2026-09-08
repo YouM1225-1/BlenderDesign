@@ -1411,3 +1411,37 @@ def test_full_finalize_probes_live_once_and_rechecks_snapshot(prepared, monkeypa
 
     assert result["status"] == "complete" and not old.exists()
     assert live == ["live"] and len(fingerprints) >= 4
+
+
+def test_exact_registration_creates_migration_journal_when_old_cache_remains(prepared, monkeypatch):
+    from types import SimpleNamespace
+    from blender_mcp_installer import upgrade_integration
+    from blender_mcp_installer.upgrade_state import record_ids
+    import project_marketplace as marketplace
+
+    roots, state, prior, row, old = prepared
+    update_record(state, roots, prior, status="cancelled")
+    projection = Path(prior["desired"]["projection"])
+    plugin = projection / "plugins/blender-mcp-installer"
+    (plugin / ".codex-plugin").mkdir(parents=True)
+    (plugin / "artifacts").mkdir()
+    (plugin / ".codex-plugin/plugin.json").write_text(
+        json.dumps({"name": "blender-mcp-installer", "version": "2"})
+    )
+    (plugin / "artifacts/manifest.json").write_text(json.dumps({"bundle_version": "1.0.0"}))
+    called = []
+    snapshot = {"present": True, "source_type": "local", "source": str(projection)}
+    monkeypatch.setattr(upgrade_integration, "inspect_registration", lambda *_args: None)
+    monkeypatch.setattr(upgrade_integration, "discover_candidates", lambda *_args: ([row], []))
+    monkeypatch.setattr(upgrade_integration, "other_references", lambda *_args: ())
+    monkeypatch.setattr(marketplace, "inspect_registration", lambda *_args: None)
+    monkeypatch.setattr(marketplace, "discover_candidates", lambda *_args: ([row], []))
+    monkeypatch.setattr(marketplace, "_marketplace_snapshot", lambda *_args: (snapshot, {}))
+    monkeypatch.setattr(
+        marketplace, "_register", lambda *_args, **_kwargs: called.append("register")
+    )
+    args = SimpleNamespace(reviewed_commit="b" * 40, codex="/fake/codex", workflow_id=None)
+    result = marketplace._run_workflow(args, state, roots, projection)
+    assert result["status"] == "complete" and not old.exists()
+    assert result["workflow_id"] != prior["id"]
+    assert len(record_ids(state)) == 2 and called == []

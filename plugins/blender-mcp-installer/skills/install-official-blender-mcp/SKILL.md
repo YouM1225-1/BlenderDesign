@@ -39,9 +39,14 @@ objects alive through the selected operation, then run the bounded cleanup.
   `PERSISTENT_MARKETPLACE_VERIFY`. This updates only Codex plugin registration;
   skip installer inspect/install/verify/rollback commands and Blender configuration.
 - **Install/repair:** inspect first, apply existing authorization, prepare the
-  persistent marketplace, then run `INSTALL` once. Preserve the receipt and complete
-  `TRUST_CLEANUP` plus `PERSISTENT_MARKETPLACE_VERIFY` before waiting for Blender.
-  Then use the verify recipe when ready. Repair requires Blender closed.
+  persistent marketplace and install in the single-process `INSTALL` upgrade. Keep
+  trust evidence until Blender starts, then run `VERIFY` and automatic `FINALIZE`,
+  followed by `TRUST_CLEANUP` and `PERSISTENT_MARKETPLACE_VERIFY`. Repair requires Blender closed.
+- **Finalize:** retry the matching workflow; full install requires live verification,
+  register-only does not require Blender. Routine cleanup is covered by the current
+  install/upgrade authorization and does not need repeated permission.
+- **Begin-handoff:** record positive process identities for an external-terminal
+  maintenance handoff before a lease-less upgrade or rollback retry.
 - **Verify:** a running selected Blender is
   required; inspect its state or reuse current user confirmation instead of asking
   for the same confirmation again. Verification does not update registration.

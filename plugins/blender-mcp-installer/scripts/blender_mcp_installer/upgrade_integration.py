@@ -64,6 +64,21 @@ def profile_from_context(context: Any) -> dict[str, str]:
     }
 
 
+def cancel_recovered_workflow(state: SafeRoot, context: Any, workflow_id: str | None) -> None:
+    """End only a matching workflow whose linked receipt proves terminal rollback."""
+    if workflow_id is None:
+        return
+    roots = UpgradeRoots(context.roots.home, context.roots.codex_home)
+    doc = load_record(state, roots, workflow_id)
+    if doc is None or doc["status"] != "awaiting_verification" or doc["install_id"] is None:
+        return
+    if doc["mode"] != "install" or doc["profile"] != profile_from_context(context):
+        raise InstallerError("recovered workflow profile mismatch")
+    receipt = load_receipt(context.roots.receipt(UUID(doc["install_id"])), context.roots)
+    if receipt.status is ReceiptStatus.ROLLED_BACK:
+        update_record(state, roots, doc, status="cancelled")
+
+
 def select_install_workflow(
     state: SafeRoot, context: Any, *, exact: bool
 ) -> dict[str, Any] | None:
@@ -81,6 +96,10 @@ def select_install_workflow(
             or doc["status"] in {"complete", "cancelled"}
         ):
             raise InstallerError("workflow does not match selected installation")
+        cancel_recovered_workflow(state, context, requested)
+        doc = load_record(state, roots, requested)
+        if doc is None or doc["status"] == "cancelled":
+            raise InstallerError("workflow receipt was rolled back")
         return doc
     matches = []
     for identifier in record_ids(state):
@@ -108,6 +127,8 @@ def select_install_workflow(
                 else {ReceiptStatus.PREPARED, ReceiptStatus.ROLLBACK_PENDING}
             )
             if receipt_status not in expected_statuses:
+                if receipt_status is ReceiptStatus.ROLLED_BACK:
+                    cancel_recovered_workflow(state, context, doc["id"])
                 continue
         matches.append(doc)
     if len(matches) > 1:

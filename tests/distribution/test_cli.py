@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import json
 import os
 import shutil
@@ -659,13 +658,56 @@ def test_expected_and_unexpected_errors_are_json_and_redacted(
     assert secret not in output
 
 
-def test_install_entrypoint_contains_only_main_delegation() -> None:
-    path = SCRIPTS / "install.py"
-    tree = ast.parse(path.read_text())
-    assert [
-        node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))
-    ] == []
-    assert "blender_mcp_installer.cli import main" in path.read_text()
+@pytest.mark.parametrize("entry", ["install.py", "project_marketplace.py"])
+def test_cached_entrypoint_leases_before_import_and_help_is_read_only(tmp_path, entry):
+    from blender_mcp_installer.upgrade_state import UpgradeRoots, state_root
+    from blender_mcp_installer.upgrade_locks import ensure_usage_lock, usage_lock
+
+    home, codex = tmp_path / "home", tmp_path / "custom-codex"
+    home.mkdir(mode=0o700)
+    codex.mkdir(mode=0o700)
+    roots = UpgradeRoots(home, codex)
+    version = roots.caches / "test-version"
+    shutil.copytree(SCRIPTS, version / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+    version.chmod(0o700)
+    runner = """import runpy,sys
+sys.addaudithook(lambda event,args: print('INSTALLER_IMPORT',flush=True)
+    if event == 'import' and args[0].startswith('blender_mcp_installer') else None)
+sys.path.insert(0,sys.argv[1]); sys.argv=sys.argv[2:]; runpy.run_path(sys.argv[0],run_name='__main__')
+"""
+    argv = [
+        sys.executable,
+        "-I",
+        "-B",
+        "-c",
+        runner,
+        str(version / "scripts"),
+        str(version / "scripts" / entry),
+        "--help",
+    ]
+    environment = dict(os.environ, HOME=str(home), CODEX_HOME=str(codex))
+    with state_root(roots) as state:
+        info = version.stat()
+        ensure_usage_lock(state, info.st_dev, info.st_ino)
+
+        def snapshot():
+            return {
+                str(path): (path.stat().st_mode, path.read_bytes() if path.is_file() else None)
+                for base in (home, codex)
+                for path in base.rglob("*")
+            }
+
+        before = snapshot()
+        with usage_lock(state, info.st_dev, info.st_ino, exclusive=True) as held:
+            assert held
+            busy = subprocess.run(argv, env=environment, capture_output=True, text=True, timeout=10)
+        assert busy.returncode == 75, busy.stderr
+        assert "INSTALLER_IMPORT" not in busy.stdout
+        assert snapshot() == before
+        released = subprocess.run(argv, env=environment, capture_output=True, text=True, timeout=10)
+        assert released.returncode == 0, released.stderr
+        assert "INSTALLER_IMPORT" in released.stdout and "usage:" in released.stdout
+        assert snapshot() == before
 
 
 def _install_context(host: HostHarness) -> tuple[cli._Context, BlenderState, InstallRoots]:
@@ -2776,3 +2818,106 @@ def test_rollback_legacy_restored_runtime_accepts_explicit_handoff(
         assert cli.run_cli(argv + handoff_args, NoOpFaultInjector()) == 0
         assert json.loads(capsys.readouterr().out)["status"] == "rolled_back"
         assert _runtime_recovery_images(roots, receipt) == completed
+
+
+@pytest.mark.parametrize("unrelated_status", ["prepared", "rollback_pending"])
+def test_recovered_install_cancels_only_its_rolled_back_workflow(tmp_path, unrelated_status):
+    from uuid import uuid4
+    from blender_mcp_installer.upgrade_state import (
+        UpgradeRoots,
+        state_root,
+        record_ids,
+        load_record,
+        new_record,
+        save_record,
+    )
+    from blender_mcp_installer.upgrade_integration import profile_from_context, desired_from_context
+    from tests.distribution.test_upgrade_core import _write_receipt
+
+    with _userpref_completion_fault_scenario(tmp_path) as context:
+        roots = context.roots
+        upgraded = UpgradeRoots(roots.home, roots.codex_home)
+        with pytest.raises(SystemExit):
+            cli.install(
+                SimpleNamespace(_fault=ExitFaultInjector("after_userpref_file_completed", 70))
+            )
+        with state_root(upgraded) as state:
+            (original_id,) = record_ids(state)
+            original = load_record(state, upgraded, original_id)
+            desired = dict(
+                desired_from_context(context),
+                commit="e" * 40,
+                projection=str(upgraded.projections / ("e" * 40)),
+            )
+            other = new_record(upgraded, "install", desired)
+            other["profile"] = profile_from_context(context)
+            other["install_id"] = str(uuid4())
+            other = save_record(state, upgraded, None, other)
+            unrelated_receipt = _write_receipt(
+                state,
+                roots,
+                other["install_id"],
+                generation=1,
+                parent_install_id=None,
+                status=unrelated_status,
+            )
+        if unrelated_status == "rollback_pending":
+            # A separate active rollback authority makes selector recovery ambiguous.
+            # The existing fail-closed guard must win over automatic retirement.
+            before = unrelated_receipt.read_bytes()
+            with pytest.raises(InstallerError):
+                cli.install(SimpleNamespace(_fault=NoOpFaultInjector()))
+            with state_root(upgraded) as state:
+                assert load_record(state, upgraded, other["id"]) == other
+                assert load_record(state, upgraded, original_id) == original
+            assert unrelated_receipt.read_bytes() == before
+            return
+        result = cli.install(SimpleNamespace(_fault=NoOpFaultInjector()))
+        assert result["workflow_id"] != original_id
+        with state_root(upgraded) as state:
+            assert load_record(state, upgraded, original_id)["status"] == "cancelled"
+            assert load_record(state, upgraded, other["id"]) == other
+        assert (
+            cli.load_receipt(roots.receipt(UUID(original["install_id"])), roots).status
+            is ReceiptStatus.ROLLED_BACK
+        )
+        assert cli.load_receipt(unrelated_receipt, roots).status.value == unrelated_status
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_retry_after_exception_recovery_retires_terminal_workflow(tmp_path, monkeypatch, explicit):
+    from blender_mcp_installer.upgrade_state import (
+        UpgradeRoots,
+        state_root,
+        record_ids,
+        load_record,
+    )
+
+    with _userpref_completion_fault_scenario(tmp_path) as context:
+        original_verify = cli.verify_runtime
+
+        def fail(*_):
+            raise InstallerError("verification failed")
+
+        monkeypatch.setattr(cli, "verify_runtime", fail)
+        with pytest.raises(InstallerError):
+            cli.install(SimpleNamespace(_fault=NoOpFaultInjector()))
+        upgraded = UpgradeRoots(context.roots.home, context.roots.codex_home)
+        with state_root(upgraded) as state:
+            (original_id,) = record_ids(state)
+            original = load_record(state, upgraded, original_id)
+        assert (
+            cli.load_receipt(
+                context.roots.receipt(UUID(original["install_id"])), context.roots
+            ).status
+            is ReceiptStatus.ROLLED_BACK
+        )
+        monkeypatch.setattr(cli, "verify_runtime", original_verify)
+        if explicit:
+            with pytest.raises(InstallerError, match="workflow"):
+                cli._changed_install(replace(context, workflow_id=original_id), NoOpFaultInjector())
+        else:
+            result = cli.install(SimpleNamespace(_fault=NoOpFaultInjector()))
+            assert result["workflow_id"] != original_id
+        with state_root(upgraded) as state:
+            assert load_record(state, upgraded, original_id)["status"] == "cancelled"

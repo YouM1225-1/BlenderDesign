@@ -1,7 +1,76 @@
+# ruff: noqa: E402 -- cache lease must precede installer imports
 from __future__ import annotations
 
+import atexit as _atexit
+import fcntl as _fcntl
+import hashlib as _hashlib
+import os as _os
+from pathlib import Path as _Path
+import stat as _stat
+
+
+def _entry_directory(path: _Path) -> int:
+    if not path.is_absolute() or ".." in path.parts:
+        raise SystemExit(75)
+    fd = _os.open("/", _os.O_RDONLY | _os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:]:
+            child = _os.open(part, _os.O_RDONLY | _os.O_DIRECTORY | _os.O_NOFOLLOW, dir_fd=fd)
+            _os.close(fd)
+            fd = child
+        info = _os.fstat(fd)
+        if info.st_uid != _os.getuid() or _stat.S_IMODE(info.st_mode) & 0o022:
+            raise SystemExit(75)
+        return fd
+    except BaseException:
+        _os.close(fd)
+        raise
+
+
+def _entry_lease() -> int | None:
+    home = _Path(_os.environ.get("HOME", "/"))
+    codex = _Path(_os.environ.get("CODEX_HOME", str(home / ".codex")))
+    cache = codex / "plugins/cache/official-blender-mcp/blender-mcp-installer"
+    script = _Path(__file__).absolute()
+    if not script.is_relative_to(cache):
+        return None
+    relative = script.relative_to(cache)
+    if len(relative.parts) < 2:
+        raise SystemExit(75)
+    version = cache / relative.parts[0]
+    root_fd = _entry_directory(version)
+    info = _os.fstat(root_fd)
+    name = _hashlib.sha256(f"tree:{info.st_dev}:{info.st_ino}".encode()).hexdigest() + ".lock"
+    usage_fd = _entry_directory(home / ".local/state/blender-mcp-installer/usage")
+    lease_fd = _os.open(name, _os.O_RDWR | _os.O_NOFOLLOW, dir_fd=usage_fd)
+    lease = _os.fstat(lease_fd)
+    linked = _os.stat(name, dir_fd=usage_fd, follow_symlinks=False)
+    if (
+        not _stat.S_ISREG(lease.st_mode)
+        or lease.st_uid != _os.getuid()
+        or _stat.S_IMODE(lease.st_mode) != 0o600
+        or lease.st_nlink != 1
+        or (lease.st_dev, lease.st_ino) != (linked.st_dev, linked.st_ino)
+    ):
+        raise SystemExit(75)
+    try:
+        _fcntl.flock(lease_fd, _fcntl.LOCK_SH | _fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit(75)
+    check_fd = _entry_directory(version)
+    after = _os.fstat(check_fd)
+    if (info.st_dev, info.st_ino) != (after.st_dev, after.st_ino) or not script.is_file():
+        raise SystemExit(75)
+    for fd in (root_fd, usage_fd, check_fd):
+        _os.close(fd)
+    _atexit.register(_os.close, lease_fd)
+    return lease_fd
+
+
+_SCRIPT_USAGE_FD = _entry_lease()
+
+
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -12,11 +81,43 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import nullcontext
+from dataclasses import replace
+from uuid import UUID
 from pathlib import Path
 from typing import Any
 
+
+from blender_mcp_installer.filesystem import InstallerError, NoOpFaultInjector, SafeRoot
+from blender_mcp_installer.upgrade_cleanup import RollbackUnavailable, assert_rollback_available
+from blender_mcp_installer.upgrade_discovery import (
+    discover_candidates,
+    read_proof,
+    read_evidence,
+    registration_scope,
+)
+from blender_mcp_installer.upgrade_handoff import (
+    RuntimeInUse,
+    LegacyHandoffRequired,
+    begin_handoff,
+    runtime_quiescence,
+)
+from blender_mcp_installer.upgrade_integration import (
+    cancel_recovered_workflow,
+    finalize_register_locked,
+    profile_from_context,
+)
+from blender_mcp_installer.upgrade_locks import ensure_usage_lock, mutation_locks
+from blender_mcp_installer.upgrade_registration import inspect_registration
+from blender_mcp_installer.upgrade_state import (
+    UpgradeRoots,
+    load_any_record,
+    new_record,
+    record_ids,
+    save_record,
+    update_record,
+    uuid_text,
+)
 
 MARKETPLACE_NAME = "official-blender-mcp"
 PLUGIN_NAME = "blender-mcp-installer"
@@ -93,33 +194,8 @@ def _prepare_roots(home: Path, codex_home: Path) -> tuple[Path, Path]:
         or config_stat.st_uid != uid
         or stat.S_IMODE(config_stat.st_mode) & 0o022
     ):
-        raise RuntimeError(
-            "Codex config must be owned, non-symlink, and not group/world-writable"
-        )
+        raise RuntimeError("Codex config must be owned, non-symlink, and not group/world-writable")
     return projection_parent, recovery_root
-
-
-@contextmanager
-def _codex_lock(codex_home: Path) -> Iterator[None]:
-    lock_path = codex_home / ".blender-mcp-marketplace.lock"
-    descriptor = os.open(
-        lock_path,
-        os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-    )
-    try:
-        value = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(value.st_mode)
-            or value.st_uid != os.getuid()
-            or stat.S_IMODE(value.st_mode) != 0o600
-        ):
-            raise RuntimeError("marketplace lock must be an owned private ordinary file")
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
 
 
 def _private_git(
@@ -212,7 +288,9 @@ def _archive_projection(
         "core.attributesFile=/dev/null",
         "-c",
         "diff.external=",
-        "archive", "--format=tar", reviewed_commit,
+        "archive",
+        "--format=tar",
+        reviewed_commit,
         ".agents",
         "plugins/blender-mcp-installer",
     ]
@@ -304,9 +382,7 @@ def _content_manifest(root: Path) -> list[tuple[str, str, str]]:
         if stat.S_ISDIR(value.st_mode):
             result.append((relative, "directory", ""))
         elif stat.S_ISREG(value.st_mode):
-            result.append(
-                (relative, "file", hashlib.sha256(path.read_bytes()).hexdigest())
-            )
+            result.append((relative, "file", hashlib.sha256(path.read_bytes()).hexdigest()))
         else:
             raise RuntimeError(f"plugin cache contains a non-ordinary path: {path}")
     return sorted(result)
@@ -413,12 +489,8 @@ def _marketplace_snapshot(config: Path) -> tuple[dict[str, Any], dict[str, Any]]
             "source_type": source_type,
             "source": source,
         }
-    others = {
-        name: value for name, value in marketplaces.items() if name != MARKETPLACE_NAME
-    }
-    canonical = json.dumps(
-        _normalize(others), sort_keys=True, separators=(",", ":")
-    ).encode()
+    others = {name: value for name, value in marketplaces.items() if name != MARKETPLACE_NAME}
+    canonical = json.dumps(_normalize(others), sort_keys=True, separators=(",", ":")).encode()
     return target_record, {
         "count": len(others),
         "sha256": hashlib.sha256(canonical).hexdigest(),
@@ -426,6 +498,7 @@ def _marketplace_snapshot(config: Path) -> tuple[dict[str, Any], dict[str, Any]]
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
+    _private_owner_directory(path.parent, os.getuid())
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(temporary_name)
     try:
@@ -437,6 +510,11 @@ def _atomic_write(path: Path, data: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
     except BaseException:
         if descriptor >= 0:
             os.close(descriptor)
@@ -497,31 +575,38 @@ def _register(
     codex: Path,
     home: Path,
     codex_home: Path,
+    *,
+    recovery_id: str,
 ) -> Path:
     config = codex_home / "config.toml"
-    recovery = Path(tempfile.mkdtemp(prefix="registration.", dir=recovery_root))
-    recovery.chmod(0o700)
-    before, non_target_before = _marketplace_snapshot(config)
-    _atomic_json(recovery / "before.json", before)
-    _atomic_json(recovery / "non-target-before.json", non_target_before)
+    recovery: Path = recovery_root / ("registration." + uuid_text(recovery_id))
+    if recovery.exists():
+        _private_owner_directory(recovery, os.getuid())
+        with SafeRoot.open(recovery, os.getuid(), recovery) as evidence:
+            before, _ = read_proof(evidence, Path("before.json"))
+            non_target_before, _ = read_proof(evidence, Path("non-target-before.json"))
+        current, non_target_current = _marketplace_snapshot(config)
+        if non_target_current != non_target_before:
+            raise InstallerError("registration evidence conflicts with non-target changes")
+        if current != before and current.get("source") != str(projection):
+            raise InstallerError("target registration changed outside pending workflow")
+    else:
+        recovery.mkdir(mode=0o700)
+        before, non_target_before = _marketplace_snapshot(config)
+        _atomic_json(recovery / "before.json", before)
+        _atomic_json(recovery / "non-target-before.json", non_target_before)
     restore_lines = [
-        f"Restore only marketplace {MARKETPLACE_NAME}; installer receipts are not required.",
+        "Read the upgrades journal before any recovery action; cleanup_pending/complete may retire local program rollback.",
+        "Use project_marketplace.py restore with this recovery directory and recorded HOME/CODEX_HOME/CODEX_BIN.",
+        "This operation restores only marketplace source. It does not restore the installed plugin version or cache.",
         f"CODEX_BIN: {codex}",
         f"HOME: {home}",
         f"CODEX_HOME: {codex_home}",
-        f"Remove the target with the recorded environment: plugin marketplace remove {MARKETPLACE_NAME}",
     ]
-    if before["present"]:
-        restore_lines.append(
-            f"Then add the prior local source recorded in before.json: {before['source']}"
-        )
-    else:
-        restore_lines.append(
-            "before.json records that the target was previously absent; do not add it."
-        )
     _atomic_write(recovery / "RESTORE.txt", ("\n".join(restore_lines) + "\n").encode())
 
-    changed = before.get("source") != str(projection)
+    current, _ = _marketplace_snapshot(config)
+    changed = current.get("source") != str(projection)
     add_marketplace = ("plugin", "marketplace", "add", str(projection))
     add_plugin = ("plugin", "add", f"blender-mcp-installer@{MARKETPLACE_NAME}")
     try:
@@ -588,8 +673,9 @@ def _prepare(args: argparse.Namespace) -> None:
         "-e",
         f"{args.reviewed_commit}^{{commit}}",
     )
-    projection_parent, recovery_root = _prepare_roots(home, codex_home)
-    with _codex_lock(codex_home):
+    projection_parent, _recovery_root = _prepare_roots(home, codex_home)
+    roots = UpgradeRoots(home, codex_home)
+    with mutation_locks(roots) as state:
         projection = _materialize(
             projection_parent,
             private_git_dir,
@@ -597,128 +683,427 @@ def _prepare(args: argparse.Namespace) -> None:
             args.reviewed_commit,
             trusted_checksums,
         )
-        recovery = _register(projection, recovery_root, codex, home, codex_home)
+        if args.command == "upgrade":
+            from blender_mcp_installer import cli
+
+            args.expected_distribution_commit = args.reviewed_commit
+            args._fault = NoOpFaultInjector()
+            args.codex = Path(args.codex)
+            with cli._context(args) as context:
+                if (context.roots.home, context.roots.codex_home) != (roots.home, roots.codex_home):
+                    raise InstallerError(
+                        "full workflow roots differ from verified host environment"
+                    )
+                result = _run_workflow(args, state, roots, projection, context)
+        else:
+            result = _run_workflow(args, state, roots, projection)
+    result.setdefault("marketplace", MARKETPLACE_NAME)
+    result.setdefault("projection", str(projection))
+    if "workflow_id" in result:
+        result.setdefault(
+            "recovery",
+            str(roots.state / "marketplace-recovery" / ("registration." + result["workflow_id"])),
+        )
+    print(json.dumps(result, sort_keys=True))
+    if result.get("status") == "cleanup_pending":
+        raise SystemExit(3)
+
+
+def _run_workflow(
+    args: argparse.Namespace,
+    state: SafeRoot,
+    roots: UpgradeRoots,
+    projection: Path,
+    context: Any = None,
+) -> dict[str, Any]:
+    plugin = json.loads(
+        (projection / "plugins/blender-mcp-installer/.codex-plugin/plugin.json").read_bytes()
+    )
+    bundle = json.loads(
+        (projection / "plugins/blender-mcp-installer/artifacts/manifest.json").read_bytes()
+    )
+    desired = {
+        "commit": args.reviewed_commit,
+        "bundle_version": bundle["bundle_version"],
+        "manifest_sha256": hashlib.sha256(
+            (projection / "plugins/blender-mcp-installer/artifacts/manifest.json").read_bytes()
+        ).hexdigest(),
+        "plugin_version": plugin["version"],
+        "projection": str(projection),
+    }
+    profile = None if context is None else profile_from_context(context)
+    mode = "register" if context is None else "install"
+    from blender_mcp_installer import cli
+    from blender_mcp_installer.model import ReceiptStatus
+
+    while True:
+        inspection = None if context is None else cli._inspection(context)
+        requested = getattr(args, "workflow_id", None)
+        matches = []
+        for identifier in record_ids(state):
+            doc = load_any_record(state, roots, identifier, recover=True)
+            if (
+                doc is not None
+                and doc["codex_home"] == str(roots.codex_home)
+                and (
+                    (requested is not None and doc["id"] == requested)
+                    or (
+                        requested is None
+                        and doc["mode"] == mode
+                        and doc["desired"] == desired
+                        and doc["profile"] == profile
+                        and doc["status"] in {"awaiting_verification", "cleanup_pending"}
+                    )
+                )
+            ):
+                if context is not None and doc["install_id"] is not None:
+                    assert inspection is not None
+                    try:
+                        linked = cli.load_receipt(
+                            context.roots.receipt(UUID(doc["install_id"])), context.roots
+                        ).status
+                    except (InstallerError, OSError, ValueError):
+                        linked = None
+                    eligible = (
+                        {ReceiptStatus.INSTALLED}
+                        if inspection.exact
+                        else {ReceiptStatus.PREPARED, ReceiptStatus.ROLLBACK_PENDING}
+                    )
+                    if linked not in eligible:
+                        if linked is ReceiptStatus.ROLLED_BACK:
+                            cancel_recovered_workflow(state, context, doc["id"])
+                        continue
+                matches.append(doc)
+        if len(matches) > 1 or (requested is not None and not matches):
+            raise InstallerError("workflow selection is not unique")
+        doc = matches[0] if matches else None
+        if doc is not None and (
+            doc["mode"] != mode
+            or doc["desired"] != desired
+            or doc["profile"] != profile
+            or doc["status"] in {"complete", "cancelled"}
+        ):
+            raise InstallerError("workflow identity mismatch")
+        try:
+            inspect_registration(Path(args.codex), roots, desired)
+            registration_exact = True
+        except (InstallerError, subprocess.SubprocessError, OSError, ValueError):
+            registration_exact = False
+        if doc is None and registration_exact and (inspection is None or inspection.exact):
+            migration = new_record(roots, mode, desired)
+            migration["profile"] = profile
+            if inspection is not None:
+                if inspection.receipt_path is None:
+                    raise InstallerError("exact installation lacks receipt identity")
+                migration["install_id"] = str(UUID(inspection.receipt_path.stem))
+            candidates, findings = discover_candidates(state, roots, migration)
+            if not candidates:
+                return {
+                    "changed": False,
+                    "no_op": True,
+                    "projection": str(projection),
+                    "unverified": findings,
+                    "all_old_versions_removed": not findings,
+                }
+            doc = save_record(state, roots, None, migration)
+            doc = update_record(
+                state, roots, doc, registration={"id": doc["id"], "state": "prepared"}
+            )
+            recovery = roots.state / "marketplace-recovery" / ("registration." + doc["id"])
+            recovery.mkdir(mode=0o700)
+            before, others = _marketplace_snapshot(roots.codex_home / "config.toml")
+            if before.get("source") != str(projection):
+                raise InstallerError("registration changed during migration binding")
+            for name, value in (
+                ("before.json", before),
+                ("after.json", before),
+                ("non-target-before.json", others),
+                ("non-target-after.json", others),
+            ):
+                _atomic_json(recovery / name, value)
+            _atomic_write(
+                recovery / "RESTORE.txt",
+                b"Inspect the upgrade journal before source-only restore. Plugin program rollback may be retired.\n",
+            )
+            doc = update_record(
+                state, roots, doc, registration={"id": doc["id"], "state": "registered"}
+            )
+        barrier = (
+            nullcontext(None)
+            if context is None
+            else runtime_quiescence(
+                state,
+                roots,
+                context.roots.runtime,
+                Path(args.codex),
+                getattr(args, "handoff_id", None),
+            )
+        )
+        install_error = None
+        try:
+            with barrier as handoff:
+                if doc is None:
+                    doc = new_record(roots, mode, desired)
+                    doc["profile"] = profile
+                    doc = save_record(state, roots, None, doc)
+                if doc["status"] == "awaiting_verification":
+                    if doc["registration"] is None or doc["registration"]["state"] != "registered":
+                        doc = update_record(
+                            state, roots, doc, registration={"id": doc["id"], "state": "prepared"}
+                        )
+                        try:
+                            _register(
+                                projection,
+                                roots.state / "marketplace-recovery",
+                                Path(args.codex),
+                                roots.home,
+                                roots.codex_home,
+                                recovery_id=doc["id"],
+                            )
+                            inspected = inspect_registration(Path(args.codex), roots, desired)
+                            ensure_usage_lock(state, inspected.cache.dev, inspected.cache.ino)
+                        except BaseException:
+                            update_record(
+                                state, roots, doc, registration={"id": doc["id"], "state": "failed"}
+                            )
+                            raise
+                        doc = update_record(
+                            state, roots, doc, registration={"id": doc["id"], "state": "registered"}
+                        )
+                    if context is not None:
+                        selected = replace(context, workflow_id=doc["id"])
+                        try:
+                            result = cli._changed_install_locked(
+                                selected, args._fault, state, doc["id"], handoff
+                            )
+                        except (cli._RuntimeRecheck, RuntimeInUse, LegacyHandoffRequired):
+                            raise
+                        except Exception as error:
+                            install_error = error
+                        else:
+                            return {
+                                **result,
+                                "workflow_id": doc["id"],
+                                "projection": str(projection),
+                            }
+        except cli._RuntimeRecheck:
+            cancel_recovered_workflow(state, context, doc["id"])
+            # Retain marketplace/state locks, but reselect after releasing the old inode.
+            continue
+        if install_error is not None:
+            cli._lifecycle_closed(selected)
+            with runtime_quiescence(
+                state,
+                roots,
+                selected.roots.runtime,
+                Path(args.codex),
+                getattr(args, "handoff_id", None),
+            ):
+                recovered = cli.recover_active(
+                    selected.roots,
+                    selected.source_bundle,
+                    selected.blender,
+                    NoOpFaultInjector(),
+                    manifest_sha256=selected.manifest_sha256,
+                )
+                if recovered["recovered"]:
+                    cancel_recovered_workflow(state, selected, doc["id"])
+            raise install_error
+        if context is None:
+            registered_result: dict[str, Any] = finalize_register_locked(
+                state, roots, doc["id"], Path(args.codex)
+            )
+            return registered_result
+        return {
+            "workflow_id": doc["id"],
+            "projection": str(projection),
+            "requires_blender_start": True,
+            "status": doc["status"],
+        }
+
+
+def _finalize_registration(args: argparse.Namespace) -> None:
+    roots = UpgradeRoots(Path(args.home), Path(args.codex_home))
+    with mutation_locks(roots) as state:
+        result = finalize_register_locked(state, roots, args.workflow_id, Path(args.codex))
+    print(json.dumps(result, sort_keys=True))
+    if result["status"] == "cleanup_pending":
+        raise SystemExit(3)
+
+
+def _begin_handoff(args: argparse.Namespace) -> None:
+    roots = UpgradeRoots(Path(args.home), Path(args.codex_home))
+    runtime = roots.home / ".local/share/blender-lab-mcp/runtime"
+    with mutation_locks(roots) as state:
+        result = begin_handoff(state, roots, runtime, Path(args.codex))
+    print(json.dumps(result, sort_keys=True))
+
+
+def _validate_restore_scope(
+    state: SafeRoot, roots: UpgradeRoots, reference: Path, codex: Path
+) -> None:
+    records = [load_any_record(state, roots, identity) for identity in record_ids(state)]
+    selected, _proofs = registration_scope(state, roots, reference, records)
+    if selected != roots:
+        raise InstallerError("registration recovery profile mismatch")
+    raw, _proof = read_evidence(state, reference / "RESTORE.txt")
+    bins = [
+        line.removeprefix("CODEX_BIN: ")
+        for line in raw.decode().splitlines()
+        if line.startswith("CODEX_BIN: ")
+    ]
+    if bins != [str(codex)]:
+        raise InstallerError("registration recovery Codex executable mismatch")
+
+
+def _restore_evidence(args: argparse.Namespace) -> None:
+    roots = UpgradeRoots(Path(args.home), Path(args.codex_home))
+    recovery = Path(args.recovery)
+    parent = roots.state / "marketplace-recovery"
+    if recovery.parent != parent or not re.fullmatch(
+        r"registration\.[A-Za-z0-9_-]+", recovery.name
+    ):
+        raise InstallerError("unsupported registration recovery path")
+    reference_path = recovery.relative_to(roots.state)
+    with SafeRoot.open(roots.home, os.getuid(), roots.home) as home:
+        fd = home.open_directory(roots.state.relative_to(roots.home))
+    with SafeRoot(roots.state, os.getuid(), fd) as state:
+        _validate_restore_scope(state, roots, reference_path, Path(args.codex))
+        assert_rollback_available(state, roots, registration_ref=reference_path.as_posix())
+    with mutation_locks(roots) as state:
+        _validate_restore_scope(state, roots, reference_path, Path(args.codex))
+        reference = reference_path.as_posix()
+        assert_rollback_available(state, roots, registration_ref=reference)
+        before, _proof = read_proof(state, recovery.relative_to(roots.state) / "before.json")
+        others, _proof = read_proof(
+            state, recovery.relative_to(roots.state) / "non-target-before.json"
+        )
+        _restore(Path(args.codex), roots.home, roots.codex_home, before, others)
+    print(
+        json.dumps(
+            {"marketplace_source_restored": True, "plugin_version_restored": False}, sort_keys=True
+        )
+    )
+
+
+def _verify(args: argparse.Namespace) -> None:
+    roots = UpgradeRoots(Path(args.home), Path(args.codex_home))
+    projection = Path(args.projection)
+    _validate_secure_tree(projection)
+    plugin = json.loads(
+        (projection / "plugins/blender-mcp-installer/.codex-plugin/plugin.json").read_bytes()
+    )
+    manifest_raw = (
+        projection / "plugins/blender-mcp-installer/artifacts/manifest.json"
+    ).read_bytes()
+    manifest = json.loads(manifest_raw)
+    inspect_registration(
+        Path(args.codex),
+        roots,
+        {
+            "commit": projection.name,
+            "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+            "bundle_version": manifest["bundle_version"],
+            "plugin_version": plugin["version"],
+            "projection": str(projection),
+        },
+    )
+    if args.recovery is not None:
+        recovery = Path(args.recovery)
+        if recovery.parent != roots.state / "marketplace-recovery" or not re.fullmatch(
+            r"registration\.[A-Za-z0-9_-]+", recovery.name
+        ):
+            raise InstallerError("unsupported registration recovery path")
+        with SafeRoot.open(roots.home, os.getuid(), roots.home) as home:
+            fd = home.open_directory(roots.state.relative_to(roots.home))
+        with SafeRoot(roots.state, os.getuid(), fd) as state:
+            before, _proof = read_proof(
+                state, recovery.relative_to(roots.state) / "non-target-before.json"
+            )
+        _target, current = _marketplace_snapshot(roots.codex_home / "config.toml")
+        if current != before:
+            raise InstallerError("non-target marketplace configuration changed")
     print(
         json.dumps(
             {
                 "marketplace": MARKETPLACE_NAME,
                 "projection": str(projection),
-                "recovery": str(recovery),
+                "status": "passed",
+                "read_only": True,
             },
             sort_keys=True,
         )
     )
 
 
-def _verify(args: argparse.Namespace) -> None:
-    projection = Path(args.projection)
-    recovery = Path(args.recovery)
-    codex = Path(args.codex)
-    home = Path(args.home)
-    codex_home = Path(args.codex_home)
-    _validate_secure_tree(projection)
-    _private_owner_directory(recovery, os.getuid())
-    _validate_plugin_cache(projection, codex_home)
-    marketplaces_text = _codex(
-        codex, home, codex_home, "plugin", "marketplace", "list", "--json"
-    )
-    marketplaces = json.loads(marketplaces_text)
-    items = marketplaces.get("marketplaces") if type(marketplaces) is dict else None
-    if type(items) is not list:
-        raise RuntimeError("marketplace list JSON must contain a marketplaces array")
-    marketplace_items = items
-    matches = [
-        item
-        for item in items
-        if type(item) is dict and item.get("name") == MARKETPLACE_NAME
-    ]
-    if len(matches) != 1 or matches[0].get("root") != str(projection):
-        raise RuntimeError("normal marketplace list does not use the persistent projection")
-    plugins_text = _codex(
-        codex,
-        home,
-        codex_home,
-        "plugin",
-        "list",
-        "--marketplace",
-        MARKETPLACE_NAME,
-        "--json",
-    )
-    plugins = json.loads(plugins_text)
-    if type(plugins) is not dict or set(plugins) != {"installed", "available"}:
-        raise RuntimeError("plugin list JSON has an unexpected schema")
-    installed = plugins["installed"]
-    available = plugins["available"]
-    if type(installed) is not list or type(available) is not list:
-        raise RuntimeError("plugin list installed and available must be arrays")
-    items = installed + available
-    if not all(type(item) is dict and type(item.get("name")) is str for item in items):
-        raise RuntimeError("plugin list items must contain string names")
-    if sum(item["name"] == PLUGIN_NAME for item in installed) != 1:
-        raise RuntimeError("plugin list must contain exactly one installed target")
-    non_target_items = [
-        item
-        for item in marketplace_items
-        if type(item) is not dict or item.get("name") != MARKETPLACE_NAME
-    ]
-    non_target_fingerprint = hashlib.sha256(
-        json.dumps(
-            _normalize(non_target_items), sort_keys=True, separators=(",", ":")
-        ).encode()
-    ).hexdigest()
-    _atomic_json(
-        recovery / "marketplaces-after-cleanup.json",
-        {
-            "marketplace": MARKETPLACE_NAME,
-            "non_target_count": len(non_target_items),
-            "non_target_sha256": non_target_fingerprint,
-            "root": str(projection),
-            "status": "passed",
-        },
-    )
-    _atomic_json(
-        recovery / "plugins-after-cleanup.json",
-        {
-            "available_count": len(available),
-            "installed_count": len(installed),
-            "plugin": PLUGIN_NAME,
-            "status": "passed",
-        },
-    )
-    print(json.dumps({"marketplace": MARKETPLACE_NAME, "projection": str(projection)}))
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
-    prepare = commands.add_parser("prepare")
-    prepare.add_argument("--private-git-dir", required=True)
-    prepare.add_argument("--git-safe-home", required=True)
-    prepare.add_argument("--reviewed-commit", required=True)
-    prepare.add_argument("--trusted-checksums", required=True)
-    prepare.add_argument("--codex", required=True)
-    prepare.add_argument("--home", required=True)
-    prepare.add_argument("--codex-home", required=True)
+    for command in ("prepare", "upgrade"):
+        prepare = commands.add_parser(command)
+        for name in (
+            "private-git-dir",
+            "git-safe-home",
+            "reviewed-commit",
+            "trusted-checksums",
+            "codex",
+            "home",
+            "codex-home",
+        ):
+            prepare.add_argument("--" + name, required=True)
+        prepare.add_argument("--workflow-id")
+        if command == "upgrade":
+            from blender_mcp_installer import cli
+
+            prepare.add_argument("--bundle-root", required=True, type=cli._bundle_root)
+            prepare.add_argument("--blender", required=True, type=cli._executable)
+            prepare.add_argument("--uv", required=True, type=cli._executable)
+            prepare.add_argument("--handoff-id")
+            for flag in (
+                "allow-extension-install",
+                "allow-online-access",
+                "allow-localhost-bridge",
+                "approve-arbitrary-python",
+            ):
+                prepare.add_argument("--" + flag, required=True, action="store_true")
     verify = commands.add_parser("verify")
-    verify.add_argument("--projection", required=True)
-    verify.add_argument("--recovery", required=True)
-    verify.add_argument("--codex", required=True)
-    verify.add_argument("--home", required=True)
-    verify.add_argument("--codex-home", required=True)
+    for name in ("projection", "codex", "home", "codex-home"):
+        verify.add_argument("--" + name, required=True)
+    verify.add_argument("--recovery")
+    for command in ("finalize", "begin-handoff", "restore"):
+        command_parser = commands.add_parser(command)
+        for name in ("codex", "home", "codex-home"):
+            command_parser.add_argument("--" + name, required=True)
+        if command == "finalize":
+            command_parser.add_argument("--workflow-id", required=True)
+        if command == "restore":
+            command_parser.add_argument("--recovery", required=True)
     return parser
 
 
 def main() -> None:
     args = _parser().parse_args()
-    if args.command == "prepare":
-        _prepare(args)
-    else:
-        _verify(args)
+    home = os.environ.get("HOME")
+    codex_home = os.environ.get("CODEX_HOME", str(Path(home or "/") / ".codex"))
+    if home != args.home or codex_home != args.codex_home:
+        raise InstallerError("workflow roots differ from lease environment")
+    handlers = {
+        "prepare": _prepare,
+        "upgrade": _prepare,
+        "verify": _verify,
+        "finalize": _finalize_registration,
+        "begin-handoff": _begin_handoff,
+        "restore": _restore_evidence,
+    }
+    handlers[args.command](args)
 
 
 if __name__ == "__main__":
     try:
         main()
+    except (RuntimeInUse, LegacyHandoffRequired, RollbackUnavailable) as exc:
+        print(json.dumps({"error": exc.code, "reason": str(exc)}, sort_keys=True))
+        raise SystemExit(1) from None
     except Exception as error:
         print(f"marketplace projection failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error
