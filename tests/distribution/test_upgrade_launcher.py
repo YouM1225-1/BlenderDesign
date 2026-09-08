@@ -93,3 +93,35 @@ def test_custom_codex_cache_cannot_supply_bootstrap(tmp_path):
     }
     with pytest.raises(InstallerError, match="retired program tree"):
         _launcher_source(environment)
+
+
+@pytest.mark.parametrize("inventory", [
+    "12345 {uid} Tue Sep 8 10:00:00 2026 /usr/bin/printf don't\n",
+    "not a process row\n",
+    "² {uid} Tue Sep 8 10:00:00 2026 /usr/bin/printf hello\n",
+    subprocess.CalledProcessError(1, "ps"),
+    subprocess.TimeoutExpired("ps", 15),
+    OSError("ps unavailable"),
+    UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid byte"),
+])
+def test_process_inventory_failure_refuses_install_without_recovery(tmp_path, monkeypatch, inventory):
+    import os
+    from types import SimpleNamespace
+    from blender_mcp_installer import cli, upgrade_handoff
+    from tests.distribution.test_cli import _userpref_completion_fault_scenario
+
+    def ps(*_args, **_kwargs):
+        if isinstance(inventory, Exception):
+            raise inventory
+        return SimpleNamespace(stdout=inventory.format(uid=os.getuid()))
+
+    monkeypatch.setattr(upgrade_handoff.subprocess, "run", ps)
+    with _userpref_completion_fault_scenario(tmp_path) as context:
+        roots = UpgradeRoots(context.roots.home, context.roots.codex_home)
+        monkeypatch.setattr(cli, "_changed_install", lambda *_args: upgrade_handoff.process_snapshot(
+            roots, context.roots.runtime, context.host.codex_bin))
+        monkeypatch.setattr(cli, "recover_active", lambda *_args, **_kwargs: pytest.fail("barrier refusal entered recovery"))
+        with pytest.raises(upgrade_handoff.LegacyHandoffRequired):
+            cli.install(SimpleNamespace())
+        assert not context.roots.runtime.exists()
+        assert not context.roots.active.exists()

@@ -1408,6 +1408,13 @@ def _changed_install_locked(
     context: _Context, fault: FaultInjector, state: SafeRoot,
     workflow_id: str | None, runtime_handoff: dict[str, Any] | None,
 ) -> dict[str, object]:
+    """Run under marketplace -> installer locks, plus usage for changed installs.
+
+    On _RuntimeRecheck, the caller must exit the usage barrier, retain both
+    mutation locks, repeat inspection/workflow selection, and acquire a fresh
+    current-runtime barrier before retrying this helper. Never call the public
+    _changed_install wrapper while mutation locks are held: they are nonreentrant.
+    """
     roots = context.roots
     reconcile_selectors(
         roots,
@@ -1428,8 +1435,9 @@ def _changed_install_locked(
     )
     if not inspection.exact and recovery["recovered"]:
         # Recovery may retire the workflow selected before the barrier, and may
-        # also replace the runtime inode protected by that barrier. Re-enter the
-        # wrapper so both identities are selected from the recovered state.
+        # also replace the runtime inode protected by that barrier. Signal the
+        # lock-held caller to release only the usage barrier and reselect both
+        # identities before acquiring the recovered runtime's barrier.
         raise _RuntimeRecheck
     context = replace(
         context, blender=getattr(inspection, "blender_state", context.blender)
@@ -1779,8 +1787,14 @@ def install(args: argparse.Namespace) -> dict[str, object]:
             _lifecycle_closed(context)
             try:
                 _ensure_mutation_roots(context.roots)
-                with mutation_locks(
-                    UpgradeRoots(context.roots.home, context.roots.codex_home)
+                roots = context.roots
+                upgrade_roots = UpgradeRoots(roots.home, roots.codex_home)
+                with (
+                    mutation_locks(upgrade_roots) as state,
+                    runtime_quiescence(
+                        state, upgrade_roots, roots.runtime,
+                        context.host.codex_bin, context.handoff_id,
+                    ),
                 ):
                     recover_active(
                         context.roots,
@@ -1789,6 +1803,8 @@ def install(args: argparse.Namespace) -> dict[str, object]:
                         NoOpFaultInjector(),
                         manifest_sha256=context.manifest_sha256,
                     )
+            except (RuntimeInUse, LegacyHandoffRequired):
+                raise
             except Exception as recovery_exc:
                 raise InstallerError("installation recovery failed") from recovery_exc
             if isinstance(exc, InstallerError):
@@ -2568,7 +2584,14 @@ def rollback(args: argparse.Namespace) -> dict[str, object]:
     fault = getattr(args, "_fault", NoOpFaultInjector())
     with _context(args) as context:
         roots = context.roots
-        with mutation_locks(UpgradeRoots(roots.home, roots.codex_home)) as state:
+        upgrade_roots = UpgradeRoots(roots.home, roots.codex_home)
+        with (
+            mutation_locks(upgrade_roots) as state,
+            runtime_quiescence(
+                state, upgrade_roots, roots.runtime,
+                context.host.codex_bin, context.handoff_id,
+            ),
+        ):
             requested = load_receipt(args.receipt, roots)
             if args.receipt != roots.receipt(requested.install_id):
                 raise InstallerError("rollback receipt path is invalid")

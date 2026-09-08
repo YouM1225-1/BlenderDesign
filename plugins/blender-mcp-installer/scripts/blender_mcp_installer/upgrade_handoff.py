@@ -37,13 +37,16 @@ class LegacyHandoffRequired(InstallerError):
 def process_snapshot(
     roots: UpgradeRoots, runtime: Path, codex: Path
 ) -> tuple[dict[str, str], ...]:
-    output = subprocess.run(
-        ["/bin/ps", "-axo", "pid=,uid=,lstart=,command="],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    ).stdout
+    try:
+        output = subprocess.run(
+            ["/bin/ps", "-axo", "pid=,uid=,lstart=,command="],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        ).stdout
+    except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
+        raise LegacyHandoffRequired("process inventory unavailable") from exc
     markers = (
         str(runtime),
         str(roots.caches),
@@ -57,10 +60,16 @@ def process_snapshot(
         if len(fields) != 8 or not fields[0].isdigit() or not fields[1].isdigit():
             raise LegacyHandoffRequired("unrecognized process inventory")
         command = fields[7]
-        tokens = shlex.split(command)
+        try:
+            # ps does not escape argv as shell source. Ambiguous quoting must
+            # refuse the handoff, including in an apparently unrelated process.
+            tokens = shlex.split(command)
+            pid, uid = int(fields[0]), int(fields[1])
+        except ValueError as exc:
+            raise LegacyHandoffRequired("unrecognized process command") from exc
         if (
-            int(fields[0]) != os.getpid()
-            and int(fields[1]) == os.getuid()
+            pid != os.getpid()
+            and uid == os.getuid()
             and any(marker in token for token in tokens[:2] for marker in markers)
         ):
             records.append(

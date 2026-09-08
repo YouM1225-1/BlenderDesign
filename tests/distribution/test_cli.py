@@ -2579,3 +2579,89 @@ def test_closed_fault_matrix_exits_70_then_fresh_process_recovers_exactly(
     assert image_at(Path(selector["path"]), tree=False) == FileImage.from_dict(
         selector["install_post"] if command == "install" else selector["pre"]
     )
+
+
+def _runtime_recovery_images(roots, receipt):
+    return (
+        _captured(roots.runtime, tree=True),
+        _captured(roots.extension_target, tree=True),
+        _captured(roots.userpref_target, tree=False),
+        _captured(roots.codex_config, tree=False),
+        receipt.read_bytes(),
+        roots.active.read_bytes() if roots.active.exists() else None,
+    )
+
+
+@pytest.mark.parametrize("interrupted", [None, "prepared", "rollback_pending", "runtime_swapped"])
+def test_rollback_busy_runtime_preserves_targets_and_retries(tmp_path, interrupted):
+    from blender_mcp_installer.upgrade_handoff import RuntimeInUse
+    from blender_mcp_installer.upgrade_locks import ensure_usage_lock, usage_lock
+    from blender_mcp_installer.upgrade_state import UpgradeRoots, state_root
+
+    with _userpref_completion_fault_scenario(tmp_path) as context:
+        roots = context.roots
+        if interrupted == "runtime_swapped":
+            roots.runtime.mkdir(parents=True)
+            (roots.runtime / ".blender-mcp-usage-v1").write_bytes(b"inode-v1\n")
+            (roots.runtime / "preimage").write_bytes(b"old-runtime")
+            info = roots.runtime.stat()
+            with state_root(UpgradeRoots(roots.home, roots.codex_home)) as state:
+                ensure_usage_lock(state, info.st_dev, info.st_ino)
+        original_runtime = _captured(roots.runtime, tree=True)
+        if interrupted == "prepared":
+            with pytest.raises(SystemExit):
+                cli.install(SimpleNamespace(_fault=ExitFaultInjector("after_userpref_file_completed", 70)))
+            receipt = next(path for path in roots.receipts.glob("*.json")
+                           if not path.name.endswith(".usage.json"))
+        else:
+            receipt = Path(cli.install(SimpleNamespace(_fault=NoOpFaultInjector()))["receipt"])
+        if interrupted in {"rollback_pending", "runtime_swapped"}:
+            point = ("after_runtime_tree_restore_swap" if interrupted == "runtime_swapped"
+                     else "after_rollback_intent")
+            with pytest.raises(SystemExit):
+                cli.rollback(SimpleNamespace(receipt=receipt, _fault=ExitFaultInjector(point, 70)))
+        before = _runtime_recovery_images(roots, receipt)
+        info = roots.runtime.stat()
+        with state_root(UpgradeRoots(roots.home, roots.codex_home)) as state:
+            with usage_lock(state, info.st_dev, info.st_ino, exclusive=False) as acquired:
+                assert acquired
+                with pytest.raises(RuntimeInUse):
+                    cli.rollback(SimpleNamespace(receipt=receipt, _fault=NoOpFaultInjector()))
+                assert _runtime_recovery_images(roots, receipt) == before
+        result = cli.rollback(SimpleNamespace(receipt=receipt, _fault=NoOpFaultInjector()))
+        assert result["status"] == "rolled_back"
+        assert _captured(roots.runtime, tree=True) == original_runtime
+        assert cli.rollback(SimpleNamespace(receipt=receipt))["status"] == "rolled_back"
+
+
+def test_install_exception_recovery_busy_runtime_preserves_targets_and_retries(tmp_path, monkeypatch):
+    from contextlib import ExitStack
+    from blender_mcp_installer.upgrade_handoff import RuntimeInUse
+    from blender_mcp_installer.upgrade_locks import usage_lock
+    from blender_mcp_installer.upgrade_state import UpgradeRoots, state_root
+
+    with _userpref_completion_fault_scenario(tmp_path) as context, ExitStack() as leases:
+        roots = context.roots
+        observations = []
+        original_verify = cli.verify_runtime
+
+        def fail_verification(*_args):
+            state = leases.enter_context(state_root(UpgradeRoots(roots.home, roots.codex_home)))
+            info = roots.runtime.stat()
+            assert leases.enter_context(usage_lock(state, info.st_dev, info.st_ino, exclusive=False))
+            receipt = next(path for path in roots.receipts.glob("*.json")
+                           if not path.name.endswith(".usage.json"))
+            observations.append((receipt, _runtime_recovery_images(roots, receipt)))
+            raise InstallerError("verification failed with runtime leased")
+
+        monkeypatch.setattr(cli, "verify_runtime", fail_verification)
+        with pytest.raises(RuntimeInUse):
+            cli.install(SimpleNamespace(_fault=NoOpFaultInjector()))
+        receipt, before = observations[0]
+        assert _runtime_recovery_images(roots, receipt) == before
+        leases.close()
+        monkeypatch.setattr(cli, "verify_runtime", original_verify)
+        result = cli.install(SimpleNamespace(_fault=NoOpFaultInjector()))
+        assert result["changed"] is True
+        assert cli.load_receipt(receipt, roots).status is ReceiptStatus.ROLLED_BACK
+        assert cli.load_receipt(Path(result["receipt"]), roots).status is ReceiptStatus.INSTALLED
