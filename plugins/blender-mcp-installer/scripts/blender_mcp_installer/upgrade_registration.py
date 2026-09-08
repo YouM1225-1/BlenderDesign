@@ -134,8 +134,8 @@ def inspect_registration(
             projection_relative = projection.relative_to(roots.home)
             config = capture_file(codex_root, PurePath("config.toml"))
             cache = capture_tree(codex_root, cache_relative)
-            source = capture_tree(home, projection_relative / "plugins" / PLUGIN)
             projection_image = capture_tree(home, projection_relative)
+            source = capture_tree(home, projection_relative / "plugins" / PLUGIN)
             raw, _ = read_owned_bytes(
                 TargetRef(
                     home,

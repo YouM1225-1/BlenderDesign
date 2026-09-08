@@ -66,19 +66,28 @@ def candidate_ref(
         yield TreeRef(root, path.relative_to(boundary))
 
 
-def proof_matches(state: SafeRoot, roots: UpgradeRoots, row: dict[str, Any]) -> bool:
+@contextmanager
+def retained_evidence(
+    state: SafeRoot, roots: UpgradeRoots, row: dict[str, Any]
+) -> Iterator[tuple[tuple[TargetRef, FileImage | TreeImage], ...]]:
+    guards: list[tuple[TargetRef, FileImage | TreeImage]] = []
     for proof in row["proofs"]:
-        if capture_file(state, PurePath(proof["relative"])) != FileImage.from_dict(
-            proof["expected"]
-        ):
-            return False
+        reference = TargetRef(state, PurePath(proof["relative"]))
+        current = capture_file(state, reference.relative)
+        if current != FileImage.from_dict(proof["expected"]):
+            raise InstallerError("candidate proof changed")
+        guards.append((reference, current))
     if row["kind"] == "plugin_cache":
         with SafeRoot.open(roots.home, os.getuid(), roots.home) as home:
-            source = capture_tree(
+            reference = TargetRef(
                 home, Path(row["content_source"]).relative_to(roots.home)
             )
-        return content_sha256(source) == row["content_sha256"]
-    return True
+            source = capture_tree(home, reference.relative)
+            if content_sha256(source) != row["content_sha256"]:
+                raise InstallerError("candidate proof changed")
+            yield (*guards, (reference, source))
+        return
+    yield tuple(guards)
 
 
 def execution_paths() -> tuple[Path, ...]:
@@ -210,8 +219,8 @@ def finalize_record(
             row.update(state="deferred_in_use", reason="active or recovery reference")
         else:
             try:
-                if not proof_matches(state, roots, row):
-                    raise InstallerError("candidate proof changed")
+                with retained_evidence(state, roots, row):
+                    pass
                 expected = TreeImage.from_dict(row["expected"])
                 with candidate_ref(roots, doc, row) as reference:
                     current = reference.capture()
@@ -233,7 +242,8 @@ def finalize_record(
                                 )
                             else:
                                 validate(doc)
-                                conditional_remove_tree(reference, expected, (), fault)
+                                with retained_evidence(state, roots, row) as guards:
+                                    conditional_remove_tree(reference, expected, guards, fault)
                                 validate(doc)
                                 row.update(state="removed", reason="verified deletion")
             except (InstallerError, OSError, ValueError) as exc:

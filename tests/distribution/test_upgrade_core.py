@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from blender_mcp_installer.filesystem import (  # noqa: E402
     capture_file,
     capture_tree,
 )
+from blender_mcp_installer import upgrade_cleanup, upgrade_registration  # noqa: E402
 from blender_mcp_installer.upgrade_cleanup import (  # noqa: E402
     RollbackUnavailable,
     assert_rollback_available,
@@ -32,6 +34,7 @@ from blender_mcp_installer.upgrade_locks import (  # noqa: E402
 )
 from blender_mcp_installer.upgrade_registration import (  # noqa: E402
     content_sha256,
+    inspect_registration,
     validate_installed_payload,
 )
 from blender_mcp_installer.upgrade_state import (  # noqa: E402
@@ -102,6 +105,61 @@ def test_exact_codex_identity_checks_distinct_source_shapes():
         validate_installed_payload({"installed": [bad]}, desired)
 
 
+def test_registration_projection_baseline_contains_source_capture(tmp_path, monkeypatch):
+    home, codex_home = tmp_path / "home", tmp_path / "codex"
+    home.mkdir(mode=0o700)
+    codex_home.mkdir(mode=0o700)
+    roots = UpgradeRoots(home, codex_home)
+    desired = {
+        "commit": "b" * 40,
+        "manifest_sha256": "c" * 64,
+        "bundle_version": "1.0.0",
+        "plugin_version": "2",
+        "projection": str(roots.projections / ("b" * 40)),
+    }
+    source = Path(desired["projection"]) / "plugins/blender-mcp-installer"
+    cache = roots.caches / "2"
+    for tree in (source, cache):
+        (tree / ".codex-plugin").mkdir(parents=True)
+        (tree / ".codex-plugin/plugin.json").write_text(
+            json.dumps({"name": "blender-mcp-installer", "version": "2"})
+        )
+        (tree / "payload").write_text("old")
+    (codex_home / "config.toml").write_text("")
+    item = {
+        "pluginId": "blender-mcp-installer@official-blender-mcp",
+        "name": "blender-mcp-installer",
+        "marketplaceName": "official-blender-mcp",
+        "version": "2",
+        "installed": True,
+        "enabled": True,
+        "source": {"source": "local", "path": str(source)},
+        "marketplaceSource": {"sourceType": "local", "source": desired["projection"]},
+    }
+    original_capture = upgrade_registration.capture_tree
+    changed = False
+
+    def capture_with_drift(root, relative):
+        nonlocal changed
+        image = original_capture(root, relative)
+        if root.path / relative == source and not changed:
+            (source / "payload").write_text("new")
+            changed = True
+        return image
+
+    def codex_response(_codex, _roots, *arguments):
+        if arguments[1] == "marketplace":
+            return {"marketplaces": [{"name": "official-blender-mcp", "root": desired["projection"]}]}
+        return {"installed": [item]}
+
+    monkeypatch.setattr(upgrade_registration, "capture_tree", capture_with_drift)
+    monkeypatch.setattr(upgrade_registration, "codex_json", codex_response)
+    with pytest.raises(InstallerError, match="registration changed during verification"):
+        inspect_registration(Path("/unused"), roots, desired)
+    assert (source / "payload").read_text() == "new"
+    assert (cache / "payload").read_text() == "old"
+
+
 def test_schema_rejects_foreign_and_unknown_fields(prepared):
     roots, state, doc, row, _ = prepared
     invalid = copy.deepcopy(doc)
@@ -167,6 +225,56 @@ def test_content_drift_is_not_adopted_as_new_baseline(prepared):
     assert result["candidates"][0]["state"] == "conflict"
     assert (old / "foreign").read_bytes() == b"user"
     assert result["candidates"][0]["expected"] == row["expected"]
+
+
+def test_proof_drift_during_predelete_validation_preserves_candidate(prepared):
+    roots, state, doc, row, old = prepared
+    proof = state.path / row["proofs"][0]["relative"]
+    validations = 0
+
+    def drift_after_validation(_doc):
+        nonlocal validations
+        validations += 1
+        if validations == 3:
+            proof.write_text('{"changed":true}')
+        return ()
+
+    result = finalize_record(
+        state, roots, doc["id"], drift_after_validation, lambda _: ([row], []), lambda _: ()
+    )
+    assert result["candidates"][0]["state"] == "conflict"
+    assert result["candidates"][0]["reason"] == "candidate proof changed"
+    assert old.exists()
+
+
+@pytest.mark.parametrize("mutation", ["proof", "source"])
+def test_cleanup_retains_exact_evidence_through_deletion_boundary(
+    prepared, monkeypatch, mutation
+):
+    roots, state, doc, row, old = prepared
+    proof = state.path / row["proofs"][0]["relative"]
+    source = Path(row["content_source"])
+    original_remove = upgrade_cleanup.conditional_remove_tree
+
+    def remove_after_evidence_drift(reference, expected, guards, fault):
+        guarded = {guard.path: image for guard, image in guards}
+        assert proof in guarded
+        assert source in guarded
+        if mutation == "proof":
+            proof.write_text('{"changed":true}')
+        else:
+            (source / "a").write_bytes(b"changed")
+        return original_remove(reference, expected, guards, fault)
+
+    monkeypatch.setattr(
+        upgrade_cleanup, "conditional_remove_tree", remove_after_evidence_drift
+    )
+    result = finalize_record(
+        state, roots, doc["id"], lambda _: (), lambda _: ([row], []), lambda _: ()
+    )
+    assert result["candidates"][0]["state"] == "conflict"
+    assert result["candidates"][0]["reason"] == "transaction state conflict"
+    assert old.exists()
 
 
 @pytest.mark.parametrize("point", ["after_upgrade_cleanup_intent", "after_cleanup_entry",
