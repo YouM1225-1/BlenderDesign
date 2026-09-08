@@ -13,19 +13,18 @@
 
 ## 资产验收方案
 
-- [验收方案 V3.8](acceptance/blender_mcp_skill_acceptance_optimized_v3_8.md):当前生效的规范版本,含 check registry、file registry、判定公式与夹具表。同目录保留 V3.2~V3.7 与历次审计报告作为演进记录,**它们不是当前规范**。
-- [V5/v2 迁移目标](acceptance/blender_mcp_skill_acceptance_optimized_v5.md)：已认可设计的实施规范；v2 CLI 切换完成前，不代表当前运行时已升级。
+- [资产验收规范 V5](acceptance/blender_mcp_skill_acceptance_optimized_v5.md)：当前 v2/M1 规范；旧 V3.8 为历史记录。
 - [判定核心实施计划](superpowers/plans/2026-08-24-asset-acceptance-decision-core.md):P0 的第一份计划,只覆盖不依赖 Blender 的判定核心。
 - [V3.1 对抗性审计档案](../blender_mcp_skill_acceptance_adversarial_audit_v3_1.md)：仅记录旧提交 `102a3a2…` 的审计证据，不代表当前实现；其 D35～D43 所述 wrapper 实现实际于 `bf63c89294a5f79649a2c550331ea8987cdeab1b` 入仓。
 
-当前只实现了不依赖 Blender 的 P0 判定核心与 R0/R1/R5 九项检查；方案中的通用资产验收仍未完成，不得用于自动发布放行。
+当前 M1 完成可信核心、冻结输入与真实证据封装；R2–R4 尚未接线，通用资产验收仍未完成，不得自动发布放行。
 
-## 已认可方向的待实施设计
+## 已认可设计与实施状态
 
 - [安装升级与旧版本自动清理](superpowers/specs/2026-09-08-installer-upgrade-cleanup-design.md)：新版验证成功后自动清理旧托管 runtime、扩展恢复副本和该 Codex 插件的历史缓存；包含清理记录、并发与回滚边界。
 - [资产验收整合设计](superpowers/specs/2026-09-08-asset-acceptance-integration-design.md)：结合源码审计、外部 V4 与 2026-09-08 Blender 实测，按可信核心、原生闭环、GLB 闭环实施；包含 v2 迁移、结果归属、无环证据和回归条件。
 
-两份设计独立实施，目前均未改变代码行为。资产验收运行时仍为 schema v1，现行规范仍是 V3.8；后续按整合设计成套迁移到 V5 规范与 schema v2。设计中的目标能力不代表当前已完成，外部 V4 也不自动取得仓库规范地位。
+两份设计独立实施。安装升级与旧版本自动清理已完成计划内代码和常规自动化测试，RELEASE 分发门禁与当前用户现场验收仍须单独执行；资产验收已切换到 schema v2 与 V5/M1，M2/M3 尚未实施。设计中的后续能力不代表当前已完成，外部 V4 也不自动取得仓库规范地位。
 
 ## 执行计划与对抗审计
 
