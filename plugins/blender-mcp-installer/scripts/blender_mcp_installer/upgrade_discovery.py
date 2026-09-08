@@ -206,9 +206,11 @@ def registration_scope(
     if journals:
         journal = journals[0]
         journal_scope = UpgradeRoots(roots.home, Path(journal["codex_home"]))
-        _raw, journal_proof = read_evidence(
+        raw, journal_proof = read_evidence(
             state, PurePath("upgrades", journal["id"] + ".json")
         )
+        if json.loads(raw) != journal:
+            raise InstallerError("upgrade journal changed during discovery")
         journal_proofs.append(journal_proof)
     try:
         before, before_proof = read_proof(state, reference / "before.json")

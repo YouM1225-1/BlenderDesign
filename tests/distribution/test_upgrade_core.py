@@ -1265,3 +1265,93 @@ def test_completed_same_root_journal_can_prove_historical_migration(tmp_path):
                 roots,
                 registration_ref="marketplace-recovery/registration." + registration_id,
             )
+
+
+@pytest.mark.parametrize("changed_field", ["codex_home", "status"])
+def test_changed_journal_snapshot_cannot_authorize_cleanup(
+    tmp_path, monkeypatch, changed_field
+):
+    from blender_mcp_installer import upgrade_discovery
+    from blender_mcp_installer.upgrade_discovery import (
+        current_paths,
+        discover_candidates,
+        other_references,
+    )
+
+    roots, current = _register_case(tmp_path)
+    foreign_home = roots.home / "foreign-codex"
+    foreign_home.mkdir(mode=0o700)
+    registration_id = str(uuid4())
+    with state_root(roots) as state:
+        projection, _plugin, cache = _registration_evidence(
+            state,
+            roots,
+            registration_name=registration_id,
+            after={
+                "present": True,
+                "source_type": "local",
+                "source": str(roots.projections / ("a" * 40)),
+            },
+        )
+        (state.path / f"marketplace-recovery/registration.{registration_id}/RESTORE.txt").unlink()
+        historical = new_record(
+            roots,
+            "register",
+            {
+                **current["desired"],
+                "commit": "a" * 40,
+                "plugin_version": "1",
+                "projection": str(projection),
+            },
+        )
+        historical["registration"] = {"id": registration_id, "state": "registered"}
+        historical = save_record(state, roots, None, historical)
+        historical = update_record(
+            state,
+            roots,
+            historical,
+            status="cleanup_pending",
+            verification={"registration": "passed", "live": "not_run"},
+        )
+        historical = update_record(state, roots, historical, status="complete")
+        current = save_record(state, roots, None, current)
+        journal_relative = PurePath("upgrades", historical["id"] + ".json")
+        journal_path = state.path / journal_relative
+        original_read = upgrade_discovery.read_evidence
+        changed = []
+
+        def read_after_journal_change(safe, relative):
+            if relative == journal_relative and not changed:
+                changed.append(True)
+                value = json.loads(journal_path.read_bytes())
+                value[changed_field] = (
+                    str(foreign_home)
+                    if changed_field == "codex_home"
+                    else "awaiting_verification"
+                )
+                journal_path.write_text(json.dumps(value))
+            return original_read(safe, relative)
+
+        monkeypatch.setattr(
+            upgrade_discovery, "read_evidence", read_after_journal_change
+        )
+        result = finalize_record(
+            state,
+            roots,
+            current["id"],
+            lambda doc: current_paths(roots, doc),
+            lambda doc: discover_candidates(state, roots, doc),
+            lambda doc: other_references(state, roots, doc),
+        )
+
+        assert changed == [True]
+        assert result["status"] == "complete"
+        assert result["candidates"] == []
+        assert any("upgrade journal changed" in item["reason"] for item in result["findings"])
+        assert cache.exists()
+        assert result["retired_registrations"] == []
+        assert_rollback_available(
+            state,
+            roots,
+            registration_ref="marketplace-recovery/registration." + registration_id,
+        )
