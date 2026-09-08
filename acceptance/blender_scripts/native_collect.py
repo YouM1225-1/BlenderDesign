@@ -213,6 +213,8 @@ def collect(
     for image in sorted(bpy.data.images, key=lambda x: x.name):
         if image.type == "RENDER_RESULT":
             continue
+        if image.alpha_mode != "STRAIGHT":
+            gaps.append("image-alpha-mode:" + image.name + ":" + image.alpha_mode)
         packed = image.packed_file
         if image.use_multiview:
             gaps.append("image-multiview:" + image.name)
@@ -242,6 +244,20 @@ def collect(
         if mat.node_tree is None:
             gaps.append("material-without-principled:" + mat.name)
             continue
+        for setting, supported in (
+            ("use_backface_culling", False),
+            ("use_backface_culling_shadow", False),
+            ("surface_render_method", "DITHERED"),
+            ("use_transparent_shadow", True),
+            ("thickness_mode", "SPHERE"),
+            ("use_thickness_from_shadow", False),
+            ("use_raytrace_refraction", False),
+        ):
+            actual = getattr(mat, setting)
+            if actual != supported:
+                gaps.append(
+                    "material-setting:" + mat.name + ":" + setting + ":" + str(actual)
+                )
         nodes = list(mat.node_tree.nodes)
         if (
             sum(n.type == "BSDF_PRINCIPLED" for n in nodes) != 1
@@ -254,6 +270,15 @@ def collect(
                 gaps.append("material-node-muted:" + mat.name + ":" + node.name)
             if node.type not in {"BSDF_PRINCIPLED", "OUTPUT_MATERIAL", "TEX_IMAGE"}:
                 gaps.append("material-node:" + mat.name + ":" + node.type)
+            if node.type == "BSDF_PRINCIPLED" and node.distribution != "MULTI_GGX":
+                gaps.append(
+                    "material-node-distribution:"
+                    + mat.name
+                    + ":"
+                    + node.name
+                    + ":"
+                    + node.distribution
+                )
             if node.type == "OUTPUT_MATERIAL" and node.target not in {"ALL", "EEVEE"}:
                 gaps.append(
                     "material-output-target:"

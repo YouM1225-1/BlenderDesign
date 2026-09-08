@@ -25,6 +25,93 @@ LIMITS = {
     "max_triangles": 2000000,
     "max_image_pixels": 1048576,
 }
+MATERIAL_PROFILE = {
+    "use_backface_culling": False,
+    "use_backface_culling_shadow": False,
+    "surface_render_method": "DITHERED",
+    "use_transparent_shadow": True,
+    "thickness_mode": "SPHERE",
+    "use_thickness_from_shadow": False,
+    "use_raytrace_refraction": False,
+}
+MATERIAL_CASES = {
+    "dithered_overlap_true": (
+        {"Alpha": 0.5},
+        {"surface_render_method": "DITHERED", "use_transparency_overlap": True},
+    ),
+    "dithered_overlap_false": (
+        {"Alpha": 0.5},
+        {"surface_render_method": "DITHERED", "use_transparency_overlap": False},
+    ),
+    "subsurface_sphere": (
+        {"Subsurface Weight": 0.5},
+        {"thickness_mode": "SPHERE", "use_thickness_from_shadow": False},
+    ),
+    "transmission_no_raytrace": (
+        {"Transmission Weight": 1.0},
+        {"use_raytrace_refraction": False},
+    ),
+    "material_backface_culling": ({}, {"use_backface_culling": True}),
+    "material_backface_culling_shadow": ({}, {"use_backface_culling_shadow": True}),
+    "material_blended_overlap_true": (
+        {"Alpha": 0.5},
+        {"surface_render_method": "BLENDED", "use_transparency_overlap": True},
+    ),
+    "material_blended_overlap_false": (
+        {"Alpha": 0.5},
+        {"surface_render_method": "BLENDED", "use_transparency_overlap": False},
+    ),
+    "material_transparent_shadow_disabled": (
+        {"Alpha": 0.5},
+        {"use_transparent_shadow": False},
+    ),
+    "material_thickness_slab": (
+        {"Subsurface Weight": 0.5},
+        {"thickness_mode": "SLAB"},
+    ),
+    "material_thickness_shadow": (
+        {"Subsurface Weight": 0.5},
+        {"use_thickness_from_shadow": True},
+    ),
+    "material_raytrace_refraction": (
+        {"Transmission Weight": 1.0},
+        {"use_raytrace_refraction": True},
+    ),
+}
+ALPHA_MODES = {
+    "image_alpha_straight": "STRAIGHT",
+    "image_alpha_premul": "PREMUL",
+    "image_alpha_channel_packed": "CHANNEL_PACKED",
+    "image_alpha_none": "NONE",
+}
+NEW_NEGATIVE_GAPS = {
+    "material_backface_culling": "material-setting:Body material:use_backface_culling:True",
+    "material_backface_culling_shadow": (
+        "material-setting:Body material:use_backface_culling_shadow:True"
+    ),
+    "material_blended_overlap_true": (
+        "material-setting:Body material:surface_render_method:BLENDED"
+    ),
+    "material_blended_overlap_false": (
+        "material-setting:Body material:surface_render_method:BLENDED"
+    ),
+    "material_transparent_shadow_disabled": (
+        "material-setting:Body material:use_transparent_shadow:False"
+    ),
+    "material_thickness_slab": "material-setting:Body material:thickness_mode:SLAB",
+    "material_thickness_shadow": (
+        "material-setting:Body material:use_thickness_from_shadow:True"
+    ),
+    "material_raytrace_refraction": (
+        "material-setting:Body material:use_raytrace_refraction:True"
+    ),
+    "principled_ggx": "material-node-distribution:Body material:Principled BSDF:GGX",
+    "image_alpha_premul": "image-alpha-mode:Alpha interpretation:PREMUL",
+    "image_alpha_channel_packed": (
+        "image-alpha-mode:Alpha interpretation:CHANNEL_PACKED"
+    ),
+    "image_alpha_none": "image-alpha-mode:Alpha interpretation:NONE",
+}
 
 
 def reopen(name):
@@ -59,7 +146,10 @@ root.mkdir(parents=True, exist_ok=False)
 def base():
     bpy.ops.wm.read_factory_settings(use_empty=True)
     mat = bpy.data.materials.new("Body material")
-    mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (0.8, 0.2, 0.05, 1)
+    principled = mat.node_tree.nodes["Principled BSDF"]
+    assert {name: getattr(mat, name) for name in MATERIAL_PROFILE} == MATERIAL_PROFILE
+    assert principled.distribution == "MULTI_GGX"
+    principled.inputs["Base Color"].default_value = (0.8, 0.2, 0.05, 1)
     for name, location, scale in [
         ("Body", (0, 0, 0), (1, 1, 0.7)),
         ("Top", (0, 0, 1), (1.1, 1.1, 0.12)),
@@ -111,11 +201,51 @@ variants = (
     "multiview",
     "cycles_output",
     "eevee_output",
+    "dithered_overlap_true",
+    "dithered_overlap_false",
+    "subsurface_sphere",
+    "transmission_no_raytrace",
+    "principled_multi_ggx",
+    "image_alpha_straight",
+    "material_backface_culling",
+    "material_backface_culling_shadow",
+    "material_blended_overlap_true",
+    "material_blended_overlap_false",
+    "material_transparent_shadow_disabled",
+    "material_thickness_slab",
+    "material_thickness_shadow",
+    "material_raytrace_refraction",
+    "principled_ggx",
+    "image_alpha_premul",
+    "image_alpha_channel_packed",
+    "image_alpha_none",
 )
 
 
 def mutate(variant):
     body = bpy.data.objects["Body"]
+    material = body.data.materials[0]
+    principled = material.node_tree.nodes["Principled BSDF"]
+    if variant in MATERIAL_CASES:
+        inputs, settings = MATERIAL_CASES[variant]
+        for name, setting in inputs.items():
+            principled.inputs[name].default_value = setting
+        for name, setting in settings.items():
+            setattr(material, name, setting)
+    if variant in {"principled_multi_ggx", "principled_ggx"}:
+        principled.inputs["Metallic"].default_value = 1.0
+        principled.inputs["Roughness"].default_value = 0.8
+        principled.distribution = "MULTI_GGX" if variant == "principled_multi_ggx" else "GGX"
+    if variant in ALPHA_MODES:
+        image = bpy.data.images.new("Alpha interpretation", width=2, height=2, alpha=True)
+        assert image.alpha_mode == "STRAIGHT"
+        image.pixels[:] = [0.4, 0.2, 0.1, 0.5] * 4
+        image.pack()
+        image.alpha_mode = ALPHA_MODES[variant]
+        tree = material.node_tree
+        node = tree.nodes.new("ShaderNodeTexImage")
+        node.image = image
+        tree.links.new(node.outputs["Color"], principled.inputs["Base Color"])
     if variant == "missing_bottom":
         bpy.data.objects.remove(bpy.data.objects["Bottom"], do_unlink=True)
     if variant == "zero_scale":
@@ -233,6 +363,27 @@ def mutate(variant):
 
 def postload(variant):
     body = bpy.data.objects["Body"]
+    if variant in MATERIAL_CASES:
+        material = body.data.materials[0]
+        principled = material.node_tree.nodes["Principled BSDF"]
+        inputs, settings = MATERIAL_CASES[variant]
+        for name, setting in inputs.items():
+            assert math.isclose(principled.inputs[name].default_value, setting, abs_tol=1e-6)
+        for name, setting in settings.items():
+            assert getattr(material, name) == setting
+    if variant in {"principled_multi_ggx", "principled_ggx"}:
+        principled = body.data.materials[0].node_tree.nodes["Principled BSDF"]
+        assert principled.distribution == (
+            "MULTI_GGX" if variant == "principled_multi_ggx" else "GGX"
+        )
+        assert principled.inputs["Metallic"].default_value == 1.0
+        assert math.isclose(principled.inputs["Roughness"].default_value, 0.8, abs_tol=1e-6)
+    if variant in ALPHA_MODES:
+        image = bpy.data.images["Alpha interpretation"]
+        assert image.alpha_mode == ALPHA_MODES[variant]
+        assert image.channels == 4 and image.packed_file.size > 0
+        if image.alpha_mode != "NONE":
+            assert 0 < image.pixels[3] < 1
     if variant == "invalid_face":
         assert [loop.vertex_index for loop in body.data.loops] == [0, 0, 1]
     if variant == "nan":
@@ -326,11 +477,31 @@ for name in (
     "packed_image",
     "plain_collection",
     "shared_mesh",
+    "dithered_overlap_true",
+    "dithered_overlap_false",
+    "subsurface_sphere",
+    "transmission_no_raytrace",
+    "principled_multi_ggx",
+    "image_alpha_straight",
 ):
     result = results[name]
     assert not result["scope_gaps"], (name, result["scope_gaps"])
     assert not any(c["findings"] for c in inspect_checks(result, True)), name
     assert not scene_geometry_findings(result), name
+for name in (
+    "dithered_overlap_true",
+    "dithered_overlap_false",
+    "subsurface_sphere",
+    "transmission_no_raytrace",
+    "principled_multi_ggx",
+    "image_alpha_straight",
+):
+    base()
+    mutate(name)
+    assert not reference_findings(results[name], saved(name + "_reference", name)), name
+assert not reference_findings(
+    results["dithered_overlap_false"], results["dithered_overlap_true"]
+)
 for name in ("triangulate", "bevel", "packed_image", "shared_mesh"):
     if name != "shared_mesh":
         assert reference_findings(results[name], reference), name
@@ -391,11 +562,40 @@ for name, prefix in [
         check for check in inspect_checks(results[name], True)
         if check["id"] == "r2.inventory.coverage_complete"
     )["findings"], name
+for name, expected_gap in NEW_NEGATIVE_GAPS.items():
+    assert results[name]["scope_gaps"] == [expected_gap], name
+    assert not results[name]["occurrences_complete"]
+    assert next(
+        check
+        for check in inspect_checks(results[name], True)
+        if check["id"] == "r2.inventory.coverage_complete"
+    )["findings"], name
 assert not results["eevee_output"]["scope_gaps"]
 assert results["eevee_output"]["occurrences_complete"]
 assert not any(c["findings"] for c in inspect_checks(results["eevee_output"], True))
 assert not scene_geometry_findings(results["eevee_output"])
 assert not reference_findings(results["eevee_output"], reference)
+for name, reference_name in {
+    "material_backface_culling": "reference",
+    "material_backface_culling_shadow": "reference",
+    "material_blended_overlap_true": "dithered_overlap_true_reference",
+    "material_blended_overlap_false": "dithered_overlap_false_reference",
+    "material_transparent_shadow_disabled": "dithered_overlap_true_reference",
+    "material_thickness_slab": "subsurface_sphere_reference",
+    "material_thickness_shadow": "subsurface_sphere_reference",
+    "material_raytrace_refraction": "transmission_no_raytrace_reference",
+    "principled_ggx": "principled_multi_ggx_reference",
+    "image_alpha_premul": "image_alpha_straight_reference",
+    "image_alpha_channel_packed": "image_alpha_straight_reference",
+    "image_alpha_none": "image_alpha_straight_reference",
+}.items():
+    assert not reference_findings(results[name], json.loads((root / (reference_name + ".json")).read_text())), name
+alpha_dependency = json.loads((root / "image_alpha_straight_reference.json").read_text())["dependencies"][0]
+assert alpha_dependency["channels"] == 4 and alpha_dependency["bytes"] > 0
+for name in ALPHA_MODES:
+    dependency = results[name]["dependencies"][0]
+    assert dependency["bytes"] == alpha_dependency["bytes"]
+    assert dependency["sha256"] == alpha_dependency["sha256"]
 for name, kind in [
     ("offscene_object", "objects"),
     ("orphan_mesh", "meshes"),
