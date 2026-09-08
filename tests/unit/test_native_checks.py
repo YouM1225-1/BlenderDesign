@@ -204,6 +204,33 @@ def test_nonzero_finite_cross_is_not_lost_to_square_underflow() -> None:
     assert not scene_geometry_findings(value)
 
 
+def test_large_finite_coordinates_do_not_escape_cross_check() -> None:
+    value = sample()
+    big = 2**1023
+    vertices = [[0, 0, 0], [big, 0, 0], [0, big, 0]]
+    value["meshes"]["Body"]["authored"]["vertices"] = deepcopy(vertices)
+    value["meshes"]["Body"]["evaluated"]["vertices"] = deepcopy(vertices)
+    validate_manifest(value, LIMITS)
+    assert {row["code"] for row in scene_geometry_findings(value)} == {
+        "degenerate_world_triangle"
+    }
+
+
+def test_large_finite_coordinates_do_not_escape_world_point_check() -> None:
+    value = sample()
+    big = 2**1023
+    vertices = [[0, 0, 0], [big, big, 0], [0, big, 0]]
+    value["meshes"]["Body"]["authored"]["vertices"] = deepcopy(vertices)
+    value["meshes"]["Body"]["evaluated"]["vertices"] = deepcopy(vertices)
+    matrix = [[big, 1.0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+    value["objects"][0]["matrix_world"] = deepcopy(matrix)
+    value["occurrences"][0]["matrix_world"] = deepcopy(matrix)
+    validate_manifest(value, LIMITS)
+    assert {row["code"] for row in scene_geometry_findings(value)} == {
+        "degenerate_world_triangle"
+    }
+
+
 def test_missing_bottom_cannot_be_fixed_by_repeating_wrong_asset() -> None:
     reference = sample()
     candidate = deepcopy(reference)

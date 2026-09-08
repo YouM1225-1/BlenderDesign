@@ -74,22 +74,30 @@ def scene_geometry_findings(manifest: dict[str, Any]) -> list[dict[str, Any]]:
         matrix = occurrence["matrix_world"]
         if not geometry["triangles"]:
             problems.append(finding("empty_geometry", repr(occurrence["key"])))
-        points = [
-            [sum(matrix[i][k] * vertex[k] for k in range(3)) + matrix[i][3] for i in range(3)]
-            for vertex in geometry["vertices"]
-        ]
-        for triangle in geometry["triangles"]:
-            a, b, c = [points[geometry["loops"][index]] for index in triangle]
-            u = [b[i] - a[i] for i in range(3)]
-            v = [c[i] - a[i] for i in range(3)]
-            cross = [
-                u[1] * v[2] - u[2] * v[1],
-                u[2] * v[0] - u[0] * v[2],
-                u[0] * v[1] - u[1] * v[0],
+        try:
+            points = [
+                [
+                    sum(matrix[i][k] * vertex[k] for k in range(3)) + matrix[i][3]
+                    for i in range(3)
+                ]
+                for vertex in geometry["vertices"]
             ]
-            if not all(math.isfinite(item) for item in cross) or all(item == 0 for item in cross):
-                problems.append(finding("degenerate_world_triangle", repr(occurrence["key"])))
-                break
+            for triangle in geometry["triangles"]:
+                a, b, c = [points[geometry["loops"][index]] for index in triangle]
+                u = [b[i] - a[i] for i in range(3)]
+                v = [c[i] - a[i] for i in range(3)]
+                cross = [
+                    u[1] * v[2] - u[2] * v[1],
+                    u[2] * v[0] - u[0] * v[2],
+                    u[0] * v[1] - u[1] * v[0],
+                ]
+                if not all(math.isfinite(item) for item in cross) or all(
+                    item == 0 for item in cross
+                ):
+                    problems.append(finding("degenerate_world_triangle", repr(occurrence["key"])))
+                    break
+        except OverflowError:
+            problems.append(finding("degenerate_world_triangle", repr(occurrence["key"])))
     return problems
 
 
