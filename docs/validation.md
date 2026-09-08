@@ -79,7 +79,7 @@ BLENDER_BIN="$BLENDER_BIN" \
 bash scripts/checks.sh
 ```
 
-该模式执行同一固定输入重建与五文件比较，并要求固定提交仍是上游 HTTPS `main`；远端落后
+该模式执行同一固定输入重建与五文件比较，并要求固定提交仍是上游 HTTPS `main`；固定提交与远端 `main` 不一致
 或最新性不可验证都会使发行失败，但固定版完整性结果仍会独立输出。随后从提交对象重放完整补丁序列，分别用
 MCP SDK `1.28.1` 和 `2.0.0` 执行上游质量门禁及非 Blender 测试，运行 Bandit、
 detect-secrets 与 pip-audit，进行两次确定性构建，并逐字节比对仓库发行物。缺少任一

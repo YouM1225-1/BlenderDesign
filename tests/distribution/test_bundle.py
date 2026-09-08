@@ -230,6 +230,7 @@ def _run_distribution_gate(
     advisory_exit: int = 0,
     required_exit: int = 0,
     mismatch: str = "",
+    comparison_error: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], list[str], list[str]]:
     root = tmp_path / "repo"
     for relative in (
@@ -362,7 +363,11 @@ exit 0
     _write_executable(
         root / "fake-bin/cmp",
         """#!/bin/sh
-printf '%s\\n' "$(/usr/bin/basename "$1")" >> "$FAKE_CMP_CALLS"
+artifact="$(/usr/bin/basename "$1")"
+printf '%s\\n' "$artifact" >> "$FAKE_CMP_CALLS"
+if test "$artifact" = "$FAKE_COMPARISON_ERROR"; then
+  exit 2
+fi
 /usr/bin/cmp "$@"
 """,
     )
@@ -382,6 +387,7 @@ printf '%s\\n' "$(/usr/bin/basename "$1")" >> "$FAKE_CMP_CALLS"
         "FAKE_ADVISORY_EXIT": str(advisory_exit),
         "FAKE_REQUIRED_EXIT": str(required_exit),
         "FAKE_MISMATCH": mismatch,
+        "FAKE_COMPARISON_ERROR": comparison_error,
         "RELEASE": str(int(release)),
         "VERIFY_DISTRIBUTION_INTEGRITY": str(int(integrity)),
         "TMPDIR": str(tmp_path),
@@ -491,6 +497,47 @@ def test_distribution_gate_runs_all_comparisons_before_reporting_mismatch(tmp_pa
         "runtime-requirements.lock",
     ]
     assert '{"check":"fixed_distribution_integrity","status":"failed"}' in completed.stdout
+    assert "DISTRIBUTION INTEGRITY CHECKS PASSED" not in completed.stdout
+    assert "ALL CHECKS PASSED" not in completed.stdout
+
+
+def test_distribution_gate_reports_comparison_error_without_claiming_corruption(
+    tmp_path: Path,
+) -> None:
+    completed, _freshness, comparisons = _run_distribution_gate(
+        tmp_path,
+        release=False,
+        integrity=True,
+        comparison_error="manifest.json",
+    )
+    assert completed.returncode == 2
+    assert len(comparisons) == 5
+    assert (
+        '{"check":"fixed_distribution_comparison","status":"error","exit_code":2}'
+        in completed.stdout
+    )
+    assert '{"check":"fixed_distribution_integrity","status":"failed"}' not in completed.stdout
+    assert "DISTRIBUTION INTEGRITY CHECKS PASSED" not in completed.stdout
+    assert "ALL CHECKS PASSED" not in completed.stdout
+
+
+def test_distribution_gate_preserves_mismatch_evidence_with_comparison_error(
+    tmp_path: Path,
+) -> None:
+    completed, _freshness, comparisons = _run_distribution_gate(
+        tmp_path,
+        release=False,
+        integrity=True,
+        mismatch="SHA256SUMS",
+        comparison_error="manifest.json",
+    )
+    assert completed.returncode == 2
+    assert len(comparisons) == 5
+    assert '{"check":"fixed_distribution_integrity","status":"failed"}' in completed.stdout
+    assert (
+        '{"check":"fixed_distribution_comparison","status":"error","exit_code":2}'
+        in completed.stdout
+    )
     assert "DISTRIBUTION INTEGRITY CHECKS PASSED" not in completed.stdout
     assert "ALL CHECKS PASSED" not in completed.stdout
 

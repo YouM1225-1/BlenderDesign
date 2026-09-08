@@ -160,20 +160,34 @@ PY
   "$UV_BIN" run --frozen python scripts/build_official_blender_mcp_distribution.py \
     --source "$OFFICIAL_MCP_SOURCE" --blender "$BLENDER_BIN" --uv "$UV_BIN" \
     --output "$RELEASE_DIR/artifacts"
-  INTEGRITY_EXIT_CODE=0
+  INTEGRITY_MISMATCH=0
+  COMPARISON_EXIT_CODE=0
   for artifact in SHA256SUMS manifest.json blender_mcp-1.0.0-py3-none-any.whl \
     mcp-1.0.0.zip runtime-requirements.lock; do
-    if ! cmp "plugins/blender-mcp-installer/artifacts/$artifact" \
-      "$RELEASE_DIR/artifacts/$artifact"; then
-      INTEGRITY_EXIT_CODE=1
-    fi
+    CMP_EXIT_CODE=0
+    cmp "plugins/blender-mcp-installer/artifacts/$artifact" \
+      "$RELEASE_DIR/artifacts/$artifact" || CMP_EXIT_CODE=$?
+    case "$CMP_EXIT_CODE" in
+      0) ;;
+      1) INTEGRITY_MISMATCH=1 ;;
+      *)
+        if test "$COMPARISON_EXIT_CODE" = 0; then
+          COMPARISON_EXIT_CODE="$CMP_EXIT_CODE"
+        fi
+        ;;
+    esac
   done
-  if test "$INTEGRITY_EXIT_CODE" = 0; then
-    echo '{"check":"fixed_distribution_integrity","status":"passed"}'
-  else
+  if test "$INTEGRITY_MISMATCH" = 1; then
     echo '{"check":"fixed_distribution_integrity","status":"failed"}'
-    exit "$INTEGRITY_EXIT_CODE"
+  elif test "$COMPARISON_EXIT_CODE" = 0; then
+    echo '{"check":"fixed_distribution_integrity","status":"passed"}'
   fi
+  if test "$COMPARISON_EXIT_CODE" != 0; then
+    printf '{"check":"fixed_distribution_comparison","status":"error","exit_code":%s}\n' \
+      "$COMPARISON_EXIT_CODE"
+    exit "$COMPARISON_EXIT_CODE"
+  fi
+  test "$INTEGRITY_MISMATCH" = 0 || exit 1
   test "$FRESHNESS_EXIT_CODE" = 0 || exit "$FRESHNESS_EXIT_CODE"
   if test "${RELEASE:-0}" = 1; then
     echo "RELEASE CHECKS PASSED"
