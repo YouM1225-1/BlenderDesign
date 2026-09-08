@@ -75,9 +75,9 @@ fi
 "$UV_BIN" run --frozen pytest -q --ignore=tests/distribution         # L1 + L2
 "$UV_BIN" run --frozen pytest tests/distribution -q                 # distributable
 
-if test "${RELEASE:-0}" = 1; then
-  : "${OFFICIAL_MCP_SOURCE:?RELEASE=1 requires OFFICIAL_MCP_SOURCE}"
-  : "${BLENDER_BIN:?RELEASE=1 requires BLENDER_BIN}"
+if test "${RELEASE:-0}" = 1 || test "${VERIFY_DISTRIBUTION_INTEGRITY:-0}" = 1; then
+  : "${OFFICIAL_MCP_SOURCE:?distribution verification requires OFFICIAL_MCP_SOURCE}"
+  : "${BLENDER_BIN:?distribution verification requires BLENDER_BIN}"
   case "$OFFICIAL_MCP_SOURCE:$BLENDER_BIN" in
     /*:/*) ;;
     *) echo "FAIL: release paths must be absolute"; exit 1 ;;
@@ -87,13 +87,14 @@ if test "${RELEASE:-0}" = 1; then
 
   RELEASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/blender-codex-release.XXXXXX")"
   trap 'rm -rf "$SDIST_DIR" "$RELEASE_DIR"' EXIT
-  UPSTREAM_COMMIT="$($PWD_ROOT/.venv/bin/python -I -c \
-    'import sys; sys.path.insert(0, "plugins/blender-mcp-installer/scripts"); from blender_mcp_installer.bundle import UPSTREAM_COMMIT; print(UPSTREAM_COMMIT)')"
-  REMOTE_MAIN="$(/usr/bin/env -i HOME=/var/empty PATH=/usr/bin:/bin LC_ALL=C \
-    GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-    /usr/bin/git ls-remote --exit-code \
-    https://projects.blender.org/lab/blender_mcp.git refs/heads/main)"
-  test "$REMOTE_MAIN" = "$UPSTREAM_COMMIT$(printf '\t')refs/heads/main"
+  FRESHNESS_EXIT_CODE=0
+  if test "${RELEASE:-0}" = 1; then
+    "$PWD_ROOT/.venv/bin/python" -I scripts/check_official_upstream.py --require-latest || \
+      FRESHNESS_EXIT_CODE=$?
+  else
+    "$PWD_ROOT/.venv/bin/python" -I scripts/check_official_upstream.py || \
+      FRESHNESS_EXIT_CODE=$?
+  fi
   "$PWD_ROOT/.venv/bin/python" -I - "$PWD_ROOT" "$OFFICIAL_MCP_SOURCE" \
     "$RELEASE_DIR" <<'PY'
 import sys
@@ -159,11 +160,25 @@ PY
   "$UV_BIN" run --frozen python scripts/build_official_blender_mcp_distribution.py \
     --source "$OFFICIAL_MCP_SOURCE" --blender "$BLENDER_BIN" --uv "$UV_BIN" \
     --output "$RELEASE_DIR/artifacts"
+  INTEGRITY_EXIT_CODE=0
   for artifact in SHA256SUMS manifest.json blender_mcp-1.0.0-py3-none-any.whl \
     mcp-1.0.0.zip runtime-requirements.lock; do
-    cmp "plugins/blender-mcp-installer/artifacts/$artifact" \
-      "$RELEASE_DIR/artifacts/$artifact"
+    if ! cmp "plugins/blender-mcp-installer/artifacts/$artifact" \
+      "$RELEASE_DIR/artifacts/$artifact"; then
+      INTEGRITY_EXIT_CODE=1
+    fi
   done
-  echo "RELEASE CHECKS PASSED"
+  if test "$INTEGRITY_EXIT_CODE" = 0; then
+    echo '{"check":"fixed_distribution_integrity","status":"passed"}'
+  else
+    echo '{"check":"fixed_distribution_integrity","status":"failed"}'
+    exit "$INTEGRITY_EXIT_CODE"
+  fi
+  test "$FRESHNESS_EXIT_CODE" = 0 || exit "$FRESHNESS_EXIT_CODE"
+  if test "${RELEASE:-0}" = 1; then
+    echo "RELEASE CHECKS PASSED"
+  else
+    echo "DISTRIBUTION INTEGRITY CHECKS PASSED"
+  fi
 fi
 echo "ALL CHECKS PASSED"

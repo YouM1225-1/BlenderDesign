@@ -56,16 +56,31 @@ python3 scripts/update_installer_version.py
 不会因之后提交无关文件而漏检。浅克隆缺少比较历史时失败，需要先补齐历史。
 这些规则由本地钩子和检查入口执行；新克隆需启用钩子，不能以跳过检查代替验证。
 
-修改上游补丁、runtime 依赖、固定产物或正式发布 runtime 时，额外使用发行门禁：
+修改上游补丁、runtime 依赖或固定产物时，可独立验证固定提交的可复现构建与五个发行文件的
+逐字节一致性：
 
 ```bash
-RELEASE=1 \
-OFFICIAL_MCP_SOURCE=/absolute/path/to/blender_mcp \
-BLENDER_BIN=/Applications/Blender.app/Contents/MacOS/Blender \
+VERIFY_DISTRIBUTION_INTEGRITY=1 \
+OFFICIAL_MCP_SOURCE="$OFFICIAL_MCP_SOURCE" \
+BLENDER_BIN="$BLENDER_BIN" \
 bash scripts/checks.sh
 ```
 
-该模式会确认固定提交仍是上游 HTTPS `main`，从提交对象重放完整补丁序列，分别用
+该模式会查询远端 `main` 并单独输出最新性记录，但最新性只作建议：固定提交落后或远端不可用
+不会导致固定版完整性失败。它仍会运行构建、依赖和审计门禁，冷机器可能需要访问包索引，
+因此不是完全离线检查。网络错误报告为 `upstream_freshness` 不可验证，不表示固定版内容损坏。
+
+正式发布 runtime 时使用发行门禁：
+
+```bash
+RELEASE=1 \
+OFFICIAL_MCP_SOURCE="$OFFICIAL_MCP_SOURCE" \
+BLENDER_BIN="$BLENDER_BIN" \
+bash scripts/checks.sh
+```
+
+该模式执行同一固定输入重建与五文件比较，并要求固定提交仍是上游 HTTPS `main`；远端落后
+或最新性不可验证都会使发行失败，但固定版完整性结果仍会独立输出。随后从提交对象重放完整补丁序列，分别用
 MCP SDK `1.28.1` 和 `2.0.0` 执行上游质量门禁及非 Blender 测试，运行 Bandit、
 detect-secrets 与 pip-audit，进行两次确定性构建，并逐字节比对仓库发行物。缺少任一
 输入、验证器或扫描器都会失败。

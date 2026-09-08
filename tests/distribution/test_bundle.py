@@ -33,9 +33,466 @@ from scripts.build_official_blender_mcp_distribution import (  # noqa: E402
     build_distribution,
 )
 import scripts.build_official_blender_mcp_distribution as builder  # noqa: E402
+import scripts.check_official_upstream as upstream_check  # noqa: E402
 
 
 COMMIT = UPSTREAM_COMMIT
+
+
+def test_upstream_freshness_policy_is_independent_of_fixed_release_integrity() -> None:
+    advisory, advisory_code = upstream_check.classify_upstream(
+        "a" * 40, "b" * 40, require_latest=False
+    )
+    assert advisory_code == 0
+    assert advisory == {
+        "check": "upstream_freshness",
+        "pinned": "a" * 40,
+        "remote": "b" * 40,
+        "status": "outdated",
+        "required": False,
+    }
+
+    required, required_code = upstream_check.classify_upstream(
+        "a" * 40, "b" * 40, require_latest=True
+    )
+    assert required_code == 1
+    assert required == {**advisory, "required": True}
+
+
+@pytest.mark.parametrize("require_latest", [False, True])
+@pytest.mark.parametrize("current", [False, True])
+def test_upstream_freshness_classifier_matrix(require_latest: bool, current: bool) -> None:
+    remote = "a" * 40 if current else "b" * 40
+    report, code = upstream_check.classify_upstream(
+        "a" * 40, remote, require_latest=require_latest
+    )
+    assert report["status"] == ("current" if current else "outdated")
+    assert report["required"] is require_latest
+    assert code == int(require_latest and not current)
+
+
+@pytest.mark.parametrize(
+    "pinned,remote",
+    [
+        ("a" * 39, "b" * 40),
+        ("A" * 40, "b" * 40),
+        ("a" * 40, "g" * 40),
+    ],
+)
+def test_upstream_freshness_classifier_rejects_invalid_hashes(
+    pinned: str, remote: str
+) -> None:
+    with pytest.raises(ValueError, match="40 lowercase hex"):
+        upstream_check.classify_upstream(pinned, remote, require_latest=False)
+
+
+def test_upstream_freshness_cli_uses_bounded_isolated_official_git_probe(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=f"{COMMIT}\trefs/heads/main\n", stderr=""
+        )
+
+    monkeypatch.setattr(upstream_check.subprocess, "run", run)
+    monkeypatch.setattr(sys, "argv", ["check_official_upstream.py", "--require-latest"])
+
+    assert upstream_check.main() == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "check": "upstream_freshness",
+        "pinned": COMMIT,
+        "remote": COMMIT,
+        "required": True,
+        "status": "current",
+    }
+    assert calls == [
+        (
+            [
+                "/usr/bin/git",
+                "ls-remote",
+                "--exit-code",
+                "https://projects.blender.org/lab/blender_mcp.git",
+                "refs/heads/main",
+            ],
+            {
+                "check": True,
+                "capture_output": True,
+                "text": True,
+                "timeout": 30,
+                "env": {
+                    "PATH": "/usr/bin:/bin",
+                    "HOME": "/var/empty",
+                    "LC_ALL": "C",
+                    "GIT_TERMINAL_PROMPT": "0",
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                },
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.TimeoutExpired(cmd="git", timeout=30),
+        subprocess.CalledProcessError(2, ["git"], stderr="remote detail" * 1000),
+        OSError("host detail" * 1000),
+    ],
+)
+@pytest.mark.parametrize("require_latest", [False, True])
+def test_upstream_freshness_cli_classifies_process_failures_as_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: Exception,
+    require_latest: bool,
+) -> None:
+    def fail(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise failure
+
+    monkeypatch.setattr(upstream_check.subprocess, "run", fail)
+    argv = ["check_official_upstream.py"]
+    if require_latest:
+        argv.append("--require-latest")
+    monkeypatch.setattr(sys, "argv", argv)
+
+    assert upstream_check.main() == int(require_latest)
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "check": "upstream_freshness",
+        "pinned": COMMIT,
+        "remote": None,
+        "required": require_latest,
+        "status": "unavailable",
+    }
+    assert captured.err == ""
+    assert "detail" not in captured.out
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "",
+        f"{COMMIT}\n",
+        f"{COMMIT}\trefs/heads/other\n",
+        f"{COMMIT.upper()}\trefs/heads/main\n",
+        f"{'g' * 40}\trefs/heads/main\n",
+        f"{'a' * 39}\trefs/heads/main\n",
+        f"{COMMIT}\trefs/heads/main\textra\n",
+        f"{COMMIT}\trefs/heads/main \n",
+        f"{COMMIT}\trefs/heads/main\n{COMMIT}\trefs/heads/main\n",
+    ],
+)
+@pytest.mark.parametrize("require_latest", [False, True])
+def test_upstream_freshness_cli_reports_invalid_responses(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    response: str,
+    require_latest: bool,
+) -> None:
+    monkeypatch.setattr(
+        upstream_check.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0] if args else [], 0, stdout=response, stderr=""
+        ),
+    )
+    argv = ["check_official_upstream.py"]
+    if require_latest:
+        argv.append("--require-latest")
+    monkeypatch.setattr(sys, "argv", argv)
+
+    assert upstream_check.main() == int(require_latest)
+    assert json.loads(capsys.readouterr().out) == {
+        "check": "upstream_freshness",
+        "pinned": COMMIT,
+        "remote": None,
+        "required": require_latest,
+        "status": "invalid_response",
+    }
+
+
+def _write_executable(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    path.chmod(0o755)
+
+
+def _run_distribution_gate(
+    tmp_path: Path,
+    *,
+    release: bool,
+    integrity: bool,
+    freshness_status: str = "current",
+    advisory_exit: int = 0,
+    required_exit: int = 0,
+    mismatch: str = "",
+) -> tuple[subprocess.CompletedProcess[str], list[str], list[str]]:
+    root = tmp_path / "repo"
+    for relative in (
+        "protocol",
+        "bridge/core",
+        "server",
+        "smoke",
+        "scripts",
+        "tests/distribution",
+        "acceptance",
+        "plugins/blender-mcp-installer/artifacts",
+        ".venv/bin",
+        "plugin-creator/scripts",
+        "source/.git",
+        "fake-bin",
+    ):
+        (root / relative).mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / "scripts/checks.sh", root / "scripts/checks.sh")
+    (root / "plugin-creator/scripts/validate_plugin.py").write_text("")
+    blender = root / "Blender"
+    blender.write_text("")
+    blender.chmod(0o755)
+
+    artifacts = [
+        "SHA256SUMS",
+        "manifest.json",
+        "blender_mcp-1.0.0-py3-none-any.whl",
+        "mcp-1.0.0.zip",
+        "runtime-requirements.lock",
+    ]
+    committed = root / "plugins/blender-mcp-installer/artifacts"
+    for artifact in artifacts:
+        (committed / artifact).write_text(f"{artifact}\n")
+
+    freshness_calls = root / "freshness-calls"
+    cmp_calls = root / "cmp-calls"
+    advisory_report = root / "advisory-report"
+    required_report = root / "required-report"
+    remote = (
+        COMMIT
+        if freshness_status == "current"
+        else "b" * 40
+        if freshness_status == "outdated"
+        else None
+    )
+    advisory_report.write_text(
+        json.dumps(
+            {
+                "check": "upstream_freshness",
+                "pinned": COMMIT,
+                "remote": remote,
+                "required": False,
+                "status": freshness_status,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    required_report.write_text(
+        json.dumps(
+            {
+                "check": "upstream_freshness",
+                "pinned": COMMIT,
+                "remote": remote,
+                "required": True,
+                "status": freshness_status,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+    _write_executable(
+        root / ".venv/bin/python",
+        """#!/bin/sh
+case " $* " in
+  *" scripts/check_official_upstream.py "*)
+    printf '%s\\n' "$*" >> "$FAKE_FRESHNESS_CALLS"
+    case " $* " in
+      *" --require-latest "*)
+        /bin/cat "$FAKE_REQUIRED_REPORT"
+        exit "$FAKE_REQUIRED_EXIT"
+        ;;
+      *)
+        /bin/cat "$FAKE_ADVISORY_REPORT"
+        exit "$FAKE_ADVISORY_EXIT"
+        ;;
+    esac
+    ;;
+  *" -I - "*)
+    for argument in "$@"; do
+      workspace="$argument"
+    done
+    /bin/mkdir -p "$workspace/source-1"
+    ;;
+esac
+exit 0
+""",
+    )
+    _write_executable(
+        root / "fake-bin/uv",
+        """#!/bin/sh
+previous=
+build_distribution=0
+output=
+for argument in "$@"; do
+  if test "$previous" = --out-dir; then
+    /bin/mkdir -p "$argument"
+    : > "$argument/blender-codex.tar.gz"
+  fi
+  if test "$previous" = --output; then
+    output="$argument"
+  fi
+  if test "$argument" = scripts/build_official_blender_mcp_distribution.py; then
+    build_distribution=1
+  fi
+  previous="$argument"
+done
+if test "$build_distribution" = 1; then
+  /bin/mkdir -p "$output"
+  /bin/cp "$FAKE_ARTIFACT_SOURCE"/* "$output"/
+  if test -n "$FAKE_MISMATCH"; then
+    printf 'changed\\n' >> "$output/$FAKE_MISMATCH"
+  fi
+fi
+exit 0
+""",
+    )
+    _write_executable(root / "fake-bin/tar", "#!/bin/sh\nexit 0\n")
+    _write_executable(
+        root / "fake-bin/cmp",
+        """#!/bin/sh
+printf '%s\\n' "$(/usr/bin/basename "$1")" >> "$FAKE_CMP_CALLS"
+/usr/bin/cmp "$@"
+""",
+    )
+
+    env = {
+        **os.environ,
+        "PATH": f"{root / 'fake-bin'}:/usr/bin:/bin",
+        "UV_BIN": str(root / "fake-bin/uv"),
+        "PLUGIN_CREATOR_ROOT": str(root / "plugin-creator"),
+        "OFFICIAL_MCP_SOURCE": str(root / "source"),
+        "BLENDER_BIN": str(blender),
+        "FAKE_ARTIFACT_SOURCE": str(committed),
+        "FAKE_FRESHNESS_CALLS": str(freshness_calls),
+        "FAKE_CMP_CALLS": str(cmp_calls),
+        "FAKE_ADVISORY_REPORT": str(advisory_report),
+        "FAKE_REQUIRED_REPORT": str(required_report),
+        "FAKE_ADVISORY_EXIT": str(advisory_exit),
+        "FAKE_REQUIRED_EXIT": str(required_exit),
+        "FAKE_MISMATCH": mismatch,
+        "RELEASE": str(int(release)),
+        "VERIFY_DISTRIBUTION_INTEGRITY": str(int(integrity)),
+        "TMPDIR": str(tmp_path),
+    }
+    completed = subprocess.run(
+        ["/bin/bash", str(root / "scripts/checks.sh")],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    freshness = freshness_calls.read_text().splitlines() if freshness_calls.exists() else []
+    comparisons = cmp_calls.read_text().splitlines() if cmp_calls.exists() else []
+    return completed, freshness, comparisons
+
+
+@pytest.mark.parametrize(
+    "release,integrity,expected_required,expected_comparisons",
+    [
+        (False, False, None, 0),
+        (False, True, False, 5),
+        (True, False, True, 5),
+        (True, True, True, 5),
+    ],
+)
+def test_distribution_gate_selects_each_mode_once(
+    tmp_path: Path,
+    release: bool,
+    integrity: bool,
+    expected_required: bool | None,
+    expected_comparisons: int,
+) -> None:
+    completed, freshness, comparisons = _run_distribution_gate(
+        tmp_path, release=release, integrity=integrity
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert len(comparisons) == expected_comparisons
+    assert len(freshness) == int(expected_required is not None)
+    if expected_required is not None:
+        assert ("--require-latest" in freshness[0]) is expected_required
+        assert completed.stdout.index('"check": "upstream_freshness"') < completed.stdout.index(
+            '"check":"fixed_distribution_integrity"'
+        )
+    if release:
+        assert "RELEASE CHECKS PASSED" in completed.stdout
+    elif integrity:
+        assert "DISTRIBUTION INTEGRITY CHECKS PASSED" in completed.stdout
+        assert "RELEASE CHECKS PASSED" not in completed.stdout
+    else:
+        assert "upstream_freshness" not in completed.stdout
+    assert completed.stdout.rstrip().endswith("ALL CHECKS PASSED")
+
+
+@pytest.mark.parametrize("freshness_status", ["outdated", "unavailable"])
+def test_distribution_integrity_gate_keeps_freshness_advisory(
+    tmp_path: Path, freshness_status: str
+) -> None:
+    completed, _freshness, comparisons = _run_distribution_gate(
+        tmp_path,
+        release=False,
+        integrity=True,
+        freshness_status=freshness_status,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert len(comparisons) == 5
+    assert f'"status": "{freshness_status}"' in completed.stdout
+    assert '"check":"fixed_distribution_integrity","status":"passed"' in completed.stdout
+
+
+@pytest.mark.parametrize("freshness_status", ["outdated", "unavailable"])
+def test_release_gate_defers_required_freshness_failure_until_after_comparisons(
+    tmp_path: Path, freshness_status: str
+) -> None:
+    completed, freshness, comparisons = _run_distribution_gate(
+        tmp_path,
+        release=True,
+        integrity=False,
+        freshness_status=freshness_status,
+        required_exit=1,
+    )
+    assert completed.returncode == 1
+    assert "--require-latest" in freshness[0]
+    assert len(comparisons) == 5
+    freshness_index = completed.stdout.index('"check": "upstream_freshness"')
+    integrity_index = completed.stdout.index(
+        '{"check":"fixed_distribution_integrity","status":"passed"}'
+    )
+    assert freshness_index < integrity_index
+    assert "RELEASE CHECKS PASSED" not in completed.stdout
+    assert "ALL CHECKS PASSED" not in completed.stdout
+
+
+def test_distribution_gate_runs_all_comparisons_before_reporting_mismatch(tmp_path: Path) -> None:
+    completed, _freshness, comparisons = _run_distribution_gate(
+        tmp_path,
+        release=False,
+        integrity=True,
+        mismatch="manifest.json",
+    )
+    assert completed.returncode == 1
+    assert comparisons == [
+        "SHA256SUMS",
+        "manifest.json",
+        "blender_mcp-1.0.0-py3-none-any.whl",
+        "mcp-1.0.0.zip",
+        "runtime-requirements.lock",
+    ]
+    assert '{"check":"fixed_distribution_integrity","status":"failed"}' in completed.stdout
+    assert "DISTRIBUTION INTEGRITY CHECKS PASSED" not in completed.stdout
+    assert "ALL CHECKS PASSED" not in completed.stdout
 
 
 def test_bundle_version_is_derived_from_upstream_commit() -> None:
