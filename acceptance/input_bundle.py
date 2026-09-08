@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from acceptance.canonical import digest
-from acceptance.primitives import AcceptanceFailure
+from acceptance.primitives import AcceptanceFailure, path_is_within
 
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -265,9 +265,9 @@ def validate_roots(
                 )
         finally:
             os.close(parent)
-        if root == repo_root or repo_root in root.parents:
+        if path_is_within(root, repo_root):
             raise AcceptanceFailure("contract_invalid", "managed root is inside repository")
     for index, left in enumerate(roots):
         for right in roots[index + 1 :]:
-            if left == right or left in right.parents or right in left.parents:
+            if path_is_within(left, right) or path_is_within(right, left):
                 raise AcceptanceFailure("contract_invalid", "managed roots overlap")

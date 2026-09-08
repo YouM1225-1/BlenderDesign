@@ -13,7 +13,7 @@ from types import MappingProxyType
 from acceptance import check_registry as reg
 from acceptance.canonical import canonicalize, digest
 from acceptance.input_bundle import read_bounded, source_digest, valid_id
-from acceptance.primitives import AcceptanceFailure
+from acceptance.primitives import AcceptanceFailure, path_is_within
 from acceptance.strict_json import strict_json_loads
 
 _MAX_CONTRACT_BYTES = 1024 * 1024
@@ -281,7 +281,7 @@ def load_contract(path: Path, *, candidate_root: Path) -> Contract:
         candidate_owner = candidate_root.resolve(strict=False)
         path_owner = path.resolve(strict=True)
         require(
-            path_owner != candidate_owner and candidate_owner not in path_owner.parents,
+            not path_is_within(path_owner, candidate_owner),
             "contract must live outside candidate input tree",
         )
         raw = read_bounded(path, _MAX_CONTRACT_BYTES)

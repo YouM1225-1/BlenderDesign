@@ -18,6 +18,28 @@ class AcceptanceFailure(RuntimeError):
         self.code = code
 
 
+def path_is_within(path: Path, root: Path) -> bool:
+    """Compare physical ownership; callers separately validate no-link access.
+
+    Missing suffixes retain their exact spelling, so prospective roots work
+    without guessing filesystem case or Unicode rules. Paths must be absolute.
+    """
+    def identity(value: Path) -> tuple[int, int, tuple[str, ...]]:
+        suffix: tuple[str, ...] = ()
+        while True:
+            try:
+                info = value.stat()
+                return info.st_dev, info.st_ino, suffix
+            except FileNotFoundError:
+                if value.parent == value:
+                    raise
+                suffix = (value.name, *suffix)
+                value = value.parent
+
+    owner = identity(root)
+    return any(identity(ancestor) == owner for ancestor in (path, *path.parents))
+
+
 def normalise_new_root(path: Path, repo_root: Path) -> Path:
     """返回一个规范化的、尚不存在的、位于 repo_root 之外的绝对路径。"""
     candidate = path.expanduser()
@@ -32,7 +54,7 @@ def normalise_new_root(path: Path, repo_root: Path) -> Path:
     else:
         raise AcceptanceFailure(
             "reused_evidence_root", f"evidence root already exists: {candidate}")
-    if candidate == repo_root or repo_root in candidate.parents:
+    if path_is_within(candidate, repo_root):
         raise AcceptanceFailure(
             "evidence_root_inside_candidate",
             "evidence root must be outside the candidate Git worktree",

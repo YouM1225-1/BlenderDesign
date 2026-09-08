@@ -276,3 +276,57 @@ def test_verify_bundle_does_not_suppress_traversal_errors(tmp_path, monkeypatch)
     monkeypatch.setattr(os, "scandir", failing_scandir)
     with pytest.raises(PermissionError, match="synthetic traversal failure"):
         verify_bundle(root, rows, max_file_bytes=32)
+
+
+@pytest.mark.parametrize(("name", "alias"), [("Input", "input"), ("é", "e\u0301")])
+@pytest.mark.parametrize("relation", ["equal", "child", "parent", "prospective_equal"])
+def test_validate_roots_rejects_physical_alias_overlap(tmp_path, name, alias, relation):
+    root, other = tmp_path / name, tmp_path / alias
+    root.mkdir()
+    if not other.exists() or not root.samefile(other):
+        pytest.skip("test filesystem does not support this directory alias")
+    repo, scratch = tmp_path / "repo", tmp_path / "scratch"
+    repo.mkdir()
+    scratch.mkdir()
+    if relation == "prospective_equal":
+        left, right = root / "new", other / "new"
+    elif relation == "equal":
+        left, right = root, other
+    else:
+        left, right = root, other / "child"
+        right.mkdir()
+        if relation == "parent":
+            left, right = right, left
+    with pytest.raises(AcceptanceFailure, match="overlap") as caught:
+        validate_roots(left, right, scratch, repo)
+    assert caught.value.code == "contract_invalid"
+
+
+@pytest.mark.parametrize(("name", "alias"), [("Repo", "repo"), ("é", "e\u0301")])
+@pytest.mark.parametrize("exists", [False, True])
+def test_validate_roots_rejects_physical_repository_alias(tmp_path, name, alias, exists):
+    repo, other = tmp_path / name, tmp_path / alias
+    repo.mkdir()
+    if not other.exists() or not repo.samefile(other):
+        pytest.skip("test filesystem does not support this directory alias")
+    source, scratch = tmp_path / "source", tmp_path / "scratch"
+    source.mkdir()
+    scratch.mkdir()
+    evidence = other / "evidence"
+    if exists:
+        evidence.mkdir()
+    with pytest.raises(AcceptanceFailure, match="inside repository") as caught:
+        validate_roots(source, evidence, scratch, repo)
+    assert caught.value.code == "contract_invalid"
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_validate_roots_accepts_disjoint_nfd_and_prospective_roots(tmp_path, exists):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    roots = [tmp_path / name for name in ("e\u0301-source", "evidence", "scratch")]
+    if exists:
+        for root in roots:
+            root.mkdir()
+    validate_roots(*roots, repo)
+    assert all(root.exists() == exists for root in roots)

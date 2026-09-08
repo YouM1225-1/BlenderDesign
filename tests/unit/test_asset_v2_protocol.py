@@ -330,3 +330,22 @@ def test_assemble_plan_rejects_malformed_job_before_attribute_access(tmp_path):
     with pytest.raises(AcceptanceFailure, match="jobs") as failure:
         assemble_plan(contract, [object()])
     assert failure.value.code == "contract_invalid"
+
+
+@pytest.mark.parametrize(("name", "alias"), [("Input", "input"), ("é", "e\u0301")])
+@pytest.mark.parametrize("relation", ["equal", "child", "parent"])
+def test_request_rejects_physical_root_alias_overlap(tmp_path, name, alias, relation):
+    request = request_fixture(tmp_path)
+    root = tmp_path / name
+    root.mkdir(exist_ok=True)
+    other = tmp_path / alias
+    if not other.exists() or not root.samefile(other):
+        pytest.skip("test filesystem does not support this directory alias")
+    child = other / "child"
+    child.mkdir()
+    left, right = (root, other) if relation == "equal" else (root, child)
+    if relation == "parent":
+        left, right = right, left
+    request.update(input_root=str(left), output_root=str(right))
+    with pytest.raises(ValueError, match="overlap"):
+        read_fixture(tmp_path, request)

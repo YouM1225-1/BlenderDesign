@@ -308,3 +308,30 @@ def test_formal_provenance_uses_absolute_system_git(monkeypatch):
     monkeypatch.setattr(e2e, "_bounded_process_stdout", fake_bounded)
     assert e2e._git_bytes(time.monotonic() + 1.0, "status") == b""
     assert seen == [["/usr/bin/git", "-c", "core.fsmonitor=false", "status"]]
+
+
+@pytest.mark.parametrize(("name", "alias"), [("Repo", "repo"), ("é", "e\u0301")])
+def test_phase0_rejects_physical_repository_alias_before_creation(
+    tmp_path, monkeypatch, capsys, name, alias
+):
+    repo, other = tmp_path / name, tmp_path / alias
+    repo.mkdir()
+    if not other.exists() or not repo.samefile(other):
+        pytest.skip("test filesystem does not support this directory alias")
+    monkeypatch.setattr(acceptance, "ROOT", repo)
+    root = other / "new-evidence"
+    with pytest.raises(acceptance.AcceptanceFailure) as caught:
+        acceptance._normalise_new_root(root)
+    assert caught.value.code == "evidence_root_inside_candidate"
+    assert acceptance.main(["--evidence-root", str(root)]) == 1
+    assert "evidence_root_inside_candidate" in capsys.readouterr().err
+    assert not root.exists()
+
+
+def test_phase0_accepts_outside_prospective_nfd_root(tmp_path, monkeypatch):
+    repo = tmp_path / "Repo"
+    repo.mkdir()
+    monkeypatch.setattr(acceptance, "ROOT", repo)
+    root = tmp_path / "e\u0301-evidence"
+    assert acceptance._normalise_new_root(root) == root
+    assert not root.exists()

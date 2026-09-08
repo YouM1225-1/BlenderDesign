@@ -17,7 +17,7 @@ from acceptance.input_bundle import (
     safe_open,
     valid_id,
 )
-from acceptance.primitives import AcceptanceFailure
+from acceptance.primitives import AcceptanceFailure, path_is_within
 from acceptance.strict_json import strict_json_loads
 
 IDENTITY = (
@@ -142,7 +142,7 @@ def _artifact_descriptor(row: Any) -> dict[str, Any]:
     return cast(dict[str, Any], row)
 
 
-def _root(value: Any) -> tuple[Path, tuple[int, int]]:
+def _root(value: Any) -> Path:
     ensure(type(value) is str and Path(value).is_absolute(), "absolute root required")
     path = Path(value)
     ensure(".." not in path.parts, "root cannot contain '..'")
@@ -151,7 +151,7 @@ def _root(value: Any) -> tuple[Path, tuple[int, int]]:
         descriptor, _ = open_parent(path / "__worker_entry__")
         info = os.fstat(descriptor)
         ensure(stat.S_ISDIR(info.st_mode), "root must be a directory")
-        return path, (info.st_dev, info.st_ino)
+        return path
     except (AcceptanceFailure, OSError) as exc:
         raise ValueError(f"invalid no-link root: {exc}") from exc
     finally:
@@ -203,15 +203,16 @@ def read_request(path: Path) -> dict[str, Any]:
     outputs = [_output_descriptor(row) for row in value["outputs"]]
     _unique(inputs, "input")
     _unique(outputs, "output")
-    input_root, input_identity = _root(value["input_root"])
-    output_root, output_identity = _root(value["output_root"])
-    ensure(
-        input_identity != output_identity
-        and input_root != output_root
-        and input_root not in output_root.parents
-        and output_root not in input_root.parents,
-        "input/output roots overlap",
-    )
+    input_root = _root(value["input_root"])
+    output_root = _root(value["output_root"])
+    try:
+        ensure(
+            not path_is_within(input_root, output_root)
+            and not path_is_within(output_root, input_root),
+            "input/output roots overlap",
+        )
+    except OSError as exc:
+        raise ValueError(f"invalid root ownership: {exc}") from exc
     for row in inputs:
         measured = artifact(input_root / row["path"], row["id"], row["path"], row["bytes"])
         ensure(measured == row, "input identity mismatch")
@@ -310,7 +311,7 @@ def write_result(
     ensure(type(request) is dict, "request must be an object")
     check_identity(request)
     ensure(type(request.get("outputs")) is list, "request outputs must be a list")
-    root, _ = _root(request.get("output_root"))
+    root = _root(request.get("output_root"))
     outputs = [_output_descriptor(row) for row in request["outputs"]]
     _unique(outputs, "output")
     result = {key: request[key] for key in IDENTITY}

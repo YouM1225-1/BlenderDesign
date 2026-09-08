@@ -217,3 +217,30 @@ def test_membership_identifiers_require_exact_shape(tmp_path, field, bad_value):
     with pytest.raises(AcceptanceFailure) as loaded:
         write_contract(tmp_path, value)
     assert loaded.value.code == "contract_invalid"
+
+
+@pytest.mark.parametrize(("name", "alias"), [("Candidate", "candidate"), ("é", "e\u0301")])
+def test_contract_rejects_physical_candidate_alias(tmp_path, name, alias):
+    value = valid_document(tmp_path)
+    candidate, other = tmp_path / name, tmp_path / alias
+    candidate.mkdir()
+    if not other.exists() or not candidate.samefile(other):
+        pytest.skip("test filesystem does not support this directory alias")
+    path = candidate / "nested" / "contract.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(AcceptanceFailure, match="outside candidate") as caught:
+        load_contract(path, candidate_root=other)
+    assert caught.value.code == "contract_invalid"
+
+
+@pytest.mark.parametrize("prospective", [False, True])
+def test_contract_accepts_outside_nfd_candidate(tmp_path, prospective):
+    value = valid_document(tmp_path)
+    candidate = tmp_path / "e\u0301-candidate"
+    if not prospective:
+        candidate.mkdir()
+    path = tmp_path / "contract.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    assert load_contract(path, candidate_root=candidate).artifact_kind == "blend_native"
+    assert candidate.exists() != prospective
