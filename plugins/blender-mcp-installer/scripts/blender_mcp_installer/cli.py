@@ -235,8 +235,9 @@ def _parser() -> argparse.ArgumentParser:
         subparser.add_argument("--uv", required=True, type=_executable)
         if command in {"install", "finalize"}:
             subparser.add_argument("--workflow-id", required=command == "finalize")
-        if command == "install":
+        if command in {"install", "rollback"}:
             subparser.add_argument("--handoff-id")
+        if command == "install":
             for flag in (
                 "allow-extension-install",
                 "allow-online-access",

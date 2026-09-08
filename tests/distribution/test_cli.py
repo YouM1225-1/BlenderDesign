@@ -2665,3 +2665,114 @@ def test_install_exception_recovery_busy_runtime_preserves_targets_and_retries(t
         assert result["changed"] is True
         assert cli.load_receipt(receipt, roots).status is ReceiptStatus.ROLLED_BACK
         assert cli.load_receipt(Path(result["receipt"]), roots).status is ReceiptStatus.INSTALLED
+
+
+def test_rollback_legacy_restored_runtime_accepts_explicit_handoff(
+    tmp_path, monkeypatch, capsys,
+):
+    import hashlib
+    from blender_mcp_installer import upgrade_handoff
+    from blender_mcp_installer.upgrade_locks import usage_lock
+    from blender_mcp_installer.upgrade_state import UpgradeRoots, state_root
+
+    real_context = cli._context
+    with (_userpref_completion_fault_scenario(tmp_path) as context,
+          monkeypatch.context() as monkeypatch):
+        roots = context.roots
+        # Keep real CLI argument parsing and context propagation; isolate host probes.
+        monkeypatch.setattr(cli, "_context", real_context)
+        checkout = SimpleNamespace(
+            repository_root=ROOT, bundle_root=ARTIFACTS,
+            trusted_checksums=(context.manifest_sha256 + "  manifest.json\n").encode(),
+        )
+        monkeypatch.setattr(cli, "verify_distribution_checkout", lambda *_args: checkout)
+        monkeypatch.setattr(cli, "open_verified_bundle", lambda *_args: nullcontext(context.verified))
+        monkeypatch.setattr(cli, "_environment", lambda: context.host.env)
+        monkeypatch.setattr(cli, "_resolve_python", lambda: context.host.python_bin)
+        monkeypatch.setattr(cli, "resolve_blender_paths", lambda *_args: roots.blender)
+        monkeypatch.setattr(cli, "probe_host", lambda *_args: context.host)
+        host = SimpleNamespace(
+            blender=context.host.blender_bin, codex=context.host.codex_bin,
+            uv=context.host.uv_bin, state_root=roots.state_root,
+        )
+        roots.runtime.mkdir(parents=True, mode=0o700)
+        (roots.runtime / "legacy-payload").write_bytes(b"lease-less preimage")
+        original_runtime = _captured(roots.runtime, tree=True)
+        upgrade_roots = UpgradeRoots(roots.home, roots.codex_home)
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            record = {
+                "pid": str(child.pid), "uid": str(os.getuid()),
+                "started": "isolated owned child",
+                "command_sha256": hashlib.sha256(b"isolated owned child").hexdigest(),
+            }
+            # Synthetic inventory is confined to this isolated owned-child fixture.
+            monkeypatch.setattr(upgrade_handoff, "process_snapshot", lambda *_args: (record,))
+            with state_root(upgrade_roots) as state:
+                handoff = upgrade_handoff.begin_handoff(
+                    state, upgrade_roots, roots.runtime, context.host.codex_bin,
+                )
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+        monkeypatch.setattr(upgrade_handoff, "process_snapshot", lambda *_args: ())
+        handoff_args = ["--handoff-id", handoff["handoff_id"]]
+        assert cli.run_cli(_argv(host, "install") + handoff_args, NoOpFaultInjector()) == 0
+        receipt = Path(json.loads(capsys.readouterr().out)["receipt"])
+        argv = _argv(host, "rollback")
+        argv[-1] = str(receipt)
+        with pytest.raises(SystemExit, match="70"):
+            cli.run_cli(argv, ExitFaultInjector("after_runtime_tree_restore_swap", 70))
+        assert cli.load_receipt(receipt, roots).status is ReceiptStatus.ROLLBACK_PENDING
+        assert _captured(roots.runtime, tree=True) == original_runtime
+        assert not (roots.runtime / ".blender-mcp-usage-v1").exists()
+        before = _runtime_recovery_images(roots, receipt)
+        state_before = _captured(roots.state_root, tree=True)
+        assert cli.run_cli(argv, NoOpFaultInjector()) == 1
+        assert json.loads(capsys.readouterr().out)["error"] == "legacy_handoff_required"
+        assert _runtime_recovery_images(roots, receipt) == before
+        assert _captured(roots.state_root, tree=True) == state_before
+
+        proof = roots.state_root / "handoffs" / (handoff["handoff_id"] + ".json")
+        valid_proof = proof.read_bytes()
+        invalid_proof = json.loads(valid_proof)
+        invalid_proof["runtime"] = str(roots.runtime.parent / "different-runtime")
+        proof.write_text(json.dumps(invalid_proof))
+        state_before = _captured(roots.state_root, tree=True)
+        assert cli.run_cli(argv + handoff_args, NoOpFaultInjector()) == 1
+        assert json.loads(capsys.readouterr().out)["error"] == "legacy_handoff_required"
+        assert _runtime_recovery_images(roots, receipt) == before
+        assert _captured(roots.state_root, tree=True) == state_before
+        proof.write_bytes(valid_proof)
+
+        # Even a valid legacy handoff cannot bypass the restored inode's lease.
+        with state_root(upgrade_roots) as state:
+            with usage_lock(state, original_runtime.dev, original_runtime.ino, exclusive=False) as acquired:
+                assert acquired
+                assert cli.run_cli(argv + handoff_args, NoOpFaultInjector()) == 1
+                assert json.loads(capsys.readouterr().out)["error"] == "runtime_in_use"
+                assert _runtime_recovery_images(roots, receipt) == before
+        assert cli.run_cli(argv + handoff_args, NoOpFaultInjector()) == 0
+        assert json.loads(capsys.readouterr().out)["status"] == "rolled_back"
+        terminal = cli.load_receipt(receipt, roots)
+        assert terminal.status is ReceiptStatus.ROLLED_BACK
+        assert all(action.state in {ActionState.CLEANED, ActionState.RESTORED}
+                   for action in terminal.actions)
+        for action in terminal.actions:
+            target = Path(action.target_path)
+            assert not (target.parent / action.stage_basename).exists()
+            if action.recovery_basename is not None:
+                assert not (target.parent / action.recovery_basename).exists()
+        assert not roots.bundle_stage(terminal.install_id).exists()
+        assert not roots.previous_active(terminal.install_id).exists()
+        assert not roots.pending.exists()
+        assert not roots.active.exists()
+        assert not roots.extension_target.exists()
+        assert not roots.userpref_target.exists()
+        assert not roots.codex_config.exists()
+        assert _captured(roots.runtime, tree=True) == original_runtime
+        assert not (roots.runtime / ".blender-mcp-usage-v1").exists()
+        completed = _runtime_recovery_images(roots, receipt)
+        assert cli.run_cli(argv + handoff_args, NoOpFaultInjector()) == 0
+        assert json.loads(capsys.readouterr().out)["status"] == "rolled_back"
+        assert _runtime_recovery_images(roots, receipt) == completed
