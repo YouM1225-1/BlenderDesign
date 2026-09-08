@@ -80,7 +80,7 @@ if test "${RELEASE:-0}" = 1 || test "${VERIFY_DISTRIBUTION_INTEGRITY:-0}" = 1; t
   : "${BLENDER_BIN:?distribution verification requires BLENDER_BIN}"
   case "$OFFICIAL_MCP_SOURCE:$BLENDER_BIN" in
     /*:/*) ;;
-    *) echo "FAIL: release paths must be absolute"; exit 1 ;;
+    *) echo "FAIL: distribution verification paths must be absolute"; exit 1 ;;
   esac
   test -d "$OFFICIAL_MCP_SOURCE/.git"
   test -x "$BLENDER_BIN"
