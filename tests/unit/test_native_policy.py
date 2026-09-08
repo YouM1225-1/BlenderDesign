@@ -65,6 +65,34 @@ def test_complete_policy_and_closed_job_parameters() -> None:
         )
 
 
+@pytest.mark.parametrize("center", [[-1, 0, 0], [-0.5, 0, 0]])
+def test_policy_accepts_signed_reference_center_coordinates(center: list[int | float]) -> None:
+    value = policy()
+    value["render"]["reference_center"] = center
+    validate_native_policy(value)
+
+
+@pytest.mark.parametrize(
+    ("location", "value"),
+    [
+        (("render", "reference_radius"), 0),
+        (("render", "reference_radius"), -1),
+        (("render", "max_abs", "beauty"), -0.1),
+        (("render", "max_abs", "beauty"), 1.1),
+    ],
+)
+def test_policy_rejects_radius_and_threshold_sign_boundaries(
+    location: tuple[str, ...], value: int | float
+) -> None:
+    candidate = policy()
+    target = candidate
+    for key in location[:-1]:
+        target = target[key]
+    target[location[-1]] = value
+    with pytest.raises(ValueError):
+        validate_native_policy(candidate)
+
+
 @pytest.mark.parametrize(
     "change",
     [

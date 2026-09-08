@@ -26,14 +26,20 @@ def exact(value: Any, keys: set[str]) -> None:
         raise ValueError("closed native policy keys mismatch")
 
 
-def number(value: Any, *, positive: bool = False) -> None:
+def finite_number(value: Any) -> None:
     if type(value) not in (int, float):
         raise ValueError("finite native number required")
     try:
         finite = math.isfinite(value)
     except OverflowError as exc:
         raise ValueError("finite native number required") from exc
-    if not finite or (value <= 0 if positive else value < 0):
+    if not finite:
+        raise ValueError("finite native number required")
+
+
+def number(value: Any, *, positive: bool = False) -> None:
+    finite_number(value)
+    if value <= 0 if positive else value < 0:
         raise ValueError("finite native number required")
 
 
@@ -84,7 +90,7 @@ def validate_native_policy(value: Any) -> None:
     if not isinstance(render["reference_center"], list) or len(render["reference_center"]) != 3:
         raise ValueError("reference center needs three coordinates")
     for item in render["reference_center"]:
-        number(item)
+        finite_number(item)
     number(render["reference_radius"], positive=True)
     exact(render["platform"], PLATFORM_FIELDS)
     if any(not isinstance(v, str) or not v for v in render["platform"].values()):
