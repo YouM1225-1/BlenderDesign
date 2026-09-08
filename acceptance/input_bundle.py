@@ -16,6 +16,10 @@ _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 
 
+def _stat_signature(s: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+
+
 def valid_id(value: object) -> bool:
     return type(value) is str and _ID.fullmatch(value) is not None
 
@@ -101,10 +105,7 @@ def measure_file(
                     view = view[written:]
         after = os.fstat(src)
 
-        def signature(s: os.stat_result) -> tuple[int, int, int, int, int]:
-            return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-
-        if signature(before) != signature(after) or count != before.st_size:
+        if _stat_signature(before) != _stat_signature(after) or count != before.st_size:
             raise AcceptanceFailure("hash_mismatch", "file changed while reading")
         if dst >= 0:
             os.fsync(dst)
@@ -227,12 +228,9 @@ def read_bounded(path: Path, max_bytes: int) -> bytes:
             remaining -= len(chunk)
         after = os.fstat(fd)
 
-        def signature(s: os.stat_result) -> tuple[int, int, int, int, int]:
-            return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-
         raw = b"".join(chunks)
         if (
-            signature(before) != signature(after)
+            _stat_signature(before) != _stat_signature(after)
             or len(raw) != before.st_size
             or len(raw) > max_bytes
         ):

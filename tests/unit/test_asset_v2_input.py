@@ -32,6 +32,30 @@ def test_freeze_survives_original_edit_and_rechecks_members(tmp_path):
         verify_bundle(root, rows, max_file_bytes=32)
 
 
+@pytest.mark.parametrize("replacement", [b"target", b"changed!"])
+def test_verify_rejects_frozen_member_drift(tmp_path, replacement):
+    original = tmp_path / "source.blend"
+    original.write_bytes(b"before")
+    root = tmp_path / "frozen"
+    rows = freeze_bundle(
+        [{"id": "asset", "path": "asset.blend", "source": str(original)}],
+        root,
+        max_files=1,
+        max_file_bytes=32,
+        max_total_bytes=32,
+    )
+    assert verify_bundle(root, rows, max_file_bytes=32)["asset"].bytes == 6
+
+    frozen = root / "asset.blend"
+    os.chmod(frozen, 0o600)
+    frozen.write_bytes(replacement)
+    with pytest.raises(AcceptanceFailure) as caught:
+        verify_bundle(root, rows, max_file_bytes=32)
+
+    assert caught.value.code == "hash_mismatch"
+    assert original.read_bytes() == b"before"
+
+
 @pytest.mark.parametrize("kind", ["symlink", "fifo", "parent_link", "too_large"])
 def test_streaming_reader_rejects_unsafe_paths(tmp_path, kind):
     real = tmp_path / "real"
