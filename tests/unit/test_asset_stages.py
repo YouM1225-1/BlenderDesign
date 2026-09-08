@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from acceptance import stages
+from scripts import asset_accept as stages
 from acceptance.contract import load_contract
 from scripts import asset_accept
 from tests.unit.asset_v2_support import valid_document

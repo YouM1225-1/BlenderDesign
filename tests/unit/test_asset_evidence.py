@@ -1,7 +1,7 @@
 import pytest
 
 from acceptance.contract import Contract
-from acceptance.evidence import summary_document
+from scripts.asset_accept import summary_document
 from acceptance.primitives import AcceptanceFailure
 
 

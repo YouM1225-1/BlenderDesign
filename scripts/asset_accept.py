@@ -9,20 +9,156 @@ import os
 import stat
 import sys
 from pathlib import Path
+from dataclasses import dataclass
+from typing import Any
 
 import platform
 
 from acceptance import check_registry as reg
-from acceptance import evidence
-from acceptance import stages
 from acceptance import toolchain
 from acceptance.contract import Contract, load_contract
-from acceptance.decide import Finding, aggregate, decide
+from acceptance.decide import Finding, Verdict, aggregate, decide
 from acceptance.primitives import (
     AcceptanceFailure,
+    write_json_exclusive,
     create_private_directory,
     normalise_new_root,
 )
+
+# Temporary legacy CLI helpers; Task 8 removes these with the CLI cutover.
+def _error(code: str, detail: str) -> Finding:
+    return Finding(code=code, severity="error", detail=detail)
+
+
+@dataclass(frozen=True, slots=True)
+class InputResult:
+    """一次安全打开得到的输入摘要、大小与失败证据。"""
+
+    digest: str | None
+    size: int | None
+    digest_finding: Finding | None = None
+    identity_finding: Finding | None = None
+
+
+def run_r0(contract: Contract, *, tools_present: set[str]) -> dict[str, list[Finding]]:
+    """schema 与 N/A 集在 load_contract 已强制,故此处只补工具存在性。"""
+    missing = [tool["id"] for tool in contract.raw["tools"]
+               if tool["id"] not in tools_present]
+    return {
+        "r0.contract.schema_closed": [],
+        "r0.contract.tools_locked": [
+            _error("tool_not_installed", f"locked tools not present: {sorted(missing)}")
+        ] if missing else [],
+        "r0.contract.na_set_declared": [],
+    }
+
+
+def run_r1(contract: Contract, input_result: InputResult) -> dict[str, list[Finding]]:
+    """R1:只消费摘要读取时绑定到同一 fd/inode 的结果。"""
+    digest_findings = [] if input_result.digest is not None else [
+        input_result.digest_finding
+        or _error("input_unreadable", "input digest was not completed")
+    ]
+    link_findings = (
+        [] if input_result.identity_finding is None else [input_result.identity_finding]
+    )
+    size_findings: list[Finding] = []
+    limit = contract.raw["budget"]["max_file_bytes"]
+    if input_result.size is not None and input_result.size > limit:
+        size_findings.append(
+            _error("input_too_large", f"{input_result.size} bytes exceeds {limit}"))
+    return {"r1.input.digest_recorded": digest_findings,
+            "r1.input.no_link_or_device": link_findings,
+            "r1.input.size_within_limit": size_findings}
+
+
+def run_r5(
+    contract: Contract,
+    *,
+    evidence_manifest: list[dict[str, Any]],
+    recomputed_digest: str,
+) -> dict[str, list[Finding]]:
+    drift = [
+        entry["id"] for entry in evidence_manifest
+        if "actual_sha256" in entry and entry["actual_sha256"] != entry["sha256"]
+    ]
+    return {
+        "r5.evidence.manifest_closed": [],
+        "r5.evidence.hashes_match": [
+            _error("evidence_hash_drift", f"hash drift on: {sorted(drift)}")
+        ] if drift else [],
+        "r5.contract.digest_stable": [
+            _error("contract_digest_drift",
+                   f"expected {contract.digest}, recomputed {recomputed_digest}")
+        ] if recomputed_digest != contract.digest else [],
+    }
+
+
+def summary_document(
+    *,
+    contract: Contract | None,
+    verdict: Verdict | None,
+    achieved_grade: str,
+    platform_key: str,
+    started_at: str,
+    completed_at: str,
+    evidence_manifest: list[dict[str, object]],
+    runner_provenance: dict[str, Any],
+    failure_code: str | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    if verdict is not None:
+        for outcome in verdict.outcomes:
+            checks.append({
+                "id": outcome.id,
+                "stage": outcome.stage,
+                "raw_status": outcome.raw_status,
+                "effective_status": outcome.effective_status,
+                "accepted": outcome.accepted,
+                "tool_id": outcome.tool_id,
+                "tool_version": outcome.tool_version,
+                "findings": [
+                    {"code": f.code, "severity": f.severity, "pointer": f.pointer,
+                     "offset": f.offset, "disposition": f.disposition,
+                     "detail": f.detail}
+                    for f in outcome.findings
+                ],
+                "source_truncated": outcome.source_truncated,
+                "detail": outcome.findings[0].detail if outcome.findings else None,
+                "metrics": None,
+            })
+    success = bool(verdict is not None and verdict.success)
+    return {
+        "schema_version": 1,
+        "kind": "asset_acceptance",
+        "success": success,
+        "contract_id": None if contract is None else contract.raw.get("contract_id"),
+        "contract_digest": None if contract is None else contract.digest,
+        "artifact_kind": None if contract is None else contract.artifact_kind,
+        "required_isolation_grade": (
+            None if contract is None else contract.required_isolation_grade),
+        "achieved_isolation_grade": achieved_grade,
+        "platform_key": platform_key,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "stages": {},
+        "checks": checks,
+        "evidence_manifest": evidence_manifest,
+        "advisories": [],
+        "failure_code": (
+            failure_code if verdict is None else verdict.failure_code),
+        "failed_check_ids": [] if verdict is None else verdict.failed_check_ids,
+        "error": error,
+        "runner_provenance": runner_provenance,
+    }
+
+
+def write_summary(root: Path, document: dict[str, Any]) -> Path:
+    path = root / "summary.json"
+    write_json_exclusive(path, document)
+    return path
+
 
 ROOT = Path(__file__).resolve().parents[1]
 _UNREADABLE_DIGEST = "0" * 64  # sha256 撞不出的哨兵值:标记"没能记录 digest"
@@ -51,7 +187,7 @@ def _acceptance_provenance() -> tuple[str, list[dict[str, str]]]:
     return str(observed["version"]), files
 
 
-def _input_digest(path: Path) -> stages.InputResult:
+def _input_digest(path: Path) -> InputResult:
     """安全打开一次输入并返回绑定到该 fd/inode 的摘要、大小与失败证据。
 
     有界流式读取,不做 `read_bytes()` 式的无界一次性读入(700 MiB 输入曾把峰值 RSS
@@ -68,18 +204,18 @@ def _input_digest(path: Path) -> stages.InputResult:
     try:
         before = path.lstat()
     except OSError as exc:
-        return stages.InputResult(
+        return InputResult(
             None, None,
             Finding("input_missing", "error", detail=f"cannot stat input: {exc}"),
         )
     if stat.S_ISLNK(before.st_mode):
-        return stages.InputResult(
+        return InputResult(
             None, before.st_size,
             Finding("input_unreadable", "error", detail="input is a symlink"),
             Finding("input_is_symlink", "error", detail=str(path)),
         )
     if not stat.S_ISREG(before.st_mode):
-        return stages.InputResult(
+        return InputResult(
             None, before.st_size,
             Finding("input_unreadable", "error", detail="input is not a regular file"),
             Finding("input_not_regular_file", "error", detail=str(path)),
@@ -95,7 +231,7 @@ def _input_digest(path: Path) -> stages.InputResult:
                     "input_identity_changed", "error", detail=str(path))
         except OSError:
             identity_finding = Finding("input_identity_changed", "error", detail=str(path))
-        return stages.InputResult(
+        return InputResult(
             None, before.st_size,
             Finding("input_unreadable", "error", detail=f"cannot open input: {exc}"),
             identity_finding,
@@ -106,13 +242,13 @@ def _input_digest(path: Path) -> stages.InputResult:
         opened_size = opened.st_size
         if (not stat.S_ISREG(opened.st_mode)
                 or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
-            return stages.InputResult(
+            return InputResult(
                 None, None,
                 Finding("input_unreadable", "error", detail="input identity changed"),
                 Finding("input_identity_changed", "error", detail=str(path)),
             )
         if opened.st_size > _MAX_INPUT_DIGEST_BYTES:
-            return stages.InputResult(
+            return InputResult(
                 None, opened.st_size,
                 Finding(
                     "input_digest_too_large", "error",
@@ -128,7 +264,7 @@ def _input_digest(path: Path) -> stages.InputResult:
                 break
             total += len(chunk)
             if total > _MAX_INPUT_DIGEST_BYTES:
-                return stages.InputResult(
+                return InputResult(
                     None, total,
                     Finding(
                         "input_digest_too_large", "error",
@@ -137,9 +273,9 @@ def _input_digest(path: Path) -> stages.InputResult:
                     ),
                 )
             hasher.update(chunk)
-        return stages.InputResult(hasher.hexdigest(), total)
+        return InputResult(hasher.hexdigest(), total)
     except OSError as exc:
-        return stages.InputResult(
+        return InputResult(
             None, opened_size,
             Finding("input_unreadable", "error", detail=f"cannot read input: {exc}"),
         )
@@ -196,15 +332,15 @@ def main(argv: list[str] | None = None) -> int:
         # Task 8:9 条 coordinator-owned check(R0/R1/R5,规范 §7.1 中不依赖外部进程的部分)
         # 真实接入;其余 stage(R2-R4 与外部工具)由后续计划接入,维持 NotTested。
         collected: dict[str, list[Finding]] = {}
-        collected.update(stages.run_r0(contract, tools_present=_present_tools(contract)))
-        collected.update(stages.run_r1(contract, input_result))
+        collected.update(run_r0(contract, tools_present=_present_tools(contract)))
+        collected.update(run_r1(contract, input_result))
         # 规范 §2.5.1 与 §2.6 条款 1:R5 必须用同一算法对同一合同路径**重算** digest 再
         # 比对(TOCTOU 检查),不能拿 R0 时记下的 contract.digest 跟它自己比——那样构造
         # 上永远不可能失败。复算失败(例如合同在此期间被删除或改坏)按既有 fail-closed
         # 路径处理:load_contract 抛出的 AcceptanceFailure 会被下面统一的 except 捕获。
         recomputed_digest = load_contract(
             args.contract, candidate_root=args.input.parent).digest
-        collected.update(stages.run_r5(
+        collected.update(run_r5(
             contract, evidence_manifest=[], recomputed_digest=recomputed_digest))
         wired = set(collected)
 
@@ -242,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
         error = f"{type(exc).__name__}: {exc}"
 
     try:
-        document = evidence.summary_document(
+        document = summary_document(
             contract=contract, verdict=verdict, achieved_grade="local-trusted",
             # P0 不渲染,故 platform_key 的后三段(engine/backend/vendor)填 none;
             # Plan B 接入 render_views 后由 gpu.init() 探测填真值(规范 §5.3)。
@@ -251,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
             completed_at=datetime.datetime.now(datetime.UTC).isoformat(),
             evidence_manifest=[], runner_provenance=provenance,
             failure_code=failure_code, error=error)
-        evidence.write_summary(root, document)
+        write_summary(root, document)
     except Exception as exc:                      # noqa: BLE001 - 连 summary 都造不出/写不出
         print(f"ASSET_ACCEPT_FAIL runner_internal_error: {exc}", file=sys.stderr)
         return 1

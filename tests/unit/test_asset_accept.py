@@ -366,7 +366,7 @@ def test_digest_size_is_the_completed_byte_count_when_file_grows(tmp_path, monke
         _contract_file(tmp_path, max_file_bytes=4, asset_bytes=b"lock"),
         candidate_root=asset.parent,
     )
-    findings = asset_accept.stages.run_r1(contract, result)
+    findings = asset_accept.run_r1(contract, result)
     assert [f.code for f in findings["r1.input.size_within_limit"]] == ["input_too_large"]
 
 
