@@ -395,6 +395,7 @@ assert not results["eevee_output"]["scope_gaps"]
 assert results["eevee_output"]["occurrences_complete"]
 assert not any(c["findings"] for c in inspect_checks(results["eevee_output"], True))
 assert not scene_geometry_findings(results["eevee_output"])
+assert not reference_findings(results["eevee_output"], reference)
 for name, kind in [
     ("offscene_object", "objects"),
     ("orphan_mesh", "meshes"),
