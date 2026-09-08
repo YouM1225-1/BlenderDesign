@@ -249,7 +249,7 @@ def _validate_review(
                 or image["id"] in viewed
             ):
                 raise AcceptanceFailure("tool_output_invalid", "invalid reviewed image")
-            if images.get(image["id"]) != image["sha256"]:
+            if image["id"] not in images or images[image["id"]] != image["sha256"]:
                 raise AcceptanceFailure("hash_mismatch", "reviewed image identity mismatch")
             viewed[image["id"]] = image["sha256"]
         if not set(policy["required_image_ids"]) <= set(viewed):

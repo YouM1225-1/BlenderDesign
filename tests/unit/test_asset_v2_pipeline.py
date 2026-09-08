@@ -1,5 +1,6 @@
 from collections import defaultdict
 import datetime
+import hashlib
 import json
 import sys
 import pytest
@@ -159,6 +160,38 @@ def test_review_does_not_rewrite_v_and_wrong_binding_cannot_seal(tmp_path):
         finish_review(evidence, delivery_path=setup[2].path, review=bad)
     complete = finish_review(evidence, delivery_path=setup[2].path, review=review)
     assert complete["state"] == "SHIP" and (evidence / "summary.json").read_bytes() == before
+
+
+def test_finish_review_rejects_unknown_image_with_null_sha(tmp_path):
+    setup = mock_run(tmp_path, require_review=True)
+    pending = seal_fixture(tmp_path, setup)
+    evidence = setup[3]
+    before = (evidence / "summary.json").read_bytes()
+    before_manifest = (evidence / "evidence-manifest.json").read_bytes()
+    review = {
+        "schema_version": 2,
+        "bindings": pending["bindings"],
+        "records": [
+            {
+                "reviewer_id": "fixture-reviewer",
+                "outcome": "approved",
+                "reviewed_images": [{"id": "nonexistent-image", "sha256": None}],
+                "reviewed_at": datetime.datetime.now(datetime.UTC).isoformat(),
+                "note": "fixture malformed image",
+            }
+        ],
+    }
+    with pytest.raises(AcceptanceFailure) as caught:
+        finish_review(evidence, delivery_path=setup[2].path, review=review)
+    assert caught.value.code == "hash_mismatch"
+    assert (evidence / "summary.json").read_bytes() == before
+    assert (evidence / "evidence-manifest.json").read_bytes() == before_manifest
+    assert (pending["bindings"]["E"], pending["bindings"]["V"]) == (
+        hashlib.sha256(before_manifest).hexdigest(),
+        hashlib.sha256(before).hexdigest(),
+    )
+    assert not (evidence / "review.json").exists()
+    assert not (evidence / "completion.json").exists()
 
 
 def test_safe_blocking_preserves_asset_failure_and_no_render_launch(tmp_path):
