@@ -1,22 +1,20 @@
-"""规范 §2.5 与 §2.6 的唯一实现处。其他模块不得复制判定逻辑。"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 
-from acceptance import check_registry as reg
-from acceptance import failure_codes as fc
+from acceptance import check_registry as reg, failure_codes as fc
 from acceptance.contract import Contract
 from acceptance.primitives import AcceptanceFailure
 
-_GRADE_ORDER = {"local-trusted": 0, "isolated": 1, "attested": 2}
-_VALID_SEVERITIES = frozenset({"error", "warning", "info"})
-_VALID_TERMINALS = frozenset({None, "Crash", "Missing", "NotTested"})
+_SPEC = {spec.id: spec for spec in reg.CHECKS}
+_TERMINALS = {None, "Crash", "Missing", "NotTested"}
 
 
 @dataclass(frozen=True, slots=True)
 class Finding:
     code: str
-    severity: str                 # "error" | "warning" | "info"
+    severity: str
     pointer: str | None = None
     offset: int | None = None
     detail: str | None = None
@@ -37,15 +35,37 @@ class CheckOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class Gate:
+    complete: bool
+    findings: tuple[Finding, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class Verdict:
     success: bool
     failure_code: str | None
-    failed_check_ids: list[str] = field(default_factory=list)
+    failed_check_ids: tuple[str, ...] = ()
     outcomes: tuple[CheckOutcome, ...] = ()
+    failed_gate_ids: tuple[str, ...] = ()
+    gates: tuple[tuple[str, Gate], ...] = ()
 
 
-_SPEC_BY_ID = {spec.id: spec for spec in reg.CHECKS}
-_VALID_ARTIFACT_KINDS = frozenset(spec.kind for spec in reg.CHECKS if spec.kind != "all")
+def validate_finding(finding: Finding) -> None:
+    if (
+        type(finding) is not Finding
+        or type(finding.code) is not str
+        or not finding.code
+        or finding.severity not in ("error", "warning", "info")
+        or any(
+            getattr(finding, key) is not None and type(getattr(finding, key)) is not str
+            for key in ("pointer", "detail", "disposition")
+        )
+        or (
+            finding.offset is not None
+            and (type(finding.offset) is not int or finding.offset < 0)
+        )
+    ):
+        raise AcceptanceFailure("tool_output_invalid", "invalid finding")
 
 
 def aggregate(
@@ -58,58 +78,82 @@ def aggregate(
     source_truncated: bool,
     terminal: str | None,
 ) -> CheckOutcome:
-    """规范 §2.5 第一步与第二步。terminal 为 coordinator 观测到的 Crash/Missing/NotTested。"""
-    spec = _SPEC_BY_ID.get(check_id)
-    if spec is None:
-        raise AcceptanceFailure(
-            "expected_set_mismatch", f"unknown check id: {check_id}")
-    if terminal not in _VALID_TERMINALS:
-        raise AcceptanceFailure(
-            "tool_output_invalid", f"unknown terminal status: {terminal!r}")
-    dispositioned: list[Finding] = []
-    for item in findings:
-        if item.severity not in _VALID_SEVERITIES:
-            raise AcceptanceFailure(
-                "tool_output_invalid",
-                f"unknown finding severity: {item.severity!r}")
-        accepted = (
-            item.severity == "warning"
-            and tool_id is not None
-            and tool_version is not None
-            and contract.allowlisted(check_id, item.code, tool_id, tool_version)
-        )
-        dispositioned.append(
-            replace(item, disposition="AcceptedWarning" if accepted else None))
-
-    accepted_flag = False
+    if (
+        type(check_id) is not str
+        or (terminal is not None and type(terminal) is not str)
+        or type(source_truncated) is not bool
+        or check_id not in _SPEC
+        or terminal not in _TERMINALS
+    ):
+        raise AcceptanceFailure("tool_output_invalid", "invalid aggregate identity/state")
+    spec = _SPEC[check_id]
     if check_id in contract.na_check_ids:
-        raw = "NotApplicableByContract"
-    elif terminal == "Crash":
-        raw = "Crash"
-    elif terminal in ("Missing", "NotTested"):
+        if (
+            findings
+            or terminal is not None
+            or source_truncated
+            or tool_id is not None
+            or tool_version is not None
+        ):
+            raise AcceptanceFailure(
+                "forged_not_applicable", "N/A cannot contain a job or its accident"
+            )
+        return CheckOutcome(
+            check_id,
+            spec.stage,
+            "NotApplicableByContract",
+            "NotApplicable",
+            False,
+            None,
+            None,
+            (),
+            False,
+        )
+    tools = {tool["id"]: tool["version"] for tool in contract.raw["tools"]}
+    if (
+        type(tool_id) is not str
+        or type(tool_version) is not str
+        or tool_id not in tools
+        or tool_version != tools[tool_id]
+    ):
+        raise AcceptanceFailure(
+            "toolchain_mismatch", "outcome tool identity differs from contract"
+        )
+    normalized = []
+    for finding in findings:
+        validate_finding(finding)
+        accepted = finding.severity == "warning" and contract.allowlisted(
+            check_id, finding.code, tool_id, tool_version
+        )
+        disposition = "AcceptedWarning" if accepted else None
+        if finding.disposition not in (None, disposition):
+            raise AcceptanceFailure(
+                "forged_disposition", "finding disposition is not policy-derived"
+            )
+        normalized.append(replace(finding, disposition=disposition))
+    if terminal is not None:
         raw = terminal
     elif source_truncated:
         raw = "Truncated"
-    elif any(f.severity == "error" for f in dispositioned):
+    elif any(finding.severity == "error" for finding in normalized):
         raw = "Fail"
-    elif any(f.severity == "warning" and f.disposition is None for f in dispositioned):
+    elif any(
+        finding.severity == "warning" and finding.disposition is None
+        for finding in normalized
+    ):
         raw = "Warning"
     else:
         raw = "Pass"
-        warnings = [f for f in dispositioned if f.severity == "warning"]
-        accepted_flag = bool(warnings)
-
-    if raw == "Pass":
-        effective = "Pass"
-    elif raw == "NotApplicableByContract":
-        effective = "NotApplicable"
-    else:
-        effective = "Fail"
-
     return CheckOutcome(
-        id=check_id, stage=spec.stage, raw_status=raw, effective_status=effective,
-        accepted=accepted_flag, tool_id=tool_id, tool_version=tool_version,
-        findings=tuple(dispositioned), source_truncated=source_truncated,
+        check_id,
+        spec.stage,
+        raw,
+        "Pass" if raw == "Pass" else "Fail",
+        raw == "Pass" and any(finding.severity == "warning" for finding in normalized),
+        tool_id,
+        tool_version,
+        tuple(normalized),
+        source_truncated,
     )
 
 
@@ -123,83 +167,135 @@ def decide(
     infra_failures: list[str],
     child_declared_na: set[str] | None = None,
 ) -> Verdict:
-    """规范 §2.6 的十条放行条件。
-
-    infra_failures 由 coordinator 在编排过程中累积(如 stale_result_file、hash_mismatch)。
-    child_declared_na 是**子进程在其 result 里自称 N/A 的 check ID 集**,用于条款 6 的
-    伪造检出;coordinator 解析 result 文件时填入(本计划尚无 result 解析,故默认空集,
-    对应测试见 test_forged_not_applicable_is_detected)。
-    """
-    child_declared_na = child_declared_na or set()
-    # 规范 §7.2 规则 1:**先把全部触发的 infra family 收齐,再取优先级最高的一个**。
-    # 不能按源码书写顺序 early-return —— 那样 "isolation 不足 + 子进程崩溃" 会报
-    # isolation_insufficient(优先级 12)而不是 tool_crashed(优先级 2)。
-    for item in infra_failures:
-        if item not in fc.INFRA_FAMILIES:
-            raise AcceptanceFailure(
-                "runner_internal_error", f"unknown infra failure family: {item!r}")
-    triggered: list[str] = list(infra_failures)
-
-    if achieved_grade not in _GRADE_ORDER:
-        raise AcceptanceFailure("contract_invalid", f"unknown grade: {achieved_grade}")
-    if contract.required_isolation_grade not in _GRADE_ORDER:
+    triggered = list(infra_failures)
+    if any(code not in fc.INFRA_FAMILIES for code in triggered):
         raise AcceptanceFailure(
-            "contract_invalid",
-            f"unknown required_isolation_grade: {contract.required_isolation_grade}")
-    if _GRADE_ORDER[achieved_grade] < _GRADE_ORDER[contract.required_isolation_grade]:
+            "runner_internal_error", "unknown infrastructure failure family"
+        )
+    if (
+        achieved_grade != "local-trusted"
+        or contract.required_isolation_grade != "local-trusted"
+    ):
         triggered.append("isolation_insufficient")
-
-    if contract.artifact_kind not in _VALID_ARTIFACT_KINDS:
-        raise AcceptanceFailure(
-            "contract_invalid", f"unknown artifact_kind: {contract.artifact_kind!r}")
-    try:
-        na_ids = set(contract.na_check_ids)
-    except TypeError as exc:
-        raise AcceptanceFailure(
-            "contract_invalid", f"na_check_ids is not a set of hashable ids: {exc}") from exc
-    if na_ids != set(reg.na_check_ids(contract.artifact_kind)):
-        raise AcceptanceFailure(
-            "contract_invalid",
-            "na_check_ids does not match the derived not-applicable set for artifact_kind")
-
-    expected_ids = {c.id for c in reg.checks_for_kind(contract.artifact_kind)}
-    expected_ids |= na_ids
-    actual_ids = [o.id for o in outcomes]
-    if not actual_ids:
+    for outcome in outcomes:
+        if (
+            type(outcome) is not CheckOutcome
+            or type(outcome.id) is not str
+            or type(outcome.raw_status) is not str
+            or (outcome.tool_id is not None and type(outcome.tool_id) is not str)
+            or (
+                outcome.tool_version is not None
+                and type(outcome.tool_version) is not str
+            )
+        ):
+            raise AcceptanceFailure("tool_output_invalid", "unknown internal outcome")
+    ids = [outcome.id for outcome in outcomes]
+    if not ids:
         triggered.append("zero_checks_collected")
-    if (len(set(actual_ids)) != len(actual_ids)
-            or set(actual_ids) != expected_ids
-            or actual_files != expected_files):
+    if len(set(ids)) != len(ids) or set(ids) != set(_SPEC) or actual_files != expected_files:
         triggered.append("expected_set_mismatch")
-
-    # 规范 §2.6 条款 6:子进程声明的 N/A 若不在合同 N/A 集内即为伪造。
-    if set(child_declared_na) - na_ids:
+    if child_declared_na:
         triggered.append("forged_not_applicable")
-
-    # 规范 §2.6 条款 7:Crash/Missing/Truncated 一律阻断,不分 required。
-    statuses = {o.raw_status for o in outcomes}
-    if "Crash" in statuses:
-        triggered.append("tool_crashed")
-    if "Missing" in statuses:
-        triggered.append("evidence_missing")
-    if "Truncated" in statuses:
-        triggered.append("evidence_truncated")
-
-    if triggered:
-        return Verdict(False, min(triggered, key=fc.family_priority), [], tuple(outcomes))
-
-    # 只有"实际被评估过并被拒"的 check 进 failed_check_ids;NotTested 表示该 stage
-    # 根本没跑,把它算作"资产被拒收"会与规范 §7.2 的第一分类冲突(见下)。
-    failed = sorted(
-        (o.id for o in outcomes
-         if o.effective_status == "Fail" and o.raw_status in ("Fail", "Warning")),
-        key=lambda i: reg.sort_key(_SPEC_BY_ID[i]),
+    incomplete = False
+    for outcome in outcomes:
+        if type(outcome.accepted) is not bool or type(outcome.findings) is not tuple:
+            raise AcceptanceFailure("tool_output_invalid", "unknown internal outcome")
+        rebuilt = aggregate(
+            outcome.id,
+            list(outcome.findings),
+            contract=contract,
+            tool_id=outcome.tool_id,
+            tool_version=outcome.tool_version,
+            source_truncated=outcome.source_truncated,
+            terminal=outcome.raw_status if outcome.raw_status in _TERMINALS else None,
+        )
+        if outcome != rebuilt:
+            raise AcceptanceFailure("tool_output_invalid", "inconsistent internal outcome")
+        incomplete = incomplete or outcome.raw_status == "NotTested"
+        failure = {
+            "Crash": "tool_crashed",
+            "Missing": "evidence_missing",
+            "Truncated": "evidence_truncated",
+        }.get(outcome.raw_status)
+        if failure:
+            triggered.append(failure)
+    failed = tuple(
+        sorted(
+            (outcome.id for outcome in outcomes if outcome.raw_status in ("Fail", "Warning")),
+            key=lambda key: reg.sort_key(_SPEC[key]),
+        )
     )
-    if failed:
-        return Verdict(False, "check_failed", failed, tuple(outcomes))
+    code = (
+        min(triggered, key=fc.family_priority)
+        if triggered
+        else "check_failed"
+        if failed
+        else "runner_internal_error"
+        if incomplete
+        else None
+    )
+    return Verdict(code is None, code, failed, tuple(outcomes))
 
-    # 无人失败却有 NotTested,说明 coordinator 没跑完自己的计划 —— fail-closed 兜底。
-    if any(o.raw_status == "NotTested" for o in outcomes):
-        return Verdict(False, "runner_internal_error", [], tuple(outcomes))
 
-    return Verdict(True, None, [], tuple(outcomes))
+def decide_technical(
+    base: Verdict, *, expected_gate_ids: tuple[str, ...], gates: Mapping[str, Gate]
+) -> Verdict:
+    triggered = [] if base.failure_code in (None, "check_failed") else [base.failure_code]
+    if set(gates) != set(expected_gate_ids) or len(set(expected_gate_ids)) != len(
+        expected_gate_ids
+    ):
+        triggered.append("expected_set_mismatch")
+    failed = []
+    incomplete = False
+    for gate_id, gate in gates.items():
+        if (
+            type(gate) is not Gate
+            or type(gate.complete) is not bool
+            or type(gate.findings) is not tuple
+        ):
+            raise AcceptanceFailure("tool_output_invalid", "invalid internal gate")
+        for finding in gate.findings:
+            validate_finding(finding)
+            if finding.disposition is not None:
+                raise AcceptanceFailure(
+                    "forged_disposition",
+                    "gate finding has no implicit warning allowance",
+                )
+        incomplete = incomplete or not gate.complete
+        if gate.complete and any(
+            finding.severity in ("error", "warning") for finding in gate.findings
+        ):
+            failed.append(gate_id)
+    code: str | None
+    if triggered:
+        code = min(triggered, key=fc.family_priority)
+    else:
+        code = (
+            "check_failed"
+            if base.failure_code == "check_failed" or failed
+            else "runner_internal_error"
+            if incomplete
+            else None
+        )
+    return Verdict(
+        code is None,
+        code,
+        base.failed_check_ids,
+        base.outcomes,
+        tuple(sorted(failed)),
+        tuple(sorted(gates.items())),
+    )
+
+
+def technical_state(verdict: Verdict) -> str:
+    if verdict.success:
+        return "NEEDS_REVIEW"
+    complete = all(
+        outcome.raw_status in ("Pass", "Fail", "Warning", "NotApplicableByContract")
+        for outcome in verdict.outcomes
+    ) and all(gate.complete for _, gate in verdict.gates)
+    return (
+        "REJECTED"
+        if complete and verdict.failure_code == "check_failed"
+        else "UNVERIFIED"
+    )

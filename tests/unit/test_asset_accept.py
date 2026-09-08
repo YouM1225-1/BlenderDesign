@@ -187,14 +187,14 @@ def test_missing_tool_fails_r0_contract_tools_locked(tmp_path, monkeypatch):
     # 终审第 2 条:锁定工具缺失是基础设施未能正常完成(toolchain_mismatch,优先级 1),
     # 不是"资产被拒收"(check_failed)——验收机没装 Blender 不等于资产不合格,规范
     # §7.2 表/§7.4/§8.3 三处都要求这里报 toolchain_mismatch。r0.contract.tools_locked
-    # 本身仍记一条 Fail 留作证据,但 decide() 一旦有 infra family 触发就会走 triggered
-    # 分支提前返回,该分支的 failed_check_ids 恒为空列表(既有行为,不是本次改动引入),
-    # 所以不能再断言 tools_locked 进 failed_check_ids。
+    # 本身仍记一条 Fail 留作证据；v2 判定在保留最高优先级 infra family 的同时也保留
+    # 实际失败的 check id，避免基础设施失败抹去已有资产证据。
     monkeypatch.setattr(asset_accept, "_present_tools", lambda contract: set())
+    _input_path(tmp_path).write_bytes(b"BLENDER-fake")
     code, summary = _run(tmp_path)
     assert code == 1
     assert summary["failure_code"] == "toolchain_mismatch"
-    assert summary["failed_check_ids"] == []
+    assert summary["failed_check_ids"] == ["r0.contract.tools_locked"]
     r0 = next(c for c in summary["checks"] if c["id"] == "r0.contract.tools_locked")
     assert r0["raw_status"] == "Fail"
     assert any(f["code"] == "tool_not_installed" for f in r0["findings"])
@@ -297,11 +297,16 @@ def test_digest_read_failure_is_propagated_to_r1(tmp_path, monkeypatch):
     asset.write_bytes(b"BLENDER-fake")
     contract_path = _contract_file(tmp_path)
     real_read = os.read
+    input_identity = asset.stat()
     failed = False
 
     def fail_first_read(descriptor: int, count: int) -> bytes:
         nonlocal failed
-        if not failed:
+        opened = os.fstat(descriptor)
+        if not failed and (opened.st_dev, opened.st_ino) == (
+            input_identity.st_dev,
+            input_identity.st_ino,
+        ):
             failed = True
             raise OSError("forced digest read failure")
         return real_read(descriptor, count)

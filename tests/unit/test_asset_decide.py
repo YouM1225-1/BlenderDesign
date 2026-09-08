@@ -14,7 +14,10 @@ CHECK = "r2.material.slots_resolved"
 
 def _contract(tmp_path: Path, allowlist: list[dict[str, str]] | None = None):
     value = valid_document(tmp_path)
-    value["warning_allowlist"] = allowlist or []
+    version = next(t["version"] for t in value["tools"] if t["id"] == "acceptance")
+    value["warning_allowlist"] = [
+        {**row, "tool_version": version} for row in (allowlist or [])
+    ]
     path = tmp_path / "contract.json"
     path.write_text(json.dumps(value), encoding="utf-8")
     return load_contract(path, candidate_root=tmp_path / "source")
@@ -28,9 +31,19 @@ def _err() -> Finding:
     return Finding(code="bad", severity="error", pointer=None, offset=None, detail=None)
 
 
+def _identity(contract, check_id=CHECK):
+    if check_id in contract.na_check_ids:
+        return None, None
+    version = next(
+        t["version"] for t in contract.raw["tools"] if t["id"] == "acceptance"
+    )
+    return "acceptance", version
+
+
 def _agg(contract, findings, **kw):
-    return aggregate(CHECK, findings, contract=contract, tool_id="acceptance",
-                     tool_version="acc-000000000000", source_truncated=False,
+    tool_id, tool_version = _identity(contract)
+    return aggregate(CHECK, findings, contract=contract, tool_id=tool_id,
+                     tool_version=tool_version, source_truncated=False,
                      terminal=None, **kw)
 
 
@@ -74,36 +87,42 @@ def test_info_only_does_not_set_accepted(tmp_path):
 
 
 def test_truncated_beats_error(tmp_path):
-    outcome = aggregate(CHECK, [_err()], contract=_contract(tmp_path),
-                        tool_id="acceptance", tool_version="acc-000000000000",
+    contract = _contract(tmp_path)
+    tool_id, tool_version = _identity(contract)
+    outcome = aggregate(CHECK, [_err()], contract=contract,
+                        tool_id=tool_id, tool_version=tool_version,
                         source_truncated=True, terminal=None)
     assert outcome.raw_status == "Truncated" and outcome.effective_status == "Fail"
 
 
 @pytest.mark.parametrize("terminal", ["Crash", "Missing"])
 def test_terminal_states_beat_findings(tmp_path, terminal):
-    outcome = aggregate(CHECK, [], contract=_contract(tmp_path), tool_id=None,
-                        tool_version=None, source_truncated=False, terminal=terminal)
+    contract = _contract(tmp_path)
+    tool_id, tool_version = _identity(contract)
+    outcome = aggregate(CHECK, [], contract=contract, tool_id=tool_id,
+                        tool_version=tool_version, source_truncated=False,
+                        terminal=terminal)
     assert outcome.raw_status == terminal and outcome.effective_status == "Fail"
 
 
-def test_not_applicable_beats_everything(tmp_path):
+def test_not_applicable_cannot_hide_accidents(tmp_path):
     contract = _contract(tmp_path)
     na_id = contract.na_check_ids[0]
-    outcome = aggregate(na_id, [_err()], contract=contract, tool_id=None,
-                        tool_version=None, source_truncated=True,
-                        terminal="Missing")
-    assert outcome.raw_status == "NotApplicableByContract"
-    assert outcome.effective_status == "NotApplicable"
+    with pytest.raises(AcceptanceFailure) as caught:
+        aggregate(na_id, [_err()], contract=contract, tool_id=None,
+                  tool_version=None, source_truncated=True,
+                  terminal="Missing")
+    assert caught.value.code == "forged_not_applicable"
 
 
 def _all_pass(contract):
-    return [aggregate(c.id, [], contract=contract, tool_id=None, tool_version=None,
-                      source_truncated=False, terminal=None)
-            for c in reg.checks_for_kind(contract.artifact_kind)] + [
-        aggregate(i, [], contract=contract, tool_id=None, tool_version=None,
-                  source_truncated=False, terminal=None)
-        for i in contract.na_check_ids]
+    outcomes = []
+    for spec in reg.CHECKS:
+        tool_id, tool_version = _identity(contract, spec.id)
+        outcomes.append(aggregate(
+            spec.id, [], contract=contract, tool_id=tool_id,
+            tool_version=tool_version, source_truncated=False, terminal=None))
+    return outcomes
 
 
 def test_all_pass_releases(tmp_path):
@@ -117,22 +136,24 @@ def test_all_pass_releases(tmp_path):
 def test_single_failed_check_yields_check_failed(tmp_path):
     contract = _contract(tmp_path)
     outcomes = _all_pass(contract)
+    tool_id, tool_version = _identity(contract, outcomes[0].id)
     outcomes[0] = aggregate(outcomes[0].id, [_err()], contract=contract,
-                            tool_id=None, tool_version=None,
+                            tool_id=tool_id, tool_version=tool_version,
                             source_truncated=False, terminal=None)
     verdict = decide(contract=contract, outcomes=outcomes,
                      actual_files={"summary"}, expected_files={"summary"},
                      achieved_grade="local-trusted", infra_failures=[])
     assert verdict.success is False
     assert verdict.failure_code == "check_failed"
-    assert verdict.failed_check_ids == [outcomes[0].id]
+    assert verdict.failed_check_ids == (outcomes[0].id,)
 
 
 def test_infra_failure_outranks_check_failed(tmp_path):
     contract = _contract(tmp_path)
     outcomes = _all_pass(contract)
+    tool_id, tool_version = _identity(contract, outcomes[0].id)
     outcomes[0] = aggregate(outcomes[0].id, [_err()], contract=contract,
-                            tool_id=None, tool_version=None,
+                            tool_id=tool_id, tool_version=tool_version,
                             source_truncated=False, terminal=None)
     verdict = decide(contract=contract, outcomes=outcomes,
                      actual_files={"summary"}, expected_files={"summary"},
@@ -162,8 +183,9 @@ def test_highest_priority_infra_family_wins(tmp_path):
     """规范 §7.2 规则 1:同时触发多个 infra family 时取优先级最高者。"""
     contract = _contract(tmp_path)
     outcomes = _all_pass(contract)
-    outcomes[0] = aggregate(outcomes[0].id, [], contract=contract, tool_id=None,
-                            tool_version=None, source_truncated=False,
+    tool_id, tool_version = _identity(contract, outcomes[0].id)
+    outcomes[0] = aggregate(outcomes[0].id, [], contract=contract, tool_id=tool_id,
+                            tool_version=tool_version, source_truncated=False,
                             terminal="Crash")                   # 优先级 2
     verdict = decide(contract=contract, outcomes=outcomes,
                      actual_files={"summary"}, expected_files={"summary"},
@@ -175,10 +197,13 @@ def test_highest_priority_infra_family_wins(tmp_path):
 def test_missing_outranks_truncated(tmp_path):
     contract = _contract(tmp_path)
     outcomes = _all_pass(contract)
-    outcomes[0] = aggregate(outcomes[0].id, [], contract=contract, tool_id=None,
-                            tool_version=None, source_truncated=True, terminal=None)
-    outcomes[1] = aggregate(outcomes[1].id, [], contract=contract, tool_id=None,
-                            tool_version=None, source_truncated=False,
+    tool_id, tool_version = _identity(contract, outcomes[0].id)
+    outcomes[0] = aggregate(outcomes[0].id, [], contract=contract, tool_id=tool_id,
+                            tool_version=tool_version, source_truncated=True,
+                            terminal=None)
+    tool_id, tool_version = _identity(contract, outcomes[1].id)
+    outcomes[1] = aggregate(outcomes[1].id, [], contract=contract, tool_id=tool_id,
+                            tool_version=tool_version, source_truncated=False,
                             terminal="Missing")
     verdict = decide(contract=contract, outcomes=outcomes,
                      actual_files={"summary"}, expected_files={"summary"},
@@ -200,21 +225,22 @@ def test_forged_not_applicable_is_detected(tmp_path):
 def test_not_tested_without_any_failure_is_runner_error(tmp_path):
     contract = _contract(tmp_path)
     outcomes = _all_pass(contract)
-    outcomes[0] = aggregate(outcomes[0].id, [], contract=contract, tool_id=None,
-                            tool_version=None, source_truncated=False,
+    tool_id, tool_version = _identity(contract, outcomes[0].id)
+    outcomes[0] = aggregate(outcomes[0].id, [], contract=contract, tool_id=tool_id,
+                            tool_version=tool_version, source_truncated=False,
                             terminal="NotTested")
     verdict = decide(contract=contract, outcomes=outcomes,
                      actual_files={"summary"}, expected_files={"summary"},
                      achieved_grade="local-trusted", infra_failures=[])
     assert verdict.failure_code == "runner_internal_error"
-    assert verdict.failed_check_ids == []
+    assert verdict.failed_check_ids == ()
 
 
 def test_unknown_check_id_is_rejected(tmp_path):
     with pytest.raises(AcceptanceFailure) as caught:
         aggregate("r9.bogus.id", [], contract=_contract(tmp_path), tool_id=None,
                   tool_version=None, source_truncated=False, terminal=None)
-    assert caught.value.code == "expected_set_mismatch"
+    assert caught.value.code == "tool_output_invalid"
 
 
 def test_zero_checks_is_rejected(tmp_path):
@@ -251,14 +277,16 @@ def test_failed_check_ids_sorted_by_registry_order(tmp_path):
     outcomes = _all_pass(contract)
     by_id = {o.id: i for i, o in enumerate(outcomes)}
     for check_id in (CHECK, dependency_id):
+        tool_id, tool_version = _identity(contract, check_id)
         outcomes[by_id[check_id]] = aggregate(
-            check_id, [_err()], contract=contract, tool_id=None, tool_version=None,
+            check_id, [_err()], contract=contract, tool_id=tool_id,
+            tool_version=tool_version,
             source_truncated=False, terminal=None)
     verdict = decide(contract=contract, outcomes=outcomes,
                      actual_files={"summary"}, expected_files={"summary"},
                      achieved_grade="local-trusted", infra_failures=[])
     assert verdict.failure_code == "check_failed"
-    assert verdict.failed_check_ids == [CHECK, dependency_id]
+    assert verdict.failed_check_ids == (CHECK, dependency_id)
 
 
 def test_duplicate_check_id_is_expected_set_mismatch(tmp_path):
@@ -274,10 +302,14 @@ def test_duplicate_check_id_is_expected_set_mismatch(tmp_path):
 def test_crash_outranks_missing(tmp_path):
     contract = _contract(tmp_path)
     outcomes = _all_pass(contract)
-    outcomes[0] = aggregate(outcomes[0].id, [], contract=contract, tool_id=None,
-                            tool_version=None, source_truncated=False, terminal="Crash")
-    outcomes[1] = aggregate(outcomes[1].id, [], contract=contract, tool_id=None,
-                            tool_version=None, source_truncated=False, terminal="Missing")
+    tool_id, tool_version = _identity(contract, outcomes[0].id)
+    outcomes[0] = aggregate(outcomes[0].id, [], contract=contract, tool_id=tool_id,
+                            tool_version=tool_version, source_truncated=False,
+                            terminal="Crash")
+    tool_id, tool_version = _identity(contract, outcomes[1].id)
+    outcomes[1] = aggregate(outcomes[1].id, [], contract=contract, tool_id=tool_id,
+                            tool_version=tool_version, source_truncated=False,
+                            terminal="Missing")
     verdict = decide(contract=contract, outcomes=outcomes,
                      actual_files={"summary"}, expected_files={"summary"},
                      achieved_grade="local-trusted", infra_failures=[])

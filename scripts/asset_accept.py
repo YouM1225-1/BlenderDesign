@@ -15,6 +15,7 @@ import platform
 from acceptance import check_registry as reg
 from acceptance import evidence
 from acceptance import stages
+from acceptance import toolchain
 from acceptance.contract import Contract, load_contract
 from acceptance.decide import Finding, aggregate, decide
 from acceptance.primitives import (
@@ -41,25 +42,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def _acceptance_provenance() -> tuple[str, list[dict[str, str]]]:
-    """规范 §7.4 的 `acceptance` 工具行:覆盖 acceptance/ 全部 .py/.json 加本 CLI。
-
-    按名字匹配的 rglob 结果可能是目录(同名巧合)或悬空符号链接;用 is_file() 过滤掉,
-    否则 read_bytes() 会因 IsADirectoryError/OSError 崩溃(调用方也兜底,但这里先避免)。
-    """
-    package = ROOT / "acceptance"
-    entries = sorted(
-        path for path in (
-            list(package.rglob("*.py")) + list(package.rglob("*.json"))
-            + [ROOT / "scripts" / "asset_accept.py"])
-        if path.is_file())
-    accumulator = hashlib.sha256()
-    files: list[dict[str, str]] = []
-    for path in entries:
-        rel = path.relative_to(ROOT).as_posix()
-        file_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        files.append({"path": rel, "sha256": file_hash})
-        accumulator.update(f"{rel}\n{file_hash}\n".encode("utf-8"))
-    return "acc-" + accumulator.hexdigest()[:12], files
+    """规范 §7.4 的 `acceptance` 工具行，复用 v2 的固定代码闭包。"""
+    observed = toolchain.provenance(ROOT)
+    files = [
+        {"path": row["path"], "sha256": row["sha256"]}
+        for row in observed["files"]
+    ]
+    return str(observed["version"]), files
 
 
 def _input_digest(path: Path) -> stages.InputResult:
@@ -231,13 +220,16 @@ def main(argv: list[str] | None = None) -> int:
         for spec in reg.CHECKS:
             if spec.id in contract.na_check_ids:
                 terminal = None                  # aggregate 会先命中 N/A 分支
+                tool_id = tool_version = None
             elif spec.id in wired:
                 terminal = None
+                tool_id, tool_version = "acceptance", version
             else:
                 terminal = "NotTested"           # 未接入的 stage:规范 §2.4 的唯一产生点
+                tool_id, tool_version = "acceptance", version
             outcomes.append(aggregate(
                 spec.id, collected.get(spec.id, []),
-                contract=contract, tool_id="acceptance", tool_version=version,
+                contract=contract, tool_id=tool_id, tool_version=tool_version,
                 source_truncated=False, terminal=terminal))
         verdict = decide(contract=contract, outcomes=outcomes,
                          actual_files=set(), expected_files=set(),
