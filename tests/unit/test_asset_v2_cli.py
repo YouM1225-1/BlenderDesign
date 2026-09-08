@@ -1,5 +1,7 @@
 import datetime
 import json
+import resource
+import signal
 import stat
 import subprocess
 import sys
@@ -10,13 +12,14 @@ from tests.unit.asset_v2_support import REPO, valid_document
 from tests.unit.test_asset_v2_pipeline import mock_run, seal_fixture
 
 
-def command(*args):
+def command(*args, preexec_fn=None):
     return subprocess.run(
         [sys.executable, str(REPO / "scripts/asset_accept.py"), *map(str, args)],
         capture_output=True,
         text=True,
         timeout=15,
         cwd=REPO.parent,
+        preexec_fn=preexec_fn,
     )
 
 
@@ -61,6 +64,38 @@ def test_v1_rejected_and_failed_summary_survives(tmp_path):
     assert result(completed)["failure_code"] == "contract_invalid"
     summary = json.loads((tmp_path / "evidence/summary.json").read_text())
     assert summary["failure_code"] == "contract_invalid" and summary["success"] is False
+
+
+def test_summary_write_failure_keeps_machine_readable_primary_error(tmp_path):
+    contract = tmp_path / "contract.json"
+    contract.write_text("{}")
+
+    def limit_child_file_size():
+        signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+
+    evidence = tmp_path / "evidence"
+    completed = command(
+        "run",
+        "--contract",
+        contract,
+        "--input-root",
+        tmp_path / "source",
+        "--evidence-root",
+        evidence,
+        "--scratch-root",
+        tmp_path / "scratch",
+        preexec_fn=limit_child_file_size,
+    )
+    output = result(completed)
+    assert completed.returncode == 1
+    assert output["state"] == "UNVERIFIED"
+    assert output["failure_code"] == "contract_invalid"
+    assert "closed fields required" in output["error"]
+    assert "File too large" in output["error"]
+    assert "Traceback" not in completed.stderr
+    assert evidence.is_dir()
+    assert not (evidence / "summary.json").exists()
 
 
 def test_reused_root_preserves_existing_files(tmp_path):

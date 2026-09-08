@@ -144,20 +144,25 @@ def main(argv: list[str] | None = None) -> int:
             "error": str(exc),
         }
         if root_created and root is not None and not (root / "summary.json").exists():
-            _write(
-                root / "summary.json",
-                {
-                    "schema_version": 2,
-                    "kind": "asset_acceptance",
-                    "success": False,
-                    "failure_code": code,
-                    "error": str(exc),
-                    "checks": [],
-                    "gates": {},
-                    "failed_check_ids": [],
-                    "failed_gate_ids": [],
-                },
-            )
+            try:
+                _write(
+                    root / "summary.json",
+                    {
+                        "schema_version": 2,
+                        "kind": "asset_acceptance",
+                        "success": False,
+                        "failure_code": code,
+                        "error": str(exc),
+                        "checks": [],
+                        "gates": {},
+                        "failed_check_ids": [],
+                        "failed_gate_ids": [],
+                    },
+                )
+            except Exception as summary_exc:
+                result["error"] = (
+                    f"{result['error']}; failure summary write failed: {summary_exc}"
+                )
         print(json.dumps(result, ensure_ascii=False, allow_nan=False))
         return 1
     print(json.dumps(result, ensure_ascii=False, allow_nan=False))
