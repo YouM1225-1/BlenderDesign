@@ -138,6 +138,8 @@ def _registration_evidence(
     *,
     version: str = "1",
     after: dict[str, object] | None,
+    registration_name: str = "historical",
+    restore_codex_home: Path | None = None,
 ) -> tuple[Path, Path, Path]:
     projection = roots.projections / ("a" * 40)
     plugin = projection / "plugins/blender-mcp-installer"
@@ -147,12 +149,45 @@ def _registration_evidence(
         (tree / ".codex-plugin").mkdir(parents=True)
         (tree / ".codex-plugin/plugin.json").write_text(manifest)
         (tree / "payload").write_text("managed")
-    proof = state.path / "marketplace-recovery/registration.historical"
+        (tree / ".blender-mcp-usage-v1").write_text("inode-v1\n")
+    proof = state.path / "marketplace-recovery" / f"registration.{registration_name}"
     proof.mkdir(parents=True, mode=0o700)
+    before = {"present": False}
+    (proof / "before.json").write_text(json.dumps(before) + "\n")
+    (proof / "before.json").chmod(0o600)
     if after is not None:
         (proof / "after.json").write_text(json.dumps(after) + "\n")
         (proof / "after.json").chmod(0o600)
+    _write_legacy_restore(proof, roots, before, restore_codex_home or roots.codex_home)
     return projection, plugin, cache
+
+
+def _write_legacy_restore(
+    proof: Path,
+    roots: UpgradeRoots,
+    before: dict[str, object],
+    codex_home: Path,
+) -> Path:
+    lines = [
+        "Restore only marketplace official-blender-mcp; installer receipts are not required.",
+        f"CODEX_BIN: {roots.home / 'bin/codex'}",
+        f"HOME: {roots.home}",
+        f"CODEX_HOME: {codex_home}",
+        "Remove the target with the recorded environment: plugin marketplace remove official-blender-mcp",
+    ]
+    if before["present"]:
+        lines.append(
+            "Then add the prior local source recorded in before.json: "
+            + str(before["source"])
+        )
+    else:
+        lines.append(
+            "before.json records that the target was previously absent; do not add it."
+        )
+    restore = proof / "RESTORE.txt"
+    restore.write_text("\n".join(lines) + "\n")
+    restore.chmod(0o600)
+    return restore
 
 
 def uuid4_from_text(value: object) -> UUID:
@@ -182,6 +217,10 @@ def prepared(tmp_path):
         proof = folder / "after.json"
         proof.write_text("{}\n")
         proof.chmod(0o600)
+        before = folder / "before.json"
+        before.write_text('{"present": false}\n')
+        before.chmod(0o600)
+        _write_legacy_restore(folder, roots, {"present": False}, roots.codex_home)
         with SafeRoot.open(codex, os.getuid(), codex) as safe_codex:
             old_image = capture_tree(safe_codex, old_cache.relative_to(codex))
         with SafeRoot.open(home, os.getuid(), home) as safe_home:
@@ -195,7 +234,18 @@ def prepared(tmp_path):
         ensure_usage_lock(state, old_image.dev, old_image.ino)
         doc = new_record(roots, "register", desired)
         doc["registration"] = {"id": str(uuid4()), "state": "registered"}
-        (state.path / "marketplace-recovery" / ("registration." + doc["registration"]["id"])).mkdir(mode=0o700)
+        current_registration = (
+            state.path
+            / "marketplace-recovery"
+            / ("registration." + doc["registration"]["id"])
+        )
+        current_registration.mkdir(mode=0o700)
+        current_before = current_registration / "before.json"
+        current_before.write_text('{"present": false}\n')
+        current_before.chmod(0o600)
+        _write_legacy_restore(
+            current_registration, roots, {"present": False}, roots.codex_home
+        )
         doc = save_record(state, roots, None, doc)
         yield roots, state, doc, row, old_cache
 
@@ -279,6 +329,11 @@ def test_schema_rejects_foreign_and_unknown_fields(prepared):
     invalid["candidates"] = [row]
     invalid["candidates"][0]["content_source"] = str(roots.projections / ("a" * 40) / "blender-mcp-installer")
     with pytest.raises(InstallerError):
+        validate_record(invalid, roots)
+    invalid = copy.deepcopy(doc)
+    invalid["candidates"] = [row]
+    invalid["candidates"][0]["proofs"][0]["relative"] = "upgrades/not-a-uuid.json"
+    with pytest.raises(InstallerError, match="invalid workflow UUID"):
         validate_record(invalid, roots)
     for change in ({"schema_version": 2}, {"home": "/foreign"}, {"extra": True}):
         with pytest.raises(InstallerError):
@@ -501,7 +556,9 @@ def test_current_plugin_version_is_excluded_from_discovery(tmp_path):
     assert (cache / "payload").read_text() == "managed"
 
 
-@pytest.mark.parametrize("missing", ["after", "source", "projection"])
+@pytest.mark.parametrize(
+    "missing", ["after", "source", "projection", "scope", "ambiguous_scope"]
+)
 def test_incomplete_registration_evidence_keeps_cache(tmp_path, missing):
     from blender_mcp_installer.upgrade_discovery import discover_candidates
 
@@ -509,16 +566,25 @@ def test_incomplete_registration_evidence_keeps_cache(tmp_path, missing):
     after = None
     if missing == "source":
         after = {"present": True, "source_type": "local"}
-    elif missing == "projection":
+    elif missing in {"projection", "scope", "ambiguous_scope"}:
         after = {
             "present": True,
             "source_type": "local",
-            "source": str(roots.projections / ("d" * 40)),
+            "source": str(
+                roots.projections / (("d" if missing == "projection" else "a") * 40)
+            ),
         }
     with state_root(roots) as state:
         _projection, _plugin, cache = _registration_evidence(
             state, roots, after=after
         )
+        restore = state.path / "marketplace-recovery/registration.historical/RESTORE.txt"
+        if missing == "scope":
+            restore.unlink()
+        elif missing == "ambiguous_scope":
+            restore.write_text(
+                restore.read_text() + f"CODEX_HOME: {roots.home / 'other-codex'}\n"
+            )
         candidates, findings = discover_candidates(state, roots, doc)
     assert candidates == []
     assert findings
@@ -583,6 +649,34 @@ def test_cleanup_pending_reuses_original_image_after_partial_removal(prepared):
     assert candidates[0]["state"] == "pending"
     assert candidates[0]["reason"] == "carried durable cleanup baseline"
     assert not (old / "b").exists()
+
+
+def test_historical_retirement_remains_authoritative_over_later_awaiting_record(prepared):
+    from blender_mcp_installer.upgrade_discovery import discover_candidates
+
+    roots, state, original, row, old = prepared
+    registration_ref = str(PurePath(row["proofs"][0]["relative"]).parent)
+    original = update_record(
+        state,
+        roots,
+        original,
+        status="cleanup_pending",
+        candidates=[row],
+        verification={"registration": "passed", "live": "not_run"},
+        retired_registrations=[registration_ref],
+    )
+    awaiting = new_record(roots, "register", original["desired"])
+    awaiting["registration"] = {"id": row["owner"], "state": "registered"}
+    save_record(state, roots, None, awaiting)
+    current = save_record(
+        state, roots, None, new_record(roots, "register", original["desired"])
+    )
+
+    candidates, findings = discover_candidates(state, roots, current)
+
+    assert [item["key"] for item in candidates] == [row["key"]]
+    assert not any("unfinished upgrade transaction" in item["reason"] for item in findings)
+    assert old.exists()
 
 
 def test_other_codex_home_references_are_protected_but_not_adopted(prepared):
@@ -796,8 +890,378 @@ def test_legacy_registration_before_protects_projection_and_cache(prepared):
         json.dumps({"present": True, "source_type": "local", "source": str(projection)})
     )
     (proof / "before.json").chmod(0o600)
+    _write_legacy_restore(
+        proof,
+        roots,
+        {"present": True, "source": str(projection)},
+        roots.codex_home,
+    )
 
     references = other_references(state, roots, doc)
 
     assert projection in references
     assert old in references
+
+
+def test_foreign_registration_evidence_cannot_authorize_or_retire_current_cache(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import (
+        current_paths,
+        discover_candidates,
+        other_references,
+    )
+
+    roots, current = _register_case(tmp_path)
+    foreign_home = roots.home / "foreign-codex"
+    foreign_home.mkdir(mode=0o700)
+    foreign = UpgradeRoots(roots.home, foreign_home)
+    registration_id = str(uuid4())
+    with state_root(roots) as state:
+        projection, _plugin, cache = _registration_evidence(
+            state,
+            roots,
+            registration_name=registration_id,
+            restore_codex_home=foreign_home,
+            after={
+                "present": True,
+                "source_type": "local",
+                "source": str(roots.projections / ("a" * 40)),
+            },
+        )
+        historical = new_record(
+            foreign,
+            "register",
+            {
+                **current["desired"],
+                "commit": "a" * 40,
+                "plugin_version": "1",
+                "projection": str(projection),
+            },
+        )
+        historical["registration"] = {"id": registration_id, "state": "registered"}
+        historical = save_record(state, foreign, None, historical)
+        current = save_record(state, roots, None, current)
+
+        candidates, findings = discover_candidates(state, roots, current)
+        result = finalize_record(
+            state,
+            roots,
+            current["id"],
+            lambda doc: current_paths(roots, doc),
+            lambda doc: discover_candidates(state, roots, doc),
+            lambda doc: other_references(state, roots, doc),
+        )
+
+        assert candidates == []
+        assert any("another CODEX_HOME" in item["reason"] for item in findings)
+        assert cache.exists()
+        assert result["retired_registrations"] == []
+        assert load_record(state, foreign, historical["id"])["status"] == "awaiting_verification"
+        assert_rollback_available(
+            state,
+            foreign,
+            registration_ref="marketplace-recovery/registration." + registration_id,
+        )
+
+
+def test_foreign_legacy_before_resolves_cache_against_exact_original_root(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import other_references
+
+    roots, doc = _register_case(tmp_path)
+    foreign_home = roots.home / "foreign-codex"
+    foreign_home.mkdir(mode=0o700)
+    projection = roots.projections / ("a" * 40)
+    manifest = projection / "plugins/blender-mcp-installer/.codex-plugin/plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"name": "blender-mcp-installer", "version": "1"}))
+    current_cache = roots.caches / "1"
+    foreign_cache = foreign_home / "plugins/cache/official-blender-mcp/blender-mcp-installer/1"
+    current_cache.mkdir(parents=True)
+    foreign_cache.mkdir(parents=True)
+    with state_root(roots) as state:
+        proof = state.path / "marketplace-recovery/registration.legacy-foreign"
+        proof.mkdir(parents=True, mode=0o700)
+        before = {"present": True, "source_type": "local", "source": str(projection)}
+        (proof / "before.json").write_text(json.dumps(before) + "\n")
+        (proof / "before.json").chmod(0o600)
+        _write_legacy_restore(proof, roots, before, foreign_home)
+
+        references = other_references(state, roots, doc)
+
+    assert projection in references
+    assert foreign_cache in references
+    assert current_cache not in references
+
+
+def test_conflicting_registration_scope_fails_closed_without_retirement(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import (
+        current_paths,
+        discover_candidates,
+        other_references,
+    )
+
+    roots, current = _register_case(tmp_path)
+    foreign_home = roots.home / "foreign-codex"
+    foreign_home.mkdir(mode=0o700)
+    registration_id = str(uuid4())
+    with state_root(roots) as state:
+        projection, _plugin, cache = _registration_evidence(
+            state,
+            roots,
+            registration_name=registration_id,
+            restore_codex_home=foreign_home,
+            after={
+                "present": True,
+                "source_type": "local",
+                "source": str(roots.projections / ("a" * 40)),
+            },
+        )
+        historical = new_record(
+            roots,
+            "register",
+            {
+                **current["desired"],
+                "commit": "a" * 40,
+                "plugin_version": "1",
+                "projection": str(projection),
+            },
+        )
+        historical["registration"] = {"id": registration_id, "state": "registered"}
+        historical = save_record(state, roots, None, historical)
+        current = save_record(state, roots, None, current)
+
+        candidates, findings = discover_candidates(state, roots, current)
+        result = finalize_record(
+            state,
+            roots,
+            current["id"],
+            lambda doc: current_paths(roots, doc),
+            lambda doc: discover_candidates(state, roots, doc),
+            lambda doc: other_references(state, roots, doc),
+        )
+
+        assert candidates == []
+        assert any(
+            "conflicting registration CODEX_HOME" in item["reason"] for item in findings
+        )
+        assert cache.exists()
+        assert result["retired_registrations"] == []
+        assert load_record(state, roots, historical["id"])["status"] == "awaiting_verification"
+        assert_rollback_available(
+            state,
+            roots,
+            registration_ref="marketplace-recovery/registration." + registration_id,
+        )
+def test_registration_root_binding_is_guarded_through_deletion(
+    tmp_path, monkeypatch
+):
+    from blender_mcp_installer.upgrade_discovery import (
+        current_paths,
+        discover_candidates,
+        other_references,
+    )
+
+    roots, current = _register_case(tmp_path)
+    with state_root(roots) as state:
+        _projection, _plugin, cache = _registration_evidence(
+            state,
+            roots,
+            after={
+                "present": True,
+                "source_type": "local",
+                "source": str(roots.projections / ("a" * 40)),
+            },
+        )
+        current = save_record(state, roots, None, current)
+        candidates, _findings = discover_candidates(state, roots, current)
+        restore = state.path / "marketplace-recovery/registration.historical/RESTORE.txt"
+        assert any(proof["relative"].endswith("/RESTORE.txt") for proof in candidates[0]["proofs"])
+        image = candidates[0]["expected"]
+        ensure_usage_lock(state, image["dev"], image["ino"])
+        original_remove = upgrade_cleanup.conditional_remove_tree
+
+        def remove_after_root_binding_drift(reference, expected, guards, fault):
+            guarded = {guard.path for guard, _image in guards}
+            assert restore in guarded
+            restore.write_text("changed\n")
+            return original_remove(reference, expected, guards, fault)
+
+        monkeypatch.setattr(
+            upgrade_cleanup,
+            "conditional_remove_tree",
+            remove_after_root_binding_drift,
+        )
+        result = finalize_record(
+            state,
+            roots,
+            current["id"],
+            lambda doc: current_paths(roots, doc),
+            lambda doc: discover_candidates(state, roots, doc),
+            lambda doc: other_references(state, roots, doc),
+        )
+
+    assert result["candidates"][0]["state"] == "conflict"
+    assert result["candidates"][0]["reason"] == "transaction state conflict"
+    assert cache.exists()
+
+
+def test_same_root_awaiting_registration_is_not_a_retirement_candidate(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import (
+        current_paths,
+        discover_candidates,
+        other_references,
+    )
+
+    roots, current = _register_case(tmp_path)
+    registration_id = str(uuid4())
+    with state_root(roots) as state:
+        projection, _plugin, cache = _registration_evidence(
+            state,
+            roots,
+            registration_name=registration_id,
+            after={
+                "present": True,
+                "source_type": "local",
+                "source": str(roots.projections / ("a" * 40)),
+            },
+        )
+        historical = new_record(
+            roots,
+            "register",
+            {
+                **current["desired"],
+                "commit": "a" * 40,
+                "plugin_version": "1",
+                "projection": str(projection),
+            },
+        )
+        historical["registration"] = {"id": registration_id, "state": "registered"}
+        historical = save_record(state, roots, None, historical)
+        current = save_record(state, roots, None, current)
+        with SafeRoot.open(roots.codex_home, os.getuid(), roots.codex_home) as codex:
+            before = capture_tree(codex, cache.relative_to(roots.codex_home))
+        ensure_usage_lock(state, before.dev, before.ino)
+
+        candidates, findings = discover_candidates(state, roots, current)
+        result = finalize_record(
+            state,
+            roots,
+            current["id"],
+            lambda doc: current_paths(roots, doc),
+            lambda doc: discover_candidates(state, roots, doc),
+            lambda doc: other_references(state, roots, doc),
+        )
+
+        assert candidates == []
+        assert any("unfinished upgrade transaction" in item["reason"] for item in findings)
+        assert cache.exists()
+        assert result["retired_registrations"] == []
+        assert load_record(state, roots, historical["id"])["status"] == "awaiting_verification"
+        assert_rollback_available(
+            state,
+            roots,
+            registration_ref="marketplace-recovery/registration." + registration_id,
+        )
+        historical = update_record(state, roots, historical, status="cancelled")
+        resumed = finalize_record(
+            state,
+            roots,
+            current["id"],
+            lambda doc: current_paths(roots, doc),
+            lambda doc: discover_candidates(state, roots, doc),
+            lambda doc: other_references(state, roots, doc),
+        )
+        assert resumed["candidates"] == []
+        assert cache.exists()
+        assert_rollback_available(
+            state,
+            roots,
+            registration_ref="marketplace-recovery/registration." + registration_id,
+        )
+        retry = new_record(roots, "register", current["desired"])
+        retry = save_record(state, roots, None, retry)
+        retry_candidates, _retry_findings = discover_candidates(state, roots, retry)
+        assert len(retry_candidates) == 1
+        assert retry_candidates[0]["expected"] == before.to_dict()
+        migrated = finalize_record(
+            state,
+            roots,
+            retry["id"],
+            lambda doc: current_paths(roots, doc),
+            lambda doc: discover_candidates(state, roots, doc),
+            lambda doc: other_references(state, roots, doc),
+        )
+        assert migrated["status"] == "complete"
+        assert not cache.exists()
+        with pytest.raises(RollbackUnavailable):
+            assert_rollback_available(
+                state,
+                roots,
+                registration_ref="marketplace-recovery/registration." + registration_id,
+            )
+
+
+def test_completed_same_root_journal_can_prove_historical_migration(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import (
+        current_paths,
+        discover_candidates,
+        other_references,
+    )
+
+    roots, current = _register_case(tmp_path)
+    registration_id = str(uuid4())
+    with state_root(roots) as state:
+        projection, _plugin, cache = _registration_evidence(
+            state,
+            roots,
+            registration_name=registration_id,
+            after={
+                "present": True,
+                "source_type": "local",
+                "source": str(roots.projections / ("a" * 40)),
+            },
+        )
+        (state.path / f"marketplace-recovery/registration.{registration_id}/RESTORE.txt").unlink()
+        historical = new_record(
+            roots,
+            "register",
+            {
+                **current["desired"],
+                "commit": "a" * 40,
+                "plugin_version": "1",
+                "projection": str(projection),
+            },
+        )
+        historical["registration"] = {"id": registration_id, "state": "registered"}
+        historical = save_record(state, roots, None, historical)
+        historical = update_record(
+            state,
+            roots,
+            historical,
+            status="cleanup_pending",
+            verification={"registration": "passed", "live": "not_run"},
+        )
+        update_record(state, roots, historical, status="complete")
+        current = save_record(state, roots, None, current)
+
+        candidates, findings = discover_candidates(state, roots, current)
+        assert findings == []
+        assert len(candidates) == 1
+        assert any(proof["relative"].startswith("upgrades/") for proof in candidates[0]["proofs"])
+        image = candidates[0]["expected"]
+        ensure_usage_lock(state, image["dev"], image["ino"])
+        result = finalize_record(
+            state,
+            roots,
+            current["id"],
+            lambda doc: current_paths(roots, doc),
+            lambda doc: discover_candidates(state, roots, doc),
+            lambda doc: other_references(state, roots, doc),
+        )
+        assert result["status"] == "complete"
+        assert not cache.exists()
+        with pytest.raises(RollbackUnavailable):
+            assert_rollback_available(
+                state,
+                roots,
+                registration_ref="marketplace-recovery/registration." + registration_id,
+            )

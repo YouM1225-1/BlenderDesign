@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 from pathlib import Path, PurePath
 from typing import Any
 from uuid import UUID
@@ -29,6 +30,7 @@ from blender_mcp_installer.upgrade_registration import content_sha256, read_owne
 from blender_mcp_installer.upgrade_state import (
     COMMIT,
     UpgradeRoots,
+    absolute,
     load_any_record,
     record_ids,
 )
@@ -56,14 +58,19 @@ def install_roots(roots: UpgradeRoots, doc: dict[str, Any]) -> InstallRoots:
     )
 
 
-def read_proof(state: SafeRoot, relative: PurePath) -> tuple[Any, dict[str, Any]]:
+def read_evidence(state: SafeRoot, relative: PurePath) -> tuple[bytes, dict[str, Any]]:
     if capture_file(state, relative).state is ImageState.ABSENT:
         raise FileNotFoundError(str(state.path / relative))
     raw, image = read_owned_bytes(TargetRef(state, relative))
-    return json.loads(raw), {
+    return raw, {
         "relative": relative.as_posix(),
         "expected": image.to_dict(),
     }
+
+
+def read_proof(state: SafeRoot, relative: PurePath) -> tuple[Any, dict[str, Any]]:
+    raw, proof = read_evidence(state, relative)
+    return json.loads(raw), proof
 
 
 def directory_names(state: SafeRoot, relative: PurePath) -> tuple[str, ...]:
@@ -96,6 +103,130 @@ def current_paths(roots: UpgradeRoots, doc: dict[str, Any]) -> tuple[Path, ...]:
         installed = install_roots(roots, doc)
         paths.extend((installed.runtime, installed.extension_target))
     return tuple(paths)
+
+
+def legacy_registration_scope(
+    state: SafeRoot,
+    roots: UpgradeRoots,
+    reference: PurePath,
+    before: Any,
+    before_proof: dict[str, Any] | None,
+) -> tuple[UpgradeRoots | None, list[dict[str, Any]]]:
+    try:
+        raw, restore_proof = read_evidence(state, reference / "RESTORE.txt")
+    except FileNotFoundError:
+        return None, []
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, []
+    lines = text.splitlines()
+    has_legacy_scope = any(
+        line.startswith("HOME: ") or line.startswith("CODEX_HOME: ") for line in lines
+    )
+    if not has_legacy_scope:
+        return None, []
+    expected_last = (
+        "Then add the prior local source recorded in before.json: " + str(before["source"])
+        if before.get("present")
+        else "before.json records that the target was previously absent; do not add it."
+    )
+    if (
+        not text.endswith("\n")
+        or len(lines) != 6
+        or lines[0]
+        != "Restore only marketplace official-blender-mcp; installer receipts are not required."
+        or not lines[1].startswith("CODEX_BIN: ")
+        or lines[4]
+        != "Remove the target with the recorded environment: plugin marketplace remove official-blender-mcp"
+        or lines[5] != expected_last
+    ):
+        return None, []
+    codex = absolute(lines[1].removeprefix("CODEX_BIN: "))
+    home = absolute(lines[2].removeprefix("HOME: "))
+    codex_home = absolute(lines[3].removeprefix("CODEX_HOME: "))
+    if not codex.name or home != roots.home:
+        raise InstallerError("invalid legacy registration restore evidence")
+    if (
+        before_proof is None
+        or capture_file(state, reference / "before.json").to_dict()
+        != before_proof["expected"]
+    ):
+        raise InstallerError("legacy registration evidence changed")
+    return UpgradeRoots(home, codex_home), [restore_proof, before_proof]
+
+
+def registration_scope_hint(
+    state: SafeRoot, roots: UpgradeRoots, reference: PurePath
+) -> UpgradeRoots | None:
+    try:
+        raw, _proof = read_evidence(state, reference / "RESTORE.txt")
+        lines = raw.decode("utf-8").splitlines()
+    except (FileNotFoundError, UnicodeDecodeError):
+        return None
+    homes = [line.removeprefix("HOME: ") for line in lines if line.startswith("HOME: ")]
+    codex_homes = [
+        line.removeprefix("CODEX_HOME: ")
+        for line in lines
+        if line.startswith("CODEX_HOME: ")
+    ]
+    if len(homes) != 1 or len(codex_homes) != 1:
+        return None
+    try:
+        home = absolute(homes[0])
+        codex_home = absolute(codex_homes[0])
+    except InstallerError:
+        return None
+    if home != roots.home:
+        raise InstallerError("conflicting registration HOME")
+    return UpgradeRoots(home, codex_home)
+
+
+def registration_scope(
+    state: SafeRoot,
+    roots: UpgradeRoots,
+    reference: PurePath,
+    records: list[dict[str, Any] | None],
+) -> tuple[UpgradeRoots, list[dict[str, Any]]]:
+    name = reference.name
+    if not re.fullmatch(r"registration\.[A-Za-z0-9_-]+", name):
+        raise InstallerError("invalid historical registration identity")
+    identity = name.removeprefix("registration.")
+    journals = [
+        item
+        for item in records
+        if item is not None
+        and item["registration"] is not None
+        and item["registration"]["id"] == identity
+    ]
+    if len(journals) > 1:
+        raise InstallerError("ambiguous registration CODEX_HOME")
+    journal_scope = None
+    journal_proofs: list[dict[str, Any]] = []
+    if journals:
+        journal = journals[0]
+        journal_scope = UpgradeRoots(roots.home, Path(journal["codex_home"]))
+        _raw, journal_proof = read_evidence(
+            state, PurePath("upgrades", journal["id"] + ".json")
+        )
+        journal_proofs.append(journal_proof)
+    try:
+        before, before_proof = read_proof(state, reference / "before.json")
+    except FileNotFoundError:
+        before = {}
+        before_proof = None
+    legacy_scope, legacy_proofs = legacy_registration_scope(
+        state, roots, reference, before, before_proof
+    )
+    scope_hint = registration_scope_hint(state, roots, reference)
+    if journal_scope is not None and scope_hint is not None and journal_scope != scope_hint:
+        raise InstallerError("conflicting registration CODEX_HOME")
+    if journal_scope is not None and legacy_scope is not None and journal_scope != legacy_scope:
+        raise InstallerError("conflicting registration CODEX_HOME")
+    selected = journal_scope or legacy_scope
+    if selected is None:
+        raise InstallerError("historical registration CODEX_HOME is unproven")
+    return selected, [*journal_proofs, *legacy_proofs]
 
 
 def source_reference(roots: UpgradeRoots, before: Any) -> tuple[Path, ...]:
@@ -216,7 +347,8 @@ def other_references(
             before, _proof = read_proof(state, reference / "before.json")
         except FileNotFoundError:
             continue
-        references.extend(source_reference(roots, before))
+        selected, _scope_proofs = registration_scope(state, roots, reference, records)
+        references.extend(source_reference(selected, before))
     return tuple(references)
 
 
@@ -225,10 +357,33 @@ def discover_candidates(
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     rows: dict[str, dict[str, Any]] = {}
     findings: list[dict[str, str]] = []
+    records = [load_any_record(state, roots, workflow_id) for workflow_id in record_ids(state)]
+    retired_receipts: set[str] = set()
+    retired_registrations: set[str] = set()
+    for other in records:
+        if other is not None and other["status"] in {"cleanup_pending", "complete"}:
+            retired_receipts.update(other["retired_receipts"])
+            retired_registrations.update(other["retired_registrations"])
+    unfinished_receipts: set[str] = set()
+    unfinished_registrations: set[str] = set()
+    for other in records:
+        if (
+            other is None
+            or other["id"] == doc["id"]
+            or other["status"] != "awaiting_verification"
+        ):
+            continue
+        if other["install_id"] is not None and other["install_id"] not in retired_receipts:
+            unfinished_receipts.add(other["install_id"])
+        if other["registration"] is not None:
+            registration_ref = (
+                "marketplace-recovery/registration." + other["registration"]["id"]
+            )
+            if registration_ref not in retired_registrations:
+                unfinished_registrations.add(registration_ref)
 
     # Carry durable deletion baselines forward; never capture a partial deletion as a new baseline.
-    for workflow_id in record_ids(state):
-        other = load_any_record(state, roots, workflow_id)
+    for other in records:
         if (
             other is None
             or other["codex_home"] != str(roots.codex_home)
@@ -289,6 +444,14 @@ def discover_candidates(
                 key = kind + ":" + identity
                 if key in rows:
                     continue
+                if identity in unfinished_receipts:
+                    findings.append(
+                        {
+                            "path": str(target.recovery_path),
+                            "reason": "recovery belongs to another unfinished upgrade transaction",
+                        }
+                    )
+                    continue
                 recovery_path = (
                     installed.runtime_recovery(child.install_id)
                     if role is TargetRole.RUNTIME
@@ -334,12 +497,27 @@ def discover_candidates(
                 rows[key] = row
             identity = parent_id
 
+    scope_blocked = False
     for name in directory_names(state, PurePath("marketplace-recovery")):
         if not name.startswith("registration."):
             continue
+        reference = PurePath("marketplace-recovery", name)
+        try:
+            selected, scope_proofs = registration_scope(
+                state, roots, reference, records
+            )
+        except (InstallerError, ValueError, OSError, KeyError, TypeError) as exc:
+            scope_blocked = True
+            findings.append(
+                {
+                    "path": str(state.path / "marketplace-recovery" / name),
+                    "reason": str(exc),
+                }
+            )
+            continue
         try:
             after, proof = read_proof(
-                state, PurePath("marketplace-recovery", name, "after.json")
+                state, reference / "after.json"
             )
             source = Path(after["source"])
             if (
@@ -350,6 +528,22 @@ def discover_candidates(
                 raise InstallerError(
                     "historical registration has no reviewed local projection"
                 )
+            if selected.codex_home != roots.codex_home:
+                findings.append(
+                    {
+                        "path": str(state.path / reference),
+                        "reason": "historical registration belongs to another CODEX_HOME",
+                    }
+                )
+                continue
+            if reference.as_posix() in unfinished_registrations:
+                findings.append(
+                    {
+                        "path": str(state.path / reference),
+                        "reason": "registration belongs to another unfinished upgrade transaction",
+                    }
+                )
+                continue
             if str(source) == doc["desired"]["projection"]:
                 continue
             plugin = source / "plugins/blender-mcp-installer"
@@ -392,7 +586,7 @@ def discover_candidates(
                 "owner": doc["id"],
                 "version": version,
                 "expected": image.to_dict(),
-                "proofs": [proof],
+                "proofs": [proof, *scope_proofs],
                 "content_source": str(plugin),
                 "content_sha256": digest,
                 "lease_known": lease_protocol(image),
@@ -407,6 +601,9 @@ def discover_candidates(
                     "reason": str(exc),
                 }
             )
+
+    if scope_blocked:
+        return [], findings
 
     # Enumerate only the exact owned plugin namespace to report unproven physical leftovers.
     with SafeRoot.open(roots.codex_home, os.getuid(), roots.codex_home) as codex:

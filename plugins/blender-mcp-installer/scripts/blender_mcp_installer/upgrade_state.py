@@ -158,8 +158,13 @@ def _validate_record(raw: object, roots: UpgradeRoots) -> dict[str, Any]:
             path = PurePath(proof["relative"])
             if (path.is_absolute() or ".." in path.parts
                     or path.as_posix() != proof["relative"]
-                    or not path.parts or path.parts[0] not in {"receipts", "marketplace-recovery"}):
+                    or not path.parts
+                    or path.parts[0] not in {"receipts", "marketplace-recovery", "upgrades"}):
                 raise InstallerError("invalid proof path")
+            if path.parts[0] == "upgrades":
+                if len(path.parts) != 2 or not path.name.endswith(".json"):
+                    raise InstallerError("invalid upgrade proof path")
+                uuid_text(path.name[:-5])
             if FileImage.from_dict(proof["expected"]).state is not ImageState.PRESENT:
                 raise InstallerError("missing proof image")
         if row["kind"] == "plugin_cache":
