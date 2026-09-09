@@ -28,6 +28,15 @@ def _roots(tmp_path: Path) -> UpgradeRoots:
     return UpgradeRoots(home, codex)
 
 
+def _filesystem_identity(roots: UpgradeRoots) -> dict[Path, tuple[int, int]]:
+    result = {}
+    for base in (roots.home, roots.codex_home):
+        for path in base.rglob("*"):
+            info = path.stat(follow_symlinks=False)
+            result[path] = (info.st_dev, info.st_ino)
+    return result
+
+
 def test_usage_identity_survives_rename_and_exec(tmp_path: Path) -> None:
     roots = _roots(tmp_path)
     tree = roots.home / "old"
@@ -90,7 +99,23 @@ def test_usage_lock_busy_is_nonblocking_and_release_succeeds(tmp_path: Path) -> 
             assert acquired
 
 
-def test_script_usage_is_read_only_for_missing_state_and_lease(tmp_path: Path) -> None:
+def test_script_usage_fails_closed_without_creating_missing_state(tmp_path: Path) -> None:
+    roots = _roots(tmp_path)
+    version = roots.caches / "1.0.0"
+    script = version / "scripts" / "entry.py"
+    script.parent.mkdir(parents=True, mode=0o700)
+    script.write_text("pass")
+    assert not roots.state.exists()
+    before = _filesystem_identity(roots)
+    with pytest.raises((FileNotFoundError, InstallerError)):
+        with script_usage(script, roots):
+            pass
+    after = _filesystem_identity(roots)
+    assert after == before
+    assert not roots.state.exists()
+
+
+def test_script_usage_is_read_only_for_missing_lease(tmp_path: Path) -> None:
     roots = _roots(tmp_path)
     version = roots.caches / "1.0.0"
     script = version / "scripts" / "entry.py"

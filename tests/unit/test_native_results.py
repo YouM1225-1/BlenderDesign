@@ -378,6 +378,17 @@ def test_contradictory_energy_and_byte_identity_is_invalid(tmp_path, mutation):
     invalid(contract, run)
 
 
+def test_zero_difference_requires_equal_energy_for_distinct_bytes(tmp_path):
+    contract, run, data, record = result_case(tmp_path)
+    row = next(item for item in data["comparisons"] if item["group"] == "fresh")
+    change_image(run, data, row["right_id"], energy=0)
+    assert row["left_bytes_sha256"] != row["right_bytes_sha256"]
+    assert row["left_rgb_energy"] != row["right_rgb_energy"]
+    assert row["max_abs"] == row["different_pixels"] == row["different_channels"] == 0
+    record("native.comparisons", data)
+    invalid(contract, run)
+
+
 def test_distinct_png_bytes_can_decode_to_identical_pixels(tmp_path):
     contract, run, data, record = result_case(tmp_path)
     change_image(run, data, data["comparisons"][0]["left_id"])

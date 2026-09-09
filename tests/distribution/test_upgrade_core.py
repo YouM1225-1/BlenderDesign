@@ -1413,6 +1413,94 @@ def test_full_finalize_probes_live_once_and_rechecks_snapshot(prepared, monkeypa
     assert live == ["live"] and len(fingerprints) >= 4
 
 
+def test_full_finalize_stops_after_recorded_cleanup_when_snapshot_changes(
+    prepared, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from blender_mcp_installer import upgrade_integration as integration
+    from blender_mcp_installer import verification
+
+    roots, state, prior, first, first_path = prepared
+    second_path = roots.caches / "0.9.0"
+    second_path.mkdir(mode=0o700)
+    (second_path / "a").write_bytes(b"old-a")
+    (second_path / "b").write_bytes(b"old-b")
+    with SafeRoot.open(roots.codex_home, os.getuid(), roots.codex_home) as codex:
+        second_image = capture_tree(codex, second_path.relative_to(roots.codex_home))
+    ensure_usage_lock(state, second_image.dev, second_image.ino)
+    second = copy.deepcopy(first)
+    second.update(
+        key="plugin_cache:0.9.0",
+        version="0.9.0",
+        expected=second_image.to_dict(),
+    )
+    profile = {
+        "executable": str(roots.home / "Blender"),
+        "architecture": "arm64",
+        "version": "5.2.0",
+        "resources": str(roots.home / "profile"),
+        "config": str(roots.home / "profile/config"),
+        "extensions": str(roots.home / "profile/extensions"),
+    }
+    document = new_record(roots, "install", prior["desired"])
+    document["profile"] = profile
+    document["registration"] = prior["registration"]
+    document["install_id"] = str(uuid4())
+    document = save_record(state, roots, None, document)
+    context = SimpleNamespace(
+        roots=SimpleNamespace(
+            home=roots.home,
+            codex_home=roots.codex_home,
+            runtime=roots.home / ".local/share/blender-lab-mcp/runtime",
+            receipt=lambda identifier: state.path / "receipts" / f"{identifier}.json",
+        ),
+        host=SimpleNamespace(codex_bin=Path("/fake/codex"), env={}),
+        source_bundle=object(),
+        blender=object(),
+    )
+    executable = context.roots.runtime / "bin/python"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    live = []
+    changed = False
+    fingerprints = []
+
+    class ChangeAfterFirstRecord(NoOpFaultInjector):
+        def hit(self, point):
+            nonlocal changed
+            if point == "after_upgrade_candidate_record":
+                changed = True
+
+    monkeypatch.setattr(integration, "desired_from_context", lambda _context: prior["desired"])
+    monkeypatch.setattr(integration, "profile_from_context", lambda _context: profile)
+    monkeypatch.setattr(
+        integration,
+        "installation_fingerprint",
+        lambda *_args: (fingerprints.append(changed) or (changed,)),
+    )
+    monkeypatch.setattr(verification, "verify_live", lambda *_args: live.append("live"))
+    monkeypatch.setattr(integration, "discover_candidates", lambda *_args: ([first, second], []))
+    monkeypatch.setattr(integration, "other_references", lambda *_args: ())
+
+    with pytest.raises(InstallerError, match="snapshot changed during cleanup"):
+        integration.finalize_install_locked(
+            state, context, document["id"], ChangeAfterFirstRecord()
+        )
+
+    persisted = load_record(state, roots, document["id"], recover=True)
+    assert persisted is not None and persisted["status"] == "cleanup_pending"
+    assert persisted["candidates"][0]["state"] == "removed"
+    assert persisted["candidates"][0]["reason"] == "verified deletion"
+    assert persisted["candidates"][1]["state"] == "pending"
+    assert not first_path.exists() and second_path.exists()
+    with SafeRoot.open(roots.codex_home, os.getuid(), roots.codex_home) as codex:
+        assert capture_tree(codex, second_path.relative_to(roots.codex_home)) == second_image
+    assert live == ["live"]
+    assert fingerprints[-1] is True and all(not value for value in fingerprints[:-1])
+
+
 @pytest.mark.parametrize("interrupt_before_cleanup", [False, True])
 def test_exact_registration_creates_migration_journal_when_old_cache_remains(
     prepared, monkeypatch, interrupt_before_cleanup, capsys
