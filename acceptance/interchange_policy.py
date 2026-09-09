@@ -2,41 +2,47 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from types import MappingProxyType
 from typing import cast
 
-PRESET = dict(
-    export_format="GLB",
-    export_apply=True,
-    export_yup=True,
-    export_draco_mesh_compression_enable=False,
-    export_image_format="AUTO",
-    export_cameras=False,
-    export_lights=False,
-    export_animations=False,
-    export_extras=True,
-    export_skins=False,
-    export_morph=False,
-    export_texcoords=True,
-    export_normals=True,
-    export_tangents=False,
-    export_materials="EXPORT",
-    use_selection=True,
-    use_visible=False,
-    use_renderable=False,
-    use_active_collection=False,
+_PRESET = MappingProxyType(
+    {
+        "export_format": "GLB",
+        "export_apply": True,
+        "export_yup": True,
+        "export_draco_mesh_compression_enable": False,
+        "export_image_format": "AUTO",
+        "export_cameras": False,
+        "export_lights": False,
+        "export_animations": False,
+        "export_extras": True,
+        "export_skins": False,
+        "export_morph": False,
+        "export_texcoords": True,
+        "export_normals": True,
+        "export_tangents": False,
+        "export_materials": "EXPORT",
+        "use_selection": True,
+        "use_visible": False,
+        "use_renderable": False,
+        "use_active_collection": False,
+    }
 )
-LIMITS = {
-    "max_glb_bytes",
-    "max_json_bytes",
-    "max_nodes",
-    "max_meshes",
-    "max_stored_triangles",
-    "max_rendered_triangles",
-    "max_draw_calls",
-    "max_texture_pixels",
-    "max_matches",
-    "max_projection_triangles",
-}
+PRESET = dict(_PRESET)
+LIMITS = frozenset(
+    {
+        "max_glb_bytes",
+        "max_json_bytes",
+        "max_nodes",
+        "max_meshes",
+        "max_stored_triangles",
+        "max_rendered_triangles",
+        "max_draw_calls",
+        "max_texture_pixels",
+        "max_matches",
+        "max_projection_triangles",
+    }
+)
 
 
 def _is_finite_number(value: object) -> bool:
@@ -66,10 +72,8 @@ def validate_interchange_policy(value: object) -> None:
     if (
         value["profile"] != "glb-static-surface-v1"
         or not isinstance(preset, dict)
-        or set(preset) != set(PRESET)
-        or any(
-            type(preset[k]) is not type(v) or preset[k] != v for k, v in PRESET.items()
-        )
+        or set(preset) != set(_PRESET)
+        or any(type(preset[k]) is not type(v) or preset[k] != v for k, v in _PRESET.items())
     ):
         raise ValueError("unsupported GLB preset/profile")
     if (

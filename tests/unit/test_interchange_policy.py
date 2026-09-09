@@ -1,5 +1,6 @@
 import pytest
 
+from acceptance import interchange_policy
 from acceptance.interchange_policy import validate_interchange_policy
 from tests.unit.interchange_support import policy
 
@@ -59,3 +60,34 @@ def test_large_integer_overflow_is_rejected_as_value_error(tmp_path, target) -> 
         value["tolerances"]["uv"]["abs"] = 10**400
     with pytest.raises(ValueError):
         validate_interchange_policy(value)
+
+
+def test_borrowed_public_preset_cannot_change_validator_policy(tmp_path) -> None:
+    original = policy(tmp_path)
+    saved_preset = dict(interchange_policy.PRESET)
+    try:
+        interchange_policy.PRESET["export_apply"] = False
+        customized = policy(tmp_path)
+
+        validate_interchange_policy(original)
+        with pytest.raises(ValueError):
+            validate_interchange_policy(customized)
+    finally:
+        interchange_policy.PRESET.clear()
+        interchange_policy.PRESET.update(saved_preset)
+
+
+def test_borrowed_limit_names_cannot_change_validator_policy(tmp_path) -> None:
+    original = policy(tmp_path)
+    missing_required_limit = policy(tmp_path)
+    missing_required_limit["limits"].pop("max_nodes")
+    borrowed_limits = interchange_policy.LIMITS
+    try:
+        borrowed_limits -= {"max_nodes"}
+
+        with pytest.raises(ValueError):
+            validate_interchange_policy(missing_required_limit)
+        validate_interchange_policy(original)
+    finally:
+        if isinstance(borrowed_limits, set):
+            borrowed_limits.add("max_nodes")
