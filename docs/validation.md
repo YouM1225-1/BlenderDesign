@@ -3,7 +3,7 @@
 ## 自动化门禁
 
 开发过程中按改动选择最小有效检查；已有环境可用 `bash scripts/checks-fast.sh`
-快速反馈。纯文档修改检查引用、命令和技能结构，不新增匹配措辞的测试。
+快速反馈。纯文档修改检查引用、命令及指令一致性；涉及技能入口时才验证技能结构，不新增匹配措辞的测试。
 提交前运行下述完整入口一次；通过后，仅在后续改动、失败或未解决疑虑涉及其覆盖范围时重跑。
 
 仓库唯一的完整验证入口是：
@@ -28,7 +28,7 @@ bash scripts/checks.sh
 
 脚本按 `UV_BIN`、`PATH`、`$HOME/.local/bin/uv` 的顺序解析 uv。
 插件验证器默认从 `$HOME/.codex/skills/.system/plugin-creator` 读取，也可通过
-`PLUGIN_CREATOR_ROOT` 指定。该检查不再跳过。
+`PLUGIN_CREATOR_ROOT` 指定。插件结构校验为必需检查。
 
 ### 安装器版本自动更新
 
@@ -75,6 +75,19 @@ detect-secrets 与 pip-audit，进行两次确定性构建，并逐字节比对�
 
 最后一次仓库文件修改后执行 `graft build .`，交付前 `graft check .` 必须退出 0。
 `graft/` 保留为未跟踪的本地缓存，不进入提交或分发包；不默认使用 `--deep`。
+
+## 文档与执行约定审计
+
+`AGENTS.md` 是执行约定的唯一入口，`CLAUDE.md` 引用同一文件。修改指令时核对根级约定与
+实际适用技能的任务范围、授权条件和验证要求，避免重复批准、无条件扩大检查或将计划当作实现。
+已知文件编辑可直接开始；仅检查安装状态不触发注册或安装，仅注册不安装 runtime。
+
+文档移动或合并需核对入站链接、相对路径、测试引用和未完成任务的依赖。归档正文保留历史语义，
+不将旧基线改写为当前结论；删除重复说明前将独有规则移入其职责对应的正式入口。
+
+安装技能的命令由其 `references/workflow.md` 维护，
+`tests/distribution/test_plugin_contract.py` 验证 operation recipes 的行为合同。
+涉及技能结构修改时使用 skill-creator 提供的 `quick_validate.py`；普通 Markdown 编辑不触发技能安装或现场验证。
 
 ## Blender 验证
 
@@ -126,12 +139,12 @@ protocol 建立有界哈希清单。历史计划或审计文档不参与运行�
 - managed launcher 与四层 live verification。
 
 已安装 runtime 只通过安装器 skill 的 `verify` 命令验证；该命令使用固定 Python，
-并同时检查 Codex 策略、MCP 握手/工具目录和 Blender localhost 只读调用。安装器不会
-启动 Blender，必须由操作者正常启动后再运行现场验证。
+并同时检查 Codex 策略、MCP 握手/工具目录和 Blender localhost 只读调用。
+交互式 Blender 由操作者正常启动；安装器的宿主探测可以使用受控后台进程，不能代替现场会话验证。
 
 ## 结论边界
 
-- 自动化测试通过证明当前提交满足仓库合同，不等于任意 Blender 文件或任意 Python payload 都安全。
+- 自动化测试通过证明被测代码满足测试覆盖的合同，不等于任意 Blender 文件或任意 Python payload 都安全。
 - 官方工具数量、版本和哈希以当前 manifest 为准，不在文档中维护第二份目录。
 - 平台支持只覆盖 manifest 声明的 macOS Apple Silicon 与 Blender 版本范围。
-- 历史验收结果可从 Git 历史追溯，但不作为当前工作树的运行时依赖。
+- 历史验收结果按[归档索引](archive/README.md)或 Git 历史追溯，不作为当前工作树的运行时依赖。

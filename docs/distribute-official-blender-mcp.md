@@ -1,10 +1,11 @@
 # Official Blender MCP distributable installer
 
-This repository packages a reviewed, LLM-driven installer for the official Blender
-MCP. It targets Darwin arm64 with Blender >=5.2.0,<5.3.0, uv 0.12.2, and local
-Python 3.13.13. The Codex plugin is a skill-only delivery adapter, not another MCP
-server; the installed managed launcher connects Codex to the official server over
-local STDIO and the Blender extension over localhost:9876.
+This document defines the distribution trust boundary and operator workflow for the
+official Blender MCP installer. Supported platforms, toolchain versions, tools and
+artifact hashes are specified by the
+[release manifest](../plugins/blender-mcp-installer/artifacts/manifest.json).
+The Codex plugin provides the installation skill; runtime components and connection
+boundaries are documented in the [system design](architecture.md).
 
 ## Trust and entrypoint
 
@@ -73,8 +74,9 @@ substitute the source checkout for its trusted worktree.
    mean four prompts were shown.
 6. After install (including no-op), retain the receipt and finish trust cleanup plus
    persistent registration verification before waiting for Blender startup.
-   The operator starts the selected Blender normally. The
-   installer never starts or terminates it. Run `verify` when current host evidence
+   The operator starts the selected interactive Blender session normally. The
+   installer does not start or terminate that session; host discovery and preference
+   handling may use controlled background Blender processes. Run `verify` when current host evidence
    or the operator's existing confirmation establishes readiness; do not reconfirm.
    A new verify session repeats only the trust and runner bootstraps and the verify
    recipe; it does not repeat marketplace preparation or installation.

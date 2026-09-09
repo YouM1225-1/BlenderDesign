@@ -1,11 +1,11 @@
-# Blender MCP / Skill 建模产物验收方案 V3.7
+# Blender MCP / Skill 建模产物验收方案 V3.6
 
-## 可执行规范版:接缝闭合、双渲染集与取向定案
+## 可执行规范版:误拒修正、失败模型重构与注册表补全
 
 > 修订日期:2026-08-24(Asia/Shanghai)
 > 仓库基线:`BlenderDesign` commit `bf63c89294a5f79649a2c550331ea8987cdeab1b`;当日实测 `bash scripts/checks.sh` → `ALL CHECKS PASSED`(362 passed;821 passed + 1 skipped)
 > 前序:V3.3 及其审计(5H/11M/5L)→ V3.4(21/21 处置)→ V3.4 双路复审 → V3.5 → **V3.5 全量审计(9H/8M/2L)经逐条独立验证:18 项成立、1 项部分成立** → 本文 V3.6
-> 本版重点(V3.6 双路审计:规范路 7H/9M/6L、实证路 8 条断言全部成立):修正**第四处误拒**(`export_apply=True` 下投影表 source 取向未定,带 SUBSURF/MIRROR 的合法资产必被拒);为 `interchange` 补齐 import 侧渲染集与差异图;把 result 文件改为 per-subprocess;`bcx_uid` 落到 manifest 字段并加防伪造;自研 warning 经 `acceptance` 工具行获得可 allowlist 路径;§2.5 三步判定改写为无歧义全称量词
+> 本版重点:修正三处会**误拒合法资产**的实测缺陷(GLB 换轴、相机拟合距离、bounds 只取 mesh),重构失败模型(区分资产拒收与基础设施失败、支持多 finding),补齐 file registry / manifest schema / 摘要规范化算法,并撤销"P0 零修改既有文件"这一被实测推翻的约束
 > 文档性质:**自包含且可执行的规范**。实现者只依据本文即可编码 P0——全部 check ID、failure code、JSON 字段、相机与阈值参数、投影映射均在文内冻结,不需要另行拍板产品决策。本文同时仍是设计:通用建模产物验收在本仓库尚未实现,不得用于自动发布放行
 
 ---
@@ -43,7 +43,7 @@ Reviewer/调用方(读取冻结 evidence 后作最终决定)
 
 ### 0.3 正式验收当前被工作树状态阻塞
 
-`_require_clean_worktree`([run_phase0_acceptance.py:87](scripts/run_phase0_acceptance.py#L87))把 untracked 文件也算脏。当前未跟踪文件包括历次方案与审计文档(V3.2 至本文 V3.7 及三份审计/验证报告)与三个 pilot 资产(`hantavirus_scientific_cutaway.blend`、`hantavirus_scientific_cutaway_v2.blend`、`hantavirus_scientific_cutaway_final.png`);**任一存在都会使正式 Phase 0 验收以 `dirty_worktree` 失败**。确切清单以运行时 `git status --porcelain --untracked-files=all` 为准,不在本文固定(避免文档随文件增减而失准)。处置见 §11。
+`_require_clean_worktree`([run_phase0_acceptance.py:87](../../../scripts/run_phase0_acceptance.py#L87))把 untracked 文件也算脏。当前全部未跟踪文件——V3.2、V3.3、V3.3 审计报告、V3.4、本文 V3.5、`hantavirus_scientific_cutaway.blend`、`hantavirus_scientific_cutaway_v2.blend`、`hantavirus_scientific_cutaway_final.png`——任一存在都会使正式 Phase 0 验收以 `dirty_worktree` 失败。处置见 §11。
 
 ---
 
@@ -118,7 +118,7 @@ C2PA 不作为 P0/P1 的验收证据载体,但**理由是成本与生态,不是�
 
 | Kind | R3 | R4 | P0 |
 |---|---|---|---|
-| `blend_native` | 不要求 interchange export | clean offline reopen + **reopen↔source manifest 全等比较**(`r4.reopen.manifest_matches_source`)+ source 视觉 | ✔ |
+| `blend_native` | 不要求 interchange export | clean offline reopen + source 视觉 | ✔ |
 | `interchange` | export + 独立格式 validator + 预算统计 | fresh-import 投影 diff + source/import 视觉 | ✔(仅 GLB) |
 | `runtime_asset` | 同 interchange | 再加合同声明的 target consumer | ✘ |
 | `rendered_media` | render + 独立媒体解码 | 帧/色彩/编码/音轨与视觉回归;不跑 3D import | ✘ |
@@ -140,43 +140,43 @@ Pass | Fail | Warning | NotTested | NotApplicableByContract | Crash | Truncated 
 
 ### 2.5 disposition 与 effective status
 
-一个 check 可携带**多条 finding**(外部工具如 glTF-Validator 的官方 schema 是 `issues.messages[]`,同一资产会同时产生多条 error/warning/info)。逐条 finding 定 disposition,再聚合成该 check 的 `raw_status`,最后由 `raw_status` 单独决定 `effective_status`。
+```text
+一个 check 可携带**多条 finding**(外部工具如 glTF-Validator 的官方 schema 是 `issues.messages[]`,同一资产会同时产生多条 error/warning/info)。逐条 finding 定 disposition,再聚合成该 check 的 raw_status:
 
 ```text
-第一步 —— 对每条 finding f(由 coordinator 计算,不由子进程写):
+对每条 finding f:
   f.disposition =
     AcceptedWarning  当且仅当 f.severity == "warning"
                      且 (check_id, f.code, tool_id, tool_version) ∈ R0 冻结 allowlist
     None             其他一切情况
 
-第二步 —— 聚合成 check.raw_status(冻结优先级,自上而下首个命中):
-  Truncated  当 check.source_truncated == true      # 无法证明"所有 warning 都已 allowlist"
+check.raw_status(聚合,冻结优先级):
+  Truncated  当 check.source_truncated == true                    # 无法证明"所有 warning 都已 allowlist"
   Fail       当存在 severity == "error" 的 finding
   Warning    当存在 severity == "warning" 且 disposition == None 的 finding
-  Pass       当 findings 为空,或所有 warning 均为 AcceptedWarning 且无 error(info 不影响)
-             —— 后一种情形同时置 check.accepted = true
-
-第三步 —— effective_status(输入只有 raw_status,不再引用 disposition):
-  Pass           当 raw_status == Pass
-  NotApplicable  当 raw_status == NotApplicableByContract 且 check_id ∈ R0 的 N/A 集
-  Fail           其他一切:Warning、NotTested、Crash、Truncated、Missing,
-                 以及 NotApplicableByContract 但 ID 不在 N/A 集(另记 forged_not_applicable)
+  Pass       当所有 warning 均为 AcceptedWarning 且无 error(info 不影响)
+             —— 此时 check.accepted = true
+  Pass       当 findings 为空
 ```
 
-**关键语义**:`raw_status == Warning` 一律 Fail。allowlist 的作用全部发生在第二步——只有**所有** warning 都被接受时 `raw_status` 才是 `Pass`。这排除了"存在一条 AcceptedWarning 即放行"的读法,使混合态(一条已接受 + 一条未接受)确定性地 Fail,与夹具 `validator_multi_message_mixed` 的预期一致。
+`accepted` 是 summary 中的**派生序列化字段**(§7.3),由上式计算后写出,便于审阅方不重算即可看到;`raw_status` 与逐条 finding 的 `disposition` 均原样保留,不被改写。
 
-**disposition 由 coordinator 独占计算(冻结)**:子进程只写 `findings[]` 的 `code`/`severity`/`pointer`/`offset`/`detail`,**不得写 `disposition`**,也不得替 coordinator 做 Pass/Warning 的二选。子进程产物中出现非 null 的 `disposition` → `forged_disposition` Fail(§7.2)。理由与 §2.6 条款 6 防伪造 N/A 对称:allowlist 是合同的一部分,而合同按 §1 是 Verifier 侧资产,任何依赖合同的判定都必须在 Verifier 侧完成。
+effective_status =
+  Pass           当 raw_status == Pass
+  Pass           当 disposition == AcceptedWarning(同时记 accepted=true,raw 保留)
+  NotApplicable  当 raw_status == NotApplicableByContract 且 check_id ∈ R0 的 N/A 集
+  Fail           其他一切(含 Warning 无 disposition、NotTested、Crash、Truncated、Missing、
+                 以及 NotApplicableByContract 但 ID 不在 N/A 集 → 另记 forged_not_applicable)
+```
 
-`accepted` 与 `effective_status` 都是 summary 中的**派生序列化字段**(§7.3),写出以便审阅方不重算即可查看;`raw_status` 与逐条 finding 原样保留,不被改写。
-
-**四元组分量来源**:`check_id` 取自 §7.1 注册表;`tool_id` 取自 §7.4 工具锁定表的 `id` 列;`tool_version` 取自该表实测记录值;`warning_code` 对外部工具取其原生稳定码(glTF-Validator 的消息码),对自研检查取 §7.1 注册表 `warning_codes` 列声明的码——**未在注册表声明的自研 warning code 不可 allowlist**(fail-closed)。自研检查的 `tool_id` 恒为 `acceptance`、`tool_version` 为该包内容哈希版本(§7.4 有对应行),因此 `packed_dependency`、`empty_material_slot`、`budget_near_limit`、`non_triangle_primitive`、`unsupported_datablock_type` 五个自研 warning **可以被 allowlist**;`acceptance` 版本变化会使既有 allowlist 条目失效并需重新审批,这是有意的。
+四元组分量来源:`check_id` 取自 §7.1 注册表;`tool_id` 取自 §7.4 工具锁定表的 `id` 列;`tool_version` 取自该表实测记录值;`warning_code` 对外部工具取其原生稳定码(glTF-Validator 的消息码),对自研检查取 §7.1 注册表 `warning_codes` 列声明的码——**未在注册表声明的自研 warning code 不可 allowlist**(fail-closed)。
 
 ### 2.5.1 摘要规范化(冻结算法)
 
 所有进入 digest 的 JSON 对象一律按 **[RFC 8785 JSON Canonicalization Scheme (JCS)](https://www.rfc-editor.org/rfc/rfc8785.html)** 序列化后取 SHA-256:UTF-8 无 BOM、对象键按 UTF-16 码元升序、无多余空白、数字按 ECMAScript `Number::toString` 规则(故 `1` 与 `1.0` 同形)。补充四条项目内规则:
 
 1. **禁止**:重复键、`NaN`/`Infinity`、未规范化 Unicode(输入先做 NFC,否则 `contract_invalid`)、`-0`(一律写 `0`);
-2. **数组顺序有语义**,不排序;需要顺序无关的集合在**写入合同前**即规范化,顺序不符 → `contract_invalid`。排序键必须是**全序**:`checks[]` 按 `(stage_index, order, id)` 三元组升序(`stage_index`:R0→0 … R5→5,由 ID 前缀推导;`order` 只在同 stage 内唯一——实测 `order=10` 在六个 stage 各出现一次,单独使用**不构成全序**);`na_check_ids`、`failed_check_ids`、`platform_blocklist` 等字符串数组按字典序(UTF-16 码元序,与 JCS 键序一致);
+2. **数组顺序有语义**,不排序;需要顺序无关的集合(如 `na_check_ids`、`checks[]`)在**写入合同前**即按注册表 order 升序、其余按 ID 字典序规范化,顺序不符 → `contract_invalid`;
 3. **域分隔**:被摘要的字节前缀 `bcx.digest.v1.<object_kind>.`(`object_kind` ∈ `contract`/`manifest`/`evidence`),防止不同对象类型共用裸 hash;
 4. **路径规范化**:合同内所有路径用 POSIX 分隔符、相对于合同声明的 root、拒绝 `..`/绝对路径/符号链接分量;`input.path` **参与**摘要(路径变更即换合同)。
 
@@ -191,8 +191,7 @@ Pass | Fail | Warning | NotTested | NotApplicableByContract | Crash | Truncated 
  3. 每个 stage:actual check ID 集 == expected check ID 集(严格相等;先拒绝重复 ID、未知 ID)
  4. 每个 stage:actual file ID 集 == expected file ID 集
  5. 每个 required check 的 effective_status == Pass 或 NotApplicable
-    (任一为 Fail → 整体不放行;**在无任何基础设施失败时**取 `failure_code = "check_failed"` 且
-     `failed_check_ids[]` 非空;若同时存在基础设施失败,按 §7.2 规则 1 取优先级更高者)
+    (任一为 Fail → 整体不放行,`failure_code = "check_failed"` 且 `failed_check_ids[]` 非空)
  6. 携带 NotApplicableByContract 的 check ID 集 == R0 声明的 N/A 集(双向包含)
  7. 任何 check 的 raw_status ∉ {Crash, Missing, Truncated}(不分 required)
  8. 所有 required 文件的 hash 与 evidence manifest 一致
@@ -212,9 +211,7 @@ Pass | Fail | Warning | NotTested | NotApplicableByContract | Crash | Truncated 
 4. **整段跳过的 stage**:当某 stage 的全部 check 均在 N/A 集内(如 `blend_native` 的 R3),该 stage **不启动任何子进程**,其 actual 全部由合成记录构成,`summary.stages.<S>` 记 `{"exit_code": null, "skipped_by_contract": true, "result_file": null}`。条款 9 只对**实际启动过**的子进程生效;条款 4 对该 stage 的 expected file ID 集为空集。
 5. **N/A 集的合法性**:R0 由 **coordinator 从自身 §7.1 注册表 + `artifact_kind` 推导**出"不适用 ID 集合"(推导源是代码,不是合同),再校验合同 `na_check_ids` 与该集合**恰好相等**——既不允许把适用的 check 塞进 N/A 逃避执行,也不允许漏掉不适用项(违反任一 → `contract_invalid`)。因此 N/A 集完全由 `artifact_kind` 决定,不是自由字段。
 
-`blend_native` 的 N/A 集 = §7.1 中"适用 kind = interchange"的 **12 项**(其中 R3 的 7 项构成整段跳过的 stage,R4 的 5 项与该 stage 内其他 check 并存);`interchange` 的 N/A 集 = "适用 kind = blend_native"的 **3 项**(均在 R4)。注册表合计 **36 项 = 21 all + 12 interchange + 3 blend_native**。
-
-**文件集不使用 N/A 机制**(修正 V3.6 的误导表述):§2.6 条款 4 的 expected file 集**直接由 §7.1.1 registry 按当前 kind 条件展开**得到——条件为空的行恒纳入,条件为 `kind=X` 的行仅当 `artifact_kind == X` 时纳入。不适用的文件既不出现在 expected 也不应出现在 actual,**不需要也不存在 `na_file_ids`**;文件记录没有 status 字段,无法承载 `NotApplicableByContract`。N/A 合成机制只作用于 check。
+`blend_native` 的 N/A 集 = §7.1 中"适用 kind = interchange"的 12 项(其中 R3 的 7 项构成整段跳过的 stage,R4 的 5 项与该 stage 内其他 check 并存),以及 §7.1.1 file registry 中条件为 kind=interchange 的文件 ID;`interchange` 的 N/A 集 = "适用 kind = blend_native"的 2 项(均在 R4)与对应文件 ID。注册表 34 项 = 20 all + 12 interchange + 2 blend_native。文件集同理按 kind 条件展开,规则与 check 完全一致。
 
 ---
 
@@ -239,8 +236,7 @@ schema_version: int = 1
 blender_version: str            # 如 "5.2.0"
 unit_system: {system: str, scale_length: float, length_unit: str}
 frame_range: {start: int, end: int, fps: float}
-objects: [ObjectRecord]         # 按 stable_id 字典序(datablock 级)
-instances: [InstanceRecord]     # 按 (instancer_stable_id, persistent_id) 升序(渲染级)
+objects: [ObjectRecord]         # 按 stable_id 字典序
 collections: [CollectionRecord] # 按 path 字典序
 materials: [MaterialRecord]     # 按 stable_id 字典序
 images: [ImageRecord]           # 按 stable_id 字典序
@@ -261,15 +257,14 @@ unsupported_fields: [str]
 
 | 记录 | 字段 |
 |---|---|
-| `ObjectRecord` | `stable_id`、`paths[]`、`type`、`data_stable_id\|null`、`parent_stable_id\|null`、`matrix_world`(16 个量化 float)、`visible_render: bool`、`visible_viewport: bool`、`modifiers: [{name, type, params}]`、`geometry: GeometrySummary\|null`(仅可渲染几何类型)、`material_slot_ids: [str\|null]`、`custom_props: {key: json_value}`(按键字典序;**含候选自有属性**)、`bcx_uid: str\|null`(evaluator 写入的导出身份标记,见 §6 `p09`) |
+| `ObjectRecord` | `stable_id`、`paths[]`、`type`、`data_stable_id\|null`、`parent_stable_id\|null`、`matrix_world`(16 个量化 float)、`visible_render: bool`、`visible_viewport: bool`、`modifiers: [{name, type, params}]`、`geometry: GeometrySummary\|null`(仅可渲染几何类型)、`material_slot_ids: [str\|null]` |
 | `GeometrySummary` | `authored: {vertex_count, edge_count, poly_count, tri_count, positions_digest, normals_digest, uv_digests: [{name, digest}], material_index_digest}`;`evaluated`: 同结构(取 evaluated depsgraph);`bbox: [6 个量化 float]` |
-| `InstanceRecord` | `instancer_stable_id`、`persistent_id`(整数元组)、`source_object_stable_id`、`matrix_world`(16 个量化 float)、`geometry_digest`(引用其 source 的 `GeometrySummary.evaluated`,不重复展开)。遍历 `depsgraph.object_instances` 得到,含真实对象与实例两类。**`objects[]` 是 datablock 级视图,`instances[]` 是渲染级视图;`p01_object_count` / `p02_triangle_count` 一律以 `instances[]` 为准**——否则 collection-instance 资产的 source 侧只有 1 条记录而 GLB 侧有 N 个 node,必然误拒 |
 | `CollectionRecord` | `stable_id`、`path`、`children_paths[]`、`object_stable_ids[]`、`exclude: bool`、`hide_render: bool` |
 | `MaterialRecord` | `stable_id`、`use_nodes: bool`、`node_summary: [{node_type, name, inputs_digest}]`(按 `name` 字典序)、`links_digest`、`pbr: {base_color[4], metallic, roughness}\|null`(仅当存在 Principled BSDF) |
 | `ImageRecord` | `stable_id`、`source`(FILE/PACKED/GENERATED)、`filepath_rel\|null`、`size: [w,h]`、`channels`、`colorspace`、`pixels_digest`(见下)、`packed: bool` |
 | `DependencyRecord` | `kind`(IMAGE/LIBRARY/CACHE/FONT/SOUND)、`filepath_rel`、`exists: bool`、`bytes\|null`、`sha256\|null`、`packed: bool` |
 
-**modifier "关键参数"注册表(冻结)**:`params` 只收录该 modifier 类型在下表中声明的属性,其余忽略并计入 `unsupported_fields`;未在表中的 modifier 类型记 `params={}` 并把类型名加入 `unsupported_fields`。**该数组由 `r2.inventory.coverage_complete` 消费**:非空即产生 `unsupported_modifier_type` warning(可 allowlist,`tool_id=acceptance`),使缺口显式且需被显式接受,而非静默丢弃。P0 表:`SUBSURF`(`levels`,`render_levels`)、`MIRROR`(`use_axis`)、`SOLIDIFY`(`thickness`)、`ARRAY`(`count`)、`BEVEL`(`width`,`segments`)、`BOOLEAN`(`operation`)、`TRIANGULATE`(`quad_method`)。扩表即 `impl` 递增。
+**modifier "关键参数"注册表(冻结)**:`params` 只收录该 modifier 类型在下表中声明的属性,其余忽略并计入 `unsupported_fields`;未在表中的 modifier 类型记 `params={}` 并把类型名加入 `unsupported_fields`(使 coverage 缺口显式)。P0 表:`SUBSURF`(`levels`,`render_levels`)、`MIRROR`(`use_axis`)、`SOLIDIFY`(`thickness`)、`ARRAY`(`count`)、`BEVEL`(`width`,`segments`)、`BOOLEAN`(`operation`)、`TRIANGULATE`(`quad_method`)。扩表即 `impl` 递增。
 
 **coverage 完整性算法(冻结)**:按 §4.2 逐类型枚举 `bpy.data` 的具体集合(**排除 `all_ids`**),`coverage.total` = 各类型计数之和;`enumerated_types` 为已建记录的类型,`skipped_types` 为已知不参与判定的类型(`screens`/`workspaces`/`window_managers`/`brushes`/`palettes`)。`r2.inventory.coverage_complete` 当且仅当 `enumerated_types ∪ skipped_types` 覆盖全部非空集合时 Pass;出现任何未分类的非空类型即 Fail。
 
@@ -277,7 +272,7 @@ unsupported_fields: [str]
 
 **量化规则(冻结)**:坐标/法线/UV 取 float64,先 `round(v / 1e-6)` 得整数刻度——**tie-breaking 用 banker's rounding(Python `round` 的默认行为,即 round-half-to-even)**,再乘回 1e-6 并按 `<`(little-endian)打包为 float64;`-0.0` 一律规范化为 `0.0`;`NaN`/`Inf` 出现即 `r2.inventory.no_nan_inf` Fail(不进摘要)。索引用 `<I`(uint32)。数组按 8192 元素分块,逐块 SHA-256,再对块摘要按序拼接后取 SHA-256 得数组摘要。摘要前缀 `bcx.manifest.v1.<field>.`。
 
-`ImageRecord.pixels_digest` 与 §6 `p08` **共用同一归一化**:在 Blender 子进程内解码为 RGBA 8-bit,按该图像的用途(base color / 数据)取合同 `texture_colorspace` 中对应的目标空间做转换,再对像素缓冲取 SHA-256——**不对文件字节取 hash**(同一图像不同编码会得到不同字节但相同像素)。
+`ImageRecord.pixels_digest` 与 §6 `p08` 同规则:解码为 RGBA 8-bit、颜色空间归一到记录的 `colorspace`,对像素缓冲取 SHA-256——**不对文件字节取 hash**(同一图像不同编码会得到不同字节但相同像素)。
 
 实现必须附带量化 golden vectors:`1e-7`(应量化为 0)、`0.5e-6` 与 `1.5e-6`(检验 half-to-even)、`-0.0`、跨块边界(8192±1 元素)各一例。
 
@@ -290,7 +285,7 @@ unsupported_fields: [str]
 3. 返回 `True` → `r2.geometry.validate_clean` 记 Fail(数据本含非法结构),不是"已修好"的 Pass;
 4. 它不覆盖非流形、法线朝向、UV 重叠、材质语义——这些是独立自建检查。
 
-现有 `scene_hash`([scene_hash.py:13-32](bridge/core/scene_hash.py#L13))仅覆盖名称/类型/量化矩阵/RNA 类型/顶点边面数。**该摘要在代码与协议中的实际字段名就是 `scene_hash`**(`bridge/core/contracts.py:19`、`server/mcp/adapter.py:111`;`phase0_structure_digest` 至今未在任何源码或协议中出现,只是历次方案的改名建议)。本文不要求改名,只规定其语义边界:禁止用于 source↔export、两次 clean-run、checkpoint 或发布 identity。
+现有 `scene_hash`([scene_hash.py:13-32](../../../bridge/core/scene_hash.py#L13))仅覆盖名称/类型/量化矩阵/RNA 类型/顶点边面数。**该摘要在代码与协议中的实际字段名就是 `scene_hash`**(`bridge/core/contracts.py:19`、`server/mcp/adapter.py:111`;`phase0_structure_digest` 至今未在任何源码或协议中出现,只是历次方案的改名建议)。本文不要求改名,只规定其语义边界:禁止用于 source↔export、两次 clean-run、checkpoint 或发布 identity。
 
 ---
 
@@ -318,8 +313,6 @@ unsupported_fields: [str]
 - 正交:`ortho_scale = 2.2r`(几何最小需 2r,含 10% margin),相机置于 `C + offset·(4r)`,`clip_start = 0.1r`、`clip_end = 10r`;
 - 透视:焦距 50 mm、传感器宽 36 mm,水平 FOV = `2·atan(18/50)` = **39.598°**;拟合半径 r 的包围球所需最小距离为 `r/sin(FOV/2)` = **2.9523r**,冻结取值 `d = 3.25r`(含约 10% margin),`clip_start = 0.05r`、`clip_end = 10r`。方形画幅下垂直 FOV 与水平相同,故该距离对两轴同时成立。
 
-**未经实测的承重假设(诚实标注)**:`r4.visual.self_determinism` 使用零容差(`--fail 0 --failpercent 0`),前提是"Workbench 在同一进程内两次渲染逐位一致"。§5 的其余关键参数均有本机实测支撑,**唯独这一条只有定性论断**。P0 第一步必须先做一次专项实测(同场景连渲两次比对字节);若 Metal 后端的 Workbench 非逐位一致,则把该 check 的容差改为由合同 `visual_thresholds` 的同一平台键提供(而非硬编码 0),并在文档记录实测值。在实测完成前,该 check 标记为 `assumption_unverified`。
-
 `r == 0`(无任何可渲染几何)→ `r4.visual.scene_not_empty` Fail。**`r == 0` 只在真正没有可渲染对象时成立;curve-only、font-only、点云等资产必须正常通过。**
 
 > 实测依据(Blender 5.2.0):curve-only 场景的 `depsgraph.object_instances` 类型集合为 `['CURVE']`,**MESH 计数为 0**——V3.5 只取可见 mesh 的规则会得 `r = 0` 并误判空场景。font 对象会同时产生 `FONT` 与其求值 `MESH` 两个 instance,故单独的文本资产恰好能被旧规则捕获,但曲线、点云、体积资产不能。混合资产下旧规则会得到**不完整**的包围盒,使部分几何落在画面外。
@@ -329,9 +322,7 @@ unsupported_fields: [str]
 
 **渲染设置(冻结)**:分辨率 1024×1024、100%;色彩管理 view transform = `Standard`、look = `None`、exposure 0、gamma 1;输出 PNG RGBA 8-bit;`clay`/`silhouette`/`wire` 使用 Workbench 引擎(其 studio 光照内置,不依赖场景灯光)并关闭 AA 抖动、固定采样数 8;`beauty` 使用 EEVEE、固定采样数 64。
 
-**evaluator-owned 光照(冻结,仅 beauty 需要)**:候选场景的全部灯光与 world 在渲染前被移除/覆盖,由 evaluator 建立固定三点光——`key`:SUN,方向 `normalize(+1,-1,-1)`,energy 3.0;`fill`:SUN,方向 `normalize(-1,-0.5,-0.3)`,energy 1.0;`rim`:SUN,方向 `normalize(0,+1,-0.5)`,energy 1.5;三者 color 均为纯白。world 使用中性灰 `(0.05, 0.05, 0.05)`、strength 1.0(**不是纯黑**——纯黑加无灯会使 beauty 恒为黑图,失去证据价值)。`silhouette` 单独使用纯黑背景与 shadeless 白色物体,由 Workbench flat 模式实现,不受三点光影响。
-
-> **实现陷阱(实测)**:Workbench 的 `scene.display.shading.background_type='WORLD'` 读取的是 `world.color` 这一**旧式标量属性,不读 world 的着色器节点树**。若用节点树(`world.node_tree` 的 Background 节点)设黑色再配 `background_type='WORLD'`,实测会静默得到 `(0.247,0.247,0.247)` 灰底而非黑底,使 silhouette 失去意义。正确做法二选一:直接设 `world.color=(0,0,0)`,或用 `background_type='VIEWPORT'` + `background_color=(0,0,0)`(实测后者背景为精确 `(0,0,0)`)。`render_views.py` 必须显式规避。
+**evaluator-owned 光照(冻结,仅 beauty 需要)**:候选场景的全部灯光与 world 在渲染前被移除/覆盖,由 evaluator 建立固定三点光——`key`:SUN,方向 `normalize(+1,-1,-1)`,energy 3.0;`fill`:SUN,方向 `normalize(-1,-0.5,-0.3)`,energy 1.0;`rim`:SUN,方向 `normalize(0,+1,-0.5)`,energy 1.5;三者 color 均为纯白。world 使用中性灰 `(0.05, 0.05, 0.05)`、strength 1.0(**不是纯黑**——纯黑加无灯会使 beauty 恒为黑图,失去证据价值)。`silhouette` 单独使用纯黑 world 与 shadeless 白色物体,由 Workbench flat 模式实现,不受此项影响。
 
 全部设置由 evaluator 脚本写入,**不读取候选文件的任何 scene render/world/light/compositor 设置**(这是抗 compositor 欺骗的机制)。
 
@@ -340,8 +331,8 @@ unsupported_fields: [str]
 P0 不要求预先存在的 golden 图像。判定项为:
 
 1. `r4.visual.all_views_rendered`:32 张全部存在、非零字节、可被 oiiotool 读取(否则 `Missing`);
-2. `r4.visual.self_determinism`:同一 run 内对 source 侧的 `clay`/`silhouette`/`wire` 共 24 张各重渲一次(第二组渲染到 `views2/` 子目录),与首次结果按 `oiiotool --fail 0 --failpercent 0 --diff` 逐张比较,**任一张不一致即该 check Fail**(单条 check 聚合 24 张结果)。第二组图像**不进入 evidence file ID 集**(条款 4 只覆盖 `views/` 的 32 张 + 差异图),但其 24 个 SHA-256 以 `{view_pass: [sha_first, sha_second]}` 形式写入该 check 的 `metrics` 字段(§7.3;`detail` 只放单行原因),使判定可复核而不使 file 集随渲染次数漂移;
-3. `interchange` 追加 `r4.visual.source_import_match`:对 8 视角 × {`clay`,`silhouette`} 共 16 组,比较 `view_src_*` 与 `view_imp_*`,用 `oiiotool ref out --fail <t> --failpercent <p> --diff`(阈值来源见 §5.3),任一组超阈值即该 check Fail;16 张差异图恒写入 `r4/diff/`。import 侧的渲染使用与 source 侧**完全相同**的 evaluator 相机与渲染设置,输入是 R4 fresh-import 后的场景。
+2. `r4.visual.self_determinism`:同一 run 内对 `clay`/`silhouette`/`wire` 共 24 张各重渲一次(第二组渲染到 `views2/` 子目录),与首次结果按 `oiiotool --fail 0 --failpercent 0 --diff` 逐张比较,**任一张不一致即该 check Fail**(单条 check 聚合 24 张结果)。第二组图像**不进入 evidence file ID 集**(条款 4 只覆盖 `views/` 的 32 张 + 差异图),但其 24 个 SHA-256 以 `{view_pass: [sha_first, sha_second]}` 形式写入该 check 的 `metrics` 字段(§7.3;`detail` 只放单行原因),使判定可复核而不使 file 集随渲染次数漂移;
+3. `interchange` 追加 `r4.visual.source_import_match`:source 与 import 的同视角 `clay`/`silhouette` 按 `--fail 0.016 --failpercent 1` 比较(阈值来源见 §5.3),超阈值 Fail,并保存 RGB/Alpha diff。
 
 `blend_native` 因只有一组图,不做跨对象像素回归;其视觉证据由 1、2 加人工审阅记录(§8.3)承载。**这消除了"首张基线从哪来"的循环**:P0 的机器判定不需要基线;需要基线的比较只在 `interchange`(两侧同 run 生成)与 §8 fixture(基线由生成器产出,见 §8.2)中出现。
 
@@ -376,28 +367,25 @@ FLIP 与 VLM/CLIP 评分进入 `advisories[]`,按 §2.1 定义**永不参与 §2
 
 `interchange/glb` 的 source↔import 比较只在下表声明的字段上进行。表中未出现的字段不参与判定;**声明为 preserved 的字段发生差异即 Fail**;**未被合同 `projection.lost` 列出的字段(即 preserved/transformed 两类)若实际丢失,记 `r4.projection.undeclared_loss` Fail**——即"丢失"本身不是问题,"未预先声明的丢失"才是。合同 `projection` 三个数组的并集必须恰好等于本表 13 行,缺项或多项 → `contract_invalid`。
 
-**source 取向(冻结,修正第四处误拒)**:§7.4 的导出 preset 固定 `export_apply=True`,GLB 一侧**恒为 evaluated 几何**。因此所有几何类字段(`p01`–`p06`)的 source 侧**一律取 §4.1 `GeometrySummary.evaluated`**,不取 `authored`。若取 authored,带 `SUBSURF`(顶点约 ×16)、`MIRROR`/`ARRAY`/`SOLIDIFY`(包围盒改变)的**合法资产会被必然误拒**——而这四类恰在 §4.1 冻结的 modifier 注册表内,即本规范预期它们出现。`p11_modifier_stack` 是唯一取 authored 的字段(它记录的正是"导出前有哪些 modifier"),且分类为 `lost`、不参与比较。标"—"的字段与 authored/evaluated 之分无关。
-
 **比较空间(冻结,修正 V3.5 的实测错误)**:两侧 manifest **均在 Blender 空间**采集——source 侧来自 R2 inspector,import 侧来自 R4 在新 Blender 进程中 `import_scene.gltf` 后的同一套采集代码。Blender 的 glTF 导出器与导入器**已在文件边界各自完成一次 Z-up↔Y-up 转换**,回环后坐标不变(本机 Blender 5.2.0 实测:位置 `(1,2,3)` 导出 GLB 再导入仍为 `(1,2,3)`)。**因此比较时不得再施加任何换轴**;V3.5 曾要求对 import 侧施加 `(x,-z,y)`,那会把合法回环误算成 `(1,-3,2)` 并误拒——已删除。若将来改为在 raw glTF 边界比较(不经 Blender 导入),才需要显式做且仅做一次 Y-up→Z-up 转换,并须另立 field ID。
 
-| field_id | manifest 字段 | source 取向 | 分类 | 变换/容差 |
-|---|---|---|---|---|
-| `p01_object_count` | 可渲染 object 数量 | evaluated | preserved | 精确相等 |
-| `p02_triangle_count` | 每 object 的三角形数 | evaluated | preserved | 精确相等(source 侧取 evaluated 三角化后计数) |
-| `p03_bbox` | 顶点位置包围盒 | evaluated | preserved | 两侧均为 Blender 空间,**不换轴**;容差 1e-4 × 包围球半径 |
-| `p04_vertex_count` | 顶点数 | evaluated | transformed | 导出因 UV/法线接缝拆点而增加,允许 `import ≥ source`;判定为 `ratio ≤ vertex_split_ratio_max`(**闭区间**),默认上限 **4.0**。实测依据:Blender 默认立方体(平直着色 + 默认 UVMap)导出再导入为 8→24 顶点,比值**恰为 3.0**——若沿用 V3.6 的默认 3.0 且用开区间,一个未经任何处理的普通立方体就会被拒;上限提到 4.0 并明确闭区间后留有余量。诊断显示该拆分主要由法线不连续驱动、UV 只是部分原因 |
-| `p05_uv_layers` | UV 层数量与每层存在性 | evaluated | preserved | 精确相等(名称可变,顺序保持) |
-| `p06_material_slot_count` | material slot 数量 | evaluated | preserved | 精确相等 |
-| `p07_pbr_factors` | 每 material 的 base color / metallic / roughness | — | transformed | Principled BSDF → pbrMetallicRoughness 映射;容差 1e-3 |
-| `p08_texture_pixels` | 纹理图像内容 | — | preserved | **按像素比较,不比字节**:两侧图像各自解码为 RGBA 8-bit、颜色空间按合同 `texture_colorspace` 归一(base color 用 `sRGB`、数据贴图用 `Non-Color`)——**与 §4.2 `ImageRecord.pixels_digest` 使用同一套归一化**,故两侧 manifest 中已有的 `pixels_digest` 可直接比较,coordinator 无需重新解码候选字节(符合 §3 边界),再对像素缓冲取 SHA-256 后比较。尺寸/通道不同即 Fail。**禁止仅比较尺寸与通道数**——那会让同尺寸的不同贴图假绿(V3.5 缺陷,已修正) |
-| `p09_object_identity` | object 身份对应 | — | transformed | **不依赖名称**:R3 导出前由 `export_glb.py` 在**候选副本**上为每个源 object 写入自定义属性 `bcx_uid`(值为 R2 manifest 的 `stable_id`),`export_extras=True` 使其进入 glTF `extras`,导入后由 §4.1 的 `ObjectRecord.bcx_uid` 字段回连。**实测确认该机制可用**(Blender 5.2:导出后原始 GLB 的 JSON chunk 含 `extras:{bcx_uid:...}`,独立进程导入后可从对象自定义属性读回)。<br>**防伪造(冻结)**:R2 阶段若候选自身已存在名为 `bcx_uid` 的自定义属性 → `r2.inventory.no_reserved_props` Fail(该键名为 evaluator 保留);R4 阶段若 import 侧出现重复或缺失的 `bcx_uid` → `r4.projection.ambiguous_object_names` Fail。<br>**退化路径**:目标 glTF 剖面禁止 extras 时退化为名称匹配,此时必须先检测归一化碰撞(`Cube` 与 `Cube.001` 并存即 Fail),不得静默折叠 |
-| `p10_collection_hierarchy` | collection 层级 | — | lost | glTF 摊平为 node 树 |
-| `p11_modifier_stack` | modifier 栈 | authored | lost | 导出即烘焙 |
-| `p12_custom_props` | 候选自有自定义属性 | — | **preserved** | `export_extras=True` 使候选自有的对象自定义属性进入 glTF `extras` 并被导入端读回,**实测确认其确实存活**,故分类为 preserved(V3.6 误标 lost)。比较 `ObjectRecord.custom_props` 去除保留键 `bcx_uid` 后的字典,值按 JCS 规范化后逐键相等。驱动与约束不随 glTF 传递,另立 `p14_drivers_constraints` 为 lost |
-| `p13_unit_system` | 单位系统 | — | transformed | glTF 固定米;source 非米制时按比例换算后比较 |
-| `p14_drivers_constraints` | 驱动与约束 | authored | lost | glTF 不承载,导出即丢失 |
+| field_id | manifest 字段 | 分类 | 变换/容差 |
+|---|---|---|---|
+| `p01_object_count` | 可渲染 object 数量 | preserved | 精确相等 |
+| `p02_triangle_count` | 每 object 的三角形数 | preserved | 精确相等(source 侧取 evaluated 三角化后计数) |
+| `p03_bbox` | 顶点位置包围盒 | preserved | 两侧均为 Blender 空间,**不换轴**;容差 1e-4 × 包围球半径 |
+| `p04_vertex_count` | 顶点数 | transformed | 导出因 UV/法线接缝拆点而增加,允许 `import ≥ source`,比值上限由合同 `vertex_split_ratio_max`(默认 3.0)约束 |
+| `p05_uv_layers` | UV 层数量与每层存在性 | preserved | 精确相等(名称可变,顺序保持) |
+| `p06_material_slot_count` | material slot 数量 | preserved | 精确相等 |
+| `p07_pbr_factors` | 每 material 的 base color / metallic / roughness | transformed | Principled BSDF → pbrMetallicRoughness 映射;容差 1e-3 |
+| `p08_texture_pixels` | 纹理图像内容 | preserved | **按像素比较,不比字节**:两侧图像各自解码为 RGBA 8-bit、颜色空间统一为合同 `texture_colorspace`(默认 `Non-Color` 用于数据贴图、`sRGB` 用于 base color),再对像素缓冲取 SHA-256 后比较。尺寸/通道不同即 Fail。**禁止仅比较尺寸与通道数**——那会让同尺寸的不同贴图假绿(V3.5 缺陷,已修正) |
+| `p09_object_identity` | object 身份对应 | transformed | **不依赖名称**:导出时由 `export_glb.py` 为每个源 object 写入 glTF `extras.bcx_uid`(值为 R2 manifest 的稳定 object ID),导入后由该 extras 回连。若目标 glTF 剖面禁止 extras,则退化为名称匹配并**必须先检测归一化碰撞**:若去后缀后出现重名(如 `Cube` 与 `Cube.001` 同时存在),该资产判 `r4.projection.ambiguous_object_names` Fail,不得静默折叠(V3.5 缺陷,已修正) |
+| `p10_collection_hierarchy` | collection 层级 | lost | glTF 摊平为 node 树 |
+| `p11_modifier_stack` | modifier 栈 | lost | 导出即烘焙 |
+| `p12_custom_props` | 自定义属性、驱动、约束 | lost | 注:`extras.bcx_uid` 由 evaluator 写入,不属候选自定义属性 |
+| `p13_unit_system` | 单位系统 | transformed | glTF 固定米;source 非米制时按比例换算后比较 |
 
-合同 `projection` 的三个数组存的是**上表 `field_id`**(稳定 ASCII 标识符),不是中文描述;三数组并集必须恰好等于 `p01`…`p14` 全集,缺项/多项/未知 ID → `contract_invalid`。这使"并集等于 14 行"成为可机械校验的断言(V3.5 存中文描述,无法校验,已修正)。
+合同 `projection` 的三个数组存的是**上表 `field_id`**(稳定 ASCII 标识符),不是中文描述;三数组并集必须恰好等于 `p01`…`p13` 全集,缺项/多项/未知 ID → `contract_invalid`。这使"并集等于 13 行"成为可机械校验的断言(V3.5 存中文描述,无法校验,已修正)。
 
 ---
 
@@ -415,9 +403,8 @@ ID 命名规则:`<stage>.<domain>.<name>`,全小写 snake,stage ∈ {r0…r5}。
 | `r1.input.digest_recorded` | R1 | 10 | 1 | all | — |
 | `r1.input.no_link_or_device` | R1 | 20 | 1 | all | — |
 | `r1.input.size_within_limit` | R1 | 30 | 1 | all | — |
-| `r2.inventory.coverage_complete` | R2 | 10 | 1 | all | `unsupported_datablock_type`, `unsupported_modifier_type` |
+| `r2.inventory.coverage_complete` | R2 | 10 | 1 | all | `unsupported_datablock_type` |
 | `r2.inventory.no_nan_inf` | R2 | 20 | 1 | all | — |
-| `r2.inventory.no_reserved_props` | R2 | 25 | 1 | all | — |
 | `r2.geometry.validate_clean` | R2 | 30 | 1 | all | — |
 | `r2.geometry.manifest_written` | R2 | 40 | 1 | all | — |
 | `r2.material.slots_resolved` | R2 | 50 | 1 | all | `empty_material_slot` |
@@ -432,7 +419,6 @@ ID 命名规则:`<stage>.<domain>.<name>`,全小写 snake,stage ∈ {r0…r5}。
 | `r3.budget.within_limits` | R3 | 70 | 1 | interchange | `budget_near_limit`, `non_triangle_primitive` |
 | `r4.reopen.offline_ok` | R4 | 10 | 1 | blend_native | — |
 | `r4.reopen.dependencies_resolved` | R4 | 20 | 1 | blend_native | — |
-| `r4.reopen.manifest_matches_source` | R4 | 25 | 1 | blend_native | — |
 | `r4.import.manifest_written` | R4 | 30 | 1 | interchange | — |
 | `r4.projection.preserved_fields_match` | R4 | 40 | 1 | interchange | — |
 | `r4.projection.undeclared_loss` | R4 | 50 | 1 | interchange | — |
@@ -460,38 +446,31 @@ ID 命名规则:`<stage>.<domain>.<name>`,全小写 snake,stage ∈ {r0…r5}。
 | `dependency_report` | R2 | inspector | `r2/dependencies.json` | — |
 | `r2_result` | R2 | inspector | `r2/result.json` | — |
 | `deliverable_glb` | R3 | export_glb | `r3/asset.glb` | kind=interchange |
-| `r3_export_result` | R3 | export_glb | `r3/export-result.json` | kind=interchange |
 | `format_report` | R3 | coordinator | `r3/validator-report.json` | kind=interchange |
 | `budget_report` | R3 | glb_budget | `r3/budget.json` | kind=interchange |
-| `r3_budget_result` | R3 | glb_budget | `r3/budget-result.json` | kind=interchange |
 | `r3_result` | R3 | coordinator | `r3/result.json` | kind=interchange |
 | `reopen_manifest` | R4 | reopen_probe | `r4/reopen-manifest.json` | kind=blend_native |
-| `r4_probe_result` | R4 | reopen_probe / reimport_probe | `r4/probe-result.json` | — |
 | `imported_manifest` | R4 | reimport_probe | `r4/imported-manifest.json` | kind=interchange |
 | `projection_diff` | R4 | coordinator | `r4/projection-diff.json` | kind=interchange |
-| `view_src_{view}_{pass}` | R4 | render_views | `r4/views/src/{view}-{pass}.png` | 32 项(8×4);**source 侧** |
-| `view_imp_{view}_{pass}` | R4 | render_views | `r4/views/imp/{view}-{pass}.png` | kind=interchange;**import 侧**,仅 `clay`/`silhouette` 两 pass × 8 视角 = 16 项 |
+| `view_{view}_{pass}` | R4 | render_views | `r4/views/{view}-{pass}.png` | 32 项(8×4) |
 | `render_settings` | R4 | render_views | `r4/render-settings.json` | — |
-| `r4_render_result` | R4 | render_views | `r4/render-result.json` | — |
-| `visual_diff_{view}_{pass}` | R4 | coordinator | `r4/diff/{view}-{pass}.png` | kind=interchange;与 `view_imp_*` 一一对应,16 项 |
+| `visual_diff_{view}_{pass}` | R4 | coordinator | `r4/diff/{view}-{pass}.png` | kind=interchange,仅 `clay`/`silhouette` 两 pass × 8 视角 = 16 项 |
 | `r4_result` | R4 | coordinator | `r4/result.json` | — |
 | `summary` | R5 | coordinator | `summary.json` | — |
 | `evidence_manifest` | R5 | coordinator | `evidence-manifest.json` | — |
 
 规则:
 
-- **差异图恒生成**(不只在失败时),使集合与结果无关、可在 R0 冻结。
+- **差异图恒生成**(不只在失败时),使集合与结果无关、可在 R0 冻结;`blend_native` 无差异图(该 16 项进入其 N/A 文件集,机制同 §2.7)。
 - 第二组自确定性渲染写入 `r4/views2/`,**不属本表**,故不进条款 4(其哈希写入 check 的 `metrics`,见 §5.2)。
-- **coordinator-owned stage**:R0、R1、R5 的 check 全部由 coordinator 直接算出并写入 `summary.json`,**不产生独立 result 文件**(R1 做的是冻结与哈希,本就无子进程)。因此 `result.json.stage` 的取值域是 `"r2"|"r3"|"r4"`。
-- **每个子进程写自己的 result 文件**,不共用:R2 一个(`r2_result`);R3 三个(`r3_export_result`、`r3_budget_result`,加 coordinator 汇总 validator 结果的 `r3_result`);R4 三个(`r4_probe_result`、`r4_render_result`,加 coordinator 的 `r4_result`)。同一 stage 内各 result 的 `checks[]` **不得出现同一 ID**(重叠 → `expected_set_mismatch`);该 stage 的 actual check 集 = 各 result 的并集 ∪ coordinator 合成的 N/A 记录。§2.6 条款 9 的"其产物"即该子进程自己的 result 文件。
-- **视觉证据分两侧**:`blend_native` 只渲 source 侧 32 张;`interchange` 另渲 import 侧 16 张(`clay`/`silhouette` × 8 视角,`r4.visual.source_import_match` 的第二输入)与 16 张差异图。`r4.visual.all_views_rendered` 的期望张数由 kind 决定:`blend_native` = 32,`interchange` = 32 + 16 = 48。
+- **R0 与 R5 的 check 记录由 coordinator 直接写入 `summary.json`,不产生独立 `result.json`**(`result.json.stage` 因此只有 `r1`…`r4`)。coordinator 是这两个 stage 的 producer,其记录与子进程记录在 §2.6 条款 3 中一并参与集合相等校验。
 - **`output_truncated` / `source_truncated` 的唯一映射**:任一 required 证据文件达到 32 MiB 上限,或工具报告自身标记截断 → 对应 check 的 `raw_status = Truncated` → 按 §2.5 → Fail,并使 `failure_code = evidence_truncated`。不存在"截断但放行"的路径。
 
 ### 7.2 Failure-code family(冻结封闭集;`failure_codes.py` 的内容即本表)
 
 底层 OS/第三方动态错误一律映射到下列父级 code,原始细节存 `detail` 字段;**不为无界底层错误码逐一建夹具**。
 
-**第一分类:失败必须先分两类**——`check_failed`(资产本身被拒收,验收流程正常完成)与其余 14 个基础设施 family(流程未能正常完成)。`summary.failure_code` 取值规则:
+**第一分类:失败必须先分两类**——`check_failed`(资产本身被拒收,验收流程正常完成)与其余 13 个基础设施 family(流程未能正常完成)。`summary.failure_code` 取值规则:
 
 1. 若存在任何基础设施失败 → 取其中**优先级最高**的一个(优先级 = 下表自上而下的顺序,`runner_internal_error` 最低);
 2. 否则若存在 `effective_status == Fail` 的 check → `failure_code = "check_failed"`,并**必须**填充 `failed_check_ids[]`(按注册表 order 升序,不去重前先拒绝重复);
@@ -509,7 +488,6 @@ ID 命名规则:`<stage>.<domain>.<name>`,全小写 snake,stage ∈ {r0…r5}。
 | `zero_checks_collected` | infra | expected 非空而 actual 为空 |
 | `expected_set_mismatch` | infra | check/file ID 集不等、重复或未知 ID |
 | `forged_not_applicable` | infra | N/A 状态的 ID 不在 R0 N/A 集 |
-| `forged_disposition` | infra | 子进程产物中出现非 null 的 `findings[].disposition`(§2.5 规定该字段由 coordinator 独占) |
 | `evidence_missing` | infra | required 证据文件缺失或零字节 |
 | `evidence_truncated` | infra | 证据达大小上限 |
 | `hash_mismatch` | infra | 文件 hash 与 manifest 不一致 |
@@ -534,13 +512,11 @@ checks: [{id: str, impl: int, order: int}]      # 必须与 §7.1 注册表逐�
 na_check_ids: [str]
 warning_allowlist: [{check_id, warning_code, tool_id, tool_version}]
 visual_thresholds: {<platform_key>: {fail: float, failpercent: float}}
-texture_colorspace: {base_color: str, data: str}   # 默认 {"base_color":"sRGB","data":"Non-Color"}
-validator_config_path: str|null                    # glTF-Validator 的 --config YAML;其内容一并入 digest
 platform_blocklist: [str]
 budget: {max_triangles: int, max_materials: int, max_images: int,
          max_image_bytes: int, max_file_bytes: int, vertex_split_ratio_max: float}
 projection: {preserved: [str], transformed: [str], lost: [str]}   # 见 §6
-tools: [{id: str, version: str, sha256: str, path: str}]   # sha256 不可为 null(§7.4)
+tools: [{id: str, version: str, sha256: str|null, path: str}]
 limits: {cpu_seconds: int, address_space_bytes: int, open_files: int, file_size_bytes: int}
 golden: {fixture_id: str, expected_dir: str}|null
 ```
@@ -602,7 +578,6 @@ runner_provenance: {acceptance_files: [{path: str, sha256: str}],
 | `uv` | uv | 依赖与子进程 | `0.12.2` | `uv --version` 前两段精确匹配 |
 | `gltf_validator` | Khronos glTF-Validator | R3 合规层 | `2.0.0-dev.3.10`(npm 最后发布,2024-10-22)| 可执行文件 SHA-256 + `--version`;**调用形态一并冻结**:`gltf_validator -r -o -a <file>`(`-r` 显式开启资源验证——CLI 默认开但库 API 默认关,故必须显式;`-o` 输出 JSON 到 stdout),`--config <file>` 的 YAML 本身入 contract digest |
 | `oiiotool` | OpenImageIO | R4 像素回归 | **本机未安装**——P0 前置条件 | 安装后填入 `--version` 实测值与来源(Homebrew formula 版本或构建 commit),`r0.contract.tools_locked` 校验其存在且匹配 |
-| `acceptance` | 本仓验收包自身 | 全部自研 check 的 `tool_id` | `acceptance/` 下全部 `.py` 的哈希清单(路径字典序,逐文件 SHA-256,再对 `路径\n哈希\n` 序列取 SHA-256),记为 `acc-<前 12 位十六进制>` | coordinator 启动时自算并写入 `summary.runner_provenance.acceptance_files`;与合同锁定值不符 → `toolchain_mismatch` |
 | `flip` / `gltf_transform` / `bat` | — | P1 起 | — | 进入本表后方可使用 |
 
 **hash 边界(冻结)**:`sha256` 对**被直接执行的文件**计算(单文件可执行或入口脚本);对 macOS `.app` bundle 形态的 Blender,hash 其 `Contents/MacOS/Blender` 可执行文件,并另记 build hash——不对整个 bundle 递归求 hash(不确定且昂贵)。`sha256` **不允许为 null**;无法取得 hash 的工具不得进入锁定表,从而不得在 P0 使用。
@@ -618,7 +593,7 @@ runner_provenance: {acceptance_files: [{path: str, sha256: str}],
 ```text
 acceptance/
   __init__.py
-  primitives.py          # 由 run_phase0_acceptance.py 提取的共享原语,Phase 0 回 import(§7.7)
+  primitives.py          # 复制自 run_phase0_acceptance.py 的最小原语(§7.7)
   contract.py            # contract.json 封闭加载与 digest
   check_registry.py      # §7.1 表
   failure_codes.py       # §7.2 表
@@ -688,14 +663,14 @@ docs/acceptance/         # 方案归档位(§11)
 5. §8.4 的两个正向夹具(allowlisted warning 放行、N/A 集匹配)通过;
 6. `bash scripts/checks.sh` 全绿(含 §7.7 定案的两处最小门禁修改后),`acceptance/` 实际被 ruff/mypy/Bandit 覆盖,且**未因本工作引入 Blender 硬依赖**(见 §8.5);
 6b. `oiiotool` 与 `gltf_validator` 已安装并把实测版本/hash 填入 §7.4;`r0.contract.tools_locked` 通过;
-6c. §8.3 的 family 覆盖矩阵机械断言通过(16/16);
+6c. §8.3 的 family 覆盖矩阵机械断言通过(15/15);
 6d. 摘要规范化与量化的 golden vectors 跨进程复算一致(§2.5.1、§4.2);
 7. `ASSET_E2E=1` 真 Blender 路径在本机通过;
 8. pilot candidate 报告产出并附人工审定结论(无论 Pass/Fail)。
 
 ### 7.9 P1 / P2(概要)
 
-P1(L1):第二 normal child 与四级确定性;沙箱与资源限制(§1);BAT 5.2 fixture matrix;**空缓存** offline reopen(P0 的 reopen 是普通 offline 重开,不清缓存);USD/FBX/动画 Profile;`reproducible_by_script` 可选门;FLIP/VLM advisories;gltf-transform 交叉验证;每周 daily-build 金丝雀;共享库提取;`readOnlyHint` 等 MCP annotations(仅元数据,非安全边界;实施需同步更新 [test_server_process.py](tests/contract/test_server_process.py) 的目录投影断言)。
+P1(L1):第二 normal child 与四级确定性;沙箱与资源限制(§1);BAT 5.2 fixture matrix;**空缓存** offline reopen(P0 的 reopen 是普通 offline 重开,不清缓存);USD/FBX/动画 Profile;`reproducible_by_script` 可选门;FLIP/VLM advisories;gltf-transform 交叉验证;每周 daily-build 金丝雀;共享库提取;`readOnlyHint` 等 MCP annotations(仅元数据,非安全边界;实施需同步更新 [test_server_process.py](../../../tests/contract/test_server_process.py) 的目录投影断言)。
 P2(L2):不同 OS principal、签名审批、DSSE/Sigstore、透明日志、Publisher receipt。
 
 ---
@@ -718,7 +693,7 @@ golden/expected 一律**由生成器或手工构造过程产出并经人工审�
 
 | Fixture | 等级 | 构造 | expected `failure_code` / 关键 check | 现状 |
 |---|---|---|---|---|
-| `exit_zero_success_false` | L0 | synthetic | `tool_output_invalid`(exit 0 但 `success!=true`) | wrapper 层已有([tests/unit/test_phase0_acceptance.py:55](tests/unit/test_phase0_acceptance.py#L55)) |
+| `exit_zero_success_false` | L0 | synthetic | `tool_output_invalid`(exit 0 但 `success!=true`) | wrapper 层已有([tests/unit/test_phase0_acceptance.py:55](../../../tests/unit/test_phase0_acceptance.py#L55)) |
 | `reused_evidence_root` | L0 | synthetic | `runner_internal_error`(启动子进程前拒绝) | wrapper 层已有(L78) |
 | `stale_result_file` | L0 | synthetic | `stale_result_file` | 无 |
 | `zero_checks_collected` | L0 | synthetic | `zero_checks_collected` | 无 |
@@ -749,23 +724,18 @@ golden/expected 一律**由生成器或手工构造过程产出并经人工审�
 | `object_name_collision` | L0 | generator | `check_failed` + `r4.projection.ambiguous_object_names`——`Cube` 与 `Cube.001` 并存时禁止静默折叠 | 无 |
 | `candidate_compositor_spoof` | L0 | generator | 通过(evaluator 全量覆盖渲染设置,诊断图不受影响) | 无 |
 | `nondeterministic_render` | L0 | generator | `check_failed` + `r4.visual.self_determinism` | 无 |
-| `axis_roundtrip_identity` | L0 | generator | **通过**——位置 `(1,2,3)` 的对象经 GLB 回环后 `p03_bbox` 相等。判定谓词:`r4.projection.preserved_fields_match` 为 Pass 且 `projection-diff.json` 中 `p03_bbox` 最大分量差 < 1e-4×r | 无 |
-| `curve_only_asset` | L0 | generator | **通过**——纯曲线资产(实测:depsgraph instance 类型仅 `['CURVE']`,MESH 计数为 0)必须正常验收。判定谓词:coordinator exit 0 且 `r4.visual.scene_not_empty` 为 Pass | 无 |
-| `mixed_curve_mesh_framing` | L0 | generator | **通过**——曲线远离网格时包围盒须覆盖两者。判定谓词(冻结):对 `view_src_front_silhouette` 用 `oiiotool --stats` 求前景(非黑)像素框,断言画面左右两半各至少有 1 个前景像素,即两个分离物体都入画 | 无 |
-| `oversized_bounds_framing` | L0 | generator | **通过**——细长/大跨度资产在 8 视角完整入画。判定谓词(冻结):对每个 `view_src_*_silhouette` 用 `oiiotool --stats` 求前景像素框,断言前景像素数 > 0 且框不与四边任一相接(`xmin>0 且 ymin>0 且 xmax<W-1 且 ymax<H-1`) | 无 |
-| `subsurf_mirror_roundtrip` | L0 | generator | **通过**——带 `SUBSURF`(level 2)与 `MIRROR` 的资产在 `export_apply=True` 下必须通过 `p01`–`p06`;专防"source 侧取 authored"回归(本轮第四处误拒) | 无 |
-| `default_cube_vertex_ratio` | L0 | generator | **通过**——未经处理的默认立方体(实测 8→24,比值恰 3.0)必须通过 `p04`;专防阈值零余量回归 | 无 |
-| `reserved_prop_bcx_uid` | L0 | generator | `check_failed` + `r2.inventory.no_reserved_props`——候选自带名为 `bcx_uid` 的自定义属性即拒收,防身份伪造 | 无 |
-| `reopen_manifest_drift` | L0 | generator | `check_failed` + `r4.reopen.manifest_matches_source`——重开后 manifest 与 source 不一致即拒 | 无 |
-| `forged_disposition_written` | L0 | synthetic | `forged_disposition`——子进程产物写了非 null 的 `findings[].disposition` | 无 |
+| `axis_roundtrip_identity` | L0 | generator | **通过**——位置 `(1,2,3)` 的对象经 GLB 回环后 `p03_bbox` 必须相等;本夹具专防"再次换轴"回归(V3.5 缺陷) | 无 |
+| `curve_only_asset` | L0 | generator | **通过**——纯曲线资产(depsgraph 中 MESH 计数为 0)必须正常验收,不得判空场景;这是 V3.5 mesh-only bounds 的确定性反例 | 无 |
+| `mixed_curve_mesh_framing` | L0 | generator | **通过**——曲线远离网格时,包围盒须覆盖两者;断言曲线部分在渲染图中可见(旧规则会漏掉曲线并使其出画) | 无 |
+| `oversized_bounds_framing` | L0 | generator | **通过**——细长/大跨度资产在 8 视角中完整入画;断言渲染图非空且前景像素未触边框(防 2.6r 型裁切回归) | 无 |
 | `compressed_payload_supplement` | L1 | handcrafted | `check_failed`(合同声明 supplement 分支但缺目标运行时证据) | 无 |
 | `fixed_view_billboards` | L1 | generator | `check_failed`(post-freeze holdout 暴露) | 无 |
 | `nondeterministic_geometry` | L1 | generator | `check_failed`(两 child geometry 比较失败) | 无 |
 | `parser_resource_bomb` | L1 | handcrafted | `resource_limit_exceeded` | 无 |
 
-**family 覆盖矩阵(§8.1 义务的机械证明)**:16 个 family 全部有夹具——`contract_invalid`(3)、`toolchain_mismatch`(1)、`tool_crashed`(1)、`tool_output_invalid`(1)、`stale_result_file`(1)、`zero_checks_collected`(1)、`expected_set_mismatch`(1)、`forged_not_applicable`(1)、`evidence_missing`(1)、`evidence_truncated`(2)、`hash_mismatch`(1)、`isolation_insufficient`(1)、`resource_limit_exceeded`(1)、`runner_internal_error`(2)、`check_failed`(14)。测试套件须有一条机械断言:遍历夹具表的 expected 列,其 family 集合 == §7.2 全集(16 项),否则该断言失败。
+**family 覆盖矩阵(§8.1 义务的机械证明)**:15 个 family 全部有夹具——`contract_invalid`(3)、`toolchain_mismatch`(1)、`tool_crashed`(1)、`tool_output_invalid`(1)、`stale_result_file`(1)、`zero_checks_collected`(1)、`expected_set_mismatch`(1)、`forged_not_applicable`(1)、`evidence_missing`(1)、`evidence_truncated`(2)、`hash_mismatch`(1)、`isolation_insufficient`(1)、`resource_limit_exceeded`(1)、`runner_internal_error`(2)、`check_failed`(14)。测试套件须有一条机械断言:遍历夹具表的 expected 列,其 family 集合 == §7.2 全集,否则该断言失败。
 
-L0 计 40 项(17 synthetic + 6 handcrafted + 17 generator),L1 计 4 项。其中 7 项是**正向回归夹具**(`axis_roundtrip_identity`、`curve_only_asset`、`mixed_curve_mesh_framing`、`oversized_bounds_framing`、`subsurf_mirror_roundtrip`、`default_cube_vertex_ratio`、`candidate_compositor_spoof`),断言"必须通过",与其余"必须被拒"的夹具方向相反,缺一不可——它们守护的正是历轮修复的四处误拒缺陷。
+L0 计 35 项(16 synthetic + 6 handcrafted + 13 generator),L1 计 4 项。其中 4 项(`axis_roundtrip_identity`、`curve_only_asset`、`mixed_curve_mesh_framing`、`oversized_bounds_framing`)是**正向回归夹具**,专防本轮修复的三处误拒缺陷复发——它们断言的是"必须通过",与其余"必须被拒"的夹具方向相反,缺一不可。
 
 ### 8.4 正向夹具(防"只测拒绝")
 
@@ -801,7 +771,7 @@ L0 计 40 项(17 synthetic + 6 handcrafted + 17 generator),L1 计 4 项。其中
 | >4GB 误报(#244) | 误报非盲区 | 合同 `max_file_bytes`(默认 512 MiB)天然规避;记 known-issue | 同 L0 |
 
 - 其余锚定事实:glTF-Validator 仅 severity=error 影响退出码、CLI 默认 `--validate-resources` 而库 API 默认关闭、npm 最后发布 `2.0.0-dev.3.10`(2024-10);OpenUSD GHSA-8878-wr6v-j5cm(§1);`mesh.validate()` 副作用(§4);MCP ToolAnnotations 均为 hint、不可作安全决策依据;glTF `image` 对象无宽高字段(§7.6 实测)。
-- **仓库内先例**:Phase 0 wrapper 安全原语与三个 known-bad 回归;`verify_live` 的等序目录比较、单一只读探针、快照防 stale([verification.py:1035-](plugins/blender-mcp-installer/scripts/blender_mcp_installer/verification.py#L1035));`RELEASE=1` 的"精确重建 + 逐字节比对"。
+- **仓库内先例**:Phase 0 wrapper 安全原语与三个 known-bad 回归;`verify_live` 的等序目录比较、单一只读探针、快照防 stale([verification.py:1035-](../../../plugins/blender-mcp-installer/scripts/blender_mcp_installer/verification.py#L1035));`RELEASE=1` 的"精确重建 + 逐字节比对"。
 - **上游对照**(observed_at=2026-08-24):ahujasid/blender-mcp 的 `execute_code` 为裸 `exec`,无沙箱与产物校验,RCE 类 issue 关闭不修,有两个 2026-06-03 公布的 low 级 CVE:[CVE-2026-10661](https://github.com/advisories/GHSA-qqw9-95ww-prfm)(`input_image_url` 注入)与 [CVE-2026-10662](https://github.com/advisories/GHSA-5hr7-6m56-f3rg)(`zip_file_url` SSRF)——二者位于全局 GitHub Advisory Database,该仓库自身 Security advisories 页未发布公告;[PatrykIti/blender-ai-mcp](https://github.com/PatrykIti/blender-ai-mcp) 以确定性测量为卖点,方向一致。
 - **反例转化**:dcc-mcp 的 `passed=false` 仍 `skill_success`、pytest exit 5 当成功;blender-agent-studio 的 `hard_gate_pass=false` 但 exit 0、公开 CI 不启动 Blender → 夹具 `zero_checks_collected` 与双判定原则。
 - **可借鉴**(P1):blender-agent-studio `verifyReproduction`;newo-ether 的"提交时重新验证"与指针泄漏审计;pyblish/AYON 有序插件范式(本方案增强:冻结 check 集+版本+序的哈希);Unreal DataValidation 的单 CLI 非零退出形态;glTF-Blender-IO 每周 daily-build 金丝雀。
@@ -811,7 +781,7 @@ L0 计 40 项(17 synthetic + 6 handcrafted + 17 generator),L1 计 4 项。其中
 ## 10. 完成定义(四级)
 
 - **本文完成**:自包含(单文档可恢复全部规范与参数)、判定唯一、注册表冻结;
-- **P0/L0 完成**:§7.8 全部条目满足(1–6、6b、6c、6d、7、8,共 11 条);
+- **P0/L0 完成**:§7.8 八条全部满足;
 - **L1 完成**:两个 clean child、可证明隔离与资源限制(§1)、依赖闭包 + 空缓存 offline reopen、§8.3 的 4 项 L1 夹具通过;
 - **L2 完成**:签名审批与 exact-digest Publisher 链实际 E2E 通过。
 
@@ -825,7 +795,7 @@ P0 代码与真 Blender fixture 落地前,唯一诚实结论仍是:
 
 1. **解除正式验收阻塞**:处置 §0.3 全部 untracked 文件——方案文档归档进 `docs/acceptance/`(同步更新 `docs/README.md` 的"历史已移除"表述与 V3.1 的跟踪位置);`.blend`/PNG 作为 pilot candidate 移入 `tests/asset_fixtures/artifacts/` 或仓库外资产目录并在合同记录路径。
 2. **V3.1 勘误**:若保留,页首补"D35~D43 所述 wrapper 实际入仓于 `bf63c89`"。
-3. **P0 启动**:按 §7 依序落地。**首个提交是共享原语提取**(§7.7 定案 3):新建 `acceptance/primitives.py`、`scripts/run_phase0_acceptance.py` 改为回 import、`scripts/checks.sh` 与 `pyproject.toml` 各加一处路径(§7.7 定案 2);完成标准是既有 `tests/unit/test_phase0_acceptance.py` **一行不改**继续全绿且 `checks.sh` 输出 `ALL CHECKS PASSED`,否则回滚改用复制方案。此后的提交才是 `check_registry.py`/`failure_codes.py`/三份 schema/`decide.py` 与 synthetic 夹具。
+3. **P0 启动**:按 §7 依序落地,首个提交含 `primitives.py` 复制、`check_registry.py`/`failure_codes.py`/三个 schema、`decide.py` 与 synthetic 夹具,不触碰任何既有文件。
 
 已剥离(与验收闭环无关或不宜先验承诺):docs/ 空目录清理(git 不跟踪空目录,列为可选卫生项);MCP `readOnlyHint` 标注(移入 §7.9 P1)。
 
@@ -862,37 +832,6 @@ V3.4 经两路独立复审:**事实与处置闭合路判定通过**(21/21 实质
 | L3:validator 调用形态未冻结 | 成立 | §7.4 冻结完整参数向量与调用形态 |
 | L4:§11 L-05 处置描述与正文不符 | 成立 | 本表以实际做法描述:删除绝对措辞 + 立锚定原则(§9) |
 | 新问题:`glb_budget.py` 进程归属未绑定 | 成立 | §3 与 §7.6 明确在独立子进程运行,coordinator 不接触候选字节 |
-
-### 12.3 V3.6 双路审计(第五轮)处置
-
-V3.6 经两路独立审计:**规范路** 7 High / 9 Medium / 6 Low;**实证路**对 8 条技术断言在 Blender 5.2.0 实测,**全部成立**(相机 8 组无退化、`ortho_scale=2.2r` 实测占宽 0.908 未触边、三点光下 EEVEE 非黑像素 100%、`extras.bcx_uid` 三层证据链完整、顶点数 8→24、`(library,name)` 唯一、CURVE/FONT 可直接 `to_mesh()`、12 个导出参数名 12/12 精确)。全部处置如下。
-
-| 发现 | 验证 | V3.7 处置 |
-|---|---|---|
-| H-01 `effective_status` 未随多 finding 改写,与自建夹具冲突 | 成立(存在量词读法会放行 `validator_multi_message_mixed`) | §2.5 重写为三步式,第三步**只以 `raw_status` 为输入**;明确 `Warning` 一律 Fail、allowlist 只在聚合步生效,排除存在量词读法 |
-| H-02 `interchange` 的 import 侧渲染集不存在 | 成立(registry 只有 32 张单侧图) | §7.1.1 拆为 `view_src_*`(32)与 `view_imp_*`(16),差异图 16 张与后者一一对应;`all_views_rendered` 期望张数按 kind 取 32 / 48 |
-| H-03 缺 `r1_result`;R3/R4 多子进程共用一份 result | 成立 | §7.1.1 改为 **per-subprocess result**(R2 一份、R3 三份、R4 三份);R0/R1/R5 为 coordinator-owned 无 result 文件,`result.json.stage` 取值域改为 `r2\|r3\|r4`;同 stage 内各 result 的 check ID 不得重叠 |
-| H-04 `reopen_manifest` 无消费者 | 成立(恰好落进 §2.2 自定的"只证明能打开"Fail 条件) | 新增 check `r4.reopen.manifest_matches_source`;§2.3 kind 表同步 |
-| H-05 投影表未分 authored/evaluated,`export_apply=True` 下必误拒 | 成立(**第四处误拒**:SUBSURF 顶点约 ×16、MIRROR/ARRAY 改包围盒,四者均在冻结的 modifier 注册表内) | §6 新增 **source 取向列**:`p01`–`p06` 一律取 `evaluated`;新增正向夹具 `subsurf_mirror_roundtrip` |
-| H-06 `bcx_uid` 在 manifest 无处可读;`p12` 分类失实;无伪造防护 | 成立 | §4.1 `ObjectRecord` 补 `custom_props` 与 `bcx_uid` 字段;`p12` 改判 **preserved**(实测 extras 确实存活),驱动/约束另立 `p14` 为 lost;新增 `r2.inventory.no_reserved_props` 防候选自带 `bcx_uid`,import 侧重复/缺失 uid 归 `ambiguous_object_names` |
-| H-07 自研 warning 无 `tool_id` → `packed_dependency` 等被无条件拒收 | 成立 | §7.4 新增 `acceptance` 工具行(版本 = 包内容哈希),§2.5 明确五个自研 warning 可 allowlist |
-| M-01 disposition 由子进程写、无重算义务 | 成立 | §2.5 定案 **disposition 由 coordinator 独占计算**;子进程写非 null 即 `forged_disposition`(§7.2 新增 family) |
-| M-02 `p08` 依赖不存在的合同字段,且与 §4.2 归一化互斥 | 成立 | contract schema 新增 `texture_colorspace` 与 `validator_config_path`;§4.2 与 §6 `p08` 统一为同一套归一化,manifest 的 `pixels_digest` 可直接比较 |
-| M-03 N/A **文件**集无 schema | 成立 | §2.7 明确**文件集不使用 N/A 机制**,直接按 registry 的 kind 条件展开;不存在 `na_file_ids` |
-| M-04 有 instance identity 定义却无 InstanceRecord | 成立 | §4.1 新增 `InstanceRecord`;`p01`/`p02` 改以 `instances[]` 为准 |
-| M-05 `unsupported_fields` 无消费者 | 成立 | 由 `r2.inventory.coverage_complete` 消费,非空即产生可 allowlist 的 `unsupported_modifier_type` warning |
-| M-06 `checks[]` 排序键非全序 | 成立(`order=10` 在六个 stage 各出现一次) | §2.5.1 改为 `(stage_index, order, id)` 三元组全序 |
-| M-07 "提取"定案未传播到 §7.5/§11 | 成立 | 两处同步为提取方案;§11 首个提交改为原语提取 + 门禁修改,并给出回滚条件 |
-| M-08 `self_determinism` 零容差是唯一未实测假设 | 成立 | §5.2 **诚实标注**:P0 第一步先做专项实测;若非逐位一致则改由合同平台键提供容差;实测前标 `assumption_unverified` |
-| M-09 三个正向夹具断言不可机械化 | 成立 | §8.3 为 `mixed_curve_mesh_framing`、`oversized_bounds_framing`、`curve_only_asset`、`axis_roundtrip_identity` 各冻结判定谓词(`oiiotool --stats` 前景框 + 具体不等式) |
-| L-01 family 计数 13 vs 14 | 成立 | 改为 14 |
-| L-02 §2.5 代码围栏嵌套错误使公式渲染为正文 | 成立 | 整节重写,单层围栏 |
-| L-03 条款 5 与 §7.2 规则 1 取值冲突 | 成立 | 条款 5 补"在无任何基础设施失败时" |
-| L-04 §7.8 条目数与 §10 不符 | 成立 | §10 改为"共 11 条" |
-| L-05 `sha256: str\|null` 与 §7.4 不符 | 成立 | schema 改为 `str`,不可为 null |
-| L-06 §0.3 未跟踪清单过时且自指 V3.5 | 成立 | 改为"以运行时 `git status` 为准",不在文中固定清单 |
-| 实证路:`vertex_split_ratio_max=3.0` 对默认立方体零余量 | 成立(实测 8→24 恰为 3.0) | 默认上限提至 **4.0** 并明确**闭区间**;新增正向夹具 `default_cube_vertex_ratio` |
-| 实证路:Workbench `background_type='WORLD'` 不读节点树 | 成立(实测得 `(0.247,0.247,0.247)` 灰底) | §5.1 加实现陷阱警示与两种正确做法 |
 
 ### 12.2 V3.5 全量审计(第四轮)处置
 

@@ -1,42 +1,50 @@
 # 文档中心
 
-本目录保留当前实现的正式文档，以及资产验收方案(`acceptance/`)、待实施设计(`superpowers/specs/`)与实施计划(`superpowers/plans/`)。此外，仓库根目录保留一份绑定旧提交的 V3.1 对抗性审计作为明确档案例外；其余历史研究草稿和机器证据不在工作树中，需要追溯时使用 Git 历史。
+本目录按文档用途区分当前实现、操作说明、现行规范、待实施方案和历史档案。
+当前实现总设计仅在 `architecture.md` 维护；各操作手册保留具体流程，避免重复定义架构。
 
-## 使用文档
+## 正式文档
 
-- [项目架构](architecture.md)：两条 MCP 链路、组件关系与安全边界。
+- [项目架构与实现设计](architecture.md)：当前实现的唯一总设计，覆盖 MCP 链路、安装事务、摘要语义、资产验收核心和技术边界。
 - [Phase 0 只读通道安装](install.md)：安装 Blender Bridge 并注册自研 MCP Server。
 - [官方 Blender MCP 分发与安装](distribute-official-blender-mcp.md)：受审分发、信任边界、安装和回滚入口。
 - [官方 Blender MCP 使用](use-official-blender-mcp.md)：安装后的安全使用方式。
-- [验证说明](validation.md)：自动化门禁、手工验证与结论边界。
-- [Agent 工作流](agent-workflow.md)：GPT-6 Astra 指令对齐、技能范围和维护场景。
+- [验证说明](validation.md)：文档审计、自动化门禁、发行验证和现场验收。
+- [Agent 执行约定](../AGENTS.md)：协作、授权、检索和交付规则；`CLAUDE.md` 引用同一文件。
 
-## 资产验收方案
+## 现行规范与技术决策
 
-- [验收方案 V3.8](acceptance/blender_mcp_skill_acceptance_optimized_v3_8.md):当前生效的规范版本,含 check registry、file registry、判定公式与夹具表。同目录保留 V3.2~V3.7 与历次审计报告作为演进记录,**它们不是当前规范**。
-- [判定核心实施计划](superpowers/plans/2026-08-24-asset-acceptance-decision-core.md):P0 的第一份计划,只覆盖不依赖 Blender 的判定核心。
-- [V3.1 对抗性审计档案](../blender_mcp_skill_acceptance_adversarial_audit_v3_1.md)：仅记录旧提交 `102a3a2…` 的审计证据，不代表当前实现；其 D35～D43 所述 wrapper 实现实际于 `bf63c89294a5f79649a2c550331ea8987cdeab1b` 入仓。
+- [资产验收规范 V3.8](acceptance/blender_mcp_skill_acceptance_optimized_v3_8.md)：现行详细规范，定义检查目录、文件目录、判定公式与夹具。规范表由 `tests/unit/test_asset_spec_counts.py` 校验。
+- [MCP SDK v2 决策](decisions/2026-08-07-mcp-sdk-v2-selection.md)：自研 Phase 0 Server 的 SDK 选择依据和兼容边界。
 
-当前只实现了不依赖 Blender 的 P0 判定核心与 R0/R1/R5 九项检查；方案中的通用资产验收仍未完成，不得用于自动发布放行。
+资产验收运行时仍为 schema v1，目前接入 R0/R1/R5 九项检查；R2–R4 尚未接入。
+规范的目标能力不等于生产实现，通用资产不能据此自动发布放行。
 
-## 已认可方向的待实施设计
+## 待实施设计与计划
 
-- [安装升级与旧版本自动清理](superpowers/specs/2026-09-08-installer-upgrade-cleanup-design.md)：新版验证成功后自动清理旧托管 runtime、扩展恢复副本和该 Codex 插件的历史缓存；包含清理记录、并发与回滚边界。
-- [资产验收整合设计](superpowers/specs/2026-09-08-asset-acceptance-integration-design.md)：结合源码审计、外部 V4 与 2026-09-08 Blender 实测，按可信核心、原生闭环、GLB 闭环实施；包含 v2 迁移、结果归属、无环证据和回归条件。
+下列方案的方向已获认可，但尚未改变生产代码行为。计划仅用于相应开发任务，
+不增加安装、删除用户缓存或发布资产的授权。
 
-两份设计独立实施，目前均未改变代码行为。资产验收运行时仍为 schema v1，现行规范仍是 V3.8；后续按整合设计成套迁移到 V5 规范与 schema v2。设计中的目标能力不代表当前已完成，外部 V4 也不自动取得仓库规范地位。
+| 设计 | 实施计划 | 依赖与范围 |
+|---|---|---|
+| [安装升级与旧版本自动清理](superpowers/specs/2026-09-08-installer-upgrade-cleanup-design.md) | [升级清理计划](superpowers/plans/2026-09-08-installer-upgrade-cleanup.md) | 独立实施；受管版本归属、使用锁、验证后清理与崩溃恢复 |
+| [资产验收整合设计](superpowers/specs/2026-09-08-asset-acceptance-integration-design.md) | [M0/M1 可信核心](superpowers/plans/2026-09-08-asset-acceptance-core-v2.md) | V5 目标规范与 schema v2 迁移、冻结输入、唯一判定和证据归属 |
+| 同上 | [M2 原生闭环](superpowers/plans/2026-09-08-asset-acceptance-native.md) | 依赖 M0/M1；真实重开、视觉比较、审阅和交付 |
+| 同上 | [M3 GLB 闭环](superpowers/plans/2026-09-08-asset-acceptance-interchange.md) | 依赖 M2；Validator、逐实例预算、有限表面投影与消费者验证 |
 
-## 技术决策
+[计划审阅与原型验证记录](superpowers/reviews/2026-09-08-plans-adversarial-review.md)仍服务于上述待实施计划，
+保留在审阅目录。仓库外原型只证明记录中的实验范围，不能作为生产功能已完成的证据。
+V5/schema v2 在代码与回归迁移完成前不替代 V3.8/schema v1；外部 V4 不自动成为仓库规范。
 
-- [MCP SDK v2](decisions/2026-08-07-mcp-sdk-v2-selection.md)：自研 Phase 0 Server 的 SDK 选择。
+## 历史档案
 
-## 权威顺序
+旧版资产验收方案、对应审计和初期判定核心计划统一收录于[归档目录](archive/README.md)。
+档案保留原始结论及其时间、提交和实验范围，不作为当前执行指令或验收结果。
 
-发生冲突时按以下顺序处理：
+## 维护规则
 
-1. 代码、测试、`pyproject.toml` 和官方分发 `artifacts/manifest.json`；
-2. 插件运行时说明 `plugins/blender-mcp-installer/skills/install-official-blender-mcp/SKILL.md`；
-3. 本目录中的正式文档；
-4. Git 历史中的旧计划、审计和实验记录。
-
-文档不得固定本机用户名、临时路径或已被新 manifest 取代的上游提交。版本、工具目录和产物哈希以当前 manifest 为准。
+- 实现事实以当前源码和行为测试为准；项目依赖以 `pyproject.toml`、`uv.lock` 为准，官方分发以 `plugins/blender-mcp-installer/artifacts/manifest.json` 及对应锁文件为准。
+- 正式设计记录已实现行为，规范记录要求；二者不一致时明确列出差距，不将计划能力写成当前事实。
+- 安装命令由安装技能及其引用文件维护，执行约定由 `AGENTS.md` 维护；其他文档通过链接引用，避免重复规则。
+- 方案完成或被替代后，将仍有追溯价值的材料归档并更新引用；重复说明在独有信息迁移后删除。
+- 文档不固定本机用户名、临时证据路径或重复的版本与工具清单。历史快照中的版本和行号仅用于追溯。

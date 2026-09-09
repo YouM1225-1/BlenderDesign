@@ -215,3 +215,18 @@ M1 先用标准库和已有原语；Blender worker 可导入 `bpy`，coordinator
 本设计已区分源码事实、有限平台实测和待实现能力；保留了正常 CLI 当前失败关闭的结论。输入身份、worker 归属、内部判定、R5 和签收没有可由子进程自行放行的入口；E/V/Q/T 不循环；首发缩小支持类型但不删必需检查；未把未知 UV/完整视觉/隔离/消费者结论写成通过。
 
 书面设计审阅通过后分别编写 M0–M3 实施计划，列出确切文件、最小行为验证和逐包完成条件；安装清理单独编写计划。后续实现若需改变支持范围、数据格式或本设计的删除/签收边界，先明确修订设计，再实施相关行为。
+
+## 12. 执行计划实测补充
+
+2026-09-08 编写计划时在仓库外进一步运行了合同/进程/封装原型、真实 Blender 采集/渲染/导入及 Node Validator。以下细节消除了计划中的错误假设；不把原型结果视为本仓库生产功能已实施。任务入口为 [M0/M1](../plans/2026-09-08-asset-acceptance-core-v2.md)、[M2](../plans/2026-09-08-asset-acceptance-native.md) 和 [M3](../plans/2026-09-08-asset-acceptance-interchange.md)。
+
+- 能力、跨进程、参考和消费者技术门禁进入 v2 `summary.success`，以 gates/failed_gate_ids 单列；保留 37 个现有 check 的身份。Q 仍只决定业务审阅状态。
+- 安全前置失败造成的未启动作业，由 controller 记录 `blocked_by` 和实际未产生文件。不能为这些文件补空内容，也不能将这种已知阻断伪装成运行事故；对应下游与未完成 R5 检查保持 NotTested，上层遵循 Fail + 未完成 = UNVERIFIED 的混合规则。
+- 导出失败时 D=null，没有虚构长度/摘要，也不拿源文件冒充 GLB。缺 D 必须阻断成功；交付入口重新核验控制链、全部叶子及实际 D。
+- 本机 macOS 的 RLIMIT_AS 设置失败。L0 的 v2 内存字段明确为 `rss_bytes`，每 0.1 秒采样进程组并终止超限；保留峰值观测与次数，承认采样间隔内峰值可能漏采。CPU/FD/文件大小仍用可用内核限制；它不替代 L1 的硬隔离。
+- `WIREFRAME` 参数可产生无信息的黑图。首个线框实现改为 evaluator 副本上的世界坐标边管，半径固定为 `reference_radius * 0.0015`，只在 wire pass 显示。比较报告保留 RGB 前景能量并拒绝整组全黑诊断。缺底板负例在部分其他 pass 被遮挡而 wire 能检出，故不得删掉结构参考与 wire 门禁。
+- CPU 图像比较进程记录自己的 Blender/build/decoder 身份；没有渲染初始化时不伪造 GPU 观测。GPU/platform 由实际 render 作业报告并与冻结政策核对。
+- 直接连接 Base Color 图像后，未连接的该 socket 默认值不参与 PBR 比较；发光颜色与 strength 归一到实际乘积。首个 GLB profile 限定非镜像 MESH、scale_length=1、基本 PBR、打包 sRGB RGBA8 PNG 与 Linear/REPEAT/default-active-UV；范围外仍为未验证。
+- npm `gltf-validator` 没有命令行 bin，适配器调用其 `validateBytes`。图像资源的读取证据采用解码尺寸/位深等字段，不能要求每行都有 byteLength；预算独立遍历 scene node，区分唯一 mesh 数据和实例绘制量。controller 另核对 export 前后 S、唯一 D、preset 与原生 occurrence 集。
+
+原型的代码身份、发现和复测口径见[计划对抗审计记录](../reviews/2026-09-08-plans-adversarial-review.md)。

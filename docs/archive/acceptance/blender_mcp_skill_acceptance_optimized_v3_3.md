@@ -38,7 +38,7 @@ V3.3 相对 V3.2 的增量只有四类,不改变门禁结构:
 | 多次 clean-run 产物比较 | absent | Phase 0 NFR/recovery 不是资产确定性验证 |
 | 签名审批 / attestation / 发布系统 | absent | 仅 L2 增强项 |
 
-**正式验收当前被工作树状态阻塞**:`_require_clean_worktree` 把 untracked 文件也算脏([run_phase0_acceptance.py:87](scripts/run_phase0_acceptance.py#L87)),而工作树上有 V3.2 文档、两个 `.blend` 和一个 PNG 未跟踪。处置见 §9。
+**正式验收当前被工作树状态阻塞**:`_require_clean_worktree` 把 untracked 文件也算脏([run_phase0_acceptance.py:87](../../../scripts/run_phase0_acceptance.py#L87)),而工作树上有 V3.2 文档、两个 `.blend` 和一个 PNG 未跟踪。处置见 §9。
 
 ---
 
@@ -48,20 +48,20 @@ V3.3 相对 V3.2 的增量只有四类,不改变门禁结构:
 
 | V3.2 声明 | 源码锚点 | 判定 |
 |---|---|---|
-| `scene_hash` 仅覆盖名称/类型/量化矩阵/RNA 类型/顶点边面数 | [scene_hash.py:13-32](bridge/core/scene_hash.py#L13) 仅 `quantize`/`object_line`/`digest` 三函数 | ✓ |
-| Phase 0 wrapper 十项能力清单 | [run_phase0_acceptance.py](scripts/run_phase0_acceptance.py) 全文核对:精确 3.13.13、仓库外全新 0700 根、环境清洗、vendor 双跑、双判定、严格 JSON、进程组清理、SHA-256 汇总 | ✓ |
+| `scene_hash` 仅覆盖名称/类型/量化矩阵/RNA 类型/顶点边面数 | [scene_hash.py:13-32](../../../bridge/core/scene_hash.py#L13) 仅 `quantize`/`object_line`/`digest` 三函数 | ✓ |
+| Phase 0 wrapper 十项能力清单 | [run_phase0_acceptance.py](../../../scripts/run_phase0_acceptance.py) 全文核对:精确 3.13.13、仓库外全新 0700 根、环境清洗、vendor 双跑、双判定、严格 JSON、进程组清理、SHA-256 汇总 | ✓ |
 | 362 + 821/1 测试 | 本日实测 collect 与运行均一致 | ✓ |
-| 三个只读工具 | [capabilities.py:9](server/core/capabilities.py#L9) | ✓ |
+| 三个只读工具 | [capabilities.py:9](../../../server/core/capabilities.py#L9) | ✓ |
 | 26 项工具目录 | `plugins/blender-mcp-installer/artifacts/manifest.json` `tools` | ✓ |
-| docs 口径矛盾 | [docs/README.md:3](docs/README.md#L3) 与 [architecture.md:58](docs/architecture.md#L58) 均称历史审计只在 Git 历史,但 V3.1 被跟踪于仓库根 | ✓ |
+| docs 口径矛盾 | [docs/README.md:3](../../README.md#L3) 与 [architecture.md:58](../../architecture.md#L58) 均称历史审计只在 Git 历史,但 V3.1 被跟踪于仓库根 | ✓ |
 
 ### 1.2 V3.2 未覆盖、对方案有直接影响的七项事实
 
 1. **上游身份**。官方分发的上游是 Blender 官方实验室仓库 `https://projects.blender.org/lab/blender_mcp.git` @ `4309a39646e6…`,bundle `1.0.0+4309a39646e6.p912ed3244261`,带 10 个下游 patch(`0001-server-hardening` … `0010-fix-python-api-member-lookup`)。"官方"不是 ahujasid 社区版;两者的安全姿态差异见 §2.3。
-2. **`RELEASE=1` 门禁已接近 L2**。[checks.sh](scripts/checks.sh) 的发行模式对*分发链路*实现了:上游 `main` 与锁定 commit 的 `ls-remote` 精确匹配、从提交对象重放全部补丁、双 MCP SDK 重放上游质量门禁、Bandit/-ll、detect-secrets、三组 pip-audit、双确定性构建后五个发行物逐字节 `cmp`。资产链路的 L2 不必新发明证据哲学,复用这套"精确重建 + 逐字节比对"即可。
-3. **`verify_live` 范式可直接迁移**。[verification.py:1035-](plugins/blender-mcp-installer/scripts/blender_mcp_installer/verification.py#L1035) 已实现:四层验证、工具目录与 manifest 严格**等序**比较、恰好一个安全只读探针(`get_blendfile_summary_datablocks`,probe 层强制校验工具名与空参数)、inspection 前后快照防 stale。资产 coordinator 的 expected-set equality(R5)在仓库内已有完整先例。
-4. **Phase 0 层 known-bad 已有回归**。[test_phase0_acceptance.py](tests/unit/test_phase0_acceptance.py) 覆盖 `blender_exit_zero_artifact_fail`(L55)、`reused_evidence_root`(L78)、`wrong_python_patch`(L172)。V3.2 §7 夹具表中这三项属于"wrapper 层已实现,资产层需建对应物",不是从零开始。
-5. **复用的具体形态**。wrapper 的可复用函数(`_normalise_new_root`、`_create_private_directory`、`_clean_environment`、严格 JSON 三件套、`_read_artifact` 骨架、`_file_evidence`、`_write_json_exclusive`、`_run_command`/`_stop_group`)全部是模块私有;而 `smoke/` 已是可导入包(wrapper 本身 `from smoke.process_registry import …`),[e2e.py](smoke/e2e.py) 另有 `_strict_json_loads`/`_sha256_file`/`_bounded_process_stdout`/`_current_provenance` 可取。P0 的第一步是提取共享模块,见 §6。
+2. **`RELEASE=1` 门禁已接近 L2**。[checks.sh](../../../scripts/checks.sh) 的发行模式对*分发链路*实现了:上游 `main` 与锁定 commit 的 `ls-remote` 精确匹配、从提交对象重放全部补丁、双 MCP SDK 重放上游质量门禁、Bandit/-ll、detect-secrets、三组 pip-audit、双确定性构建后五个发行物逐字节 `cmp`。资产链路的 L2 不必新发明证据哲学,复用这套"精确重建 + 逐字节比对"即可。
+3. **`verify_live` 范式可直接迁移**。[verification.py:1035-](../../../plugins/blender-mcp-installer/scripts/blender_mcp_installer/verification.py#L1035) 已实现:四层验证、工具目录与 manifest 严格**等序**比较、恰好一个安全只读探针(`get_blendfile_summary_datablocks`,probe 层强制校验工具名与空参数)、inspection 前后快照防 stale。资产 coordinator 的 expected-set equality(R5)在仓库内已有完整先例。
+4. **Phase 0 层 known-bad 已有回归**。[test_phase0_acceptance.py](../../../tests/unit/test_phase0_acceptance.py) 覆盖 `blender_exit_zero_artifact_fail`(L55)、`reused_evidence_root`(L78)、`wrong_python_patch`(L172)。V3.2 §7 夹具表中这三项属于"wrapper 层已实现,资产层需建对应物",不是从零开始。
+5. **复用的具体形态**。wrapper 的可复用函数(`_normalise_new_root`、`_create_private_directory`、`_clean_environment`、严格 JSON 三件套、`_read_artifact` 骨架、`_file_evidence`、`_write_json_exclusive`、`_run_command`/`_stop_group`)全部是模块私有;而 `smoke/` 已是可导入包(wrapper 本身 `from smoke.process_registry import …`),[e2e.py](../../../smoke/e2e.py) 另有 `_strict_json_loads`/`_sha256_file`/`_bounded_process_stdout`/`_current_provenance` 可取。P0 的第一步是提取共享模块,见 §6。
 6. **正式证据的 provenance 边界**。`e2e.py::_current_provenance` 只对受跟踪的 Python/shell/TOML/`pyproject.toml`/`uv.lock`/vendored protocol 建有界哈希清单,历史 `.md` 不参与——所以把验收方案文档提交进仓库不会污染运行时 provenance,只影响 clean-worktree 判定。
 7. **现成试点资产**。工作树上的 `hantavirus_scientific_cutaway_v2.blend` 是真实建模产物,可作为 P0 `blend_native` 分支的第一个 known-good 试点(`final.png` 为其渲染物);它同时是"合同应声明什么"的现实校准器(科学可视化 Profile:剖面、标注、静帧交付)。
 
@@ -181,7 +181,7 @@ manifest V1 覆盖清单、量化/chunk 规则沿 V3.2 §5.1 不变。
 
 ### 6.1 第一步:提取共享验收库
 
-新建 `smoke/acceptance_lib.py`(smoke/ 已是可导入包,improvement 最小),从 [run_phase0_acceptance.py](scripts/run_phase0_acceptance.py) 迁移并由其回 import,行为不变:
+新建 `smoke/acceptance_lib.py`(smoke/ 已是可导入包,improvement 最小),从 [run_phase0_acceptance.py](../../../scripts/run_phase0_acceptance.py) 迁移并由其回 import,行为不变:
 
 - 根管理:`_normalise_new_root`、`_create_private_directory`;
 - 环境:`_clean_environment`(参数化 blocked 前缀);
@@ -223,7 +223,7 @@ P1/P2 内容沿 V3.2 §6,两处更新:依赖闭包工具版本按 §2.1 修正;�
 
 | Fixture | 等级 | 预期 | 现状 |
 |---|---|---|---|
-| `exit_zero_success_false` | L0 | 外层非零,不被 Blender exit 0 掩盖 | wrapper 层已有([test_phase0_acceptance.py:55](tests/unit/test_phase0_acceptance.py#L55));资产层需对应物 |
+| `exit_zero_success_false` | L0 | 外层非零,不被 Blender exit 0 掩盖 | wrapper 层已有([test_phase0_acceptance.py:55](../../../tests/unit/test_phase0_acceptance.py#L55));资产层需对应物 |
 | `reused_evidence_root` | L0 | 启动子进程前拒绝 | wrapper 层已有(L78);共享库迁移后直接复用 |
 | `stale_result_file` **新** | L0 | 子进程启动前结果文件已存在 → 拒绝;失败路径不得读到上一轮 JSON | 无(源自 ellmos 实查假绿) |
 | `zero_checks_collected` **新** | L0 | expected 集非空、实际为空 → Fail | 无(源自 dcc-mcp pytest exit 5 假绿) |

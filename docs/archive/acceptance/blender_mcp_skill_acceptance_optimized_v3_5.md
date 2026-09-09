@@ -42,7 +42,7 @@ Reviewer/调用方(读取冻结 evidence 后作最终决定)
 
 ### 0.3 正式验收当前被工作树状态阻塞
 
-`_require_clean_worktree`([run_phase0_acceptance.py:87](scripts/run_phase0_acceptance.py#L87))把 untracked 文件也算脏。当前全部未跟踪文件——V3.2、V3.3、V3.3 审计报告、V3.4、本文 V3.5、`hantavirus_scientific_cutaway.blend`、`hantavirus_scientific_cutaway_v2.blend`、`hantavirus_scientific_cutaway_final.png`——任一存在都会使正式 Phase 0 验收以 `dirty_worktree` 失败。处置见 §11。
+`_require_clean_worktree`([run_phase0_acceptance.py:87](../../../scripts/run_phase0_acceptance.py#L87))把 untracked 文件也算脏。当前全部未跟踪文件——V3.2、V3.3、V3.3 审计报告、V3.4、本文 V3.5、`hantavirus_scientific_cutaway.blend`、`hantavirus_scientific_cutaway_v2.blend`、`hantavirus_scientific_cutaway_final.png`——任一存在都会使正式 Phase 0 验收以 `dirty_worktree` 失败。处置见 §11。
 
 ---
 
@@ -206,7 +206,7 @@ V1 覆盖:scene/view layer/collection/object/instance 的稳定路径与可见�
 3. 返回 `True` → `r2.geometry.validate_clean` 记 Fail(数据本含非法结构),不是"已修好"的 Pass;
 4. 它不覆盖非流形、法线朝向、UV 重叠、材质语义——这些是独立自建检查。
 
-现有 `scene_hash`([scene_hash.py:13-32](bridge/core/scene_hash.py#L13))仅覆盖名称/类型/量化矩阵/RNA 类型/顶点边面数。**该摘要在代码与协议中的实际字段名就是 `scene_hash`**(`bridge/core/contracts.py:19`、`server/mcp/adapter.py:111`;`phase0_structure_digest` 至今未在任何源码或协议中出现,只是历次方案的改名建议)。本文不要求改名,只规定其语义边界:禁止用于 source↔export、两次 clean-run、checkpoint 或发布 identity。
+现有 `scene_hash`([scene_hash.py:13-32](../../../bridge/core/scene_hash.py#L13))仅覆盖名称/类型/量化矩阵/RNA 类型/顶点边面数。**该摘要在代码与协议中的实际字段名就是 `scene_hash`**(`bridge/core/contracts.py:19`、`server/mcp/adapter.py:111`;`phase0_structure_digest` 至今未在任何源码或协议中出现,只是历次方案的改名建议)。本文不要求改名,只规定其语义边界:禁止用于 source↔export、两次 clean-run、checkpoint 或发布 identity。
 
 ---
 
@@ -488,7 +488,7 @@ docs/acceptance/         # 方案归档位(§11)
 
 ### 7.9 P1 / P2(概要)
 
-P1(L1):第二 normal child 与四级确定性;沙箱与资源限制(§1);BAT 5.2 fixture matrix;**空缓存** offline reopen(P0 的 reopen 是普通 offline 重开,不清缓存);USD/FBX/动画 Profile;`reproducible_by_script` 可选门;FLIP/VLM advisories;gltf-transform 交叉验证;每周 daily-build 金丝雀;共享库提取;`readOnlyHint` 等 MCP annotations(仅元数据,非安全边界;实施需同步更新 [test_server_process.py](tests/contract/test_server_process.py) 的目录投影断言)。
+P1(L1):第二 normal child 与四级确定性;沙箱与资源限制(§1);BAT 5.2 fixture matrix;**空缓存** offline reopen(P0 的 reopen 是普通 offline 重开,不清缓存);USD/FBX/动画 Profile;`reproducible_by_script` 可选门;FLIP/VLM advisories;gltf-transform 交叉验证;每周 daily-build 金丝雀;共享库提取;`readOnlyHint` 等 MCP annotations(仅元数据,非安全边界;实施需同步更新 [test_server_process.py](../../../tests/contract/test_server_process.py) 的目录投影断言)。
 P2(L2):不同 OS principal、签名审批、DSSE/Sigstore、透明日志、Publisher receipt。
 
 ---
@@ -511,7 +511,7 @@ golden/expected 一律**由生成器或手工构造过程产出并经人工审�
 
 | Fixture | 等级 | 构造 | 预期 | 现状 |
 |---|---|---|---|---|
-| `exit_zero_success_false` | L0 | synthetic | 子进程 exit 0 但 `success!=true` → Fail | wrapper 层已有([tests/unit/test_phase0_acceptance.py:55](tests/unit/test_phase0_acceptance.py#L55)) |
+| `exit_zero_success_false` | L0 | synthetic | 子进程 exit 0 但 `success!=true` → Fail | wrapper 层已有([tests/unit/test_phase0_acceptance.py:55](../../../tests/unit/test_phase0_acceptance.py#L55)) |
 | `reused_evidence_root` | L0 | synthetic | 启动子进程前拒绝 | wrapper 层已有(L78) |
 | `stale_result_file` | L0 | synthetic | 结果文件预先存在 → 拒绝,不读旧 JSON | 无 |
 | `zero_checks_collected` | L0 | synthetic | expected 非空、actual 为空 → Fail | 无 |
@@ -570,7 +570,7 @@ L0 计 18 项:8 synthetic + 3 handcrafted + 7 generator。L1 计 4 项。
 | >4GB 误报(#244) | 误报非盲区 | 合同 `max_file_bytes`(默认 512 MiB)天然规避;记 known-issue | 同 L0 |
 
 - 其余锚定事实:glTF-Validator 仅 severity=error 影响退出码、CLI 默认 `--validate-resources` 而库 API 默认关闭、npm 最后发布 `2.0.0-dev.3.10`(2024-10);OpenUSD GHSA-8878-wr6v-j5cm(§1);`mesh.validate()` 副作用(§4);MCP ToolAnnotations 均为 hint、不可作安全决策依据;glTF `image` 对象无宽高字段(§7.6 实测)。
-- **仓库内先例**:Phase 0 wrapper 安全原语与三个 known-bad 回归;`verify_live` 的等序目录比较、单一只读探针、快照防 stale([verification.py:1035-](plugins/blender-mcp-installer/scripts/blender_mcp_installer/verification.py#L1035));`RELEASE=1` 的"精确重建 + 逐字节比对"。
+- **仓库内先例**:Phase 0 wrapper 安全原语与三个 known-bad 回归;`verify_live` 的等序目录比较、单一只读探针、快照防 stale([verification.py:1035-](../../../plugins/blender-mcp-installer/scripts/blender_mcp_installer/verification.py#L1035));`RELEASE=1` 的"精确重建 + 逐字节比对"。
 - **上游对照**(observed_at=2026-08-24):ahujasid/blender-mcp 的 `execute_code` 为裸 `exec`,无沙箱与产物校验,RCE 类 issue 关闭不修,有两个 2026 CVE;PatrykIti/blender-ai-mcp 以确定性测量为卖点,方向一致。
 - **反例转化**:dcc-mcp 的 `passed=false` 仍 `skill_success`、pytest exit 5 当成功;blender-agent-studio 的 `hard_gate_pass=false` 但 exit 0、公开 CI 不启动 Blender → 夹具 `zero_checks_collected` 与双判定原则。
 - **可借鉴**(P1):blender-agent-studio `verifyReproduction`;newo-ether 的"提交时重新验证"与指针泄漏审计;pyblish/AYON 有序插件范式(本方案增强:冻结 check 集+版本+序的哈希);Unreal DataValidation 的单 CLI 非零退出形态;glTF-Blender-IO 每周 daily-build 金丝雀。

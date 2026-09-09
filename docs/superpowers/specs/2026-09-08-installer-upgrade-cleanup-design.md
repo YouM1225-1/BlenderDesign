@@ -66,7 +66,7 @@ runtime 与扩展 recovery 必须具有有效 receipt、派生路径、托管来
 
 ## 5. 流程与状态
 
-完整安装顺序：建立 journal → 保存注册前态并注册新版 → 安装 runtime/扩展并绑定 receipt → 完成注册验证 → 启动选定 Blender → 只读现场验证 → finalize 重新核验 → 自动清理。
+完整安装顺序：发布前确认旧 runtime 可安全替换 → 建立 journal → 保存注册前态并注册新版 → 安装 runtime/扩展并绑定 receipt → 完成注册验证 → 启动选定 Blender → 只读现场验证 → finalize 重新核验 → 自动清理。
 
 仅注册顺序：建立 journal → 保存注册前态并注册新版 → 完成注册验证 → finalize 重新核验 → 只清理历史插件缓存。不得要求 Blender 启动，也不得触碰 runtime 或扩展 recovery。
 
@@ -122,6 +122,7 @@ journal 明确包含：schema 版本、UUID 工作流 ID、`install` 或 `regist
 - [project_marketplace.py](../../../plugins/blender-mcp-installer/scripts/project_marketplace.py)：精确已安装身份核验、注册阶段 journal 关联、仅注册 finalize、锁序和恢复能力标记。
 - [model.py](../../../plugins/blender-mcp-installer/scripts/blender_mcp_installer/model.py) 与新增生命周期模块：新增独立 schema，沿用 receipt 和根边界定义，不重构无关协议或 adapter。
 - [filesystem.py](../../../plugins/blender-mcp-installer/scripts/blender_mcp_installer/filesystem.py)：复用安全捕获、持久化和可续删能力，只补缺失的直接需求。
+- [runtime.py](../../../plugins/blender-mcp-installer/scripts/blender_mcp_installer/runtime.py)：启动前使用锁、托管树外的 bootstrap 解释器、active/installed receipt 屏障及跨 exec 的锁继承。
 - [安装工作流](../../../plugins/blender-mcp-installer/skills/install-official-blender-mcp/references/workflow.md) 及安装技能：同步 install/register/finalize 的顺序、结果和失败语义，避免只改代码而留下旧回滚承诺。
 - [分发测试](../../../tests/distribution/)：补充升级、引用、并发和崩溃用例；复用现有安装故障注入和注册假宿主。
 
@@ -144,3 +145,14 @@ journal 明确包含：schema 版本、UUID 工作流 ID、`install` 或 `regist
 | 分发验证 | 固定旧版完整性通过、远端 main 已更新时两项分别报告；新版本发布的最新性门禁没有被绕过。 |
 
 开发先运行能覆盖改动的最小检查，提交前按仓库约定运行完整 checks；真实多版本升级验收在一次性受控 profile 中完成并保留证据。现场成功不得由假宿主测试替代，不能用“清理计划已生成”代替物理目录已删除。
+
+## 11. 执行计划审计后的具体约束
+
+2026-09-08 的计划原型进一步固定了以下实现细节，删除授权范围不变。完整任务及回归见[执行计划](../plans/2026-09-08-installer-upgrade-cleanup.md)。
+
+- 使用锁按目录的 device/inode 建立，不能以 rename 后会变化的路径作为唯一键。launcher 必须先用托管 runtime 和目标插件缓存之外的 bootstrap Python 获取共享锁，再 exec 托管解释器；锁 FD 跨 exec 继承。bootstrap 边界使用实际 HOME/CODEX_HOME。
+- rename 并不会让旧进程的 `__file__` 或 `sys.path` 自动指向 recovery。整个 runtime 替换之前必须取得旧目录的非阻塞排他锁；占用时，在首次注册/安装目标修改之前返回 `runtime_in_use`。
+- 第一代无使用锁的旧 launcher，需要一次外部维护终端的停止交接：先记录受支持客户端的正向进程身份，停止后再核验。无法证明已停止则返回 `legacy_handoff_required`；这只覆盖合作的受管客户端，不宣称能够识别任意绕过入口的进程。
+- launcher 在导入 runtime 业务模块之前核对 active、installed receipt 和当前目录 inode；PREPARED 或混合版本不可启动。
+- 完整 finalize 持变更锁执行一次真实现场验证，随后逐候选复核绑定的注册、active、receipt、runtime/extension 镜像；任一漂移停止删除。等待用户启动 Blender 时释放锁，不对每个文件重复完整现场探针。
+- 对精确目标插件 namespace 中完全缺少历史注册证据的旧目录，保留并列为未验证。不存在可删除候选不等于所有旧版本已清理；同内容重试可以建立清理迁移记录，但不制造新的安装代次。
