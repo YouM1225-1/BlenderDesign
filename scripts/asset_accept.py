@@ -35,7 +35,11 @@ def dispatch_run(
     contract_path: Path, source_root: Path, evidence_root: Path, scratch_root: Path
 ) -> dict[str, Any]:
     contract = load_contract(contract_path, candidate_root=source_root)
-    # M2/M3 insert their kind-specific adapter here; M1 never accepts worker commands from CLI JSON.
+    if contract.artifact_kind == "blend_native" and contract.raw["native"] is not None:
+        from acceptance.native_run import run_native
+
+        return run_native(contract_path, source_root, evidence_root, scratch_root)
+    # M3 inserts its kind-specific adapter here; M1 never accepts worker commands from CLI JSON.
     plan = assemble_plan(contract, ())
     inputs = verify_bundle(
         source_root,
