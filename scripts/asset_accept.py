@@ -35,6 +35,10 @@ def dispatch_run(
     contract_path: Path, source_root: Path, evidence_root: Path, scratch_root: Path
 ) -> dict[str, Any]:
     contract = load_contract(contract_path, candidate_root=source_root)
+    if contract.artifact_kind == "interchange" and contract.raw["interchange"] is not None:
+        from acceptance.interchange_run import run_interchange
+
+        return run_interchange(contract_path, source_root, evidence_root, scratch_root)
     if contract.artifact_kind == "blend_native" and contract.raw["native"] is not None:
         from acceptance.native_run import run_native
 

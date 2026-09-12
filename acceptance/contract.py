@@ -213,7 +213,14 @@ def validate_document(value: Any) -> None:
         native_ids.update(value["native"]["render"]["reference_images"].values())
         require(native_ids <= input_ids, "native references must be frozen input members")
         require(value["input"]["main"] == "asset", "native main file ID must be asset")
-    require(value["interchange"] is None, "interchange worker policy is not implemented in M1")
+    if value["interchange"] is not None:
+        require(value["artifact_kind"] == "interchange" and value["native"] is not None,
+                "interchange requires an explicit native inspection/render policy")
+        from acceptance.interchange_policy import validate_interchange_policy
+        try:
+            validate_interchange_policy(value["interchange"])
+        except ValueError as exc:
+            raise AcceptanceFailure("contract_invalid", str(exc)) from exc
     fields(value["review"], {"required", "reviewer_ids", "required_image_ids", "reason"}, "review")
     review = value["review"]
     require(

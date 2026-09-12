@@ -86,6 +86,8 @@ def main():
     del obj["bcx_uid"]
     assert render_manifest([obj]) == {
         "scope_gaps": [],
+        "scene": bpy.context.scene.name,
+        "view_layer": bpy.context.view_layer.name,
         "occurrences": [{"source": ["OBJECT", obj.name], "matrix_world": before["matrix"]}],
     }
     obj.data.polygons[0].material_index = 1

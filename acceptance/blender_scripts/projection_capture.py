@@ -5,9 +5,12 @@ import json
 import math
 import struct
 from array import array
+from contextlib import contextmanager
+from collections.abc import Iterator
 from typing import Any
 
 import bpy
+import bmesh  # type: ignore[import-not-found]
 
 
 def plain(value: Any) -> Any:
@@ -195,6 +198,8 @@ def capture(objects: Any, policy: Any, *, imported: Any = False) -> Any:
 def render_manifest(objects: Any) -> Any:
     return {
         "scope_gaps": [],
+        "scene": bpy.context.scene.name,
+        "view_layer": bpy.context.view_layer.name,
         "occurrences": [
             {
                 "source": ["OBJECT", o.name],
@@ -203,3 +208,68 @@ def render_manifest(objects: Any) -> Any:
             for o in objects
         ],
     }
+
+
+@contextmanager
+def projected_surface(objects: Any, frozen: Any, policy: Any) -> Iterator[list[Any]]:
+    """Render only received triangles; recover effective materials after exact binding."""
+    if capture(objects, policy) != frozen:
+        raise ValueError("source differs from frozen projection")
+    owned_objects, owned_meshes, owned_materials = [], [], []
+    dg = bpy.context.evaluated_depsgraph_get()
+    try:
+        for original, record in zip(
+            sorted(objects, key=lambda obj: obj.name), frozen["objects"], strict=True
+        ):
+            evaluated = original.evaluated_get(dg)
+            source = evaluated.to_mesh(preserve_all_data_layers=True, depsgraph=dg)
+            try:
+                source.calc_loop_triangles()
+                # The exact capture above binds every tessellated corner to frozen data.
+                # Keep original polygon/loop normal encoding: Blender stores INT16 custom
+                # normals relative to the source topology, so rebuilding triangles is lossy.
+                mesh = source.copy()
+                owned_meshes.append(mesh)
+                face_indices = [face.material_index for face in mesh.polygons]
+                mesh.materials.clear()
+                for slot in evaluated.material_slots:
+                    material = slot.material.copy() if slot.material is not None else None
+                    if material is not None:
+                        owned_materials.append(material)
+                    mesh.materials.append(material)
+                for face, index in zip(mesh.polygons, face_indices, strict=True):
+                    face.material_index = index
+                bm = bmesh.new()
+                try:
+                    bm.from_mesh(mesh)
+                    bmesh.ops.delete(
+                        bm, geom=[edge for edge in bm.edges if not edge.link_faces], context="EDGES"
+                    )
+                    bmesh.ops.delete(
+                        bm,
+                        geom=[vertex for vertex in bm.verts if not vertex.link_faces],
+                        context="VERTS",
+                    )
+                    bm.to_mesh(mesh)
+                finally:
+                    bm.free()
+                mesh.update()
+                obj = bpy.data.objects.new("Evaluator frozen surface", mesh)
+                owned_objects.append(obj)
+                bpy.context.scene.collection.objects.link(obj)
+                obj.matrix_world = original.matrix_world.copy()
+            finally:
+                evaluated.to_mesh_clear()
+        bpy.context.view_layer.update()
+        for obj, record in zip(owned_objects, frozen["objects"], strict=True):
+            retained = capture([obj], policy)["objects"][0]
+            if retained["triangles"] != record["triangles"]:
+                raise ValueError("pruning changed frozen projection corners/materials")
+        yield owned_objects
+    finally:
+        for obj in reversed(owned_objects):
+            bpy.data.objects.remove(obj, do_unlink=True)
+        for mesh in reversed(owned_meshes):
+            bpy.data.meshes.remove(mesh, do_unlink=True)
+        for material in reversed(owned_materials):
+            bpy.data.materials.remove(material, do_unlink=True)
