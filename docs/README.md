@@ -13,18 +13,18 @@
 
 ## 资产验收方案
 
-- [资产验收规范 V5](acceptance/blender_mcp_skill_acceptance_optimized_v5.md)：当前 v2/M1 规范；旧 V3.8 为历史记录。
+- [资产验收规范 V5](acceptance/blender_mcp_skill_acceptance_optimized_v5.md)：当前 schema v2 规范；有限 M3 静态 GLB 已通过独立夹具门禁，Native7 实际门禁仍未通过；旧 V3.8 为历史记录。
 - [判定核心实施计划](superpowers/plans/2026-08-24-asset-acceptance-decision-core.md):P0 的第一份计划,只覆盖不依赖 Blender 的判定核心。
 - [V3.1 对抗性审计档案](../blender_mcp_skill_acceptance_adversarial_audit_v3_1.md)：仅记录旧提交 `102a3a2…` 的审计证据，不代表当前实现；其 D35～D43 所述 wrapper 实现实际于 `bf63c89294a5f79649a2c550331ea8987cdeab1b` 入仓。
 
-当前 M1 完成可信核心、冻结输入与真实证据封装；R2–R4 尚未接线，通用资产验收仍未完成，不得自动发布放行。
+当前 M0/M1 完成可信核心、冻结输入与真实证据封装；M2/M3 worker 已接线，有限 M3 静态 GLB 已通过独立夹具门禁。Native7 实际门禁仍未通过，通用资产验收仍未完成，不得自动发布放行。
 
 ## 已认可设计与实施状态
 
 - [安装升级与旧版本自动清理](superpowers/specs/2026-09-08-installer-upgrade-cleanup-design.md)：新版验证成功后自动清理旧托管 runtime、扩展恢复副本和该 Codex 插件的历史缓存；包含清理记录、并发与回滚边界。
 - [资产验收整合设计](superpowers/specs/2026-09-08-asset-acceptance-integration-design.md)：结合源码审计、外部 V4 与 2026-09-08 Blender 实测，按可信核心、原生闭环、GLB 闭环实施；包含 v2 迁移、结果归属、无环证据和回归条件。
 
-两份设计独立实施。安装升级与旧版本自动清理已完成计划内代码和常规自动化测试，RELEASE 分发门禁与当前用户现场验收仍须单独执行；资产验收已切换到 schema v2 与 V5/M1，M2/M3 尚未实施。设计中的后续能力不代表当前已完成，外部 V4 也不自动取得仓库规范地位。
+两份设计独立实施。安装升级与旧版本自动清理已完成计划内代码和常规自动化测试，RELEASE 分发门禁与当前用户现场验收仍须单独执行；资产验收已切换到 schema v2，M2/M3 worker 已接线，有限 M3 静态 GLB 夹具门禁已通过，Native7 实际门禁仍未闭合。设计中的其他能力不代表当前已完成，外部 V4 也不自动取得仓库规范地位。
 
 ## 执行计划与对抗审计
 
@@ -34,7 +34,7 @@
 - [M3 GLB 闭环执行计划](superpowers/plans/2026-09-08-asset-acceptance-interchange.md)：依赖 M2；真实 Validator、逐实例预算、有限表面投影及消费者门禁。
 - [计划对抗审计与实测记录](superpowers/reviews/2026-09-08-plans-adversarial-review.md)：记录发现、修复、复测范围及实施阶段仍需执行的现场门禁。
 
-上述计划含目标代码和完整回归步骤；仓库外原型实测用于核对计划可执行性，生产源码的当前状态仍以上文说明为准。
+上述计划记录目标代码和完整回归步骤；仓库外原型只用于核对可执行性，当前 M3 结论以独立三文件实际门禁为准，Native7 仍以未通过的实际门禁为准。
 
 ## 技术决策
 

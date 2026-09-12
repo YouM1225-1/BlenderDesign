@@ -46,7 +46,7 @@ Blender 用户必须在 3D 视图的 `Codex` 侧栏中显式允许连接。Bridg
 | `bridge/blender/` | Blender UI、driver 与场景读取 |
 | `server/core/` | 配置、实例发现、审计和 Bridge client |
 | `server/mcp/` | MCP SDK v2 adapter 与三个只读工具 |
-| `acceptance/` | checkout-only 的资产验收 P0 判定核心，不进入 wheel/sdist |
+| `acceptance/` | checkout-only 的 schema v2 资产验收核心及 M2 Native/M3 GLB worker，不进入 wheel/sdist；有限 M3 已通过独立夹具门禁，Native7 实际门禁仍未通过 |
 | `plugins/blender-mcp-installer/` | 官方 MCP 的固定分发与安装器 |
 | `smoke/` | background、GUI、恢复与性能验证 |
 | `tests/` | unit、contract 和 distribution 测试 |

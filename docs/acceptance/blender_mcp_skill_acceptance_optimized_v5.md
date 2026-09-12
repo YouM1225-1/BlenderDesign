@@ -1,8 +1,8 @@
 # BlenderDesign 资产验收规范 V5
 
-状态：当前 v2/M1 规范；R2–R4 worker 尚未接线，通用资产不能自动放行。
+状态：schema v2 的 M0/M1 与有限 M3 静态 GLB 路径已接线并通过独立夹具门禁；M2 Native7 实际门禁仍未通过，通用资产不能自动放行。
 
-本规范采用已经认可的资产验收整合设计。官方分发、自研 Phase 0、资产验收分别报告；当前 M1 不代表完整资产通过。V3.8 与外部 V4 是迁移输入，不是 v2 的可兼容合同。
+本规范采用已经认可的资产验收整合设计。官方分发、自研 Phase 0、资产验收分别报告；有限 M3 结果不代表完整原生资产或任意 GLB 通过。V3.8 与外部 V4 是迁移输入，不是 v2 的可兼容合同。
 
 ## 合同与版本
 
@@ -57,7 +57,15 @@ controller 编译唯一文件/作业计划，固定 writer、输入/输出及安
 
 ## 事实与范围
 
-2026-09-08 实测只覆盖所记 Blender build/platform 和探针。曲线/文字实例去重、合法拆点与未使用数据裁剪、PNG 像素/字节分离是后续实现约束，不代表 M1 worker 已完成。UV 层裁剪、完整 wire/beauty 复现、消费者与隔离按各实施阶段单独验收。
+2026-09-13 的独立 M3 夹具门禁在锁定 Blender、Node 与 gltf-validator 上覆盖完整 CLI、两进程 surface 和真实 Validator 反例；它只证明下面声明的有限静态 GLB profile。Native7 的历史实际门禁仍为 13 通过、6 失败、0 跳过，因此 M2 未完成。曲线、文字、动画、任意实例、任意消费者和通用资产发布均不在这些结果内。
+
+### M3 静态 GLB 实现范围与证据
+
+M3 保留全部 34 个适用 check，并要求 `native.scope_supported`、`native.cross_process`、`native.reference`、`interchange.scope_supported`、`interchange.consumer` 五个技术 gate。未实现实际消费者、未知类型/平台、缺证据及导出无 D 都禁止技术成功。
+
+有限 profile 为 `glb-static-surface-v1`：普通非镜像静态 MESH，单位 `scale_length=1`，显式固定导出 preset，基本 PBR 与直接 Base Color 打包 sRGB RGBA8 PNG，Linear/REPEAT/default-active-UV；collection 可省略、已支持 modifier 烘焙、未用顶点/槽可裁剪，UV 层仍保留。存在所需扩展、非默认额外 shader 输入、HDR 或外部资源时不声称支持。
+
+Validator 的格式/资源结论、逐 node 绘制预算、表面保真和实际消费者分别报告。原始 GLB 与所有报告/图像进入 E；R5 结论只在 V；Q 绑定实际图像与 C/S/D/E/V。没有真实所需审阅时停在 NEEDS_REVIEW。测试 reviewer 不授权用户作品。
 
 ## 当前机器表
 

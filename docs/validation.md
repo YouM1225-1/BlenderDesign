@@ -129,6 +129,23 @@ Background smoke：
 并对当前受跟踪的 Python、shell、TOML、`pyproject.toml`、`uv.lock` 和生成的 vendored
 protocol 建立有界哈希清单。历史计划或审计文档不参与运行时 provenance。
 
+### 独立 M3 资产门禁
+
+先完成 M0/M1 与 M2；准备锁定 Python、Blender、Node 和 gltf-validator 2.0.0-dev.3.10 及其真实工具/包文件摘要。显式运行 `RUN_ASSET_INTERCHANGE=1 RUN_GLTF_VALIDATOR=1` 的三份 integration 测试，并记录 source/C/D、工具身份、退出状态、summary、E/Q/T 和实际交付 receipt。
+
+```bash
+RUN_ASSET_INTERCHANGE=1 RUN_GLTF_VALIDATOR=1 \
+BLENDER_BIN="$BLENDER_BIN" NODE_BIN="$NODE_BIN" \
+GLTF_PACKAGE_ROOT="$GLTF_PACKAGE_ROOT" \
+ASSET_CALIBRATION_ROOT="$ASSET_CALIBRATION_ROOT" \
+"$PYTHON_BIN" -m pytest \
+  tests/integration/test_asset_interchange.py \
+  tests/integration/test_interchange_surface.py \
+  tests/integration/test_gltf_validator.py -q
+```
+
+这组门禁只证明声明的 GLB 静态 L0 支持范围。独立两进程 surface probe、Node validator probe、完整 CLI、人工 Q 和正式交付分别记录，不互相替代。没有对应证据不得把状态标为已完成。当前 Native7 实际门禁未通过，不能由 M3 结果替代。
+
 ## 官方分发验证
 
 安装器测试覆盖：
