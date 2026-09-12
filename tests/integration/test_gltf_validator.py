@@ -7,9 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from acceptance import interchange_results as reducer
+from acceptance import check_registry as reg, interchange_results as reducer
+from acceptance.decide import Gate, aggregate, decide, decide_technical
 from acceptance.glb_budget import measure_glb
 from acceptance.input_bundle import measure_file
+from acceptance.primitives import AcceptanceFailure
+from tests.unit.asset_v2_support import valid_document, write_contract
 from tests.unit.interchange_support import policy
 
 pytestmark = [
@@ -168,8 +171,9 @@ def test_real_validator_consumes_embedded_bytes_and_controller_rechecks(tmp_path
         tampered_resources = json.dumps(resources).encode()
         (valid_output.parent / "tampered-resources.json").write_bytes(tampered_resources)
         resources_path.write_bytes(tampered_resources)
-        with pytest.raises(Exception, match="resource log differs"):
+        with pytest.raises(AcceptanceFailure, match="resource log differs") as caught:
             controller_result(valid_asset, valid_output, valid_policy, monkeypatch)
+        assert caught.value.code == "tool_output_invalid"
     finally:
         resources_path.write_bytes(original_resources)
     wrapper_result = json.loads((valid_output / "result.json").read_text())
@@ -217,3 +221,59 @@ def test_real_validator_truncation_blocks_controller_completion(tmp_path, monkey
     assert {
         finding.code for finding in findings["r3.validator.report_complete"]
     } == {"validator_truncated"}
+
+    # Test-only adjudication seam: the real reducer finding is isolated inside an otherwise
+    # complete CLI-shaped baseline. This is not a full CLI or real-world acceptance result.
+    adjudication_root = tmp_path / "adjudication-fixture"
+    adjudication_root.mkdir()
+    contract = write_contract(
+        adjudication_root,
+        valid_document(adjudication_root, kind="interchange"),
+    )
+    assert len(contract.raw["checks"]) == 34
+    assert set(contract.na_check_ids) == {
+        "r4.reopen.dependencies_resolved",
+        "r4.reopen.manifest_matches_source",
+        "r4.reopen.offline_ok",
+    }
+    acceptance_version = next(
+        tool["version"] for tool in contract.raw["tools"] if tool["id"] == "acceptance"
+    )
+    outcomes = [
+        aggregate(
+            spec.id,
+            list(findings["r3.validator.report_complete"])
+            if spec.id == "r3.validator.report_complete"
+            else [],
+            contract=contract,
+            tool_id=None if spec.id in contract.na_check_ids else "acceptance",
+            tool_version=None if spec.id in contract.na_check_ids else acceptance_version,
+            source_truncated=False,
+            terminal=None,
+        )
+        for spec in reg.CHECKS
+    ]
+    base = decide(
+        contract=contract,
+        outcomes=outcomes,
+        actual_files={"test-seam"},
+        expected_files={"test-seam"},
+        achieved_grade="local-trusted",
+        infra_failures=[],
+    )
+    expected_gate_ids = (
+        "native.scope_supported",
+        "native.cross_process",
+        "native.reference",
+        "interchange.scope_supported",
+        "interchange.consumer",
+    )
+    gates = {gate_id: Gate(True) for gate_id in expected_gate_ids}
+    verdict = decide_technical(base, expected_gate_ids=expected_gate_ids, gates=gates)
+    assert sum(outcome.raw_status != "NotApplicableByContract" for outcome in outcomes) == 34
+    assert sum(outcome.raw_status == "NotApplicableByContract" for outcome in outcomes) == 3
+    assert len(gates) == 5 and all(gate.complete and not gate.findings for gate in gates.values())
+    assert verdict.success is False
+    assert verdict.failure_code == "check_failed"
+    assert verdict.failed_check_ids == ("r3.validator.report_complete",)
+    assert verdict.failed_gate_ids == ()

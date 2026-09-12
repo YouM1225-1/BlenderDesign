@@ -131,7 +131,7 @@ protocol 建立有界哈希清单。历史计划或审计文档不参与运行�
 
 ### 独立 M3 资产门禁
 
-先完成 M0/M1 与 M2；准备锁定 Python、Blender、Node 和 gltf-validator 2.0.0-dev.3.10 及其真实工具/包文件摘要。显式运行 `RUN_ASSET_INTERCHANGE=1 RUN_GLTF_VALIDATOR=1` 的三份 integration 测试，并记录 source/C/D、工具身份、退出状态、summary、E/Q/T 和实际交付 receipt。
+先完成 M0/M1 以及 M2 worker 接线和运行前置条件；M2 完整 Native 实际门禁作为独立门禁持续跟踪，不能由 M3 结果替代。准备锁定 Python、Blender、Node 和 gltf-validator 2.0.0-dev.3.10 及其真实工具/包文件摘要。显式运行 `RUN_ASSET_INTERCHANGE=1 RUN_GLTF_VALIDATOR=1` 的三份 integration 测试，并记录 source/C/D、工具身份、退出状态、summary、E/Q/T 和实际交付 receipt。
 
 ```bash
 RUN_ASSET_INTERCHANGE=1 RUN_GLTF_VALIDATOR=1 \
