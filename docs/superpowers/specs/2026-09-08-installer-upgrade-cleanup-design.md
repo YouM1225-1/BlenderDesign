@@ -156,3 +156,9 @@ journal 明确包含：schema 版本、UUID 工作流 ID、`install` 或 `regist
 - launcher 在导入 runtime 业务模块之前核对 active、installed receipt 和当前目录 inode；PREPARED 或混合版本不可启动。
 - 完整 finalize 持变更锁执行一次真实现场验证，随后逐候选复核绑定的注册、active、receipt、runtime/extension 镜像；任一漂移停止删除。等待用户启动 Blender 时释放锁，不对每个文件重复完整现场探针。
 - 对精确目标插件 namespace 中完全缺少历史注册证据的旧目录，保留并列为未验证。不存在可删除候选不等于所有旧版本已清理；同内容重试可以建立清理迁移记录，但不制造新的安装代次。
+
+## 12. 2026-09-23 真实 Codex 注册边界补充
+
+现场确认 Codex `plugin add` 会提前删除同插件旧版本缓存且不遵守安装器使用锁。注册器现在仅在同一目标用户的 0700 私有事务 CODEX_HOME 中运行此命令，使用目标 config.toml 的 0600 配置快照，不复制登录文件、会话或继承凭据。当前一次性验收不复制或修改普通用户配置。配置快照可能敏感，不得写入日志；成功发布后移除临时配置，失败只保留受保护的恢复证据。
+
+发布顺序为已验证的新版本 cache → 条件发布 config；不得重命名、替换或删除旧版本路径/inode。除精确目标 marketplace 项与目标插件 enabled 字段外，所有 TOML 值必须保持不变。外部配置漂移停止发布；cache 已发布而配置未发布时可 exact-match 复用，记录的配置交换通过原条件原语续作。只有原有 finalizer 完成规定验证并取得对应使用锁后才可删除旧缓存；占用状态继续返回 cleanup_pending。

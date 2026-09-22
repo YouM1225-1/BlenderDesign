@@ -90,7 +90,12 @@ from pathlib import Path
 from typing import Any
 
 
-from blender_mcp_installer.filesystem import InstallerError, NoOpFaultInjector, SafeRoot
+from blender_mcp_installer.filesystem import (
+    InstallerError, NoOpFaultInjector, SafeRoot, TargetRef, TreeRef, StagedFile, StagedTree,
+    NativeState, capture_file, capture_tree, forward_file, forward_tree,
+    conditional_remove_file, conditional_remove_tree,
+)
+from blender_mcp_installer.model import FileImage, TreeImage, ImageState
 from blender_mcp_installer.upgrade_cleanup import RollbackUnavailable, assert_rollback_available
 from blender_mcp_installer.upgrade_discovery import (
     lease_protocol,
@@ -111,7 +116,7 @@ from blender_mcp_installer.upgrade_integration import (
     profile_from_context,
 )
 from blender_mcp_installer.upgrade_locks import ensure_usage_lock, mutation_locks
-from blender_mcp_installer.upgrade_registration import RegistrationSnapshot, inspect_registration
+from blender_mcp_installer.upgrade_registration import RegistrationSnapshot, inspect_registration, read_owned_bytes
 from blender_mcp_installer.upgrade_state import (
     UpgradeRoots,
     load_any_record,
@@ -530,7 +535,7 @@ def _atomic_json(path: Path, value: Any) -> None:
 
 
 def _codex(codex: Path, home: Path, codex_home: Path, *arguments: str) -> str:
-    environment = os.environ.copy()
+    environment = {key: os.environ[key] for key in ("PATH", "TMPDIR", "LANG", "LC_ALL") if key in os.environ}
     environment.update(HOME=str(home), CODEX_HOME=str(codex_home))
     return subprocess.run(
         [str(codex), *arguments],
@@ -586,6 +591,133 @@ def _write_restore_instructions(
     _atomic_write(recovery / "RESTORE.txt", ("\n".join(restore_lines) + "\n").encode())
 
 
+def _unmanaged_config(raw: bytes) -> Any:
+    data = tomllib.loads(raw.decode())
+    marketplaces = data.get("marketplaces", {})
+    plugins = data.get("plugins", {})
+    if type(marketplaces) is not dict or type(plugins) is not dict:
+        raise InstallerError("invalid registration configuration tables")
+    marketplaces.pop(MARKETPLACE_NAME, None)
+    plugin_id = f"{PLUGIN_NAME}@{MARKETPLACE_NAME}"
+    target = plugins.get(plugin_id, {})
+    if type(target) is not dict:
+        raise InstallerError("invalid target plugin configuration")
+    target.pop("enabled", None)
+    if not target:
+        plugins.pop(plugin_id, None)
+    if not marketplaces:
+        data.pop("marketplaces", None)
+    if not plugins:
+        data.pop("plugins", None)
+    return data
+
+
+def _isolated_registration(
+    projection: Path, recovery: Path, codex: Path, home: Path, codex_home: Path,
+) -> None:
+    """Native Codex may prune caches: only run plugin add in a private transaction."""
+    identity = uuid_text(recovery.name.removeprefix("registration."))
+    publication = recovery / "publication.json"
+    plugin_id = f"{PLUGIN_NAME}@{MARKETPLACE_NAME}"
+    cache = _plugin_cache(projection, codex_home)
+    config_relative = Path("config.toml")
+    stage_relative = Path(f".blender-mcp-installer.{identity}.registration.stage")
+    backup_relative = Path(f".blender-mcp-installer.{identity}.registration.pre")
+    with SafeRoot.open(codex_home, os.getuid(), codex_home) as root:
+        config = TargetRef(root, config_relative)
+        if publication.exists():
+            with SafeRoot.open(recovery, os.getuid(), recovery) as evidence:
+                pending, _ = read_proof(evidence, Path("publication.json"))
+            if pending["projection"] != str(projection):
+                raise InstallerError("registration publication identity mismatch")
+        else:
+            pre = capture_file(root, config_relative)
+            raw = b"" if pre.state is ImageState.ABSENT else read_owned_bytes(config)[0]
+            native = Path(tempfile.mkdtemp(prefix="native-codex.", dir=recovery))
+            native.chmod(0o700)
+            if raw:
+                _atomic_write(native / "config.toml", raw)
+            current, _ = _marketplace_snapshot(native / "config.toml")
+            if current.get("source") != str(projection):
+                if current["present"]:
+                    _codex(codex, home, native, *REMOVE_MARKETPLACE)
+                _codex(codex, home, native, "plugin", "marketplace", "add", str(projection))
+            _codex(codex, home, native, "plugin", "add", f"blender-mcp-installer@{MARKETPLACE_NAME}")
+            _validate_plugin_cache(projection, native)
+            version = cache.name
+            inspect_registration(codex, UpgradeRoots(home, native), {
+                "commit": projection.name, "projection": str(projection), "plugin_version": version,
+            })
+            with SafeRoot.open(native, os.getuid(), native) as stage_root:
+                post_raw, _ = read_owned_bytes(TargetRef(stage_root, Path("config.toml")))
+            parsed = tomllib.loads(post_raw.decode())
+            if (
+                _unmanaged_config(raw) != _unmanaged_config(post_raw)
+                or parsed.get("plugins", {}).get(plugin_id, {}).get("enabled") is not True
+            ):
+                raise InstallerError("native registration changed non-target configuration")
+            if capture_file(root, config_relative) != pre:
+                raise InstallerError("registration configuration changed during staging")
+            parent = root.open_directory(cache.parent.relative_to(codex_home), create=True)
+            os.close(parent)
+            native_cache = _plugin_cache(projection, native)
+            if _lstat(cache) is None:
+                # Copy to a private sibling on the target filesystem before an exclusive publish.
+                cache_stage_relative = Path(f".blender-mcp-installer.{identity}.cache.stage")
+                cache_stage_path = codex_home / cache_stage_relative
+                if _lstat(cache_stage_path) is None:
+                    shutil.copytree(native_cache, cache_stage_path, symlinks=True)
+                    _secure_tree(cache_stage_path)
+                if _content_manifest(cache_stage_path) != _content_manifest(native_cache):
+                    raise InstallerError("registration cache stage requires recovery")
+                cache_stage = StagedTree(root, cache_stage_relative, capture_tree(root, cache_stage_relative))
+                target_cache = TreeRef(root, cache.relative_to(codex_home))
+                cache_recovery = TreeRef(root, Path(f".blender-mcp-installer.{identity}.cache.pre"))
+                while forward_tree(target_cache, TreeImage.absent(), cache_stage, cache_recovery, NoOpFaultInjector()) is not NativeState.COMPLETED:
+                    pass
+            _validate_plugin_cache(projection, codex_home)
+            prior_stage = capture_file(root, stage_relative)
+            if prior_stage.state is ImageState.PRESENT:
+                if read_owned_bytes(TargetRef(root, stage_relative))[0] != post_raw:
+                    raise InstallerError("registration config stage requires recovery")
+            else:
+                _atomic_write(codex_home / stage_relative, post_raw)
+            post = capture_file(root, stage_relative)
+            pending = {
+                "schema_version": 1, "projection": str(projection), "pre": pre.to_dict(),
+                "post": post.to_dict(), "cache": capture_tree(root, cache.relative_to(codex_home)).to_dict(),
+                "complete": False,
+            }
+            _atomic_json(publication, pending)
+            # The native profile has no login/session files; its config snapshot is sensitive.
+            _secure_tree(native)
+            with SafeRoot.open(recovery, os.getuid(), recovery) as evidence:
+                native_ref = TreeRef(evidence, Path(native.name))
+                conditional_remove_tree(native_ref, native_ref.capture(), (), NoOpFaultInjector())
+        if pending["schema_version"] != 1:
+            raise InstallerError("unknown registration publication schema")
+        expected_cache = TreeImage.from_dict(pending["cache"])
+        if capture_tree(root, cache.relative_to(codex_home)) != expected_cache:
+            raise InstallerError("registration cache changed before config publication")
+        pre, post = FileImage.from_dict(pending["pre"]), FileImage.from_dict(pending["post"])
+        staged = StagedFile(root, stage_relative, post)
+        backup = TargetRef(root, backup_relative)
+        if not pending["complete"]:
+            while forward_file(config, pre, staged, backup, NoOpFaultInjector()) is not NativeState.COMPLETED:
+                if capture_tree(root, cache.relative_to(codex_home)) != expected_cache:
+                    raise InstallerError("registration cache changed during config publication")
+            _validate_plugin_cache(projection, codex_home)
+            pending["complete"] = True
+            _atomic_json(publication, pending)
+        elif capture_file(root, config_relative) != post:
+            raise InstallerError("published registration configuration changed")
+        old = capture_file(root, backup_relative)
+        if old.state is ImageState.PRESENT:
+            if old != pre:
+                raise InstallerError("registration config recovery conflict")
+            conditional_remove_file(backup, old, (), NoOpFaultInjector())
+
+
 def _register(
     projection: Path,
     recovery_root: Path,
@@ -614,35 +746,13 @@ def _register(
         _atomic_json(recovery / "non-target-before.json", non_target_before)
     _write_restore_instructions(recovery, codex, home, codex_home)
 
-    current, _ = _marketplace_snapshot(config)
-    changed = current.get("source") != str(projection)
-    add_marketplace = ("plugin", "marketplace", "add", str(projection))
-    add_plugin = ("plugin", "add", f"blender-mcp-installer@{MARKETPLACE_NAME}")
-    try:
-        if changed:
-            if before["present"]:
-                _codex(codex, home, codex_home, *REMOVE_MARKETPLACE)
-            _codex(codex, home, codex_home, *add_marketplace)
-        _codex(codex, home, codex_home, *add_plugin)
-        _validate_plugin_cache(projection, codex_home)
-        after, non_target_after = _marketplace_snapshot(config)
-        _atomic_json(recovery / "after.json", after)
-        _atomic_json(recovery / "non-target-after.json", non_target_after)
-        if non_target_after != non_target_before:
-            raise RuntimeError("non-target marketplace registration changed")
-        if after.get("source") != str(projection):
-            raise RuntimeError("target marketplace does not reference the projection")
-    except BaseException as error:
-        if changed:
-            try:
-                _restore(codex, home, codex_home, before, non_target_before)
-            except BaseException as restore_error:
-                raise RuntimeError(
-                    f"marketplace replacement and restoration failed; evidence: {recovery}"
-                ) from restore_error
-        raise RuntimeError(
-            f"marketplace replacement failed: {error}; evidence: {recovery}"
-        ) from error
+    _isolated_registration(projection, recovery, codex, home, codex_home)
+    _validate_plugin_cache(projection, codex_home)
+    after, non_target_after = _marketplace_snapshot(config)
+    _atomic_json(recovery / "after.json", after)
+    _atomic_json(recovery / "non-target-after.json", non_target_after)
+    if non_target_after != non_target_before or after.get("source") != str(projection):
+        raise InstallerError("published marketplace registration mismatch")
     return recovery
 
 

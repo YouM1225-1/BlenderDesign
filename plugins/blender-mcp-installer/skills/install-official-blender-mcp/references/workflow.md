@@ -334,8 +334,21 @@ registration and finalizes cleanup without Blender, runtime, extension, or recei
 Full install/repair uses the single-process `INSTALL` upgrade block below.
 Skip this block for inspect-only, verify-only, and rollback requests.
 New commits are verified before target-only replacement;
-mode-0600 recovery evidence is receipt-independent. The helper then runs
-`plugin add "blender-mcp-installer@official-blender-mcp"`.
+mode-0600 recovery evidence is receipt-independent. The helper runs
+`plugin add "blender-mcp-installer@official-blender-mcp"` only in a mode-0700
+transaction CODEX_HOME, because the native command may prune older caches. It stages
+only this target profile's mode-0600 config snapshot, never login/session files or
+inherited credentials. The snapshot may contain sensitive configuration; it is not
+logged, and successful publication removes temporary config copies. Failed stages
+remain private for explicit diagnosis/recovery.
+
+The verified desired cache is published first without replacing older cache paths
+or inodes. Only then is the config conditionally published, preserving every
+non-target TOML value (including other fields in the target plugin table). Conflicts
+retain evidence and do not overwrite external changes. A crash between cache and
+config publication can reuse the exact new cache; a recorded config swap resumes
+through the existing conditional file primitives. Old busy caches remain pending
+until their entry leases are released and a later finalize revalidates them.
 <!-- PERSISTENT_MARKETPLACE_BEGIN -->
 ```bash
 run_uv_bootstrap

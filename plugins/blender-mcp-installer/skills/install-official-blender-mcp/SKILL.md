@@ -18,6 +18,9 @@ an inspection request does not authorize installation or marketplace changes.
   of the archive and adjacent checksums; never execute the source checkout.
 - Use the private trusted worktree for installer execution and a commit-addressed
   persistent projection for marketplace registration. Do not register the worktree.
+- Native plugin installation is isolated in a private transaction profile; never run
+  `codex plugin add` directly against an existing managed profile during upgrade.
+  Preserve old cache paths/inodes until verified finalization.
 - Never start, terminate, or force-close Blender or open/modify project `.blend`
   files through this installer. Do not install uv or Python. A validated absolute
   symlink to either runner is supported.

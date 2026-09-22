@@ -457,14 +457,10 @@ def test_registration_retry_preserves_original_before_images(tmp_path, monkeypat
     )
     monkeypatch.setattr(marketplace, "_validate_plugin_cache", lambda *_: None)
 
-    def codex_call(_codex, _home, _codex_home, *args):
-        if args[:3] == ("plugin", "marketplace", "remove"):
-            current.clear()
-            current.update(present=False)
-        if args[:3] == ("plugin", "marketplace", "add"):
-            current.update(present=True, source_type="local", source=args[3])
+    def publish(desired, _recovery, _codex, _home, _codex_home):
+        current.update(present=True, source_type="local", source=str(desired))
 
-    monkeypatch.setattr(marketplace, "_codex", codex_call)
+    monkeypatch.setattr(marketplace, "_isolated_registration", publish)
     identifier = str(uuid4())
     folder = marketplace._register(
         projection, recovery, Path("/fake/codex"), home, codex, recovery_id=identifier

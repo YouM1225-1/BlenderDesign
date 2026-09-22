@@ -950,11 +950,13 @@ import shutil
 import sys
 import time
 import tomllib
+import tomlkit
 from pathlib import Path
 
 home = Path(os.environ["CODEX_HOME"])
 config = home / "config.toml"
-installed = home / "installed"
+controls_path = Path(__file__).with_suffix(".controls.json")
+controls = json.loads(controls_path.read_text()) if controls_path.exists() else {}
 
 
 def read_marketplaces():
@@ -964,18 +966,11 @@ def read_marketplaces():
 
 
 def write_marketplaces(marketplaces):
-    lines = []
-    for name, value in marketplaces.items():
-        lines.extend(
-            (
-                f"[marketplaces.{name}]",
-                f"source_type = {json.dumps(value['source_type'])}",
-                f"source = {json.dumps(value['source'])}",
-                "",
-            )
-        )
+    data = tomlkit.parse(config.read_text()) if config.exists() else tomlkit.document()
+    data["marketplaces"] = marketplaces
     config.parent.mkdir(parents=True, exist_ok=True)
-    config.write_text("\n".join(lines))
+    config.write_text(tomlkit.dumps(data))
+
 
 
 args = sys.argv[1:]
@@ -983,15 +978,15 @@ if args[:3] == ["plugin", "marketplace", "remove"]:
     marketplaces = read_marketplaces()
     if args[3] not in marketplaces:
         raise SystemExit(1)
-    if args[3] == os.environ.get("FAIL_MARKETPLACE_REMOVE"):
+    if args[3] == controls.get("FAIL_MARKETPLACE_REMOVE"):
         raise SystemExit(44)
     del marketplaces[args[3]]
     write_marketplaces(marketplaces)
 elif args[:3] == ["plugin", "marketplace", "add"]:
     source = str(Path(args[3]).resolve())
-    if source == os.environ.get("FAIL_MARKETPLACE_ADD"):
+    if source == controls.get("FAIL_MARKETPLACE_ADD"):
         raise SystemExit(42)
-    time.sleep(float(os.environ.get("SLEEP_MARKETPLACE_ADD", "0")))
+    time.sleep(float(controls.get("SLEEP_MARKETPLACE_ADD", "0")))
     manifest = json.loads(
         (Path(source) / ".agents/plugins/marketplace.json").read_text()
     )
@@ -1027,12 +1022,16 @@ elif args[:2] == ["plugin", "add"]:
     plugin = Path(source) / "plugins/blender-mcp-installer"
     version = json.loads((plugin / ".codex-plugin/plugin.json").read_text())["version"]
     cache = home / "plugins/cache" / marketplace / "blender-mcp-installer" / version
-    if os.environ.get("FAIL_PLUGIN_ADD"):
+    if controls.get("FAIL_PLUGIN_ADD"):
         cache.mkdir(parents=True, exist_ok=True)
         (cache / "partial").write_text("partial")
         raise SystemExit(43)
-    shutil.copytree(plugin, cache, dirs_exist_ok=True)
-    installed.write_text(args[2])
+    if cache.parent.exists():
+        shutil.rmtree(cache.parent)
+    shutil.copytree(plugin, cache)
+    data = tomlkit.parse(config.read_text())
+    data.setdefault("plugins", {}).setdefault(args[2], {})["enabled"] = True
+    config.write_text(tomlkit.dumps(data))
 elif args[:2] == ["plugin", "list"] and "--json" in args:
     marketplace = args[args.index("--marketplace") + 1]
     source = read_marketplaces().get(marketplace, {}).get("source")
@@ -1040,8 +1039,11 @@ elif args[:2] == ["plugin", "list"] and "--json" in args:
         raise SystemExit(5)
     plugin = Path(source) / "plugins/blender-mcp-installer"
     version = json.loads((plugin / ".codex-plugin/plugin.json").read_text())["version"]
-    names = [] if not installed.exists() else [{
-        "name": "blender-mcp-installer", "pluginId": installed.read_text(),
+    plugin_id = "blender-mcp-installer@" + marketplace
+    enabled = tomllib.loads(config.read_text()).get("plugins", {}).get(plugin_id, {}).get("enabled")
+    cache = home / "plugins/cache" / marketplace / "blender-mcp-installer" / version
+    names = [] if not cache.exists() or enabled is not True else [{
+        "name": "blender-mcp-installer", "pluginId": plugin_id,
         "marketplaceName": marketplace, "version": version,
         "installed": True, "enabled": True,
         "source": {"source": "local", "path": str(plugin)},
@@ -1219,7 +1221,7 @@ def test_documented_registration_only_does_not_invoke_installer(tmp_path: Path) 
     )
     result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert (codex_home / "installed").read_text() == "blender-mcp-installer@official-blender-mcp"
+    assert '[plugins."blender-mcp-installer@official-blender-mcp"]' in (codex_home / "config.toml").read_text()
     assert "install.py" not in log.read_text()
     state = home / ".local/state/blender-mcp-installer"
     assert not (state / "receipts").exists()
@@ -1241,9 +1243,10 @@ def test_marketplace_registration_failure_restores_only_previous_target(
         / commit
     )
     if failure == "marketplace_add":
-        env["FAIL_MARKETPLACE_ADD"] = str(projection)
+        controls = {"FAIL_MARKETPLACE_ADD": str(projection)}
     else:
-        env["FAIL_PLUGIN_ADD"] = "1"
+        controls = {"FAIL_PLUGIN_ADD": "1"}
+    Path(env["CODEX_BIN"]).with_suffix(".controls.json").write_text(json.dumps(controls))
     script = "\n".join(
         (
             _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
@@ -1334,14 +1337,12 @@ def test_persistent_marketplace_rejects_writable_profile_paths(
     ).read_text()
 
 
-def test_failed_restore_is_reported_and_never_claimed_success(tmp_path: Path) -> None:
+def test_native_stage_failure_leaves_live_target_untouched(tmp_path: Path) -> None:
     env, home, codex_home, _, _ = _persistent_marketplace_env(tmp_path)
     config = codex_home / "config.toml"
     config.write_text(config.read_text().split("[marketplaces.official-blender-mcp]", 1)[0])
-    env.update(
-        FAIL_PLUGIN_ADD="1",
-        FAIL_MARKETPLACE_REMOVE="official-blender-mcp",
-    )
+    original = config.read_bytes()
+    Path(env["CODEX_BIN"]).with_suffix(".controls.json").write_text(json.dumps({"FAIL_PLUGIN_ADD": "1", "FAIL_MARKETPLACE_REMOVE": "official-blender-mcp"}))
     script = "\n".join(
         (
             _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),
@@ -1351,14 +1352,14 @@ def test_failed_restore_is_reported_and_never_claimed_success(tmp_path: Path) ->
     )
     result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
     assert result.returncode != 0
-    assert "replacement and restoration failed" in result.stderr
+    assert config.read_bytes() == original
     recovery = home / ".local/state/blender-mcp-installer/marketplace-recovery"
     assert tuple(recovery.glob("registration.*/before.json"))
 
 
 def test_marketplace_registration_is_serialized_per_codex_home(tmp_path: Path) -> None:
     env, _, codex_home, _, _ = _persistent_marketplace_env(tmp_path)
-    env["SLEEP_MARKETPLACE_ADD"] = "0.2"
+    Path(env["CODEX_BIN"]).with_suffix(".controls.json").write_text(json.dumps({"SLEEP_MARKETPLACE_ADD": "0.2"}))
     script = "\n".join(
         (
             _shell_block(WORKFLOW.read_text(), "TRUST_BOOTSTRAP"),

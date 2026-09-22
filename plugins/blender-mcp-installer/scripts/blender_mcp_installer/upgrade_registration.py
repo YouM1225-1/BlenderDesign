@@ -55,7 +55,7 @@ def content_sha256(image: TreeImage) -> str:
 
 
 def codex_json(codex: Path, roots: UpgradeRoots, *arguments: str) -> dict[str, Any]:
-    env = dict(os.environ)
+    env = {key: os.environ[key] for key in ("PATH", "TMPDIR", "LANG", "LC_ALL") if key in os.environ}
     env.update(HOME=str(roots.home), CODEX_HOME=str(roots.codex_home))
     result = subprocess.run(
         [str(codex), *arguments],

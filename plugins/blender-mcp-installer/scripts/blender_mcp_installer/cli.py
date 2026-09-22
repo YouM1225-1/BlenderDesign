@@ -1464,6 +1464,7 @@ def _changed_install_locked(
     install_id = uuid4()
     if workflow_id is None:
         raise InstallerError("changed installation requires workflow journal")
+    _ensure_mutation_roots(roots)
     bind_receipt(state, context, workflow_id, install_id)
     for relative in (
         PurePath("receipts"),

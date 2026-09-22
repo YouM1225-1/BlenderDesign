@@ -24,7 +24,7 @@
 - [安装升级与旧版本自动清理](superpowers/specs/2026-09-08-installer-upgrade-cleanup-design.md)：新版验证成功后自动清理旧托管 runtime、扩展恢复副本和该 Codex 插件的历史缓存；包含清理记录、并发与回滚边界。
 - [资产验收整合设计](superpowers/specs/2026-09-08-asset-acceptance-integration-design.md)：结合源码审计、外部 V4 与 2026-09-08 Blender 实测，按可信核心、原生闭环、GLB 闭环实施；包含 v2 迁移、结果归属、无环证据和回归条件。
 
-两份设计独立实施。安装升级与旧版本自动清理已完成计划内代码和常规自动化测试，RELEASE 分发门禁与当前用户现场验收仍须单独执行；资产验收已切换到 schema v2，M2/M3 worker 已接线，有限 M3 静态 GLB 夹具门禁已通过，Native7 于 2026-09-23 完整门禁 19 项通过、零跳过。设计中的其他能力不代表当前已完成，外部 V4 也不自动取得仓库规范地位。
+两份设计独立实施。安装升级与旧版本自动清理已完成计划内代码、常规自动化测试及修复后的真实隔离 A→B→C/live/busy/no-op 验收；固定分发完整性通过，严格 RELEASE 因上游 outdated 未通过，正常用户 profile 仍需维护和 live 复验，LLM/跨机门禁 NOT_RUN（见 [validation](validation.md#2026-09-23-安装升级当前现场结果)）；资产验收已切换到 schema v2，M2/M3 worker 已接线，有限 M3 静态 GLB 夹具门禁已通过，Native7 于 2026-09-23 完整门禁 19 项通过、零跳过。设计中的其他能力不代表当前已完成，外部 V4 也不自动取得仓库规范地位。
 
 ## 执行计划与对抗审计
 

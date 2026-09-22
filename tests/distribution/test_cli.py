@@ -1069,8 +1069,9 @@ def test_prepublication_runtime_barrier_preserves_managed_targets(
     assert images() == before
 
 
+@pytest.mark.parametrize("entrypoint", ["public", "locked"])
 def test_first_install_orchestrates_journaled_adapters(
-    host: HostHarness, monkeypatch: pytest.MonkeyPatch
+    host: HostHarness, monkeypatch: pytest.MonkeyPatch, entrypoint: str
 ) -> None:
     context, blender, roots = _install_context(host)
     inspected_blender = replace(blender, online_access=True)
@@ -1131,7 +1132,21 @@ def test_first_install_orchestrates_journaled_adapters(
     monkeypatch.setattr(cli, "verify_codex_toml", lambda *_a, **_k: None)
     monkeypatch.setattr(cli, "verify_codex_effective", lambda *_a, **_k: None)
 
-    result = cli._changed_install(context, NoOpFaultInjector())
+    roots.data_root.rmdir()
+    if entrypoint == "locked":
+        from blender_mcp_installer.upgrade_integration import select_install_workflow
+        from blender_mcp_installer.upgrade_locks import mutation_locks
+        from blender_mcp_installer.upgrade_state import UpgradeRoots
+
+        with mutation_locks(UpgradeRoots(roots.home, roots.codex_home)) as state:
+            workflow = select_install_workflow(state, context, exact=False)
+            assert workflow is not None
+            result = cli._changed_install_locked(
+                context, NoOpFaultInjector(), state, workflow["id"], None
+            )
+    else:
+        result = cli._changed_install(context, NoOpFaultInjector())
+    assert roots.data_root.stat().st_mode & 0o777 == 0o700
 
     assert result["changed"] is True and result["no_op"] is False
     receipt = Path(result["receipt"])

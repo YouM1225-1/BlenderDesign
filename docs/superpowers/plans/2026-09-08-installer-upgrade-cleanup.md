@@ -3078,3 +3078,12 @@ def test_other_codex_home_journal_is_validated_but_not_adopted(prepared):
 2026-09-08 在仓库外隔离目录 `/tmp/blender-upgrade-plan-probe.wV3ucU` 执行核心与 launcher 原型，使用本仓库现有 filesystem/model 原语，22 个 pytest 用例通过。原型测试中的 roots 全部来自 pytest 临时目录；没有调用真实安装、注册、删除或关闭进程。这个证据只证明候选/journal/使用锁核心可行，不是完整安装工作流、真实 Codex 自动重载或 Blender 现场验收结论。
 
 执行计划后仍必须完成 A→B→C 内容真实不同的现场验收：每次正式验证通过后检查物理目录删除、当前 MCP 可用、当前扩展可用、非目标目录与配置备份不变。首次 legacy 维护交接需要外部终端和相关应用退出的可观测证据，不能在当前 Codex 任务中伪造通过。
+
+## 2026-09-23 现场发现与注册修复
+
+真实冷 profile 首装发现同进程锁内入口缺少数据目录初始化，已复用既有安全初始化并补公共/锁内入口行为回归。真实 Codex 0.155.0-alpha.9.2 的 plugin add 提前删除持锁旧缓存，原 A→B→C 的 runtime/live 成功不构成完整现场通过。新增私有注册 staging 路径：保护目标配置快照，真实 native add 仅在 stage 内执行，验证新 cache 与所有非目标 TOML 值后按 cache→config 条件发布；旧缓存原 inode 留给既有验证后清理器。崩溃恢复覆盖 cache 已发布、config 已发布、after 证据写入边界；未知/冲突状态失败关闭。修复后的真实隔离现场已完成，具体结果如下；正常用户维护、LLM/跨机与发行最新性仍分别保留未通过或 NOT_RUN 状态。
+
+
+修复后以同一生产算法及受审不可变 A/B/C 夹具完成真实 Codex、MCP 26 工具和自有 Blender 5.2.0 LTS 的 A→B→C。A/B/C wheel 分别来自真实历史/当前固定产物，A→B 扩展不同、B→C 扩展相同；现有事务仍重新暂存扩展，不能声明 B→C 扩展 inode 保持。每代 live 后 finalize 两次，旧 runtime/extension recovery 和旧 plugin cache 逐路径确认不存在；live 之前旧 cache 仍存在。非目标插件、marketplace、配置备份、其他 profile、历史 projection 未改变。真实旧 cache 持锁返回 cleanup_pending，退出自有入口后 retry 物理删除；当前 managed runtime 持锁返回 runtime_in_use，受管目标字节不变。当前 C 同内容安装 no-op，独立只读 inspect/verify 前后 receipt/journal/active/config 一致。
+
+当前 C 为 `f23c8a783b10be6e17c89aed5f7527caa528a7ec`，证据 `/private/tmp/blenderdesign-closeout-20260922-27x0hxjj/task3/live-final`。仓库 Phase 0 依赖漏洞通过只更新 httpx2/httpcore2 2.12.0 闭合，官方固定 runtime/产物未改。固定版完整性及依赖审计通过，严格 RELEASE 仍因上游 outdated 退出 1，不具备发行资格，不自动升级 pin。正常用户 profile inspect exact=false、未运行 Blender 的 verify 未通过；未维修正常 profile，也未停止当前 Codex 做 legacy 交接。一次性 LLM/第二台 Mac 缺失的检查为 NOT_RUN。完整分类与工具身份见 [validation 当前现场结果](../../validation.md#2026-09-23-安装升级当前现场结果)。
