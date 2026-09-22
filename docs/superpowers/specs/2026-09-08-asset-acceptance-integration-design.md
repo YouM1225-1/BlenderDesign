@@ -1,6 +1,6 @@
 # 资产验收整合设计：可信核心、原生闭环与 GLB 投影
 
-状态：整体设计已于 2026-09-08 获用户认可；本文为待实施设计，尚未改变运行时行为。本文整合源码审计、外部 V4 优化方案与同日 Blender 实测。与[安装升级清理设计](2026-09-08-installer-upgrade-cleanup-design.md)独立实施、独立验收。
+状态：整体设计已于 2026-09-08 获用户认可；schema v2 的 M0/M1 及有限 M2 Native/M3 GLB 路径已实施。当前 M2 独立完整门禁为 19 passed/0 failed/0 skipped；M3 只保留此前有限 L0 证据，新的三文件实际门禁待收尾 Task 5 执行。通用资产仍未获自动发布批准。本文整合源码审计、外部 V4 优化方案与同日 Blender 实测；与[安装升级清理设计](2026-09-08-installer-upgrade-cleanup-design.md)独立实施、独立验收。
 
 ## 1. 决策、范围与成功标准
 
@@ -14,7 +14,7 @@
 
 ## 2. 证据基线与当前缺口
 
-审计基线为仓库提交 `97abbad7f43fbc4b16de45246ee9b196d1527ba0`。当前入口仍是 [V3.8](../../acceptance/blender_mcp_skill_acceptance_optimized_v3_8.md)，[合同加载器](../../../acceptance/contract.py)只接受 schema v1。外部 V4 与本文不会自动升级现行接口。
+本节的审计基线为仓库提交 `97abbad7f43fbc4b16de45246ee9b196d1527ba0`；下表保留实施前的 schema v1/V3.8 缺口，不是当前运行时状态。现行入口为 [V5](../../acceptance/blender_mcp_skill_acceptance_optimized_v5.md)，[合同加载器](../../../acceptance/contract.py)只接受 schema v2；外部 V4 仍只是已审计输入，不是仓库合同。
 
 | 已核对对象 | 当前事实 | 本次设计的处理 |
 |---|---|---|

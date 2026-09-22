@@ -49,6 +49,9 @@ Task 3 审查修订：修复 publication 后中断遗留敏感配置快照，持
 
 核对链接、命令、计划状态与实现一致；不将未运行现场检查记为通过。完成范围检查、完整门禁、graft 后提交并独立审查。
 
+Task 4 当前进展（2026-09-23）：已从远端复核 `origin/main=5a3bb97`，并将其合入升级分支。冲突按正式文档职责逐段整合：保留主线文档收敛、历史归档、`AGENTS.md` 唯一执行入口和 quoted-interpreter 夹具修复；同步 schema v2、有限 M2 的 19/0/0 真实门禁、M3 旧有限证据与 Task 5 待跑新三文件门禁，以及安装器 A→B→C/C→D 的当前有限现场结果。严格 RELEASE 仍因 upstream outdated 退出 1，正常 profile 未验证，LLM/第二台 Mac/legacy user-app handoff 仍为 `NOT_RUN`。本任务不变更上游 pin，不把工具准备写成 M3 通过；完整门禁、graft 与合并提交结果见 Task 4 报告。
+合并后聚焦 distribution 回归 150 项通过；普通完整门禁为 1150 passed / 27 explicit skips，distribution 为 1034 passed，末行 `ALL CHECKS PASSED`。本次合并未改动 installer/runtime/artifacts、`uv.lock` 或 acceptance 运行时字节，plugin 版本仍为 `1.0.0+codex.20260922175350`；最终合并提交与树身份需由 Task 5 单独记录，不把提交身份变化误写成生产字节变化。
+
 ## Task 5: 完整检查与全分支对抗性审计
 
 运行最终候选树的 `bash scripts/checks.sh`、受影响的真实 Native/M3 与适用发行门禁，记录提交/代码身份；同一代码已取得有效结果不无谓重复。最后修改后 build/check graft。

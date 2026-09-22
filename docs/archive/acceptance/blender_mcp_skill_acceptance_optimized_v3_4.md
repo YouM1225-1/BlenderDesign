@@ -44,7 +44,7 @@ Reviewer/调用方(读取冻结 evidence 后作最终决定)
 
 ### 0.3 正式验收当前被工作树状态阻塞
 
-`_require_clean_worktree`([run_phase0_acceptance.py:87](scripts/run_phase0_acceptance.py#L87))把 untracked 文件也算脏。当前工作树的全部未跟踪文件——V3.2、V3.3、V3.3 审计报告、本文 V3.4、`hantavirus_scientific_cutaway.blend`、`hantavirus_scientific_cutaway_v2.blend`、`hantavirus_scientific_cutaway_final.png`——任何一个存在都会使正式 Phase 0 验收以 `dirty_worktree` 失败。处置见 §10。
+`_require_clean_worktree`([run_phase0_acceptance.py:87](../../../scripts/run_phase0_acceptance.py#L87))把 untracked 文件也算脏。当前工作树的全部未跟踪文件——V3.2、V3.3、V3.3 审计报告、本文 V3.4、`hantavirus_scientific_cutaway.blend`、`hantavirus_scientific_cutaway_v2.blend`、`hantavirus_scientific_cutaway_final.png`——任何一个存在都会使正式 Phase 0 验收以 `dirty_worktree` 失败。处置见 §10。
 
 ---
 
@@ -175,7 +175,7 @@ V1 manifest 只覆盖放行所需字段:
 - 外部依赖相对路径、大小、hash、packed 状态;
 - `schema_version`、`coverage`、`unsupported_fields`。
 
-只有实际出现误判后再扩 coverage。现有 `scene_hash`([scene_hash.py:13-32](bridge/core/scene_hash.py#L13))仅覆盖名称/类型/量化矩�阵/RNA 类型/顶点边面数,正式名称保持 `phase0_structure_digest`,禁止用于 source↔export、两次 clean-run、checkpoint 或发布 identity。
+只有实际出现误判后再扩 coverage。现有 `scene_hash`([scene_hash.py:13-32](../../../bridge/core/scene_hash.py#L13))仅覆盖名称/类型/量化矩�阵/RNA 类型/顶点边面数,正式名称保持 `phase0_structure_digest`,禁止用于 source↔export、两次 clean-run、checkpoint 或发布 identity。
 
 **`mesh.validate()` 使用约束**(Blender API:返回 `True` 表示发现**并已修正/移除**非法几何——有副作用):
 
@@ -238,7 +238,7 @@ FLIP(NVIDIA,感知第二意见)与 VLM/CLIP 评分都属 P1,引入时:版本进�
 
 ### 6.2 已验证可继续引用的先例
 
-- 仓库内:Phase 0 wrapper 的全部安全原语与三个 known-bad 回归([test_phase0_acceptance.py](tests/unit/test_phase0_acceptance.py):L55/L78/L172);`verify_live` 的等序目录比较、单一只读探针、快照防 stale([verification.py:1035-](plugins/blender-mcp-installer/scripts/blender_mcp_installer/verification.py#L1035));`RELEASE=1` 的"精确重建 + 逐字节比对"范式。
+- 仓库内:Phase 0 wrapper 的全部安全原语与三个 known-bad 回归([test_phase0_acceptance.py](../../../tests/unit/test_phase0_acceptance.py):L55/L78/L172);`verify_live` 的等序目录比较、单一只读探针、快照防 stale([verification.py:1035-](../../../plugins/blender-mcp-installer/scripts/blender_mcp_installer/verification.py#L1035));`RELEASE=1` 的"精确重建 + 逐字节比对"范式。
 - 上游对照:ahujasid/blender-mcp 的 `execute_code` 为裸 `exec`,无沙箱与产物校验,RCE 类 issue 关闭不修(#201/#207/#261),有两个 2026 CVE(GHSA-qqw9-95ww-prfm、GHSA-5hr7-6m56-f3rg)——最流行上游把验收明确让位使用者;PatrykIti/blender-ai-mcp 以确定性测量为卖点,方向与本方案一致(observed_at=2026-08-24)。
 - 反例转化:dcc-mcp 的 `passed=false` 仍 `skill_success`、pytest exit 5(零收集)当成功;blender-agent-studio 的 `hard_gate_pass=false` 但脚本 exit 0、公开 CI 不启动 Blender;→ 夹具 `zero_checks_collected` 与双判定原则。
 - 可借鉴:blender-agent-studio `verifyReproduction`(生成脚本在干净环境重跑并重过全部硬门,P1 可选合同声明 `reproducible_by_script`);newo-ether 的"提交时重新验证、不信任先前 validate"与指针泄漏审计(P1);pyblish/AYON 的有序插件范式(本方案的增强:冻结 check 集+版本+序的哈希,pyblish 生态无此概念);Unreal DataValidation 的单 CLI 非零退出形态;glTF-Blender-IO 每周 cron 对 daily build 的金丝雀回归(P1)。
@@ -334,7 +334,7 @@ P2(L2):不同 OS principal、签名审批、DSSE/Sigstore、透明日志、Publi
 
 | Fixture | 等级 | 预期 | 现状 |
 |---|---|---|---|
-| `exit_zero_success_false` | L0 | 子进程 exit 0 但产物 `success!=true` → 外层 Fail | wrapper 层已有([tests/unit/test_phase0_acceptance.py:55](tests/unit/test_phase0_acceptance.py#L55));资产层需对应物 |
+| `exit_zero_success_false` | L0 | 子进程 exit 0 但产物 `success!=true` → 外层 Fail | wrapper 层已有([tests/unit/test_phase0_acceptance.py:55](../../../tests/unit/test_phase0_acceptance.py#L55));资产层需对应物 |
 | `reused_evidence_root` | L0 | 启动子进程前拒绝 | wrapper 层已有(L78);原语复制后同规则 |
 | `stale_result_file` | L0 | 结果文件预先存在 → 拒绝;失败路径不得读旧 JSON | 无(实测依据 §6.1) |
 | `zero_checks_collected` | L0 | expected 非空、actual 为空 → Fail | 无 |
@@ -377,7 +377,7 @@ P0 代码与真 Blender fixture 落地前,唯一诚实结论仍是:
 2. **V3.1 勘误**:若保留,页首补一行"D35~D43 所述 wrapper 实际入仓于 `bf63c89`"。
 3. **P0 启动**:按 §7 依序落地;首个提交即包含 `primitives.py` 复制与 coordinator 骨架 + unit 夹具,不触碰任何既有文件。
 
-已从行动清单剥离(与验收闭环无关或不宜先验承诺):docs/ 空目录清理(git 不跟踪空目录,不影响任何门禁,列为可选卫生项);Phase 0 工具 `readOnlyHint` 标注(MCP 规范明确 annotations 仅为 hint,不构成安全边界;实施需同步更新 [test_server_process.py](tests/contract/test_server_process.py) 的目录投影断言,变更面小但非零——移入 P1 可选项)。
+已从行动清单剥离(与验收闭环无关或不宜先验承诺):docs/ 空目录清理(git 不跟踪空目录,不影响任何门禁,列为可选卫生项);Phase 0 工具 `readOnlyHint` 标注(MCP 规范明确 annotations 仅为 hint,不构成安全边界;实施需同步更新 [test_server_process.py](../../../tests/contract/test_server_process.py) 的目录投影断言,变更面小但非零——移入 P1 可选项)。
 
 ---
 

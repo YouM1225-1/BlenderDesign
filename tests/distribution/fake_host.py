@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
 import sys
 import tomllib
@@ -40,10 +41,17 @@ class HostHarness:
     uv: Path
 
 
+def python_script_header() -> str:
+    # A shebang cannot quote an interpreter path containing spaces.
+    # Keep backslashes paired for Python and unquoted for the shell.
+    python = shlex.quote(sys.executable).replace("\\", "'\\\\'")
+    return "#!/bin/sh\n" + f"'''exec' {python} \"$0\" \"$@\"\n" + "' '''\n"
+
+
 def _write_launcher(path: Path, tool: str, state_file: Path, commands: Path) -> None:
     source = (
-        f"#!{sys.executable}\n"
-        "from pathlib import Path\n"
+        python_script_header()
+        + "from pathlib import Path\n"
         "import sys\n"
         f"sys.path.insert(0, {str(Path(__file__).parents[2])!r})\n"
         "from tests.distribution.fake_host import run_fake\n"
@@ -288,7 +296,8 @@ def run_fake(tool: str, state_file: Path, commands: Path, argv: list[str]) -> in
             (runtime / "bin").mkdir(parents=True)
             python = runtime / "bin/python"
             python.write_text(
-                f"#!{sys.executable}\nimport os, sys\n"
+                python_script_header()
+                + "import os, sys\n"
                 f"os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n"
             )
             python.chmod(stat.S_IRWXU)
@@ -303,7 +312,8 @@ def run_fake(tool: str, state_file: Path, commands: Path, argv: list[str]) -> in
             server = runtime / "bin/blender-mcp"
             server.parent.mkdir(parents=True, exist_ok=True)
             server.write_text(
-                f"#!{sys.executable}\nimport sys\nsys.path.insert(0, {str(Path(__file__).parents[2])!r})\n"
+                python_script_header()
+                + f"import sys\nsys.path.insert(0, {str(Path(__file__).parents[2])!r})\n"
                 "from tests.distribution.fake_host import _mcp_server\n"
                 f"from pathlib import Path\nraise SystemExit(_mcp_server({state['tools']!r}, "
                 f"Path({str(commands)!r})))\n"

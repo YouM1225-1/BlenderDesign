@@ -29,6 +29,7 @@
 | 文件 | 责任 |
 |---|---|
 | `docs/acceptance/blender_mcp_skill_acceptance_optimized_v5.md`、`docs/README.md` | 新规范权威、v2 字段/版本/状态与阶段能力 |
+| `docs/architecture.md`、`README.md` | 当前实现设计与能力说明随 M1 切换同步 |
 | `acceptance/check_registry.py` | 37 个 check 的逐项 impl 和唯一顺序 |
 | `acceptance/contract.py` | 封闭加载、深不可变快照、v2 digest |
 | `acceptance/input_bundle.py` | 无链接父链、安全有界流式复制、冻结包和文件身份 |
@@ -293,7 +294,7 @@ text += "".join(f"| `{name}` | {priority} |\n" for priority, name in enumerate(f
 path.write_text(text)
 ```
 
-在 `docs/README.md` “资产验收方案”下添加一条目标规范链接，暂保留 V3.8 当前入口：
+在 `docs/README.md` “现行规范与技术决策”下添加一条目标规范链接，暂保留 V3.8 当前入口：
 
 ```markdown
 - [V5/v2 迁移目标](acceptance/blender_mcp_skill_acceptance_optimized_v5.md)：已认可设计的实施规范；v2 CLI 切换完成前，不代表当前运行时已升级。
@@ -3624,6 +3625,8 @@ Expected: 退出 0。按本文末尾提交门禁合并 M1 提交；没有提交�
 - Test: `tests/unit/test_asset_v2_cli.py`
 - Test: `tests/unit/test_asset_v2_legacy_boundaries.py`
 - Modify: `docs/README.md`
+- Modify: `docs/architecture.md`
+- Modify: `README.md`
 - Modify: `tests/unit/test_asset_spec_counts.py`
 
 **Interfaces:**
@@ -4064,7 +4067,7 @@ def test_current_failure_family_table_is_complete():
     assert rows == [(name, str(index)) for index, name in enumerate(fc.FAILURE_FAMILIES)]
 ```
 
-M1 切换后，按机器表更新 V5 的版本/失败表与 README 当前入口，保留历史 V3.8 原文。运行下面的完整同步脚本：
+M1 切换并通过回归后，按机器表更新 V5 的版本/失败表，保留历史 V3.8 原文。运行下面的规范同步脚本：
 
 ```python
 from pathlib import Path
@@ -4078,19 +4081,13 @@ text += "".join(f"| `{s.id}` | {s.impl} | `{s.writer}` |\n" for s in reg.CHECKS)
 text += "\n| Failure family | priority |\n|---|---:|\n"
 text += "".join(f"| `{name}` | {index} |\n" for index, name in enumerate(fc.FAILURE_FAMILIES))
 spec.write_text(text)
-readme = Path("docs/README.md")
-lines = readme.read_text().splitlines()
-updated = []
-for line in lines:
-    if line.startswith("- [V5/v2 迁移目标]"):
-        continue
-    if line.startswith("- [验收方案 V3.8]"):
-        line = "- [资产验收规范 V5](acceptance/blender_mcp_skill_acceptance_optimized_v5.md)：当前 v2/M1 规范；旧 V3.8 为历史记录。"
-    if line.startswith("当前只实现了不依赖 Blender 的 P0"):
-        line = "当前 M1 完成可信核心、冻结输入与真实证据封装；R2–R4 尚未接线，通用资产验收仍未完成，不得自动发布放行。"
-    updated.append(line)
-readme.write_text("\n".join(updated) + "\n")
 ```
+
+再按实际实现同步以下文档，不依赖整行旧文案替换；缺少入口时先核对当前结构：
+
+- `docs/README.md`：将“现行规范与技术决策”的当前入口切换为 V5，保留 V3.8 历史链接只在归档索引中。
+- 对应计划与 `docs/README.md` 的计划索引：按当前源码和行为门禁标记 M0/M1、有限 M2/M3 的状态，不把原型或计划能力当作完成证据。
+- `docs/architecture.md` 与根 `README.md`：更新 schema v2、冻结输入、证据归属、Native/GLB worker 及 CLI 的实际边界；通用资产仍不能自动放行。
 
 ### M1 最终门禁与提交
 
@@ -4098,6 +4095,7 @@ readme.write_text("\n".join(updated) + "\n")
 - [ ] `bash scripts/checks.sh` 输出 `ALL CHECKS PASSED`；不运行 RELEASE 或正式 Phase 0 现场门禁冒充本任务验证。
 - [ ] 最后改动后 `graft build .`；随后 `graft check .` 退出 0。
 - [ ] `git diff --check` 退出 0，审阅没有候选资产、日志、冻结包、node_modules 或 graft 缓存被暂存。
+- [ ] V5 规范、架构、README 和计划索引与本次已验证的 M1 行为一致；没有残留的 v1 当前实现声明或失效引用。
 - [ ] 在已有提交授权范围内提交 M0/M1；不自行推送。提交标题建议 `feat: harden asset acceptance core with v2 evidence protocol`。
 
 M1 的完成声明限于：纯 Python 可信核心与真实子进程 JSON/文件封装已验证，正常生产 CLI 仍对缺少 15/25 个 worker 检查失败关闭。后续分别执行原生和 GLB 计划；不得用模拟成功替代真实资产的正向闭环。

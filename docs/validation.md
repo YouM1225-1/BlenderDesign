@@ -3,7 +3,7 @@
 ## 自动化门禁
 
 开发过程中按改动选择最小有效检查；已有环境可用 `bash scripts/checks-fast.sh`
-快速反馈。纯文档修改检查引用、命令和技能结构，不新增匹配措辞的测试。
+快速反馈。纯文档修改检查引用、命令及指令一致性；涉及技能入口时才验证技能结构，不新增匹配措辞的测试。
 提交前运行下述完整入口一次；通过后，仅在后续改动、失败或未解决疑虑涉及其覆盖范围时重跑。
 
 仓库唯一的完整验证入口是：
@@ -28,7 +28,10 @@ bash scripts/checks.sh
 
 脚本按 `UV_BIN`、`PATH`、`$HOME/.local/bin/uv` 的顺序解析 uv。
 插件验证器默认从 `$HOME/.codex/skills/.system/plugin-creator` 读取，也可通过
-`PLUGIN_CREATOR_ROOT` 指定。该检查不再跳过。
+`PLUGIN_CREATOR_ROOT` 指定。插件结构校验为必需检查。
+
+分发测试的模拟可执行程序使用 shell 跳转到当前 Python，支持解释器路径中的空格；
+便携包审计应在含中文和空格的解包目录运行完整入口，避免只验证原仓库路径。
 
 ### 安装器版本自动更新
 
@@ -90,6 +93,20 @@ detect-secrets 与 pip-audit，进行两次确定性构建，并逐字节比对�
 
 最后一次仓库文件修改后执行 `graft build .`，交付前 `graft check .` 必须退出 0。
 `graft/` 保留为未跟踪的本地缓存，不进入提交或分发包；不默认使用 `--deep`。
+
+## 文档与执行约定审计
+
+`AGENTS.md` 是执行约定的唯一入口，`CLAUDE.md` 仅引用同一文件。修改指令时核对根级约定与
+实际适用技能的任务范围、授权条件和验证要求，避免重复批准、无条件扩大检查或将计划当作实现。
+已知文件编辑可直接开始；仅检查安装状态不触发注册或安装，仅注册不安装 runtime。
+
+文档移动或合并需核对入站链接、相对路径、测试引用和未完成任务的依赖。归档正文保留历史语义，
+不将旧基线改写为当前结论；删除重复说明前将独有规则移入其职责对应的正式入口。
+计划中的待创建路径不按当前断链处理；其中用于修改现有文件的标题、文本锚点和命令仍需核对。
+
+安装技能的命令由其 `references/workflow.md` 维护，
+`tests/distribution/test_plugin_contract.py` 验证 operation recipes 的行为合同。
+涉及技能结构修改时使用 skill-creator 提供的 `quick_validate.py`；普通 Markdown 编辑不触发技能安装或现场验证。
 
 ## Blender 验证
 
@@ -159,6 +176,8 @@ ASSET_CALIBRATION_ROOT="$ASSET_CALIBRATION_ROOT" \
   tests/integration/test_gltf_validator.py -q
 ```
 
+此前的有限 GLB L0 结果是独立的旧证据，不是当前候选树的新运行。收尾 Task 5 将使用新准备的外部锁定 Node/Validator 和全新 evidence root 执行上述三文件门禁；在完整结果与候选身份绑定前，本节不声称新的 M3 通过。
+
 这组门禁只证明声明的 GLB 静态 L0 支持范围。独立两进程 surface probe、Node validator probe、完整 CLI、人工 Q 和正式交付分别记录，不互相替代。没有对应证据不得把状态标为已完成。M2 与 M3 各自的实际门禁结论独立，不能互相替代。
 
 ## 官方分发验证
@@ -173,15 +192,15 @@ ASSET_CALIBRATION_ROOT="$ASSET_CALIBRATION_ROOT" \
 - managed launcher 与四层 live verification。
 
 已安装 runtime 只通过安装器 skill 的 `verify` 命令验证；该命令使用固定 Python，
-并同时检查 Codex 策略、MCP 握手/工具目录和 Blender localhost 只读调用。安装器不会
-启动 Blender，必须由操作者正常启动后再运行现场验证。
+并同时检查 Codex 策略、MCP 握手/工具目录和 Blender localhost 只读调用。
+交互式 Blender 由操作者正常启动；安装器的宿主探测可以使用受控后台进程，不能代替现场会话验证。
 
 ## 结论边界
 
-- 自动化测试通过证明当前提交满足仓库合同，不等于任意 Blender 文件或任意 Python payload 都安全。
+- 自动化测试通过证明被测代码满足测试覆盖的合同，不等于任意 Blender 文件或任意 Python payload 都安全。
 - 官方工具数量、版本和哈希以当前 manifest 为准，不在文档中维护第二份目录。
 - 平台支持只覆盖 manifest 声明的 macOS Apple Silicon 与 Blender 版本范围。
-- 历史验收结果可从 Git 历史追溯，但不作为当前工作树的运行时依赖。
+- 历史验收结果按[归档索引](archive/README.md)或 Git 历史追溯，不作为当前工作树的运行时依赖。
 
 ### 2026-09-23 安装升级当前现场结果
 
@@ -196,4 +215,4 @@ ASSET_CALIBRATION_ROOT="$ASSET_CALIBRATION_ROOT" \
 正常用户 profile 单独只读检查为 `exact=false`：Codex effective/namespace/policy、recorded Blender executable 和 runtime 未达精确目标，Blender 扩展/host/online access/port/autostart 检查为真；正常 Blender 未运行，verify 未通过。本任务没有维修正常 profile。需要独立维护交接后修复并重新 live 验证；隔离环境成功不代替此结论。无一次性 LLM 凭据和第二台 Mac，相关 LLM/跨机检查为 `NOT_RUN`；当前运行中的普通 Codex 也未执行 legacy 全应用退出交接。
 
 
-独立审查发现 publication 持久化后中断会在成功重试后遗留敏感 native 配置快照，已增加写入配置前的 stage 根身份记录、publication 绑定和持久删除镜像；重试先安全清理前次记录的尝试，未知目录不删除，缺失/冲突证据失败关闭。三个中断边界及三个冲突回归通过；受审修订候选 `a4bf15db6b565b08de37b76439b96d89e7e7add3` 的真实 Codex 三次中断/重试均清除已记录快照。复用自有 C profile 的 C→D INSTALL 返回 runtime no-op，随后真实 26 工具/Blender VERIFY、FINALIZE 及重复 FINALIZE 全部通过，旧 cache 只在 live 后移除，runtime/extension/preferences/receipts/active 字节不变。证据在同一外部根的 `fix1-*`；官方产物和上游 pin 未变，本轮不重复无关 Native 或固定产物重建，也不改变既有 RELEASE 不具备发布资格的结论。
+独立审查发现 publication 持久化后中断会在成功重试后遗留敏感 native 配置快照，已增加写入配置前的 stage 根身份记录、publication 绑定和持久删除镜像；重试先安全清理前次记录的尝试，未知目录不删除，缺失/冲突证据失败关闭。三个中断边界及三个冲突回归通过；受审修订候选 `a4bf15db6b565b08de37b76439b96d89e7e7add3` 的真实 Codex 三次中断/重试均清除已记录快照。复用自有 C profile 的 C→D installer-only 升级返回 runtime no-op，随后真实 26 tools/Blender 只读 VERIFY、FINALIZE 及重复 FINALIZE 全部通过，旧 cache 只在 live 后移除，runtime/extension/preferences/receipts/active 字节不变。修订后常规门禁为 1150 passed / 27 explicit skips，distribution 为 1033 passed，`ALL CHECKS PASSED`。证据在同一外部根的 `fix1-*`；官方产物和上游 pin 未变，合并若改变 plugin 版本或代码身份，Task 5 重新绑定候选，不改变既有 RELEASE 不具备发布资格的结论。

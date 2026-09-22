@@ -8,6 +8,10 @@
 
 **Tech Stack:** CPython 3.13.13；Blender 5.2.0 LTS / `fbe6228777e7`；Node.js v20.20.2；`gltf-validator@2.0.0-dev.3.10`；标准库；pytest。只为 interchange 安装 Node 验证器包，原生路径不依赖它。
 
+## 当前执行状态（2026-09-23）
+
+M3 有限静态 GLB L0 worker 已接线，此前独立夹具结果只代表当时锁定范围。收尾 Task 5 将使用新准备的外部 Node/`gltf-validator@2.0.0-dev.3.10`、独立 calibration 和全新 evidence root 重跑 `test_asset_interchange.py`、`test_interchange_surface.py`、`test_gltf_validator.py`。该运行尚未发生；不将旧的缺失证据或工具准备写成当前通过，也不用 M2 结果替代 M3。
+
 ## Global Constraints
 
 - 「所有必需检查均须真实执行；不能通过减少 required 集合、合成 Pass 或放宽阈值制造成功。」

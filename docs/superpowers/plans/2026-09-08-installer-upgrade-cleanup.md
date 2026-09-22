@@ -2468,7 +2468,6 @@ def _ensure_current_cache_lease(
     if inspect_registration(codex, roots, desired) != snapshot:
         raise InstallerError("registration changed during current cache lease")
 
-
 def _run_workflow(args: argparse.Namespace, state: SafeRoot, roots: UpgradeRoots,
                   projection: Path, context: Any = None) -> dict[str, Any]:
     plugin = json.loads((projection / "plugins/blender-mcp-installer/.codex-plugin/plugin.json").read_bytes())
@@ -3078,7 +3077,6 @@ def test_other_codex_home_journal_is_validated_but_not_adopted(prepared):
 2026-09-08 在仓库外隔离目录 `/tmp/blender-upgrade-plan-probe.wV3ucU` 执行核心与 launcher 原型，使用本仓库现有 filesystem/model 原语，22 个 pytest 用例通过。原型测试中的 roots 全部来自 pytest 临时目录；没有调用真实安装、注册、删除或关闭进程。这个证据只证明候选/journal/使用锁核心可行，不是完整安装工作流、真实 Codex 自动重载或 Blender 现场验收结论。
 
 执行计划后仍必须完成 A→B→C 内容真实不同的现场验收：每次正式验证通过后检查物理目录删除、当前 MCP 可用、当前扩展可用、非目标目录与配置备份不变。首次 legacy 维护交接需要外部终端和相关应用退出的可观测证据，不能在当前 Codex 任务中伪造通过。
-
 ## 2026-09-23 现场发现与注册修复
 
 真实冷 profile 首装发现同进程锁内入口缺少数据目录初始化，已复用既有安全初始化并补公共/锁内入口行为回归。真实 Codex 0.155.0-alpha.9.2 的 plugin add 提前删除持锁旧缓存，原 A→B→C 的 runtime/live 成功不构成完整现场通过。新增私有注册 staging 路径：保护目标配置快照，真实 native add 仅在 stage 内执行，验证新 cache 与所有非目标 TOML 值后按 cache→config 条件发布；旧缓存原 inode 留给既有验证后清理器。崩溃恢复覆盖 cache 已发布、config 已发布、after 证据写入边界；未知/冲突状态失败关闭。修复后的真实隔离现场已完成，具体结果如下；正常用户维护、LLM/跨机与发行最新性仍分别保留未通过或 NOT_RUN 状态。
@@ -3089,4 +3087,4 @@ def test_other_codex_home_journal_is_validated_but_not_adopted(prepared):
 当前 C 为 `f23c8a783b10be6e17c89aed5f7527caa528a7ec`，证据 `/private/tmp/blenderdesign-closeout-20260922-27x0hxjj/task3/live-final`。仓库 Phase 0 依赖漏洞通过只更新 httpx2/httpcore2 2.12.0 闭合，官方固定 runtime/产物未改。固定版完整性及依赖审计通过，严格 RELEASE 仍因上游 outdated 退出 1，不具备发行资格，不自动升级 pin。正常用户 profile inspect exact=false、未运行 Blender 的 verify 未通过；未维修正常 profile，也未停止当前 Codex 做 legacy 交接。一次性 LLM/第二台 Mac 缺失的检查为 NOT_RUN。完整分类与工具身份见 [validation 当前现场结果](../../validation.md#2026-09-23-安装升级当前现场结果)。
 
 
-Task 3 独立审查修订：成功恢复后的 native 配置快照滞留已通过配置写入前绑定 stage、清理镜像持久化及前次尝试续删修复；缺失身份、根替换和内容漂移失败关闭。修订候选 `a4bf15db6b565b08de37b76439b96d89e7e7add3` 的真实 C→D 同产物安装保持 runtime no-op，并完成 VERIFY/FINALIZE/重复 FINALIZE；真实 Codex 三个中断边界成功重试后已记录配置快照为零。原 C 仍仅代表首次交付，不代表此次修订的生产字节；当前证据为 `task3/fix1-*`，具体边界见 validation 当前结果。
+Task 3 独立审查修订：成功恢复后的 native 配置快照滞留已通过配置写入前绑定 stage、清理镜像持久化及前次尝试续删修复；缺失身份、根替换和内容漂移失败关闭。修订候选 `a4bf15db6b565b08de37b76439b96d89e7e7add3` 的真实 C→D installer-only 升级保持 runtime no-op，并完成 26 tools/Blender 只读 VERIFY、FINALIZE 及重复 FINALIZE；真实 Codex 三个中断边界成功重试后已记录配置快照为零，旧 cache 在 live 后物理清除，runtime/extension/preferences/receipts/active 不变。修订后常规门禁为 1150 passed / 27 explicit skips，distribution 为 1033 passed。原 C 仍仅代表首次交付，不代表此次修订的生产字节；合并若改变 plugin 版本或生产字节，由 Task 5 重新绑定最终候选身份。
