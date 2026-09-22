@@ -10,7 +10,7 @@
 - [官方 Blender MCP 分发与安装](distribute-official-blender-mcp.md)：受审分发、信任边界、安装和回滚入口。
 - [官方 Blender MCP 使用](use-official-blender-mcp.md)：安装后的安全使用方式。
 - [验证说明](validation.md)：文档审计、自动化门禁、发行验证和现场验收。
-- [Agent 执行约定](../AGENTS.md)：协作、授权、检索和交付规则；`CLAUDE.md` 引用同一文件。
+- [Agent 执行约定](../AGENTS.md)：协作、授权、检索和交付规则；`CLAUDE.md` 仅引用同一文件。
 
 ## 现行规范与技术决策
 
@@ -46,5 +46,6 @@ V5/schema v2 在代码与回归迁移完成前不替代 V3.8/schema v1；外部 
 - 实现事实以当前源码和行为测试为准；项目依赖以 `pyproject.toml`、`uv.lock` 为准，官方分发以 `plugins/blender-mcp-installer/artifacts/manifest.json` 及对应锁文件为准。
 - 正式设计记录已实现行为，规范记录要求；二者不一致时明确列出差距，不将计划能力写成当前事实。
 - 安装命令由安装技能及其引用文件维护，执行约定由 `AGENTS.md` 维护；其他文档通过链接引用，避免重复规则。
+- 阶段状态变化时更新对应计划与本索引；通用文档同步和版本纪律遵循 [AGENTS.md](../AGENTS.md)，不另建平行设计或计划。
 - 方案完成或被替代后，将仍有追溯价值的材料归档并更新引用；重复说明在独有信息迁移后删除。
 - 文档不固定本机用户名、临时证据路径或重复的版本与工具清单。历史快照中的版本和行号仅用于追溯。

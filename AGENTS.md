@@ -1,6 +1,6 @@
 # BlenderDesign 工作约定
 
-本文件是仓库执行约定的唯一入口，`CLAUDE.md` 引用本文件。模型与推理参数由调用端管理。
+本文件适用于仓库及其子目录，是执行约定的唯一入口；`CLAUDE.md` 仅引用本文件。模型与推理参数由调用端管理。
 
 ## 执行与范围
 
@@ -17,20 +17,27 @@
 - 独立读取和搜索可并行；有依赖或修改同一状态的操作串行。仅在用户或适用指令明确要求时使用子代理，并划清任务、文件范围及核验责任。
 - 长工具运行期间推进独立工作，交付前收齐必要结果。写操作超时先核实状态，再决定是否重试。
 
-## 定位与边界
+## 按需定位
 
 - 已知文件直接读取；文字、配置和完整引用搜索使用 `rg`。跨模块关系可用 graft，命中不全或索引陈旧时回到源码核实。
 - 当前实现总设计为 `docs/architecture.md`；正式说明、现行规范和待实施计划统一由 `docs/README.md` 索引。归档不作为当前执行依据，计划和原型不代表已实现能力。
-- 官方分发仅在注册、安装、修复、检查、验证或回滚时加载 `plugins/blender-mcp-installer/skills/install-official-blender-mcp/SKILL.md`。仅检查不注册或安装，仅注册不安装 runtime 或扩展。
+- 只读任务相关资料，不要求每次编辑都读全仓文档。实现事实以源码和行为测试为准。
+
+| 任务 | 读取入口 |
+|---|---|
+| 架构、模块边界、协议或跨模块行为变更 | `docs/architecture.md` 的相关章节 |
+| 资产验收或多阶段计划实施 | `docs/README.md` 中的现行规范及对应计划 |
+| 官方分发注册、安装、修复、检查、验证或回滚 | `plugins/blender-mcp-installer/skills/install-official-blender-mcp/SKILL.md` |
+| Blender 场景操作 | `docs/use-official-blender-mcp.md`；已保存磁盘状态足够时优先 `_for_cli`，未保存状态及 UI 使用 live 工具 |
+| 门禁、发行或现场验收 | `docs/validation.md` 的对应部分 |
+
+## 实现与操作边界
+
+- 仅检查安装状态不注册或安装；仅注册不安装 runtime 或扩展。普通仓库开发不加载安装工作流。
 - 自研 Phase 0 位于 `protocol/`、`bridge/`、`server/`，只提供状态、场景摘要和能力描述；与官方 MCP 的权限和验收结论独立。
 - `bridge/core/` 与 `protocol/` 不得导入 `bpy`；Blender 适配位于 `bridge/blender/`。协议修改需检查 bridge/server 消费方，并用 `scripts/vendor_protocol.py` 生成 `bridge/_vendor/`，不手改副本。
 - `acceptance/` 仅在 checkout 中使用，不进入 wheel/sdist；通用资产验收尚未完成，不能自动发布放行。
 - 项目版本与依赖以 `pyproject.toml`、`uv.lock` 为准；官方工具、平台和产物以 `plugins/blender-mcp-installer/artifacts/manifest.json` 及对应锁文件为准。
-
-## Blender 场景任务
-
-- 按 `docs/use-official-blender-mcp.md` 操作，先检查场景、对象和必要的 UI 状态。已保存 `.blend` 的磁盘状态足够时优先使用 `_for_cli`；未保存状态和 UI 操作使用 live 工具。
-- 默认逐个部件创建并截图检查，再分别处理材质、装配与最终视觉检查；阶段完成自动继续。用户要求批处理时可合并，要求逐阶段审批时等待。
 - 仓库编辑或测试不自动授权场景修改、源 `.blend` 覆盖或 Blender 重启；破坏性场景操作须有明确授权。
 
 ## 验证与交付
@@ -40,11 +47,12 @@
 - 修改上游补丁、runtime 依赖、固定产物或发行 runtime 时使用 `RELEASE=1`；完整参数、指令包同步及现场门禁见 `docs/validation.md`。普通编辑不附加现场验收。
 - 正式 Phase 0 证据链要求干净工作树，普通编辑和测试不要求。提交和推送按授权执行，暂存前核对范围；证据和临时产物放在仓库外。
 - 分别报告文档审计、测试、磁盘安装和 live 验证结果；说明未运行、失败或受阻的检查，不以较弱证据替代验收。
+- 行为、契约、命令或 skill 变更须同批同步受影响的正式文档；存在对应执行计划时，再同步计划及 `docs/README.md` 的状态。沿用既有版本规则，不另造文档版本；历史归档保留原结论。
+- 完成定义：请求范围内的工作已落地，相关检查及 graft 门禁通过，受影响文档、适用计划状态与引用一致；仍有失败或未完成项时明确报告。
 
 ## Graft Map
 
 - 最后一次仓库文件修改后运行 `graft build .`；后续有修改则重新构建。
 - 交付前 `graft check .` 必须退出 0，否则不得声明完成。
 - 默认只构建 wiring 图，不使用 `--deep`，除非用户明确要求。`graft/` 是本地缓存，不暂存、不提交。
-
-依据：2026-09-09 核对的 [OpenAI GPT-6 Astra 模型指南](https://developers.openai.com/api/docs/guides/latest-model)。本文件约定工作流，不代表模型性能评测结论。
+- 不手改生成地图；命令不可用时继续独立工作并报告门禁受阻，不自动安装、升级或运行 `graft init`。
