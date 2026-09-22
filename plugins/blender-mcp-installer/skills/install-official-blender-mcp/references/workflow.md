@@ -340,7 +340,12 @@ transaction CODEX_HOME, because the native command may prune older caches. It st
 only this target profile's mode-0600 config snapshot, never login/session files or
 inherited credentials. The snapshot may contain sensitive configuration; it is not
 logged, and successful publication removes temporary config copies. Failed stages
-remain private for explicit diagnosis/recovery.
+remain private for explicit diagnosis/recovery. Before writing a config snapshot, the
+transaction records the exact native stage directory and root identity. Retries
+clean the recorded prior attempt before creating another, using a persisted
+deletion image to resume partial cleanup. Successful publication also requires
+this cleanup; missing or conflicting evidence fails closed, and unknown native
+directories are never selected by a wildcard.
 
 The verified desired cache is published first without replacing older cache paths
 or inodes. Only then is the config conditionally published, preserving every

@@ -41,6 +41,8 @@ Task 2 当前执行记录（2026-09-23）：在基线 `117b133`、Python 3.13.13
 
 Task 3 当前执行记录（2026-09-23）：真实冷首装与 native plugin add 提前 prune 缺陷均已修复并覆盖回归，Phase 0 httpx2/httpcore2 定向升级至 2.12.0 以闭合依赖审计。受审不可变候选 C `f23c8a783b10be6e17c89aed5f7527caa528a7ec` 在无凭据自有 profile 完成真实 A→B→C、MCP 26 工具/Blender 只读验证、验证后物理删除、busy 保留/释放后续删、同内容 no-op、只读状态保持。正常用户 inspect exact=false、live 未通过，未擅自维修/退出；一次性 LLM 和第二台 Mac 为 NOT_RUN。固定分发完整性和依赖审计通过，严格 RELEASE 因上游 outdated 仍退出 1，不具备发行资格。详见 [validation 当前结果](../../validation.md#2026-09-23-安装升级当前现场结果)；本任务交付与后续独立审查不等于发布放行。
 
+Task 3 审查修订：修复 publication 后中断遗留敏感配置快照，持久绑定 stage 身份并安全续删；候选 `a4bf15db6b565b08de37b76439b96d89e7e7add3` 在真实自有 profile 完成同产物 C→D runtime no-op、VERIFY/FINALIZE，及三个 native 中断/重试无快照残留。首次 C 身份与修订候选分别保留，RELEASE/正常 profile/NOT_RUN 限制不变。
+
 ## Task 4: 同步主线及正式文档
 
 先确认并获取 origin/main 最新状态，将 main 的独有提交合入开发分支，保留新主线的文档整合与 quoted interpreter 修复，并保留开发分支实现。解决冲突时以实际实现与验证结果同步 README、docs/README、architecture、validation、现行 V5 和四份计划状态。历史归档保留原结论。

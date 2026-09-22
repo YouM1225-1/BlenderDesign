@@ -3087,3 +3087,6 @@ def test_other_codex_home_journal_is_validated_but_not_adopted(prepared):
 修复后以同一生产算法及受审不可变 A/B/C 夹具完成真实 Codex、MCP 26 工具和自有 Blender 5.2.0 LTS 的 A→B→C。A/B/C wheel 分别来自真实历史/当前固定产物，A→B 扩展不同、B→C 扩展相同；现有事务仍重新暂存扩展，不能声明 B→C 扩展 inode 保持。每代 live 后 finalize 两次，旧 runtime/extension recovery 和旧 plugin cache 逐路径确认不存在；live 之前旧 cache 仍存在。非目标插件、marketplace、配置备份、其他 profile、历史 projection 未改变。真实旧 cache 持锁返回 cleanup_pending，退出自有入口后 retry 物理删除；当前 managed runtime 持锁返回 runtime_in_use，受管目标字节不变。当前 C 同内容安装 no-op，独立只读 inspect/verify 前后 receipt/journal/active/config 一致。
 
 当前 C 为 `f23c8a783b10be6e17c89aed5f7527caa528a7ec`，证据 `/private/tmp/blenderdesign-closeout-20260922-27x0hxjj/task3/live-final`。仓库 Phase 0 依赖漏洞通过只更新 httpx2/httpcore2 2.12.0 闭合，官方固定 runtime/产物未改。固定版完整性及依赖审计通过，严格 RELEASE 仍因上游 outdated 退出 1，不具备发行资格，不自动升级 pin。正常用户 profile inspect exact=false、未运行 Blender 的 verify 未通过；未维修正常 profile，也未停止当前 Codex 做 legacy 交接。一次性 LLM/第二台 Mac 缺失的检查为 NOT_RUN。完整分类与工具身份见 [validation 当前现场结果](../../validation.md#2026-09-23-安装升级当前现场结果)。
+
+
+Task 3 独立审查修订：成功恢复后的 native 配置快照滞留已通过配置写入前绑定 stage、清理镜像持久化及前次尝试续删修复；缺失身份、根替换和内容漂移失败关闭。修订候选 `a4bf15db6b565b08de37b76439b96d89e7e7add3` 的真实 C→D 同产物安装保持 runtime no-op，并完成 VERIFY/FINALIZE/重复 FINALIZE；真实 Codex 三个中断边界成功重试后已记录配置快照为零。原 C 仍仅代表首次交付，不代表此次修订的生产字节；当前证据为 `task3/fix1-*`，具体边界见 validation 当前结果。

@@ -612,6 +612,38 @@ def _unmanaged_config(raw: bytes) -> Any:
     return data
 
 
+def _cleanup_native_stage(recovery: Path) -> str | None:
+    record = recovery / "native-stage.json"
+    if _lstat(record) is None:
+        return None
+    with SafeRoot.open(recovery, os.getuid(), recovery) as evidence:
+        stage, _ = read_proof(evidence, Path(record.name))
+        if (
+            type(stage) is not dict
+            or set(stage) != {"schema_version", "path", "root", "cleanup"}
+            or stage["schema_version"] != 1
+            or type(stage["path"]) is not str
+            or not re.fullmatch(r"native-codex\.[A-Za-z0-9_-]+", stage["path"])
+        ):
+            raise InstallerError("invalid native stage evidence")
+        name: str = stage["path"]
+        owned = TreeImage.from_dict(stage["root"])
+        if owned.state is not ImageState.PRESENT or owned.uid != os.getuid() or owned.mode != 0o700:
+            raise InstallerError("invalid native stage ownership")
+        ref = TreeRef(evidence, Path(name))
+        current = ref.capture()
+        if current.state is ImageState.ABSENT:
+            return name
+        if (current.dev, current.ino, current.uid, current.mode) != (owned.dev, owned.ino, owned.uid, owned.mode):
+            raise InstallerError("native stage identity changed")
+        if stage["cleanup"] is None:
+            # Native may mutate this owned directory; freeze its deletion image once.
+            stage["cleanup"] = current.to_dict()
+            _atomic_json(record, stage)
+        conditional_remove_tree(ref, TreeImage.from_dict(stage["cleanup"]), (), NoOpFaultInjector())
+        return name
+
+
 def _isolated_registration(
     projection: Path, recovery: Path, codex: Path, home: Path, codex_home: Path,
 ) -> None:
@@ -623,6 +655,7 @@ def _isolated_registration(
     config_relative = Path("config.toml")
     stage_relative = Path(f".blender-mcp-installer.{identity}.registration.stage")
     backup_relative = Path(f".blender-mcp-installer.{identity}.registration.pre")
+    previous_native = _cleanup_native_stage(recovery)
     with SafeRoot.open(codex_home, os.getuid(), codex_home) as root:
         config = TargetRef(root, config_relative)
         if publication.exists():
@@ -630,11 +663,18 @@ def _isolated_registration(
                 pending, _ = read_proof(evidence, Path("publication.json"))
             if pending["projection"] != str(projection):
                 raise InstallerError("registration publication identity mismatch")
+            if previous_native is None or pending.get("native_stage") != previous_native:
+                raise InstallerError("registration publication lacks native stage evidence")
         else:
             pre = capture_file(root, config_relative)
             raw = b"" if pre.state is ImageState.ABSENT else read_owned_bytes(config)[0]
             native = Path(tempfile.mkdtemp(prefix="native-codex.", dir=recovery))
             native.chmod(0o700)
+            with SafeRoot.open(recovery, os.getuid(), recovery) as evidence:
+                _atomic_json(recovery / "native-stage.json", {
+                    "schema_version": 1, "path": native.name,
+                    "root": capture_tree(evidence, Path(native.name)).to_dict(), "cleanup": None,
+                })
             if raw:
                 _atomic_write(native / "config.toml", raw)
             current, _ = _marketplace_snapshot(native / "config.toml")
@@ -686,14 +726,10 @@ def _isolated_registration(
             pending = {
                 "schema_version": 1, "projection": str(projection), "pre": pre.to_dict(),
                 "post": post.to_dict(), "cache": capture_tree(root, cache.relative_to(codex_home)).to_dict(),
-                "complete": False,
+                "complete": False, "native_stage": native.name,
             }
             _atomic_json(publication, pending)
-            # The native profile has no login/session files; its config snapshot is sensitive.
-            _secure_tree(native)
-            with SafeRoot.open(recovery, os.getuid(), recovery) as evidence:
-                native_ref = TreeRef(evidence, Path(native.name))
-                conditional_remove_tree(native_ref, native_ref.capture(), (), NoOpFaultInjector())
+            _cleanup_native_stage(recovery)
         if pending["schema_version"] != 1:
             raise InstallerError("unknown registration publication schema")
         expected_cache = TreeImage.from_dict(pending["cache"])

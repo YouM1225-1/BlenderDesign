@@ -189,8 +189,11 @@ ASSET_CALIBRATION_ROOT="$ASSET_CALIBRATION_ROOT" \
 
 在 macOS arm64、Python 3.13.13、uv 0.12.2、Blender 5.2.0 LTS / `fbe6228777e7` 上，修复后的隔离 A→B→C 已完成真实 Codex 注册、MCP 26 工具目录和 Blender 只读调用、验证后物理清理及重复 finalize。A/B/C 使用真实不同 wheel 内容，A→B 的扩展也不同；B→C 的扩展字节相同，但现有事务会重新暂存扩展并清理其 recovery，不声称 inode 不变。非目标插件、marketplace、配置备份、其他 profile 和历史 projection 保持不变。真实旧缓存入口持锁时返回 `cleanup_pending` 并保留目录，释放自有进程后重试物理删除；真实 managed runtime 持锁时在修改前返回 `runtime_in_use`。当前 C 的同内容安装为 `no_op=true`；独立 inspect/verify 不改变 receipts、upgrade journals、active 或 Codex 配置。
 
-本次执行证据位于 `/private/tmp/blenderdesign-closeout-20260922-27x0hxjj/task3`，当前真实升级在 `live-final/`，固定候选与产物哈希见 `fixture-identities-staging.json`。C 为受审不可变提交 `f23c8a783b10be6e17c89aed5f7527caa528a7ec`；最终仓库提交只追加执行结果文档，安装器源码、plugin 和产物字节须与该 C 对应。测试只启动并正常退出未打开项目文件的自有 Blender，不覆盖源 `.blend` 或停止用户进程。
+本次执行证据位于 `/private/tmp/blenderdesign-closeout-20260922-27x0hxjj/task3`，当前真实升级在 `live-final/`，固定候选与产物哈希见 `fixture-identities-staging.json`。C 为受审不可变提交 `f23c8a783b10be6e17c89aed5f7527caa528a7ec`；该 C 对应首次交付 `5e70856` 的安装运行字节，后续修订必须另行绑定候选身份。测试只启动并正常退出未打开项目文件的自有 Blender，不覆盖源 `.blend` 或停止用户进程。
 
 仓库 Phase 0 的 `httpx2` / `httpcore2` 旧锁定版本扫描失败，已定向更新至兼容的 2.12.0；官方 runtime 锁和固定产物未改。固定分发完整性、五文件可重建比对及三个依赖审计通过。严格 `RELEASE=1` 仍退出 1：`upstream_freshness=outdated`，固定上游 `4309a39646e644261624bfcd2bca669b343b7621` 落后于当次远端 `ff54e4d8f6b09502f2f466189cca0e52b4a91643`。因此当前不具备 RELEASE 发布资格；未修改上游 pin 或放宽最新性要求。
 
 正常用户 profile 单独只读检查为 `exact=false`：Codex effective/namespace/policy、recorded Blender executable 和 runtime 未达精确目标，Blender 扩展/host/online access/port/autostart 检查为真；正常 Blender 未运行，verify 未通过。本任务没有维修正常 profile。需要独立维护交接后修复并重新 live 验证；隔离环境成功不代替此结论。无一次性 LLM 凭据和第二台 Mac，相关 LLM/跨机检查为 `NOT_RUN`；当前运行中的普通 Codex 也未执行 legacy 全应用退出交接。
+
+
+独立审查发现 publication 持久化后中断会在成功重试后遗留敏感 native 配置快照，已增加写入配置前的 stage 根身份记录、publication 绑定和持久删除镜像；重试先安全清理前次记录的尝试，未知目录不删除，缺失/冲突证据失败关闭。三个中断边界及三个冲突回归通过；受审修订候选 `a4bf15db6b565b08de37b76439b96d89e7e7add3` 的真实 Codex 三次中断/重试均清除已记录快照。复用自有 C profile 的 C→D INSTALL 返回 runtime no-op，随后真实 26 工具/Blender VERIFY、FINALIZE 及重复 FINALIZE 全部通过，旧 cache 只在 live 后移除，runtime/extension/preferences/receipts/active 字节不变。证据在同一外部根的 `fix1-*`；官方产物和上游 pin 未变，本轮不重复无关 Native 或固定产物重建，也不改变既有 RELEASE 不具备发布资格的结论。

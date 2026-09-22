@@ -186,3 +186,98 @@ def test_foreign_old_cache_and_symlink_are_not_touched(registration):
     marketplace._register(*args, recovery_id=identity)
     assert before == (old.stat().st_ino, unknown.stat().st_ino, alias.lstat().st_ino)
     assert (unknown / "user-file").read_text() == "retain me"
+
+
+@pytest.mark.parametrize("boundary", ["publication_recorded", "native_cleanup", "native_cli"])
+def test_retry_removes_all_recorded_native_config_snapshots(registration, monkeypatch, boundary):
+    args, identity, config, old, _ = registration
+    initial, old_inode = config.read_bytes(), old.stat().st_ino
+    atomic_json, remove, codex = marketplace._atomic_json, marketplace.conditional_remove_tree, marketplace._codex
+    fired = False
+
+    def crash_json(path, value):
+        nonlocal fired
+        atomic_json(path, value)
+        if not fired and boundary == "publication_recorded" and path.name == "publication.json":
+            fired = True
+            raise RuntimeError("injected native lifecycle exit")
+
+    class CleanupExit:
+        def hit(self, point):
+            nonlocal fired
+            if not fired and point == "after_cleanup_entry":
+                fired = True
+                raise RuntimeError("injected native lifecycle exit")
+
+    def crash_cleanup(ref, expected, guards, fault):
+        if boundary == "native_cleanup" and ref.relative.name.startswith("native-codex."):
+            fault = CleanupExit()
+        return remove(ref, expected, guards, fault)
+
+    def crash_codex(*argv):
+        nonlocal fired
+        if not fired and boundary == "native_cli":
+            assert (argv[2] / "config.toml").read_bytes() == initial
+            fired = True
+            raise RuntimeError("injected native lifecycle exit")
+        return codex(*argv)
+
+    monkeypatch.setattr(marketplace, "_atomic_json", crash_json)
+    monkeypatch.setattr(marketplace, "conditional_remove_tree", crash_cleanup)
+    monkeypatch.setattr(marketplace, "_codex", crash_codex)
+    with pytest.raises(RuntimeError, match="injected native lifecycle exit"):
+        marketplace._register(*args, recovery_id=identity)
+    assert fired and config.read_bytes() == initial
+    recovery = args[1] / ("registration." + identity)
+    unknown = recovery / "native-codex.unrecorded"
+    unknown.mkdir(mode=0o700)
+    (unknown / "sentinel").write_text("unknown ownership evidence: preserve")
+    marketplace._register(*args, recovery_id=identity)
+    assert not list(recovery.glob("native-codex.*/config.toml"))
+    assert list(recovery.glob("native-codex.*")) == [unknown]
+    assert (unknown / "sentinel").read_text() == "unknown ownership evidence: preserve"
+    assert old.stat().st_ino == old_inode
+    assert marketplace._unmanaged_config(config.read_bytes()) == marketplace._unmanaged_config(initial)
+
+
+@pytest.mark.parametrize("conflict", ["replaced_root", "changed_cleanup", "missing_record"])
+def test_native_stage_recovery_conflicts_preserve_evidence(registration, monkeypatch, conflict):
+    args, identity, config, old, _ = registration
+    initial = config.read_bytes()
+    atomic_json, remove = marketplace._atomic_json, marketplace.conditional_remove_tree
+    fired = False
+
+    def crash_json(path, value):
+        nonlocal fired
+        atomic_json(path, value)
+        if not fired and conflict != "changed_cleanup" and path.name == "publication.json":
+            fired = True
+            raise RuntimeError("injected evidence boundary")
+
+    def crash_cleanup(ref, expected, guards, fault):
+        nonlocal fired
+        if not fired and conflict == "changed_cleanup" and ref.relative.name.startswith("native-codex."):
+            fired = True
+            raise RuntimeError("injected evidence boundary")
+        return remove(ref, expected, guards, fault)
+
+    monkeypatch.setattr(marketplace, "_atomic_json", crash_json)
+    monkeypatch.setattr(marketplace, "conditional_remove_tree", crash_cleanup)
+    with pytest.raises(RuntimeError, match="injected evidence boundary"):
+        marketplace._register(*args, recovery_id=identity)
+    recovery = args[1] / ("registration." + identity)
+    record = recovery / "native-stage.json"
+    native = recovery / json.loads(record.read_text())["path"]
+    if conflict == "replaced_root":
+        native.rename(recovery / "preserved-original-stage")
+        native.mkdir(mode=0o700)
+        (native / "config.toml").write_text('foreign = true\n')
+    elif conflict == "changed_cleanup":
+        (native / "config.toml").write_text('changed = true\n')
+    else:
+        record.unlink()
+    retained = (native / "config.toml").read_bytes()
+    with pytest.raises(InstallerError, match="identity changed|state conflict|lacks native stage evidence"):
+        marketplace._register(*args, recovery_id=identity)
+    assert (native / "config.toml").read_bytes() == retained
+    assert config.read_bytes() == initial and old.exists()
