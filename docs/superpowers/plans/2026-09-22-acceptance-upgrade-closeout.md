@@ -6,7 +6,7 @@
 
 完成用户指定顺序：核验未提交改动 → 修复 M2 验收 → 安装升级现场验收 → 同步主线与文档 → 完整检查 → 提交合并并推送 main。每步独立审查，最终对全部待合并修改进行对抗性审计；实际问题修复后复审，未解决问题不得宣称通过。
 
-约束依据：现行 [整合设计](../specs/2026-09-08-asset-acceptance-integration-design.md)、[升级设计](../specs/2026-09-08-installer-upgrade-cleanup-design.md)、[V5](../../acceptance/blender_mcp_skill_acceptance_optimized_v5.md)，以及四份 2026-09-08 实施计划。已实现的 M0/M1 与有限 M3 继续沿用；M2 历史 13 pass / 6 fail / 0 skip 必须用当前真实运行闭合。
+约束依据：现行 [整合设计](../specs/2026-09-08-asset-acceptance-integration-design.md)、[升级设计](../specs/2026-09-08-installer-upgrade-cleanup-design.md)、[V5](../../acceptance/blender_mcp_skill_acceptance_optimized_v5.md)，以及四份 2026-09-08 实施计划。已实现的 M0/M1 与有限 M3 继续沿用；M2 历史 13 pass / 6 fail / 0 skip 已由 2026-09-23 当前锁定环境的 19 pass / 0 fail / 0 skip 完整运行闭合；旧失败未复现，因旧证据缺失不追溯根因。
 
 ## Global Constraints
 
@@ -29,6 +29,8 @@
 参照原生计划 Task 7 与 V5，用锁定 Python、真实 Blender 和仓库外新证据目录运行 `RUN_ASSET_NATIVE=1` 的 `tests/integration/test_asset_native.py`，不得 skip。先保存具体失败和输入/工具/代码身份，再修复根因。
 
 不得通过减弱支持合同、删除好资产、跳过用例、扩大阈值或伪造图像/签收来通过。正资产通过技术门禁，未业务签收为 NEEDS_REVIEW；坏几何、缺件、证据变更与假签收应按合同拒绝。真实运行验证 exact-byte reopen、跨进程、参考/视觉及 E/V/Q/T/D 链。补必要回归，更新 V5/native 计划的当前结果，运行完整检查及 graft 后提交；独立审查后继续。
+
+Task 2 当前执行记录（2026-09-23）：在基线 `117b133`、Python 3.13.13、Blender 5.2.0 LTS / `fbe6228777e7` 上，完整 Native 门禁为 `19 passed in 1018.12s`，零跳过；聚焦 Native 回归 210 项通过。运行时源码、支持合同、测试与阈值均未修改。证据位于 `/private/tmp/blenderdesign-closeout-20260922-27x0hxjj/task2-baseline`，详见 [M2 当前执行记录](2026-09-08-asset-acceptance-native.md#当前执行结果2026-09-23)。当前有限原生路径通过不代表真实业务签收、安装/live 或 RELEASE 通过；独立审查仍由控制器推进。
 
 ## Task 3: 完成安装升级现场验收
 

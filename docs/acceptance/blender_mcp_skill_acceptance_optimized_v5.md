@@ -1,6 +1,6 @@
 # BlenderDesign 资产验收规范 V5
 
-状态：schema v2 的 M0/M1 与有限 M3 静态 GLB 路径已接线并通过独立夹具门禁；M2 Native7 实际门禁仍未通过，通用资产不能自动放行。
+状态：schema v2 的 M0/M1、有限 M2 原生静态资产与有限 M3 静态 GLB 路径已接线并通过各自独立夹具门禁；通用资产不能自动放行。
 
 本规范采用已经认可的资产验收整合设计。官方分发、自研 Phase 0、资产验收分别报告；有限 M3 结果不代表完整原生资产或任意 GLB 通过。V3.8 与外部 V4 是迁移输入，不是 v2 的可兼容合同。
 
@@ -57,7 +57,15 @@ controller 编译唯一文件/作业计划，固定 writer、输入/输出及安
 
 ## 事实与范围
 
-2026-09-13 的独立 M3 夹具门禁在锁定 Blender、Node 与 gltf-validator 上覆盖完整 CLI、两进程 surface 和真实 Validator 反例；它只证明下面声明的有限静态 GLB profile。Native7 的历史实际门禁仍为 13 通过、6 失败、0 跳过，因此 M2 未完成。曲线、文字、动画、任意实例、任意消费者和通用资产发布均不在这些结果内。
+2026-09-13 的独立 M3 夹具门禁在锁定 Blender、Node 与 gltf-validator 上覆盖完整 CLI、两进程 surface 和真实 Validator 反例；它只证明下面声明的有限静态 GLB profile。Native7 历史记录为 13 通过、6 失败、0 跳过；2026-09-23 在当前锁定工具与代码上重新执行完整门禁，结果为 19 通过、0 失败、0 跳过。旧失败本次未复现，且旧运行证据已不可用，不能追溯根因或宣称修复了某个历史缺陷。曲线、文字、动画、任意实例、任意消费者和通用资产发布均不在这些结果内。
+
+### M2 原生静态资产实现范围与证据
+
+`native-static-v1` 在当前锁定环境为 implemented-and-enforced；此状态绑定完整 [M2 门禁](../validation.md#独立-m2-原生资产门禁)，不代表任意平台或任意原生资产通过。2026-09-23 的实际运行使用代码基线 `117b133`、CPython 3.13.13、Blender 5.2.0 LTS / `fbe6228777e7`，19 项全部通过，未修改实现、用例、支持合同或像素阈值。
+
+普通网格、BEVEL、TRIANGULATE、打包图像和嵌套自定义属性各有完整正例与独立可信参考。正例完成 24 个适用 check、`native.scope_supported` / `native.cross_process` / `native.reference` 三个技术 gate、135 原图及 99 对比较/差异图；未签收时仅为 NEEDS_REVIEW。exact-byte fresh reopen、同进程与跨进程渲染、错误几何/缺件/材质、未支持类型/未知平台、证据及签收身份篡改、E/V/Q/T/D 与真实交付回执均由实际 CLI 测试覆盖。诊断图继续使用零阈值，beauty 仅观察，不扩大为 EEVEE 普遍确定性承诺。
+
+测试 reviewer 仅验证签收封装与拒绝路径，不构成用户作品的真实业务签收。本结果不替代 Phase 0、RELEASE、安装或 live 验收。命令、当前工具/代码身份与外部证据位置见 [M2 执行记录](../superpowers/plans/2026-09-08-asset-acceptance-native.md#当前执行结果2026-09-23)。
 
 ### M3 静态 GLB 实现范围与证据
 

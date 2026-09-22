@@ -129,6 +129,21 @@ Background smoke：
 并对当前受跟踪的 Python、shell、TOML、`pyproject.toml`、`uv.lock` 和生成的 vendored
 protocol 建立有界哈希清单。历史计划或审计文档不参与运行时 provenance。
 
+### 独立 M2 原生资产门禁
+
+使用锁定 Python、Blender 与仓库外全新证据目录显式执行全部 Native 测试；默认常规门禁的 skip 不能替代它。每次更换 `--basetemp`，避免 pytest 清理旧证据。
+
+```bash
+NATIVE_E2E="$(mktemp -d /private/tmp/asset-native-m2-e2e.XXXXXX)"
+RUN_ASSET_NATIVE=1 .venv/bin/python -m pytest \
+  tests/integration/test_asset_native.py -vv --tb=long \
+  --basetemp "$NATIVE_E2E/pytest" > "$NATIVE_E2E/pytest.log" 2>&1
+```
+
+2026-09-23 在代码基线 `117b133`、CPython 3.13.13、Blender 5.2.0 LTS / `fbe6228777e7` 上完成 `19 passed in 1018.12s`，0 失败、0 跳过。每个完整正例验证 24 个现有适用检查、三个固定原生 gates、135 原图、99 比较/差异图、exact-byte fresh reopen 与 E/V；未签收只报告 NEEDS_REVIEW。签收交付用例另行验证 Q/T/D 和真实交付回执。测试 reviewer 仅验证流程，不能代替真实业务签收。
+
+本门禁只证明当前工具下声明的有限原生静态支持范围。未支持实例/曲线/动画与未知平台仍为 UNVERIFIED，不代表 Phase 0、RELEASE、安装或 live 验收。历史 6 项失败本次未复现，旧证据缺失使其根因不可追溯；[执行记录](superpowers/plans/2026-09-08-asset-acceptance-native.md#当前执行结果2026-09-23) 保存本次完整命令与外部证据位置。
+
 ### 独立 M3 资产门禁
 
 先完成 M0/M1 以及 M2 worker 接线和运行前置条件；M2 完整 Native 实际门禁作为独立门禁持续跟踪，不能由 M3 结果替代。准备锁定 Python、Blender、Node 和 gltf-validator 2.0.0-dev.3.10 及其真实工具/包文件摘要。显式运行 `RUN_ASSET_INTERCHANGE=1 RUN_GLTF_VALIDATOR=1` 的三份 integration 测试，并记录 source/C/D、工具身份、退出状态、summary、E/Q/T 和实际交付 receipt。
@@ -144,7 +159,7 @@ ASSET_CALIBRATION_ROOT="$ASSET_CALIBRATION_ROOT" \
   tests/integration/test_gltf_validator.py -q
 ```
 
-这组门禁只证明声明的 GLB 静态 L0 支持范围。独立两进程 surface probe、Node validator probe、完整 CLI、人工 Q 和正式交付分别记录，不互相替代。没有对应证据不得把状态标为已完成。当前 Native7 实际门禁未通过，不能由 M3 结果替代。
+这组门禁只证明声明的 GLB 静态 L0 支持范围。独立两进程 surface probe、Node validator probe、完整 CLI、人工 Q 和正式交付分别记录，不互相替代。没有对应证据不得把状态标为已完成。M2 与 M3 各自的实际门禁结论独立，不能互相替代。
 
 ## 官方分发验证
 

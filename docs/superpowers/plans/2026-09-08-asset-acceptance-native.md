@@ -8,6 +8,23 @@
 
 **Tech Stack:** CPython 3.13.13；锁定的 Blender 5.2.0 LTS / `fbe6228777e7`；标准库 JSON、hashlib、array；pytest；现有 acceptance 安全原语。图像由同一受锁 Blender 解码成 RGBA float32，不增加第三方像素库或 PNG 解析器。
 
+## 当前执行结果（2026-09-23）
+
+M2 当前有限原生静态路径已由真实完整门禁闭合：代码基线 `117b133b9e3a2f5f1b35e3bfdb04a29cde599b62`，CPython 3.13.13，Blender 5.2.0 LTS / `fbe6228777e7`；结果 `19 passed in 1018.12s (0:16:58)`，退出 0、零失败、零跳过。本节是当前实施状态；下文任务代码块和计划编写期核验记录保留原历史结论，以现行源码及本次实际运行判定实现事实。
+
+```bash
+RUN_ASSET_NATIVE=1 .venv/bin/python -m pytest tests/integration/test_asset_native.py \
+  -vv --tb=long \
+  --basetemp /private/tmp/blenderdesign-closeout-20260922-27x0hxjj/task2-baseline/pytest \
+  > /private/tmp/blenderdesign-closeout-20260922-27x0hxjj/task2-baseline/pytest.log 2>&1
+```
+
+外部新证据根为 `/private/tmp/blenderdesign-closeout-20260922-27x0hxjj/task2-baseline`：`identity.json` 记录代码、Python、Blender 及摘要；`pytest.log` 保存完整用例结果；`pytest/` 保存每个冻结输入、合同、scratch 作业、原图/差异图、E/V 与测试 Q/T/D 交付回执。该目录仅属于本次验证，不依赖已经丢失的旧证据。
+
+五种正资产（good、BEVEL、TRIANGULATE、packed image、nested custom）各完成 24 个适用检查、三个技术 gate、135 原图及 99 对比较/差异图，无签收仅为 NEEDS_REVIEW。坏几何/缺件/材质按具体检查拒收，非法面/NaN/缺依赖/曲线与未知平台保留失败关闭；重开字节、真实进程身份、可信参考、证据及签收篡改、测试签收与原字节交付均通过。测试 reviewer 不构成真实业务签收；Phase 0、RELEASE、安装/live 和通用资产能力不在此结论内。
+
+历史 13 pass / 6 fail / 0 skip 本次未复现，旧运行证据已不可用，根因不能追溯。因此本轮不制造运行时代码修复，不修改合同、检查、支持集合或零阈值；当前结果不重写历史失败事实。仅同步现行文档及独立门禁状态。
+
 ## Global Constraints
 
 - 「首发支持 `blend_native + static_render + local-trusted`」。来源授权、自包含、单场景及固定帧缺一不可。
