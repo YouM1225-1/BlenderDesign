@@ -128,3 +128,42 @@ def test_sampled_rss_budget_is_observed_not_fake_address_space_limit(tmp_path):
     assert caught.value.code == "resource_limit_exceeded"
     assert observed["memory_sampling"]["samples"] >= 1
     assert observed["memory_sampling"]["peak_observed_rss_bytes"] > 1
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "families, terminals, winner",
+    [
+        (("evidence_missing", "evidence_truncated"), (), "evidence_missing"),
+        (("tool_crashed", "hash_mismatch"), (), "tool_crashed"),
+        ((), ("Missing", "Truncated"), "evidence_missing"),
+        ((), ("Crash", "Missing", "Truncated"), "tool_crashed"),
+    ],
+)
+def test_competing_infra_families_have_order_independent_priority(
+    tmp_path, reverse, families, terminals, winner
+):
+    contract = write_contract(tmp_path, valid_document(tmp_path))
+    outcomes = complete_outcomes(contract)
+    statuses = [None, *terminals]
+    originals = outcomes[: len(statuses)]
+    for index, (original, terminal) in enumerate(zip(originals, statuses, strict=True)):
+        outcomes[index] = aggregate(
+            original.id,
+            [Finding("actual_failure", "error")] if index == 0 else [],
+            contract=contract,
+            tool_id=original.tool_id,
+            tool_version=original.tool_version,
+            source_truncated=terminal == "Truncated",
+            terminal=None if terminal == "Truncated" else terminal,
+        )
+    result = decide(
+        contract=contract,
+        outcomes=list(reversed(outcomes)) if reverse else outcomes,
+        actual_files={"a"},
+        expected_files={"a"},
+        achieved_grade="local-trusted",
+        infra_failures=list(reversed(families)) if reverse else list(families),
+    )
+    assert result.failure_code == winner and not result.success
+    assert result.failed_check_ids == (originals[0].id,)

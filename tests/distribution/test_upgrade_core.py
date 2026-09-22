@@ -1530,7 +1530,10 @@ def test_exact_registration_creates_migration_journal_when_old_cache_remains(
     monkeypatch.setattr(upgrade_integration, "inspect_registration", lambda *_args: None)
     monkeypatch.setattr(upgrade_integration, "discover_candidates", lambda *_args: ([row], []))
     monkeypatch.setattr(upgrade_integration, "other_references", lambda *_args: ())
-    monkeypatch.setattr(marketplace, "inspect_registration", lambda *_args: None)
+    monkeypatch.setattr(
+        marketplace, "inspect_registration",
+        lambda *_args: SimpleNamespace(cache=SimpleNamespace(entries=())),
+    )
     monkeypatch.setattr(marketplace, "discover_candidates", lambda *_args: ([row], []))
     monkeypatch.setattr(
         marketplace, "_register", lambda *_args, **_kwargs: called.append("register")

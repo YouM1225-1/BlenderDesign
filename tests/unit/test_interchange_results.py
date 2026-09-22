@@ -235,7 +235,6 @@ def test_projection_reducer_rejects_invalid_measurements(tmp_path, mutation):
         "equal_encoding",
         "different_encoding",
         "quality_difference",
-        "edge_on_black",
         "empty_right",
         "observed_beauty",
         "observed_wire",
@@ -243,13 +242,6 @@ def test_projection_reducer_rejects_invalid_measurements(tmp_path, mutation):
 )
 def test_projection_reducer_controls(tmp_path, variant):
     contract, run, data, reports, put = visual_case(tmp_path)
-    if variant == "edge_on_black":
-        row = data["comparisons"][0]
-        for side in ("left", "right"):
-            sha = side[0] * 64
-            run.files[row[side + "_id"]].sha256 = sha
-            row[side + "_bytes_sha256"] = sha
-            row[side + "_rgb_energy"] = 0
     if variant == "empty_right":
         for row in data["comparisons"]:
             run.files[row["right_id"]].sha256 = "b" * 64
@@ -303,3 +295,21 @@ def test_export_preset_numeric_boolean_is_not_the_frozen_preset():
         validate_export_evidence(
             value, source, native, source_sha256="a" * 64, delivery_sha256="b" * 64, preset=PRESET
         )
+
+
+@pytest.mark.parametrize("render_pass", ["clay", "silhouette", "wire"])
+def test_single_edge_on_black_diagnostic_view_preserves_group_foreground(tmp_path, render_pass):
+    contract, run, data, _reports, put = visual_case(tmp_path)
+    row = next(r for r in data["comparisons"] if r["pass"] == render_pass and r["view"] == "front")
+    for side, sha in (("left", "a" * 64), ("right", "b" * 64)):
+        run.files[row[side + "_id"]].sha256 = sha
+        row[side + "_bytes_sha256"] = sha
+        row[side + "_rgb_energy"] = 0
+    row.update(different_channels=0, different_pixels=0, max_abs=0)
+    remaining = [
+        r for r in data["comparisons"] if r["pass"] == render_pass and r["view"] != "front"
+    ]
+    assert len(remaining) == 8
+    assert all(r["left_rgb_energy"] > 0 and r["right_rgb_energy"] > 0 for r in remaining)
+    put("projection.visual", data)
+    assert not interchange_results(contract, run)[0]["r4.visual.source_import_match"]

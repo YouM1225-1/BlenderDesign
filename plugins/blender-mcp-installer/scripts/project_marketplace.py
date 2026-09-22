@@ -93,6 +93,7 @@ from typing import Any
 from blender_mcp_installer.filesystem import InstallerError, NoOpFaultInjector, SafeRoot
 from blender_mcp_installer.upgrade_cleanup import RollbackUnavailable, assert_rollback_available
 from blender_mcp_installer.upgrade_discovery import (
+    lease_protocol,
     discover_candidates,
     read_proof,
     read_evidence,
@@ -110,7 +111,7 @@ from blender_mcp_installer.upgrade_integration import (
     profile_from_context,
 )
 from blender_mcp_installer.upgrade_locks import ensure_usage_lock, mutation_locks
-from blender_mcp_installer.upgrade_registration import inspect_registration
+from blender_mcp_installer.upgrade_registration import RegistrationSnapshot, inspect_registration
 from blender_mcp_installer.upgrade_state import (
     UpgradeRoots,
     load_any_record,
@@ -717,6 +718,22 @@ def _prepare(args: argparse.Namespace) -> None:
         raise SystemExit(3)
 
 
+def _ensure_current_cache_lease(
+    state: SafeRoot,
+    roots: UpgradeRoots,
+    desired: dict[str, str],
+    codex: Path,
+    snapshot: RegistrationSnapshot,
+) -> None:
+    if not lease_protocol(snapshot.cache):
+        return
+    if inspect_registration(codex, roots, desired) != snapshot:
+        raise InstallerError("registration changed before current cache lease")
+    ensure_usage_lock(state, snapshot.cache.dev, snapshot.cache.ino)
+    if inspect_registration(codex, roots, desired) != snapshot:
+        raise InstallerError("registration changed during current cache lease")
+
+
 def _run_workflow(
     args: argparse.Namespace,
     state: SafeRoot,
@@ -793,10 +810,12 @@ def _run_workflow(
         ):
             raise InstallerError("workflow identity mismatch")
         try:
-            inspect_registration(Path(args.codex), roots, desired)
+            inspected = inspect_registration(Path(args.codex), roots, desired)
             registration_exact = True
         except (InstallerError, subprocess.SubprocessError, OSError, ValueError):
             registration_exact = False
+        if registration_exact:
+            _ensure_current_cache_lease(state, roots, desired, Path(args.codex), inspected)
         if doc is None and registration_exact and (inspection is None or inspection.exact):
             migration = new_record(roots, mode, desired)
             migration["profile"] = profile
@@ -866,7 +885,9 @@ def _run_workflow(
                                 recovery_id=doc["id"],
                             )
                             inspected = inspect_registration(Path(args.codex), roots, desired)
-                            ensure_usage_lock(state, inspected.cache.dev, inspected.cache.ino)
+                            _ensure_current_cache_lease(
+                                state, roots, desired, Path(args.codex), inspected
+                            )
                         except BaseException:
                             update_record(
                                 state, roots, doc, registration={"id": doc["id"], "state": "failed"}

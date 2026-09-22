@@ -546,3 +546,111 @@ def test_partial_delivery_copy_cleans_only_attempt_staging(tmp_path, monkeypatch
     assert not destination.exists() and not (setup[3] / "delivery-receipt.json").exists()
     assert list(tmp_path.glob(".delivery-*")) == [unrelated]
     assert (unrelated / "keep").read_bytes() == b"keep"
+
+
+def test_payload_unknown_unreadable_and_empty_directory_controls(tmp_path):
+    import os
+    from acceptance.evidence import _verify_payload
+
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    known = payload / "known.json"
+    known.write_bytes(b"{}")
+    manifest = {"files": [measure_file(known, 20, file_id="known").descriptor("known.json")]}
+    hidden = payload / "unreadable"
+    hidden.mkdir()
+    _verify_payload(tmp_path, manifest)  # Readable empty directories add no leaves.
+    (hidden / "unknown.txt").write_text("unknown leaf")
+    with pytest.raises(AcceptanceFailure) as caught:
+        _verify_payload(tmp_path, manifest)
+    assert caught.value.code == "expected_set_mismatch"
+    if os.geteuid() == 0:
+        pytest.skip(
+            "root bypasses chmod permissions; deterministic scan-error tests cover this host"
+        )
+    hidden.chmod(0)
+    try:
+        with pytest.raises(AcceptanceFailure) as caught:
+            _verify_payload(tmp_path, manifest)
+        assert caught.value.code == "tool_output_invalid"
+        assert isinstance(caught.value.__cause__, PermissionError)
+    finally:
+        hidden.chmod(0o700)
+
+
+@pytest.mark.parametrize(
+    "error, family",
+    [(PermissionError, "tool_output_invalid"), (FileNotFoundError, "evidence_missing")],
+)
+def test_scan_errors_are_typed_at_worker_r5_review_and_delivery(
+    tmp_path, monkeypatch, error, family
+):
+    import os
+
+    real_scandir = os.scandir
+    blocked = None
+
+    def scandir(path):
+        if blocked is not None and str(path) == str(blocked):
+            raise error("fixture scan failure")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    # Each phase gets a complete fixture; only the actual scan at its boundary fails.
+    for phase in ("worker", "r5", "review", "delivery"):
+        case = tmp_path / phase
+        case.mkdir()
+        blocked = case / "scratch/job-0/output" if phase == "worker" else None
+        setup = mock_run(case, require_review=phase == "review")
+        if phase == "worker":
+            assert setup[4].jobs[0]["failure_code"] == family
+            assert family in setup[4].infra_failures
+            assert "job-0" not in setup[4].results
+            assert seal_fixture(case, setup)["state"] == "UNVERIFIED"
+            continue
+        if phase != "r5":
+            pending = seal_fixture(case, setup)
+            assert pending["state"] == ("NEEDS_REVIEW" if phase == "review" else "SHIP")
+        blocked = setup[3] / "payload"
+        with pytest.raises(AcceptanceFailure) as caught:
+            if phase == "r5":
+                seal_fixture(case, setup)
+            elif phase == "review":
+                finish_review(setup[3], delivery_path=setup[2].path, review={})
+            else:
+                deliver(setup[3], delivery_path=setup[2].path, destination=case / "forbidden")
+        assert caught.value.code == family
+        assert isinstance(caught.value.__cause__, error)
+        assert not (case / "forbidden").exists()
+        assert not (setup[3] / "delivery-receipt.json").exists()
+        if phase != "delivery":
+            assert not (setup[3] / "completion.json").exists()
+        blocked = None
+
+
+@pytest.mark.parametrize("change", ["valid_document", "whitespace_only"])
+def test_contract_disk_drift_after_load_prevents_ship_and_delivery(tmp_path, change):
+    from acceptance.contract import load_contract, thaw
+
+    setup = mock_run(tmp_path)
+    contract, _plan, source, evidence, _run = setup
+    path = tmp_path / "contract.json"
+    document = thaw(contract.raw)
+    if change == "valid_document":
+        document["contract_id"] = "different-valid-contract"
+    path.write_text(json.dumps(document, indent=3) + "\n\n")
+    changed = load_contract(path, candidate_root=tmp_path / "source")
+    assert changed.byte_sha256 != contract.byte_sha256
+    assert (changed.digest == contract.digest) is (change == "whitespace_only")
+    assert contract.raw["contract_id"] == "fixture-001"  # Retain the loaded immutable snapshot.
+    assert seal_fixture(tmp_path, setup)["state"] == "UNVERIFIED"
+    summary = json.loads((evidence / "summary.json").read_text())
+    assert not summary["success"] and summary["failure_code"] == "hash_mismatch"
+    assert summary["failed_check_ids"] == ["r5.contract.digest_stable"]
+    check = next(row for row in summary["checks"] if row["id"] == "r5.contract.digest_stable")
+    assert check["raw_status"] == "Fail"
+    assert [finding["code"] for finding in check["findings"]] == ["identity_drift"]
+    destination = tmp_path / "forbidden"
+    with pytest.raises(AcceptanceFailure):
+        deliver(evidence, delivery_path=source.path, destination=destination)
+    assert not destination.exists() and not (evidence / "delivery-receipt.json").exists()

@@ -2315,9 +2315,9 @@ from blender_mcp_installer.filesystem import (InstallerError, NoOpFaultInjector,
     TargetRef, capture_file, capture_tree, write_atomic_json)
 from blender_mcp_installer.model import ImageState, Receipt, TargetRole
 from blender_mcp_installer.upgrade_cleanup import cleanup_result, finalize_record
-from blender_mcp_installer.upgrade_discovery import current_paths, discover_candidates, other_references
+from blender_mcp_installer.upgrade_discovery import current_paths, discover_candidates, other_references, lease_protocol
 from blender_mcp_installer.upgrade_locks import ensure_usage_lock
-from blender_mcp_installer.upgrade_registration import inspect_registration
+from blender_mcp_installer.upgrade_registration import RegistrationSnapshot, inspect_registration
 from blender_mcp_installer.upgrade_state import (UpgradeRoots, load_any_record, load_record, new_record,
     record_ids, save_record, update_record)
 
@@ -2453,6 +2453,22 @@ def finalize_register_locked(state: SafeRoot, roots: UpgradeRoots,
 ### project_functions.py
 
 ```python
+def _ensure_current_cache_lease(
+    state: SafeRoot,
+    roots: UpgradeRoots,
+    desired: dict[str, str],
+    codex: Path,
+    snapshot: RegistrationSnapshot,
+) -> None:
+    if not lease_protocol(snapshot.cache):
+        return
+    if inspect_registration(codex, roots, desired) != snapshot:
+        raise InstallerError("registration changed before current cache lease")
+    ensure_usage_lock(state, snapshot.cache.dev, snapshot.cache.ino)
+    if inspect_registration(codex, roots, desired) != snapshot:
+        raise InstallerError("registration changed during current cache lease")
+
+
 def _run_workflow(args: argparse.Namespace, state: SafeRoot, roots: UpgradeRoots,
                   projection: Path, context: Any = None) -> dict[str, Any]:
     plugin = json.loads((projection / "plugins/blender-mcp-installer/.codex-plugin/plugin.json").read_bytes())
@@ -2477,10 +2493,12 @@ def _run_workflow(args: argparse.Namespace, state: SafeRoot, roots: UpgradeRoots
             or doc["profile"] != profile or doc["status"] in {"complete", "cancelled"}):
         raise InstallerError("workflow identity mismatch")
     try:
-        inspect_registration(Path(args.codex), roots, desired)
+        inspected = inspect_registration(Path(args.codex), roots, desired)
         registration_exact = True
     except (InstallerError, subprocess.SubprocessError, OSError, ValueError):
         registration_exact = False
+    if registration_exact:
+        _ensure_current_cache_lease(state, roots, desired, Path(args.codex), inspected)
     from blender_mcp_installer import cli
     inspection = None if context is None else cli._inspection(context)
     if doc is None and registration_exact and (inspection is None or inspection.exact):
@@ -2520,7 +2538,7 @@ def _run_workflow(args: argparse.Namespace, state: SafeRoot, roots: UpgradeRoots
                     _register(projection, roots.state / "marketplace-recovery", Path(args.codex),
                               roots.home, roots.codex_home, recovery_id=doc["id"])
                     inspected = inspect_registration(Path(args.codex), roots, desired)
-                    ensure_usage_lock(state, inspected.cache.dev, inspected.cache.ino)
+                    _ensure_current_cache_lease(state, roots, desired, Path(args.codex), inspected)
                 except BaseException:
                     update_record(state, roots, doc, registration={"id": doc["id"], "state": "failed"})
                     raise

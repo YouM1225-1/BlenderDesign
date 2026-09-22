@@ -106,7 +106,7 @@ def workflow(tmp_path, monkeypatch):
     monkeypatch.setattr(
         marketplace,
         "inspect_registration",
-        lambda *_: SimpleNamespace(cache=SimpleNamespace(dev=1, ino=2)),
+        lambda *_: SimpleNamespace(cache=SimpleNamespace(entries=())),
     )
     monkeypatch.setattr(marketplace, "_register", lambda *_args, **_kw: events.append("register"))
     monkeypatch.setattr(cli, "_lifecycle_closed", lambda _: events.append("closed"))
@@ -512,7 +512,11 @@ def test_prepare_after_unfinished_authority_ends_creates_new_migration(tmp_path,
     )
     (plugin / "artifacts/manifest.json").write_text(json.dumps({"bundle_version": "1.0.0"}))
     args = SimpleNamespace(reviewed_commit="b" * 40, codex="/fake/codex", workflow_id=None)
-    monkeypatch.setattr(marketplace, "inspect_registration", lambda *_: None)
+    monkeypatch.setattr(
+        marketplace,
+        "inspect_registration",
+        lambda *_: SimpleNamespace(cache=SimpleNamespace(entries=())),
+    )
     monkeypatch.setattr(upgrade_integration, "inspect_registration", lambda *_: None)
     monkeypatch.setattr(
         marketplace, "_register", lambda *_a, **_kw: pytest.fail("exact registration changed")
@@ -676,3 +680,180 @@ def test_restore_retired_authority_refuses_before_mutation(tmp_path, monkeypatch
         marketplace._restore_evidence(args)
     assert marketplace._tree_manifest(roots.state) == before
     assert not (roots.codex_home / ".blender-mcp-marketplace.lock").exists()
+
+
+@pytest.fixture
+def exact_cache(tmp_path, monkeypatch):
+    import hashlib
+    import shutil
+    from blender_mcp_installer import upgrade_registration
+
+    roots = UpgradeRoots(tmp_path / "home", tmp_path / "codex")
+    roots.home.mkdir(mode=0o700)
+    roots.codex_home.mkdir(mode=0o700)
+    projection = roots.projections / ("b" * 40)
+    source = projection / "plugins/blender-mcp-installer"
+    original = Path(marketplace.__file__).parents[1]
+    shutil.copytree(
+        original / "scripts", source / "scripts", ignore=shutil.ignore_patterns("__pycache__")
+    )
+    for name in (".codex-plugin/plugin.json", "artifacts/manifest.json", ".blender-mcp-usage-v1"):
+        target = source / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(original / name, target)
+    version = json.loads((source / ".codex-plugin/plugin.json").read_text())["version"]
+    cache = roots.caches / version
+    shutil.copytree(source, cache)
+    (roots.codex_home / "config.toml").write_text(
+        '[marketplaces.official-blender-mcp]\nsource_type = "local"\n'
+        f"source = {json.dumps(str(projection))}\n"
+    )
+    desired = dict(
+        commit="b" * 40,
+        plugin_version=version,
+        projection=str(projection),
+        bundle_version=json.loads((source / "artifacts/manifest.json").read_text())[
+            "bundle_version"
+        ],
+        manifest_sha256=hashlib.sha256(
+            (source / "artifacts/manifest.json").read_bytes()
+        ).hexdigest(),
+    )
+    item = dict(
+        pluginId="blender-mcp-installer@official-blender-mcp",
+        name="blender-mcp-installer",
+        marketplaceName="official-blender-mcp",
+        version=version,
+        installed=True,
+        enabled=True,
+        source={"source": "local", "path": str(source)},
+        marketplaceSource={"sourceType": "local", "source": str(projection)},
+    )
+
+    def codex_json(_codex, _roots, *arguments):
+        if arguments[1] == "marketplace":
+            return {"marketplaces": [{"name": "official-blender-mcp", "root": str(projection)}]}
+        return {"installed": [item]}
+
+    monkeypatch.setattr(upgrade_registration, "codex_json", codex_json)
+    return roots, projection, cache, desired
+
+
+def cached_entry(cache, roots, name):
+    import os
+    import subprocess
+
+    return subprocess.run(
+        [sys.executable, "-B", str(cache / "scripts" / name), "--help"],
+        env=dict(
+            os.environ,
+            HOME=str(roots.home),
+            CODEX_HOME=str(roots.codex_home),
+            PYTHONDONTWRITEBYTECODE="1",
+        ),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
+@pytest.mark.parametrize("pending", [False, True], ids=["cold_noop", "rematerialized_pending"])
+def test_exact_current_cache_establishes_runnable_lease(exact_cache, pending):
+    import shutil
+    from blender_mcp_installer.upgrade_locks import mutation_locks, ensure_usage_lock, usage_name
+    from blender_mcp_installer.upgrade_state import new_record, save_record, record_ids
+
+    roots, projection, cache, desired = exact_cache
+    args = SimpleNamespace(reviewed_commit="b" * 40, codex="/fake/codex", workflow_id=None)
+    with mutation_locks(roots) as state:
+        if pending:
+            doc = new_record(roots, "register", desired)
+            doc["registration"] = {"id": doc["id"], "state": "registered"}
+            doc = save_record(state, roots, None, doc)
+            old_info = cache.stat()
+            ensure_usage_lock(state, old_info.st_dev, old_info.st_ino)
+            previous = roots.home / "previous-cache"
+            cache.rename(previous)
+            shutil.copytree(previous, cache)
+            assert cache.stat().st_ino != old_info.st_ino
+        before_ids = record_ids(state)
+        inspected = marketplace.inspect_registration(Path(args.codex), roots, desired)
+        lease = state.path / "usage" / usage_name(inspected.cache.dev, inspected.cache.ino)
+        assert not lease.exists()
+        result = marketplace._run_workflow(args, state, roots, projection)
+        assert record_ids(state) == before_ids  # A lease repair is not a new generation.
+        assert (
+            result["status"] == "complete" if pending else result["no_op"] and not result["changed"]
+        )
+        assert lease.is_file()
+    for name in ("install.py", "project_marketplace.py"):
+        entry = cached_entry(cache, roots, name)
+        assert entry.returncode == 0, entry.stderr
+
+
+def test_exact_cache_inspection_and_failed_entries_do_not_create_lease(exact_cache):
+    roots, _projection, cache, desired = exact_cache
+    assert not roots.state.exists()
+    marketplace.inspect_registration(Path("/fake/codex"), roots, desired)
+    for name in ("install.py", "project_marketplace.py"):
+        assert cached_entry(cache, roots, name).returncode != 0
+    assert not roots.state.exists()
+
+
+@pytest.mark.parametrize("when", ["before", "during"])
+def test_current_cache_identity_drift_cannot_succeed_or_lease_replacement(
+    exact_cache, monkeypatch, when
+):
+    import shutil
+    from blender_mcp_installer.upgrade_locks import mutation_locks, usage_name
+
+    roots, projection, cache, desired = exact_cache
+    inspect = marketplace.inspect_registration
+    ensure = marketplace.ensure_usage_lock
+    calls = 0
+
+    def replace_cache():
+        previous = roots.home / "previous-cache"
+        cache.rename(previous)
+        shutil.copytree(previous, cache)
+        assert cache.stat().st_ino != previous.stat().st_ino
+
+    def inspect_with_drift(*args):
+        nonlocal calls
+        snapshot = inspect(*args)
+        calls += 1
+        if calls == 1 and when == "before":
+            replace_cache()
+        return snapshot
+
+    def ensure_with_drift(*args):
+        ensure(*args)
+        if when == "during":
+            replace_cache()
+
+    monkeypatch.setattr(marketplace, "inspect_registration", inspect_with_drift)
+    monkeypatch.setattr(marketplace, "ensure_usage_lock", ensure_with_drift)
+    args = SimpleNamespace(reviewed_commit="b" * 40, codex="/fake/codex", workflow_id=None)
+    with mutation_locks(roots) as state:
+        with pytest.raises(InstallerError, match="registration changed .* current cache lease"):
+            marketplace._run_workflow(args, state, roots, projection)
+        info = cache.stat()
+        assert not (state.path / "usage" / usage_name(info.st_dev, info.st_ino)).exists()
+        assert not list(state.path.glob("upgrades/*.json"))
+
+
+def test_current_lease_repair_retains_unknown_lease_less_history(exact_cache):
+    from blender_mcp_installer.upgrade_locks import mutation_locks, usage_name
+
+    roots, projection, cache, _desired = exact_cache
+    old = roots.caches / "unknown-old"
+    old.mkdir()
+    (old / "payload").write_bytes(b"retained unknown history")
+    info = old.stat()
+    args = SimpleNamespace(reviewed_commit="b" * 40, codex="/fake/codex", workflow_id=None)
+    with mutation_locks(roots) as state:
+        result = marketplace._run_workflow(args, state, roots, projection)
+        assert result["no_op"] and result["unverified"] and not result["all_old_versions_removed"]
+        assert not (state.path / "usage" / usage_name(info.st_dev, info.st_ino)).exists()
+    assert (old / "payload").read_bytes() == b"retained unknown history"
+    assert cached_entry(cache, roots, "project_marketplace.py").returncode == 0

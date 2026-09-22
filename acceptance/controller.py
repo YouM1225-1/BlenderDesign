@@ -53,8 +53,11 @@ def _copy(source: Path, target: Path, *, file_id: str, max_bytes: int) -> BoundF
 
 
 def _files_under(root: Path) -> set[str]:
+    def scan_error(exc: OSError) -> None:
+        raise AcceptanceFailure(_family(exc), f"cannot enumerate output directory: {exc}") from exc
+
     names = set()
-    for current, directories, files in os.walk(root, followlinks=False):
+    for current, directories, files in os.walk(root, followlinks=False, onerror=scan_error):
         if any((Path(current) / d).is_symlink() for d in directories):
             raise AcceptanceFailure("tool_output_invalid", "symlink output directory")
         for name in files:

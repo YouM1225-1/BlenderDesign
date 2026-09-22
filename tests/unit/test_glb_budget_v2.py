@@ -1,3 +1,6 @@
+import json
+import struct
+
 import pytest
 
 from acceptance.glb_budget import measure_glb
@@ -30,7 +33,6 @@ def test_budget_rejects_external_and_data_uris(tmp_path):
     make_budget_fixture(path, 1)
     raw = path.read_bytes()
     json_end = 20 + int.from_bytes(raw[12:16], "little")
-    import json
     document = json.loads(raw[20:json_end])
     document["buffers"] = [{"uri": "data:application/octet-stream;base64,AA=="}]
     encoded = json.dumps(document).encode()
@@ -44,3 +46,26 @@ def test_budget_rejects_external_and_data_uris(tmp_path):
     )
     with pytest.raises(ValueError, match="URI"):
         measure_glb(path, policy(tmp_path)["limits"])
+
+
+@pytest.mark.parametrize(
+    "nodes,roots",
+    [
+        ([{"mesh": 0, "children": [0]}], [0]),
+        ([{"children": [2]}, {"children": [2]}, {"mesh": 0}], [0, 1]),
+    ],
+    ids=["reachable_cycle", "multiple_parents"],
+)
+def test_budget_rejects_reachable_cycle_and_multiple_parents(tmp_path, nodes, roots):
+    path = tmp_path / "graph.glb"
+    make_budget_fixture(path, 1)
+    limits = policy(tmp_path)["limits"]
+    baseline = measure_glb(path, limits)
+    assert baseline["rendered_triangles"] == baseline["draw_calls"] == 1
+    document = json.loads(path.read_bytes()[20:])
+    document.update(nodes=nodes, scenes=[{"nodes": roots}])
+    raw = json.dumps(document).encode()
+    raw += b" " * ((-len(raw)) % 4)
+    path.write_bytes(struct.pack("<4sIIII", b"glTF", 2, 20 + len(raw), len(raw), 0x4E4F534A) + raw)
+    with pytest.raises(ValueError, match="^cycle or multiple-parent scene graph$"):
+        measure_glb(path, limits)
