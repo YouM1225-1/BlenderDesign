@@ -176,7 +176,9 @@ ASSET_CALIBRATION_ROOT="$ASSET_CALIBRATION_ROOT" \
   tests/integration/test_gltf_validator.py -q
 ```
 
-此前的有限 GLB L0 结果是独立的旧证据，不是当前候选树的新运行。收尾 Task 5 将使用新准备的外部锁定 Node/Validator 和全新 evidence root 执行上述三文件门禁；在完整结果与候选身份绑定前，本节不声称新的 M3 通过。
+2026-09-23 在提交 `98b91403d30ee3e2023831720619cbea6bd558fa`、树 `d697753f522f18cc25fd55b0f674ed76a68992e0` 上使用 CPython 3.13.13、Blender 5.2.0 LTS / `fbe6228777e7`、Node v20.20.2 和 `gltf-validator@2.0.0-dev.3.10` 执行上述三文件门禁：`8 passed in 263.29s`，0 失败、0 跳过。运行前后 42 个 calibration 输入、Blender、Node、validator 包及 332 个 calibration 文件身份一致；完整日志、身份清单与 pytest basetemp 位于 `/private/tmp/blenderdesign-closeout-20260922-27x0hxjj/task5-m3.rCWtQP`。
+
+完整正例的 34 个适用 check 和五个技术 gate 全部通过，三个合同 N/A 保持 N/A，409 个 manifest 文件无 missing/unknown/unproduced；真实 12 个作业均记录正 PID 并退出 0。受控 fixture reviewer 产生 Q/T，交付 4,952 字节 D 至新目标并生成 receipt，交付前后 D 摘要一致。缺消费者与缺底面分别保持 UNVERIFIED/REJECTED；同一运行还覆盖实际投影差异、Validator 缺资源、报告截断、资源记录篡改和内容重验。测试签收不构成用户作品的业务批准。
 
 这组门禁只证明声明的 GLB 静态 L0 支持范围。独立两进程 surface probe、Node validator probe、完整 CLI、人工 Q 和正式交付分别记录，不互相替代。没有对应证据不得把状态标为已完成。M2 与 M3 各自的实际门禁结论独立，不能互相替代。
 

@@ -1,6 +1,6 @@
 # BlenderDesign 资产验收规范 V5
 
-状态：schema v2 的 M0/M1、有限 M2 原生静态资产与有限 M3 静态 GLB 路径已接线；M2 当前完整门禁为 19 passed/0 failed/0 skipped，M3 只保留此前有限 L0 证据，新的三文件实际门禁待收尾 Task 5 执行；通用资产不能自动放行。
+状态：schema v2 的 M0/M1、有限 M2 原生静态资产与有限 M3 静态 GLB 路径已接线；M2 当前完整门禁为 19 passed/0 failed/0 skipped，M3 当前真实三文件门禁为 8 passed/0 failed/0 skipped；通用资产不能自动放行。
 
 本规范采用已经认可的资产验收整合设计。官方分发、自研 Phase 0、资产验收分别报告；有限 M3 结果不代表完整原生资产或任意 GLB 通过。V3.8 与外部 V4 是迁移输入，不是 v2 的可兼容合同。
 
@@ -57,7 +57,7 @@ controller 编译唯一文件/作业计划，固定 writer、输入/输出及安
 
 ## 事实与范围
 
-2026-09-13 的独立 M3 夹具门禁在锁定 Blender、Node 与 gltf-validator 上覆盖完整 CLI、两进程 surface 和真实 Validator 反例；它只证明下面声明的有限静态 GLB profile，不作为当前候选树的新运行。Native7 历史记录为 13 通过、6 失败、0 跳过；2026-09-23 在当前锁定工具与代码上重新执行完整门禁，结果为 19 通过、0 失败、0 跳过。旧失败本次未复现，且旧运行证据已不可用，不能追溯根因或宣称修复了某个历史缺陷。曲线、文字、动画、任意实例、任意消费者和通用资产发布均不在这些结果内。
+2026-09-23 在候选 `98b9140`、锁定 Blender、Node 与 gltf-validator 上重新执行 M3 三文件真实门禁，覆盖完整 CLI、两进程 surface 和真实 Validator 正反例，结果为 8 通过、0 失败、0 跳过；此前 2026-09-13 结果保留为独立旧证据。Native7 历史记录为 13 通过、6 失败、0 跳过；同日在当前锁定工具与代码上重新执行完整 M2 门禁，结果为 19 通过、0 失败、0 跳过。旧 Native 失败本次未复现，且旧运行证据已不可用，不能追溯根因或宣称修复了某个历史缺陷。曲线、文字、动画、任意实例、任意消费者和通用资产发布均不在这些结果内。
 
 ### M2 原生静态资产实现范围与证据
 
@@ -74,6 +74,8 @@ M3 保留全部 34 个适用 check，并要求 `native.scope_supported`、`nativ
 有限 profile 为 `glb-static-surface-v1`：普通非镜像静态 MESH，单位 `scale_length=1`，显式固定导出 preset，基本 PBR 与直接 Base Color 打包 sRGB RGBA8 PNG，Linear/REPEAT/default-active-UV；collection 可省略、已支持 modifier 烘焙、未用顶点/槽可裁剪，UV 层仍保留。存在所需扩展、非默认额外 shader 输入、HDR 或外部资源时不声称支持。
 
 Validator 的格式/资源结论、逐 node 绘制预算、表面保真和实际消费者分别报告。原始 GLB 与所有报告/图像进入 E；R5 结论只在 V；Q 绑定实际图像与 C/S/D/E/V。没有真实所需审阅时停在 NEEDS_REVIEW。测试 reviewer 不授权用户作品。
+
+当前 [M3 门禁](../validation.md#独立-m3-资产门禁) 绑定提交 `98b9140` 与树 `d697753`。完整正例的 34 个适用 check 和五个技术 gate 全部通过，三个合同 N/A 保持 N/A；实际交付复测相同 D 并生成 Q/T 与 receipt。缺消费者、缺底面、投影松散数据、真实 surface 变化，以及 Validator 缺资源、截断和资源记录篡改均由同一零跳过运行覆盖。这里的 SHIP 只来自受控 fixture reviewer，不授权用户作品。
 
 ## 当前机器表
 

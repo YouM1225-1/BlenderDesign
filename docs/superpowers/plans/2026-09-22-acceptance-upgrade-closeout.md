@@ -58,6 +58,8 @@ Task 4 当前进展（2026-09-23）：已从远端复核 `origin/main=5a3bb97`�
 
 对 main 合入前的全部功能 diff 进行最强模型全分支对抗性审计，重点检查证据伪造/缺失、判定绕过、资源/进程边界、清理归属及锁竞争、验证后内容漂移。审查实现和测试合同，不仅审阅报告。每项实际问题由实现者修复、覆盖测试、独立复审；全部已确认问题闭合才放行。更新结果与计划状态。
 
+Task 5 当前进展（2026-09-23）：候选 `98b9140` / 树 `d697753` 的 M3 三文件真实门禁已完成，8 通过、0 失败、0 跳过；运行前后代码、工具和 calibration 身份一致。M2 的 19/0/0 与安装器修订候选 D 的现场结果已按未变生产字节映射复用，没有重复昂贵原样检查。严格 RELEASE 仍仅因 upstream outdated 失败；正常 profile、LLM、第二台 Mac 和 legacy user-app handoff 限制不变。全分支独立审查已确认三项待修：publication 写入前 config stage 遇到 native `last_updated` 变化会使恢复连续冲突；明确 rejected 的 optional review 仍可能 SHIP；GLB 合同可删去 `io_scene_gltf2` 模块锁闭包仍通过 R0。当前 M3 8 项结果仍是完整锁定 126 个成员的真实有限 fixture 证据，不替代三项生产修复与复审。普通完整门禁为 1150 passed / 27 个常规 integration skips，distribution 为 1034 passed，末行 `ALL CHECKS PASSED`；最终 graft 必须在本段落修改后通过。当前未获 main 合入放行，也未执行 Task 6 的合并或 push。
+
 ## Task 6: 提交合并到 main 并推送
 
 核对审计结果、暂存范围、`git diff --cached --check`、分支和远端。主工作树既有 `.claude/` 删除必须保留；在能保留它们的前提下将已验证候选合入 main，核对合并树与已测树一致。必要时复测合并引入变化。

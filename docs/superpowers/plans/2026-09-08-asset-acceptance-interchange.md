@@ -10,7 +10,7 @@
 
 ## 当前执行状态（2026-09-23）
 
-M3 有限静态 GLB L0 worker 已接线，此前独立夹具结果只代表当时锁定范围。收尾 Task 5 将使用新准备的外部 Node/`gltf-validator@2.0.0-dev.3.10`、独立 calibration 和全新 evidence root 重跑 `test_asset_interchange.py`、`test_interchange_surface.py`、`test_gltf_validator.py`。该运行尚未发生；不将旧的缺失证据或工具准备写成当前通过，也不用 M2 结果替代 M3。
+M3 有限静态 GLB L0 worker 已接线。2026-09-23 收尾 Task 5 使用外部锁定 Node/`gltf-validator@2.0.0-dev.3.10`、独立 calibration 和全新 evidence root，在候选 `98b9140` 上真实运行 `test_asset_interchange.py`、`test_interchange_surface.py`、`test_gltf_validator.py`：8 通过、0 失败、0 跳过，耗时 263.29 秒。完整正例的 34 个适用 check、五个技术 gate、C/S/D/E/V/Q/T 与实际 receipt 闭合；负例保持失败关闭。该结果只证明有限静态 GLB L0 范围，不用 M2 结果替代 M3，也不构成用户作品业务批准。
 
 ## Global Constraints
 
