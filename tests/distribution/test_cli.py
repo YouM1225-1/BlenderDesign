@@ -54,7 +54,7 @@ from blender_mcp_installer.model import (  # noqa: E402
     TreeImage,
 )
 from blender_mcp_installer.verification import HostCapabilities  # noqa: E402
-from tests.distribution.fake_host import HostHarness  # noqa: E402
+from tests.distribution.fake_host import HostHarness, python_script_header  # noqa: E402
 from tests.distribution.test_blender_adapter import BlenderRunner  # noqa: E402
 from tests.distribution.test_bundle import _checkout  # noqa: E402
 from tests.distribution.fault_driver import (  # noqa: E402
@@ -194,8 +194,8 @@ def test_empty_home_outer_python_inspect_does_not_rediscover_python(
     host.state_file.write_text(json.dumps(state, sort_keys=True) + "\n")
     blender_log = tmp_path / "blender-invocations.jsonl"
     host.blender.write_text(
-        f"#!{sys.executable}\n"
-        "import json,os,sys\n"
+        python_script_header()
+        + "import json,os,sys\n"
         f"state=json.load(open({str(host.state_file)!r}))\n"
         f"with open({str(blender_log)!r},'a') as log:\n"
         " log.write(json.dumps({'argv':sys.argv[1:],'env':{k:os.environ[k] for k in "

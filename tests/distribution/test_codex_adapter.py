@@ -41,6 +41,7 @@ from blender_mcp_installer.filesystem import (  # noqa: E402
     forward_file,
 )
 from blender_mcp_installer.model import FileImage  # noqa: E402
+from tests.distribution.fake_host import python_script_header  # noqa: E402
 
 
 TOOLS = ("one", "two", "execute_blender_code")
@@ -508,8 +509,8 @@ def test_stage_binds_retained_fd_to_published_path(monkeypatch, tmp_path: Path) 
 
 def _effective_launcher(path: Path, payload: dict[str, object], marker: Path) -> None:
     source = (
-        f"#!{sys.executable}\n"
-        "import json, pathlib, sys\n"
+        python_script_header()
+        + "import json, pathlib, sys\n"
         f"pathlib.Path({str(marker)!r}).write_text(json.dumps(sys.argv[1:]))\n"
         f"print(json.dumps({payload!r}, sort_keys=True))\n"
     )
@@ -518,7 +519,7 @@ def _effective_launcher(path: Path, payload: dict[str, object], marker: Path) ->
 
 
 def _effective_raw_launcher(path: Path, raw: str) -> None:
-    path.write_text(f"#!{sys.executable}\nprint({raw!r})\n")
+    path.write_text(python_script_header() + f"print({raw!r})\n")
     path.chmod(0o700)
 
 
@@ -733,7 +734,7 @@ def test_effective_json_error_never_echoes_output(tmp_path: Path) -> None:
 
 
 def _special_codex(path: Path, body: str) -> None:
-    path.write_text(f"#!{sys.executable}\n{body}\n")
+    path.write_text(python_script_header() + f"{body}\n")
     path.chmod(0o700)
 
 

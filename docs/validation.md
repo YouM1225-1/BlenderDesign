@@ -30,6 +30,9 @@ bash scripts/checks.sh
 插件验证器默认从 `$HOME/.codex/skills/.system/plugin-creator` 读取，也可通过
 `PLUGIN_CREATOR_ROOT` 指定。插件结构校验为必需检查。
 
+分发测试的模拟可执行程序使用 shell 跳转到当前 Python，支持解释器路径中的空格；
+便携包审计应在含中文和空格的解包目录运行完整入口，避免只验证原仓库路径。
+
 ### 安装器版本自动更新
 
 每个开发克隆启用一次仓库提交钩子：

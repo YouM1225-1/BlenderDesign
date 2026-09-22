@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.distribution.fake_host import python_script_header
 
 ROOT = Path(__file__).parents[2]
 PLUGIN = ROOT / "plugins/blender-mcp-installer"
@@ -930,8 +931,8 @@ def test_docs_index_and_repository_checks_include_plugin_contract() -> None:
 def _fake_marketplace_codex(tmp_path: Path) -> Path:
     codex = tmp_path / "codex"
     codex.write_text(
-        f"#!{sys.executable}\n"
-        r'''import json
+        python_script_header()
+        + r'''import json
 import os
 import shutil
 import sys
