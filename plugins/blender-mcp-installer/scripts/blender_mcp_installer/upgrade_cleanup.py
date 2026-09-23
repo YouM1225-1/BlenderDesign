@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
+import hashlib
 import json
 import os
+import re
+import subprocess
 import sys
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path, PurePath
 from typing import Any, Callable, Iterator
 from uuid import UUID
@@ -20,7 +24,7 @@ from blender_mcp_installer.filesystem import (
     conditional_remove_tree,
     write_atomic_json,
 )
-from blender_mcp_installer.model import FileImage, TreeImage
+from blender_mcp_installer.model import FileImage, ImageState, TreeImage
 from blender_mcp_installer.upgrade_locks import usage_lock
 from blender_mcp_installer.upgrade_registration import content_sha256, read_owned_bytes
 from blender_mcp_installer.upgrade_state import (
@@ -42,6 +46,76 @@ class CleanupReferenceUnproven(InstallerError):
 
     def __init__(self) -> None:
         super().__init__("legacy registration recovery evidence cannot be proven")
+
+
+def host_boot_time_ns() -> int:
+    try:
+        output = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "kern.boottime"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        ).stdout
+    except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
+        raise InstallerError("host boot time unavailable") from exc
+    match = re.fullmatch(r"\{ sec = (\d+), usec = (\d+) \}.*", output.strip())
+    if match is None or int(match[2]) >= 1_000_000:
+        raise InstallerError("host boot time unavailable")
+    return int(match[1]) * 1_000_000_000 + int(match[2]) * 1_000
+
+
+def remounted(expected: Any, current: FileImage | TreeImage) -> Any:
+    """Carry a recorded image across a remount that renumbered its whole volume.
+
+    Only the device number is adopted; inode, owner, mode, size, time and content
+    still have to match the recording exactly.
+    """
+    if (
+        expected.state is not ImageState.PRESENT
+        or current.state is not ImageState.PRESENT
+        or expected.dev == current.dev
+    ):
+        return expected
+    if isinstance(expected, FileImage):
+        return dataclasses.replace(expected, dev=current.dev)
+    if any(entry.dev != expected.dev for entry in expected.entries):
+        return expected
+    entries = tuple(dataclasses.replace(entry, dev=current.dev) for entry in expected.entries)
+    encoded = json.dumps(
+        [entry.to_dict() for entry in entries], sort_keys=True, separators=(",", ":")
+    ).encode()
+    return dataclasses.replace(
+        expected,
+        dev=current.dev,
+        digest=hashlib.sha256(encoded).hexdigest(),
+        entries=entries,
+    )
+
+
+def retired_before_boot(row: dict[str, Any], boot_ns: int | None) -> bool:
+    """Whether a host restart ended every process that could still use a lease-less recovery.
+
+    The owner receipt becomes INSTALLED only after the old tree was renamed away, so
+    its last write bounds the retirement (assuming no forward wall-clock step within
+    the current boot). Managed entries resolve only the active runtime path, and a
+    recovery name is not an importable Blender extension. Leased rows keep using
+    their lease; plugin caches stay excluded because resumed tasks can run old cached
+    scripts after a restart.
+    """
+    if (
+        boot_ns is None
+        or row["lease_known"]
+        or row["kind"] not in {"runtime_recovery", "extension_recovery"}
+    ):
+        return False
+    receipt = "receipts/" + row["owner"] + ".json"
+    written = [
+        FileImage.from_dict(proof["expected"]).mtime_ns
+        for proof in row["proofs"]
+        if proof["relative"] == receipt
+    ]
+    return len(written) == 1 and written[0] < boot_ns
 
 
 def candidate_path(roots: UpgradeRoots, doc: dict[str, Any], row: dict[str, Any]) -> Path:
@@ -81,7 +155,7 @@ def retained_evidence(
     for proof in row["proofs"]:
         reference = TargetRef(state, PurePath(proof["relative"]))
         current = capture_file(state, reference.relative)
-        if current != FileImage.from_dict(proof["expected"]):
+        if current != remounted(FileImage.from_dict(proof["expected"]), current):
             raise InstallerError("candidate proof changed")
         guards.append((reference, current))
     if row["kind"] == "plugin_cache":
@@ -152,6 +226,41 @@ def write_retirement_notices(state: SafeRoot, doc: dict[str, Any], fault: Any) -
         write_atomic_json(target, image, notice, UUID(doc["id"]), fault=fault)
 
 
+def retire_superseded(
+    state: SafeRoot, roots: UpgradeRoots, doc: dict[str, Any], fault: Any
+) -> None:
+    """Complete an older release's journal once every recorded baseline is absent.
+
+    Its own finalize can no longer validate a release that is not current, so the
+    current workflow records the absence; nothing is deleted here.
+    """
+    for workflow_id in record_ids(state):
+        if workflow_id == doc["id"]:
+            continue
+        try:
+            other = load_record(state, roots, workflow_id)
+            if (
+                other is None
+                or other["status"] != "cleanup_pending"
+                or other["desired"] == doc["desired"]
+            ):
+                continue
+            rows = copy.deepcopy(other["candidates"])
+            for row in rows:
+                if row["state"] == "removed":
+                    continue
+                with candidate_ref(roots, other, row) as reference:
+                    if reference.capture() != TreeImage.absent():
+                        break
+                row.update(state="removed", reason="verified absent")
+            else:
+                update_record(
+                    state, roots, other, fault=fault, candidates=rows, status="complete"
+                )
+        except (InstallerError, OSError, ValueError):
+            continue
+
+
 def finalize_record(
     state: SafeRoot,
     roots: UpgradeRoots,
@@ -164,11 +273,16 @@ def finalize_record(
     fault: Any = None,
 ) -> dict[str, Any]:
     fault = fault or NoOpFaultInjector()
+    try:
+        boot_ns: int | None = host_boot_time_ns()
+    except InstallerError:
+        boot_ns = None
     doc = load_record(state, roots, workflow_id, recover=True)
     if doc is None or doc["status"] == "cancelled":
         raise InstallerError("upgrade cannot be finalized")
     if doc["status"] == "complete":
         validate(doc)
+        retire_superseded(state, roots, doc, fault)
         return doc
     protected = validate(doc)
     if doc["status"] == "awaiting_verification":
@@ -228,31 +342,49 @@ def finalize_record(
             try:
                 with retained_evidence(state, roots, row):
                     pass
-                expected = TreeImage.from_dict(row["expected"])
-                with candidate_ref(roots, doc, row) as reference:
+                recorded = TreeImage.from_dict(row["expected"])
+                with candidate_ref(roots, doc, row) as reference, ExitStack() as leases:
                     current = reference.capture()
+                    expected = remounted(recorded, current)
                     if current == TreeImage.absent():
                         row.update(state="removed", reason="verified absent")
+                        idle = False
+                    elif retired_before_boot(row, boot_ns):
+                        idle = True
                     elif not row["lease_known"]:
                         row.update(
                             state="deferred_in_use",
                             reason="legacy usage is not proven idle",
                         )
+                        idle = False
                     else:
-                        with usage_lock(
-                            state, expected.dev, expected.ino, exclusive=True
-                        ) as acquired:
-                            if not acquired:
-                                row.update(
-                                    state="deferred_in_use",
-                                    reason="version lease is busy or missing",
+                        # Leases taken before a remount use the recorded device number;
+                        # later entries can only hold an already existing lease file.
+                        idle = leases.enter_context(
+                            usage_lock(state, recorded.dev, recorded.ino, exclusive=True)
+                        ) and (
+                            expected.dev == recorded.dev
+                            or leases.enter_context(
+                                usage_lock(
+                                    state,
+                                    expected.dev,
+                                    expected.ino,
+                                    exclusive=True,
+                                    missing_idle=True,
                                 )
-                            else:
-                                validate(doc)
-                                with retained_evidence(state, roots, row) as guards:
-                                    conditional_remove_tree(reference, expected, guards, fault)
-                                validate(doc)
-                                row.update(state="removed", reason="verified deletion")
+                            )
+                        )
+                        if not idle:
+                            row.update(
+                                state="deferred_in_use",
+                                reason="version lease is busy or missing",
+                            )
+                    if idle:
+                        validate(doc)
+                        with retained_evidence(state, roots, row) as guards:
+                            conditional_remove_tree(reference, expected, guards, fault)
+                        validate(doc)
+                        row.update(state="removed", reason="verified deletion")
             except (InstallerError, OSError, ValueError) as exc:
                 row.update(state="conflict", reason=str(exc))
         rows = copy.deepcopy(doc["candidates"])
@@ -262,6 +394,7 @@ def finalize_record(
     if all(row["state"] == "removed" for row in doc["candidates"]):
         validate(doc)
         doc = update_record(state, roots, doc, fault=fault, status="complete")
+    retire_superseded(state, roots, doc, fault)
     return validate_record(doc, roots)
 
 

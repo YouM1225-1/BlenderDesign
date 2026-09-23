@@ -1741,3 +1741,406 @@ def test_exact_registration_creates_migration_journal_when_old_cache_remains(
         assert result["status"] == "complete" and not old.exists()
         assert result["workflow_id"] != prior["id"]
     assert len(record_ids(state)) == 2 and called == []
+
+
+def _renumbered(image, device, *, only=None, keep=None):
+    """Rewrite device numbers as a volume remount does, keeping the digest consistent."""
+    import dataclasses
+    import hashlib
+
+    from blender_mcp_installer.model import FileImage
+
+    if isinstance(image, FileImage):
+        return dataclasses.replace(image, dev=device)
+    entries = tuple(
+        dataclasses.replace(entry, dev=device)
+        if (only is None or entry.path == only) and entry.path != keep
+        else entry
+        for entry in image.entries
+    )
+    encoded = json.dumps(
+        [entry.to_dict() for entry in entries], sort_keys=True, separators=(",", ":")
+    ).encode()
+    return dataclasses.replace(
+        image,
+        dev=device if only is None else image.dev,
+        entries=entries,
+        digest=hashlib.sha256(encoded).hexdigest(),
+    )
+
+
+def _replace_file_inode(path: Path) -> None:
+    info = path.stat()
+    fresh = path.with_name(path.name + ".fresh")
+    fresh.write_bytes(path.read_bytes())
+    fresh.chmod(info.st_mode & 0o7777)
+    os.replace(fresh, path)
+    os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+
+def _replace_with_copy(recovery: Path) -> None:
+    import shutil
+
+    parked = recovery.with_name("parked")
+    recovery.rename(parked)
+    shutil.copytree(parked, recovery)
+    shutil.rmtree(parked)
+
+
+RUNTIME_DRIFTS = {
+    "bytecode": lambda root: (
+        (root / "pkg/__pycache__/mod.cpython-313.pyc").write_bytes(b"new cache"),
+        (root / "pkg/__pycache__/mod.cpython-312.pyc").write_bytes(b"rewritten cache"),
+        (root / "__pycache__").mkdir(),
+        (root / "__pycache__/top.cpython-313.opt-1.pyc").write_bytes(b"optimized"),
+    ),
+    "source": lambda root: (root / "pkg/mod.py").write_text("managed = 2\n"),
+    "orphan_bytecode": lambda root: (
+        root / "pkg/__pycache__/ghost.cpython-313.pyc"
+    ).write_bytes(b"no source"),
+    "foreign_in_cache": lambda root: (
+        root / "pkg/__pycache__/notes.txt"
+    ).write_text("user"),
+    "new_file": lambda root: (root / "pkg/extra.py").write_text("user"),
+    "nested_cache": lambda root: (root / "pkg/__pycache__/__pycache__").mkdir(),
+    "replaced_file": lambda root: _replace_file_inode(root / "pkg/mod.py"),
+    "copied_tree": _replace_with_copy,
+}
+
+
+def _drifted_runtime_case(tmp_path, drift):
+    roots, register_doc = _register_case(tmp_path)
+    doc = new_record(roots, "install", register_doc["desired"])
+    doc["profile"] = _install_profile(roots)
+    doc["install_id"] = str(uuid4())
+    installed = _install_roots(roots, doc)
+    recovery = installed.runtime_recovery(uuid4_from_text(doc["install_id"]))
+    (recovery / "pkg/__pycache__").mkdir(parents=True)
+    (recovery / "pkg/mod.py").write_text("managed = 1\n")
+    (recovery / "pkg/__pycache__/mod.cpython-312.pyc").write_bytes(b"install cache")
+    (recovery / "top.py").write_text("top = 1\n")
+    with SafeRoot.open(roots.home, os.getuid(), roots.home) as home:
+        post = capture_tree(home, recovery.relative_to(roots.home))
+        drift(recovery)
+        pre = capture_tree(home, recovery.relative_to(roots.home))
+    return roots, doc, installed, recovery, post, pre
+
+
+def _discover_drifted(roots, doc, installed, post, pre):
+    from blender_mcp_installer.upgrade_discovery import discover_candidates
+
+    parent_id = str(uuid4())
+    with state_root(roots) as state:
+        _write_receipt(
+            state, installed, parent_id, generation=1, parent_install_id=None,
+            status="installed", runtime_image=post,
+        )
+        _write_receipt(
+            state, installed, doc["install_id"], generation=2,
+            parent_install_id=parent_id, status="installed", runtime_image=pre,
+        )
+        return discover_candidates(state, roots, doc)
+
+
+@pytest.mark.parametrize("renumber", [False, True])
+def test_bytecode_and_remount_drift_keep_parent_provenance(tmp_path, renumber):
+    roots, doc, installed, recovery, post, pre = _drifted_runtime_case(
+        tmp_path, RUNTIME_DRIFTS["bytecode"]
+    )
+    assert pre != post
+    if renumber:
+        pre = _renumbered(pre, pre.dev + 1)
+
+    candidates, findings = _discover_drifted(roots, doc, installed, post, pre)
+
+    assert findings == []
+    assert [row["key"] for row in candidates] == ["runtime_recovery:" + doc["install_id"]]
+    assert candidates[0]["expected"] == pre.to_dict()
+    assert (recovery / "pkg/__pycache__/mod.cpython-313.pyc").exists()
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "source",
+        "orphan_bytecode",
+        "foreign_in_cache",
+        "new_file",
+        "nested_cache",
+        "replaced_file",
+        "copied_tree",
+    ],
+)
+def test_unexplained_preimage_drift_stays_unverified(tmp_path, drift):
+    roots, doc, installed, recovery, post, pre = _drifted_runtime_case(
+        tmp_path, RUNTIME_DRIFTS[drift]
+    )
+
+    candidates, findings = _discover_drifted(roots, doc, installed, post, pre)
+
+    assert candidates == []
+    assert [row["reason"] for row in findings] == [
+        "preimage lacks exact managed parent provenance"
+    ]
+    assert recovery.is_dir()
+
+
+def test_partial_device_renumbering_is_not_a_remount(tmp_path):
+    roots, doc, installed, recovery, post, _pre = _drifted_runtime_case(
+        tmp_path, lambda _root: None
+    )
+    split = _renumbered(post, post.dev + 1, only="pkg/mod.py")
+
+    candidates, findings = _discover_drifted(roots, doc, installed, post, split)
+
+    assert candidates == []
+    assert [row["reason"] for row in findings] == [
+        "preimage lacks exact managed parent provenance"
+    ]
+
+
+@pytest.fixture
+def legacy_recovery(tmp_path):
+    roots, register_doc = _register_case(tmp_path)
+    doc = new_record(roots, "install", register_doc["desired"])
+    doc["profile"] = _install_profile(roots)
+    doc["install_id"] = str(uuid4())
+    doc["registration"] = {"id": doc["id"], "state": "registered"}
+    owner = str(uuid4())
+    recovery = _install_roots(roots, doc).runtime_recovery(UUID(owner))
+    (recovery / "bin").mkdir(parents=True)
+    (recovery / "bin/python").write_text("legacy")
+    with state_root(roots) as state:
+        receipt = state.path / "receipts" / f"{owner}.json"
+        receipt.parent.mkdir(mode=0o700)
+        receipt.write_text("{}\n")
+        receipt.chmod(0o600)
+        with SafeRoot.open(roots.home, os.getuid(), roots.home) as home:
+            image = capture_tree(home, recovery.relative_to(roots.home))
+        proof = capture_file(state, receipt.relative_to(state.path))
+        row = {
+            "key": "runtime_recovery:" + owner, "kind": "runtime_recovery",
+            "owner": owner, "version": None, "expected": image.to_dict(),
+            "proofs": [{"relative": f"receipts/{owner}.json", "expected": proof.to_dict()}],
+            "content_source": None, "content_sha256": None, "lease_known": False,
+            "state": "pending", "reason": "",
+        }
+        doc = save_record(state, roots, None, doc)
+        yield roots, state, doc, row, recovery, proof
+
+
+def _finalize_row(state, roots, doc, row):
+    return finalize_record(
+        state, roots, doc["id"], lambda _: (), lambda _: ([row], []), lambda _: ()
+    )
+
+
+def test_legacy_recovery_retired_before_host_boot_is_removed(legacy_recovery, monkeypatch):
+    roots, state, doc, row, recovery, proof = legacy_recovery
+    monkeypatch.setattr(upgrade_cleanup, "host_boot_time_ns", lambda: proof.mtime_ns + 1)
+
+    result = _finalize_row(state, roots, doc, row)
+
+    assert result["status"] == "complete"
+    assert result["candidates"][0]["reason"] == "verified deletion"
+    assert not recovery.exists()
+
+
+@pytest.mark.parametrize("boot", ["same_boot", "unavailable"])
+def test_legacy_recovery_without_restart_evidence_stays_deferred(
+    legacy_recovery, monkeypatch, boot
+):
+    roots, state, doc, row, recovery, proof = legacy_recovery
+
+    def boot_time():
+        if boot == "unavailable":
+            raise InstallerError("host boot time unavailable")
+        return proof.mtime_ns
+
+    monkeypatch.setattr(upgrade_cleanup, "host_boot_time_ns", boot_time)
+
+    result = _finalize_row(state, roots, doc, row)
+
+    assert result["status"] == "cleanup_pending"
+    assert result["candidates"][0]["state"] == "deferred_in_use"
+    assert result["candidates"][0]["reason"] == "legacy usage is not proven idle"
+    assert (recovery / "bin/python").read_text() == "legacy"
+
+
+def test_host_restart_never_proves_plugin_cache_idle(prepared, monkeypatch):
+    roots, state, doc, row, old = prepared
+    row["lease_known"] = False
+    monkeypatch.setattr(upgrade_cleanup, "host_boot_time_ns", lambda: 2**62)
+
+    result = _finalize_row(state, roots, doc, row)
+
+    assert result["candidates"][0]["reason"] == "legacy usage is not proven idle"
+    assert old.exists()
+
+
+def test_remounted_recovery_is_removed_from_its_recorded_image(legacy_recovery, monkeypatch):
+    from blender_mcp_installer.model import TreeImage
+
+    roots, state, doc, row, recovery, proof = legacy_recovery
+    image = TreeImage.from_dict(row["expected"])
+    row["expected"] = _renumbered(image, image.dev + 7).to_dict()
+    row["proofs"][0]["expected"] = _renumbered(proof, proof.dev + 7).to_dict()
+    monkeypatch.setattr(upgrade_cleanup, "host_boot_time_ns", lambda: proof.mtime_ns + 1)
+
+    result = _finalize_row(state, roots, doc, row)
+
+    assert result["status"] == "complete" and not recovery.exists()
+    assert result["candidates"][0]["expected"] == row["expected"]
+
+
+@pytest.mark.parametrize("drift", ["split_device", "stale_entry", "content"])
+def test_remount_never_hides_other_recovery_drift(legacy_recovery, monkeypatch, drift):
+    from blender_mcp_installer.model import TreeImage
+
+    roots, state, doc, row, recovery, proof = legacy_recovery
+    image = TreeImage.from_dict(row["expected"])
+    if drift == "split_device":
+        row["expected"] = _renumbered(image, image.dev + 7, only="bin/python").to_dict()
+    elif drift == "stale_entry":
+        row["expected"] = _renumbered(image, image.dev + 7, keep="bin/python").to_dict()
+    else:
+        row["expected"] = _renumbered(image, image.dev + 7).to_dict()
+        (recovery / "bin/extra").write_text("user")
+    monkeypatch.setattr(upgrade_cleanup, "host_boot_time_ns", lambda: proof.mtime_ns + 1)
+
+    result = _finalize_row(state, roots, doc, row)
+
+    assert result["candidates"][0]["state"] == "conflict"
+    assert (recovery / "bin/python").read_text() == "legacy"
+
+
+def test_remounted_leased_cache_honours_both_device_identities(prepared):
+    from blender_mcp_installer.model import TreeImage
+
+    roots, state, doc, row, old = prepared
+    image = TreeImage.from_dict(row["expected"])
+    row["expected"] = _renumbered(image, image.dev + 7).to_dict()
+    ensure_usage_lock(state, image.dev + 7, image.ino)
+    with usage_lock(state, image.dev, image.ino, exclusive=False) as acquired:
+        assert acquired
+        first = _finalize_row(state, roots, doc, row)
+    assert first["candidates"][0]["reason"] == "version lease is busy or missing"
+    assert old.exists()
+
+    second = finalize_record(
+        state, roots, doc["id"], lambda _: (), lambda _: ([], []), lambda _: ()
+    )
+
+    assert second["status"] == "complete" and not old.exists()
+
+
+def test_host_boot_time_parses_kernel_boottime(monkeypatch):
+    import time
+
+    if sys.platform == "darwin":
+        real = upgrade_cleanup.host_boot_time_ns()
+        assert 0 < real < time.time_ns()
+
+    class Result:
+        stdout = "{ sec = 12, usec = 5 } Thu Jan  1 00:00:12 1970\n"
+
+    monkeypatch.setattr(upgrade_cleanup.subprocess, "run", lambda *_a, **_k: Result())
+    assert upgrade_cleanup.host_boot_time_ns() == 12_000_005_000
+    Result.stdout = "{ sec = 12, usec = 1000000 }\n"
+    with pytest.raises(InstallerError, match="host boot time unavailable"):
+        upgrade_cleanup.host_boot_time_ns()
+
+
+def _superseded(state, roots, doc, row, **desired):
+    old = new_record(roots, "register", {**doc["desired"], **desired})
+    old["registration"] = {"id": old["id"], "state": "registered"}
+    old = save_record(state, roots, None, old)
+    return update_record(
+        state, roots, old, status="cleanup_pending", candidates=[row],
+        verification={"registration": "passed", "live": "not_run"},
+    )
+
+
+def test_superseded_journal_completes_once_its_baselines_are_absent(prepared):
+    import shutil
+
+    roots, state, doc, row, old = prepared
+    superseded = _superseded(
+        state, roots, doc, row, commit="a" * 40, plugin_version="1",
+        projection=str(roots.projections / ("a" * 40)),
+    )
+    finalize_record(state, roots, doc["id"], lambda _: (), lambda _: ([], []), lambda _: ())
+    assert load_record(state, roots, superseded["id"]) == superseded
+    shutil.rmtree(old)
+
+    finalize_record(state, roots, doc["id"], lambda _: (), lambda _: ([], []), lambda _: ())
+
+    retired = load_record(state, roots, superseded["id"])
+    assert retired["status"] == "complete"
+    assert [(item["state"], item["reason"]) for item in retired["candidates"]] == [
+        ("removed", "verified absent")
+    ]
+    assert Path(row["content_source"]).is_dir()
+
+
+def test_journal_for_current_release_is_not_retired_by_another_workflow(prepared):
+    import shutil
+
+    roots, state, doc, row, old = prepared
+    same_release = _superseded(state, roots, doc, row)
+    shutil.rmtree(old)
+
+    finalize_record(state, roots, doc["id"], lambda _: (), lambda _: ([], []), lambda _: ())
+
+    assert load_record(state, roots, same_release["id"]) == same_release
+
+
+def test_host_restart_never_replaces_an_available_lease(legacy_recovery, monkeypatch):
+    from blender_mcp_installer.model import TreeImage
+
+    roots, state, doc, row, recovery, proof = legacy_recovery
+    row["lease_known"] = True
+    image = TreeImage.from_dict(row["expected"])
+    ensure_usage_lock(state, image.dev, image.ino)
+    monkeypatch.setattr(upgrade_cleanup, "host_boot_time_ns", lambda: proof.mtime_ns + 1)
+    with usage_lock(state, image.dev, image.ino, exclusive=False) as acquired:
+        assert acquired
+        busy = _finalize_row(state, roots, doc, row)
+    assert busy["candidates"][0]["reason"] == "version lease is busy or missing"
+    assert recovery.is_dir()
+
+    released = finalize_record(
+        state, roots, doc["id"], lambda _: (), lambda _: ([], []), lambda _: ()
+    )
+
+    assert released["status"] == "complete" and not recovery.exists()
+
+
+def test_remounted_cache_without_new_device_lease_file_is_removed(prepared):
+    from blender_mcp_installer.model import TreeImage
+
+    roots, state, doc, row, old = prepared
+    image = TreeImage.from_dict(row["expected"])
+    row["expected"] = _renumbered(image, image.dev + 7).to_dict()
+    ensure_usage_lock(state, image.dev + 7, image.ino)
+    (state.path / "usage" / usage_name(image.dev, image.ino)).unlink()
+
+    result = _finalize_row(state, roots, doc, row)
+
+    assert result["status"] == "complete" and not old.exists()
+
+
+def test_superseded_journal_is_retired_by_the_finalize_that_completes_cleanup(prepared):
+    roots, state, doc, row, old = prepared
+    absent = dict(copy.deepcopy(row), key="plugin_cache:0", version="0")
+    superseded = _superseded(
+        state, roots, doc, absent, commit="a" * 40, plugin_version="1",
+        projection=str(roots.projections / ("a" * 40)),
+    )
+
+    result = _finalize_row(state, roots, doc, row)
+
+    assert result["status"] == "complete" and not old.exists()
+    retired = load_record(state, roots, superseded["id"])
+    assert retired["status"] == "complete"
+    assert retired["candidates"][0]["reason"] == "verified absent"

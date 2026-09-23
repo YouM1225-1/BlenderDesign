@@ -69,18 +69,21 @@ def ensure_usage_lock(state: SafeRoot, device: int, inode: int) -> None:
 
 
 @contextmanager
-def usage_lock(state: SafeRoot, device: int, inode: int, *, exclusive: bool) -> Iterator[bool]:
+def usage_lock(
+    state: SafeRoot, device: int, inode: int, *, exclusive: bool, missing_idle: bool = False
+) -> Iterator[bool]:
+    # Entries never create lease files, so a caller may treat a missing one as unheld.
     name = usage_name(device, inode)
     try:
         directory = state.open_directory(PurePath("usage"))
     except FileNotFoundError:
-        yield False
+        yield missing_idle
         return
     with SafeRoot(state.path / "usage", os.getuid(), directory) as usage:
         try:
             fd = _lock_fd(usage, name, create=False)
         except FileNotFoundError:
-            yield False
+            yield missing_idle
             return
         try:
             operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH

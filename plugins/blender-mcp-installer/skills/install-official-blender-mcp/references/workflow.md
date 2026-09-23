@@ -509,7 +509,10 @@ clients and managed MCP processes normally. Pass `HANDOFF_ID` into upgrade or ro
 never shut down user applications automatically. A prior rollback can restore a lease-less
 runtime, so a repeated rollback may require a fresh begin-handoff and `--handoff-id`.
 Runtime handoff does not prove old Codex tasks reloaded: old caches without cooperative
-usage evidence remain pending.
+usage evidence remain pending. Runtime and extension recoveries retired before the
+current host boot need no handoff, because the restart ended every process that could
+still use them. A cleanup journal for a release that is no longer current completes
+once a current finalize verifies all its remaining baselines absent.
 
 
 Verification succeeds only when parsed Codex policy, effective Codex MCP config,

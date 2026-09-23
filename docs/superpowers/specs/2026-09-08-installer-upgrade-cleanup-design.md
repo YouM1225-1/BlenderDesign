@@ -2,7 +2,7 @@
 
 日期：2026-09-08
 
-状态：整体方向已获用户认可并实施；长期行为包括 upgrade journal、使用锁、私有 Codex 注册 staging、条件发布与验证后清理。现场结果与限制见 [验证说明](../../validation.md#2026-09-23-安装升级当前现场结果)。
+状态：整体方向已获用户认可并实施；长期行为包括 upgrade journal、使用锁、私有 Codex 注册 staging、条件发布与验证后清理。2026-09-24 补充历史 recovery 的托管漂移、重启空闲证据、设备号重编与被取代 journal 收尾（§13）。现场结果与限制见 [验证说明](../../validation.md#2026-09-23-安装升级当前现场结果)。
 
 ## 1. 目标与删除范围
 
@@ -60,7 +60,7 @@
 
 “旧版本”由已知安装、注册记录中的历史关系确定，不能以目录修改时间、字符串排序或“不是当前版本”判断。插件版本含构建元数据，比较优先级不能替代身份核对。
 
-runtime 与扩展 recovery 必须具有有效 receipt、派生路径、托管来源和对应镜像证据。首次安装前已经存在但无法证明属于本安装器的程序，不能仅因被备份到 recovery 就自动删除。扩展产生的缓存只接受现有来源校验能够解释的内容。
+runtime 与扩展 recovery 必须具有有效 receipt、派生路径、托管来源和对应镜像证据；父 install post 与子 pre 之间只接受 §13 列出的托管漂移。首次安装前已经存在但无法证明属于本安装器的程序，不能仅因被备份到 recovery 就自动删除。扩展产生的缓存只接受现有来源校验能够解释的内容。
 
 插件缓存必须位于精确的 marketplace/plugin 目录下，manifest 名称与版本匹配路径，内容与保留的历史受审 projection 或此前记录的完整内容摘要吻合。只有目录名相似、存在未知文件、摘要漂移或历史来源缺失的条目保留并报告。
 
@@ -103,7 +103,7 @@ journal 明确包含：schema 版本、UUID 工作流 ID、`install` 或 `regist
 
 旧注册 `before.json` 指向受审 projection 时，由其 manifest 推导需保护的 cache 版本。若经 `SafeRoot` 非跟随核对，该 projection 整体不存在，这条 source 恢复既不能重建本地来源，也无法推导版本，只保护 source 路径本身，不引用任何 cache 版本。projection 仍存在但 manifest 缺失、超限或无效，路径含符号链接、非目录项、外来所有者，或该记录的注册作用域无法证明时，finalize 失败关闭并返回固定原因的 `cleanup_reference_unproven`，不输出路径，也不改写或删除该证据。
 
-未来所有受管脚本入口在使用版本目录之前持有共享使用锁；锁文件位于 state root 的稳定目录，不能放进待删树。清理需取得相应独占锁，失败则记录 `deferred_in_use`。当前 Codex 列表未提供运行任务的加载版本；旧入口没有使用锁时，不能用一次进程扫描或 `lsof` 空结果证明无人使用。不能证明空闲的候选延后，待宿主提供任务结束/重载证据，或受管入口已完成可验证的交接后重试。
+未来所有受管脚本入口在使用版本目录之前持有共享使用锁；锁文件位于 state root 的稳定目录，不能放进待删树。清理需取得相应独占锁，失败则记录 `deferred_in_use`。当前 Codex 列表未提供运行任务的加载版本；旧入口没有使用锁时，不能用一次进程扫描或 `lsof` 空结果证明无人使用。不能证明空闲的候选延后，待宿主提供任务结束/重载证据，或受管入口已完成可验证的交接后重试；runtime/扩展 recovery 的宿主重启证据见 §13。
 
 变更锁的固定顺序为：Codex home 的 marketplace 锁 → 安装器 state 锁。清理持有这两把锁后，按规范路径排序尝试版本目录的独占使用锁；这些尝试必须非阻塞，失败即记为延后，不能持变更锁等待使用者退出。普通脚本在加载旧版本内容前持有共享使用锁，后续如需变更仍遵守 marketplace → state 顺序；清理不等待使用锁，避免与这样的运行入口形成循环等待。仅注册清理同样获取两把变更锁，以检查共享恢复引用。等待用户启动 Blender 时不持锁，恢复后重新验证状态。
 
@@ -168,3 +168,12 @@ journal 明确包含：schema 版本、UUID 工作流 ID、`install` 或 `regist
 发布顺序为已验证的新版本 cache → 条件发布 config；不得重命名、替换或删除旧版本路径/inode。除精确目标 marketplace 项与目标插件 enabled 字段外，所有 TOML 值必须保持不变。外部配置漂移停止发布；cache 已发布而配置未发布时可 exact-match 复用，记录的配置交换通过原条件原语续作。只有原有 finalizer 完成规定验证并取得对应使用锁后才可删除旧缓存；占用状态继续返回 cleanup_pending。
 
 敏感配置写入前必须持久绑定 native stage 的精确目录名和根身份。配置 stage 可见前，先将原 live config、已验证 cache、native 配置文件 inode/摘要和事务身份写入 durable intent。已有 intent 的重试直接续移同一文件，不重跑 native 或采纳新的 `last_updated`。CODEX_HOME 与 HOME 位于不同卷时 rename 以 EXDEV 拒绝且不移动任何内容：此时在 CODEX_HOME 以事务专属名 `.registration.transfer` 独占创建 0600 副本，字节、模式和属主与 intent 绑定的 native 文件一致后，先将该副本 inode/摘要追加写入 intent，再在同卷内移入 stage；写入失败只删除本次独占创建且仍打开的同一 inode；native 快照仍随记录目录在 publication 后删除，不留未绑定副本。没有 intent 或内容不符的 transfer 及绑定后的漂移均保留并拒绝；未产生 intent 的尝试才先清理记录目录，再创建下一次。没有 intent/publication 证明的配置 stage 及任何已绑定身份漂移均保留并拒绝；既有 publication 恢复仍兼容。删除镜像在删除前持久化，部分删除按既有条件删除原语续作。publication 绑定同一 stage 记录，成功不能绕过清理；记录缺失、目录替换或删除镜像漂移失败关闭并保留私有证据，不按通配符删除未知目录。
+
+## 13. 2026-09-24 历史 recovery 回收补充
+
+正常 profile 的只读诊断发现三类阻塞：父 install post 与子 pre 因运行产生的字节码缓存和设备号不同而无法证明来源；无 receipt 使用证据的旧 recovery 永远标为 `legacy usage is not proven idle`；已记录镜像在重启重编 `st_dev` 后无法用于条件删除。补充规则只放宽可推导的漂移，不改变删除前的归属、空闲与镜像条件。
+
+- **托管漂移**：父 install post 与子 pre 相同，或同时满足：根目录 inode/属主/模式相同；每个镜像内所有条目共用其根设备号（整卷重编）；除字节码缓存外的路径集合相同，且逐项 kind/inode/属主/模式一致，文件的 size/mtime/SHA-256 也一致；目录时间与大小可变。字节码缓存仅指唯一一层 `__pycache__` 目录，及其中 `<模块>.cpython-3NN[.opt-N].pyc` 文件，其源 `<模块>.py` 必须是上述一致的托管文件。源码改动、新 inode 的整树复制、孤立或非 `.pyc` 缓存及部分设备号变化仍作为未验证发现保留。
+- **重启空闲证据**：仅用于没有使用证据（`lease_known=false`）的 runtime/扩展 recovery；有租约证据的候选始终取独占使用锁。owner receipt 仅在旧树改名后写为 INSTALLED，其最后写入时间早于当前内核 `kern.boottime`（每次 finalize 读取一次）时，改名前可能使用旧树的进程均已随重启结束；受管入口只解析 active runtime 路径，recovery 名称也不是可导入的 Blender 扩展名。启动时间不可读或 receipt 证据不唯一时仍延后。该比较假设当前启动内墙钟没有跨越退役时间向前跳变；`kern.boottime` 随墙钟校正移动，因此不对有租约的候选使用。插件缓存不适用此规则，因为恢复的 Codex 任务可在重启后直接运行旧缓存脚本。begin-handoff 只在一次切换中证明当前 runtime 的合作客户端已停止，不覆盖 Blender 或早已改名的 recovery，因此不用于提升历史候选。
+- **设备号重编**：已记录镜像只有在整树（或单个证据文件）仅设备号不同时，才以当前设备号参与条件删除，其余字段仍逐项比较；部分条目设备号变化视为冲突。使用锁先在记录的设备号上取得独占锁；设备号已变时，新设备号上已存在的租约文件也必须可独占，入口从不创建租约文件，因此缺失即无人持有。
+- **被取代 journal**：release 已不是当前版本的 `cleanup_pending` journal 无法通过自身 finalize 的身份验证。当前 release 的 finalize 通过验证后，若该 journal 所有未删除候选的路径经 `SafeRoot` 核验为不存在，则在同一把变更锁内把这些候选记为 `verified absent` 并置为 `complete`；本步骤不删除任何内容，只记录已核验的缺失，因此不要求旧 receipt 或 projection 证据仍存在；journal 无法读取或某路径仍存在时保持原状。仅被新 journal 继承但仍存在的基线不会收尾，旧 journal 继续作为持久删除基线。

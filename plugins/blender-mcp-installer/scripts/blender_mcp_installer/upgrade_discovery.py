@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 import re
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PurePosixPath
 from typing import Any
 from uuid import UUID
 
@@ -22,6 +22,7 @@ from blender_mcp_installer.model import (
     InstallRoots,
     ReceiptStatus,
     TargetRole,
+    TreeEntry,
     TreeImage,
     parse_receipt,
 )
@@ -92,6 +93,56 @@ def lease_protocol(image: TreeImage) -> bool:
         and item.sha256 == expected
         for item in image.entries
     )
+
+
+BYTECODE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\.cpython-3[0-9]{1,2}(?:\.opt-[12])?\.pyc")
+
+
+def bytecode_source(entry: TreeEntry) -> str | None:
+    """Name the source a CPython bytecode cache entry derives from ("" for its directory)."""
+    parts = PurePosixPath(entry.path).parts
+    if entry.kind == "dir":
+        return "" if parts[-1] == "__pycache__" and "__pycache__" not in parts[:-1] else None
+    match = BYTECODE.fullmatch(parts[-1])
+    if match is None or len(parts) < 2 or parts[-2] != "__pycache__" or "__pycache__" in parts[:-2]:
+        return None
+    return PurePosixPath(*parts[:-2], match[1] + ".py").as_posix()
+
+
+def managed_drift(post: TreeImage, pre: TreeImage) -> bool:
+    """Whether a retired preimage is still the parent's managed postimage.
+
+    Running the program may rewrite bytecode caches of unchanged sources and touch
+    directory times; a remount renumbers every device at once. Anything else,
+    including a new inode for managed content, is not explained.
+    """
+    if post == pre:
+        return True
+    if (
+        post.state is not ImageState.PRESENT
+        or pre.state is not ImageState.PRESENT
+        or (post.ino, post.uid, post.mode) != (pre.ino, pre.uid, pre.mode)
+        or any(entry.dev != image.dev for image in (post, pre) for entry in image.entries)
+    ):
+        return False
+    before, after = (
+        {entry.path: entry for entry in image.entries if bytecode_source(entry) is None}
+        for image in (post, pre)
+    )
+    if before.keys() != after.keys():
+        return False
+    for path, old in before.items():
+        new = after[path]
+        fields = ("kind", "ino", "uid", "mode")
+        if old.kind == "file":
+            fields += ("size", "mtime_ns", "sha256")
+        if any(getattr(old, field) != getattr(new, field) for field in fields):
+            return False
+    for entry in pre.entries:
+        source = bytecode_source(entry)
+        if source and (source not in after or after[source].kind != "file"):
+            return False
+    return True
 
 
 def current_paths(roots: UpgradeRoots, doc: dict[str, Any]) -> tuple[Path, ...]:
@@ -502,7 +553,11 @@ def discover_candidates(
                     if parent is None
                     else next(item for item in parent.targets if item.role is role)
                 )
-                if old is None or old.install_post != target.pre:
+                if (
+                    old is None
+                    or not isinstance(old.install_post, TreeImage)
+                    or not managed_drift(old.install_post, target.pre)
+                ):
                     findings.append(
                         {
                             "path": str(target.recovery_path),
