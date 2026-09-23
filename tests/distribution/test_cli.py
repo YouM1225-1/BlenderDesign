@@ -658,6 +658,22 @@ def test_expected_and_unexpected_errors_are_json_and_redacted(
     assert secret not in output
 
 
+def test_unproven_cleanup_reference_reports_fixed_reason(
+    host: HostHarness, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from blender_mcp_installer.upgrade_cleanup import CleanupReferenceUnproven
+
+    def blocked(_args: object) -> dict[str, object]:
+        raise CleanupReferenceUnproven()
+
+    monkeypatch.setattr(cli, "inspect", blocked)
+    assert cli.run_cli(_argv(host, "inspect"), NoOpFaultInjector()) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "error": "cleanup_reference_unproven",
+        "reason": "legacy registration recovery evidence cannot be proven",
+    }
+
+
 @pytest.mark.parametrize("entry", ["install.py", "project_marketplace.py"])
 def test_cached_entrypoint_leases_before_import_and_help_is_read_only(tmp_path, entry):
     from blender_mcp_installer.upgrade_state import UpgradeRoots, state_root

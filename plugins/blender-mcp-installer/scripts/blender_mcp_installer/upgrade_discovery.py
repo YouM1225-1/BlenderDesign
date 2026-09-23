@@ -25,7 +25,7 @@ from blender_mcp_installer.model import (
     TreeImage,
     parse_receipt,
 )
-from blender_mcp_installer.upgrade_cleanup import candidate_path
+from blender_mcp_installer.upgrade_cleanup import CleanupReferenceUnproven, candidate_path
 from blender_mcp_installer.upgrade_registration import content_sha256, read_owned_bytes
 from blender_mcp_installer.upgrade_state import (
     COMMIT,
@@ -231,6 +231,20 @@ def registration_scope(
     return selected, [*journal_proofs, *legacy_proofs]
 
 
+def entry_absent(root: SafeRoot, relative: PurePath) -> bool:
+    try:
+        parent_fd, name = root.open_parent(relative)
+    except FileNotFoundError:
+        return True
+    try:
+        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
+    finally:
+        os.close(parent_fd)
+    return False
+
+
 def source_reference(roots: UpgradeRoots, before: Any) -> tuple[Path, ...]:
     if not before.get("present") or before.get("source_type") != "local":
         return ()
@@ -238,6 +252,9 @@ def source_reference(roots: UpgradeRoots, before: Any) -> tuple[Path, ...]:
     if source.parent != roots.projections or not COMMIT.fullmatch(source.name):
         return (source,)
     with SafeRoot.open(roots.home, os.getuid(), roots.home) as home:
+        # A wholly absent projection cannot restore a source or name a cache version.
+        if entry_absent(home, source.relative_to(roots.home)):
+            return (source,)
         raw, _image = read_owned_bytes(
             TargetRef(
                 home,
@@ -349,8 +366,18 @@ def other_references(
             before, _proof = read_proof(state, reference / "before.json")
         except FileNotFoundError:
             continue
-        selected, _scope_proofs = registration_scope(state, roots, reference, records)
-        references.extend(source_reference(selected, before))
+        try:
+            selected, _scope_proofs = registration_scope(state, roots, reference, records)
+            references.extend(source_reference(selected, before))
+        except (
+            InstallerError,
+            ValueError,
+            OSError,
+            KeyError,
+            TypeError,
+            AttributeError,
+        ) as exc:
+            raise CleanupReferenceUnproven() from exc
     return tuple(references)
 
 

@@ -903,6 +903,170 @@ def test_legacy_registration_before_protects_projection_and_cache(prepared):
     assert old in references
 
 
+def _legacy_before_reference(
+    state: SafeRoot, roots: UpgradeRoots, projection: Path
+) -> tuple[Path, bytes]:
+    proof = state.path / "marketplace-recovery/registration.legacy-removed-source"
+    proof.mkdir(mode=0o700)
+    before = {"present": True, "source_type": "local", "source": str(projection)}
+    (proof / "before.json").write_text(json.dumps(before) + "\n")
+    (proof / "before.json").chmod(0o600)
+    _write_legacy_restore(proof, roots, before, roots.codex_home)
+    return proof, (proof / "before.json").read_bytes()
+
+
+def _finalize_with_real_references(state, roots, doc, row):
+    from blender_mcp_installer.upgrade_discovery import other_references
+
+    return finalize_record(
+        state,
+        roots,
+        doc["id"],
+        lambda _: (),
+        lambda _: ([row], []),
+        lambda current: other_references(state, roots, current),
+    )
+
+
+def test_absent_legacy_before_projection_references_no_cache(prepared):
+    roots, state, doc, row, old = prepared
+    projection = roots.projections / ("d" * 40)
+    proof, evidence = _legacy_before_reference(state, roots, projection)
+
+    result = _finalize_with_real_references(state, roots, doc, row)
+
+    assert result["status"] == "complete"
+    assert not old.exists()
+    assert not projection.exists()
+    assert (proof / "before.json").read_bytes() == evidence
+    assert (proof / "RESTORE.txt").is_file()
+
+
+def _assert_legacy_reference_blocks(state, roots, doc, row, old, projection):
+    from blender_mcp_installer.upgrade_cleanup import CleanupReferenceUnproven
+
+    _proof, evidence = _legacy_before_reference(state, roots, projection)
+    with pytest.raises(CleanupReferenceUnproven) as caught:
+        _finalize_with_real_references(state, roots, doc, row)
+    assert caught.value.code == "cleanup_reference_unproven"
+    assert str(roots.home) not in str(caught.value)
+    assert old.exists()
+    assert _proof.joinpath("before.json").read_bytes() == evidence
+    record = load_record(state, roots, doc["id"])
+    assert record["status"] == "cleanup_pending"
+    assert record["candidates"][0]["state"] == "pending"
+
+
+def test_present_legacy_projection_without_manifest_fails_closed(prepared):
+    roots, state, doc, row, old = prepared
+    projection = roots.projections / ("d" * 40)
+    (projection / "plugins/blender-mcp-installer").mkdir(parents=True)
+
+    _assert_legacy_reference_blocks(state, roots, doc, row, old, projection)
+    assert projection.is_dir()
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_symlinked_legacy_projection_fails_closed(prepared, dangling):
+    roots, state, doc, row, old = prepared
+    target = roots.home / "elsewhere"
+    if not dangling:
+        manifest = target / "plugins/blender-mcp-installer/.codex-plugin/plugin.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(json.dumps({"name": "blender-mcp-installer", "version": "1"}))
+    projection = roots.projections / ("d" * 40)
+    projection.symlink_to(target, target_is_directory=True)
+
+    _assert_legacy_reference_blocks(state, roots, doc, row, old, projection)
+    assert projection.is_symlink()
+
+
+def test_non_directory_legacy_projection_fails_closed(prepared):
+    roots, state, doc, row, old = prepared
+    projection = roots.projections / ("d" * 40)
+    projection.write_text("not a projection")
+
+    _assert_legacy_reference_blocks(state, roots, doc, row, old, projection)
+    assert projection.read_text() == "not a projection"
+
+
+def test_foreign_owned_legacy_projection_fails_closed(prepared, monkeypatch):
+    from blender_mcp_installer import filesystem
+
+    roots, state, doc, row, old = prepared
+    projection = roots.projections / ("d" * 40)
+    manifest = projection / "plugins/blender-mcp-installer/.codex-plugin/plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"name": "blender-mcp-installer", "version": "1"}))
+    foreign = projection.stat().st_ino
+    original = filesystem._require_owner
+
+    def foreign_owner(info, uid):
+        if info.st_ino == foreign:
+            raise ValueError("foreign-owned path")
+        original(info, uid)
+
+    monkeypatch.setattr(filesystem, "_require_owner", foreign_owner)
+
+    _assert_legacy_reference_blocks(state, roots, doc, row, old, projection)
+    assert manifest.is_file()
+
+
+def test_absent_projection_ancestor_references_only_source(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import source_reference
+
+    roots, _doc = _register_case(tmp_path)
+    source = roots.projections / ("d" * 40)
+    before = {"present": True, "source_type": "local", "source": str(source)}
+
+    assert not roots.projections.parent.exists()
+    assert source_reference(roots, before) == (source,)
+
+
+def test_symlinked_projection_ancestor_with_absent_leaf_fails_closed(tmp_path):
+    from blender_mcp_installer.upgrade_discovery import source_reference
+
+    roots, _doc = _register_case(tmp_path)
+    target = roots.home / "elsewhere"
+    target.mkdir()
+    roots.projections.parent.mkdir(parents=True)
+    roots.projections.symlink_to(target, target_is_directory=True)
+    before = {
+        "present": True,
+        "source_type": "local",
+        "source": str(roots.projections / ("d" * 40)),
+    }
+
+    with pytest.raises(ValueError):
+        source_reference(roots, before)
+
+
+def test_unproven_legacy_registration_scope_fails_closed(prepared):
+    from blender_mcp_installer.upgrade_cleanup import CleanupReferenceUnproven
+
+    roots, state, doc, row, old = prepared
+    projection = roots.projections / ("d" * 40)
+    proof, evidence = _legacy_before_reference(state, roots, projection)
+    (proof / "RESTORE.txt").unlink()
+
+    with pytest.raises(CleanupReferenceUnproven):
+        _finalize_with_real_references(state, roots, doc, row)
+    assert old.exists()
+    assert (proof / "before.json").read_bytes() == evidence
+    assert load_record(state, roots, doc["id"])["status"] == "cleanup_pending"
+
+
+def test_non_object_legacy_manifest_fails_closed(prepared):
+    roots, state, doc, row, old = prepared
+    projection = roots.projections / ("d" * 40)
+    manifest = projection / "plugins/blender-mcp-installer/.codex-plugin/plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("[]")
+
+    _assert_legacy_reference_blocks(state, roots, doc, row, old, projection)
+    assert manifest.read_text() == "[]"
+
+
 def test_foreign_registration_evidence_cannot_authorize_or_retire_current_cache(tmp_path):
     from blender_mcp_installer.upgrade_discovery import (
         current_paths,

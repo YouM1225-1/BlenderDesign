@@ -629,7 +629,9 @@ If this session prepared a persistent marketplace projection, after private trus
 cleanup verify both normal-profile listings read-only. Preserve journal, registration
 recovery, cleanup logs, historical projections and receipts. `cleanup_pending` / exit 3
 still runs explicit trust cleanup and persistent verification before returning 3;
-ordinary errors fail immediately. Later install/register/finalize retries cleanup. Otherwise
+ordinary errors fail immediately. `cleanup_reference_unproven` means legacy registration
+recovery evidence blocks cleanup: keep that evidence and diagnose it manually; do not delete
+or rewrite it. Later install/register/finalize retries cleanup. Otherwise
 skip this block; inspect-only, verify-only, and rollback do not register a plugin.
 <!-- PERSISTENT_MARKETPLACE_VERIFY_BEGIN -->
 ```bash

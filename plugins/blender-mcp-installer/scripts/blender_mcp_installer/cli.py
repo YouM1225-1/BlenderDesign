@@ -93,7 +93,11 @@ from .model import (
     parse_receipt,
 )
 from .runtime import stage_runtime, verify_runtime
-from .upgrade_cleanup import RollbackUnavailable, assert_rollback_available
+from .upgrade_cleanup import (
+    CleanupReferenceUnproven,
+    RollbackUnavailable,
+    assert_rollback_available,
+)
 from .upgrade_handoff import LegacyHandoffRequired, RuntimeInUse, runtime_quiescence
 from .upgrade_integration import (
     bind_receipt,
@@ -2729,7 +2733,12 @@ def run_cli(argv: Sequence[str], fault: FaultInjector) -> int:
     }[args.command]
     try:
         result = handler(args)
-    except (RollbackUnavailable, RuntimeInUse, LegacyHandoffRequired) as exc:
+    except (
+        CleanupReferenceUnproven,
+        RollbackUnavailable,
+        RuntimeInUse,
+        LegacyHandoffRequired,
+    ) as exc:
         print(
             json.dumps(
                 {"error": exc.code, "reason": str(exc)},

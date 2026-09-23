@@ -37,6 +37,13 @@ class RollbackUnavailable(InstallerError):
     code = "rollback_unavailable"
 
 
+class CleanupReferenceUnproven(InstallerError):
+    code = "cleanup_reference_unproven"
+
+    def __init__(self) -> None:
+        super().__init__("legacy registration recovery evidence cannot be proven")
+
+
 def candidate_path(roots: UpgradeRoots, doc: dict[str, Any], row: dict[str, Any]) -> Path:
     if row["kind"] == "runtime_recovery":
         return roots.home / ".local/share/blender-lab-mcp" / (

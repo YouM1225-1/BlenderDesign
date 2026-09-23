@@ -97,7 +97,11 @@ from blender_mcp_installer.filesystem import (
     conditional_remove_file, conditional_remove_tree,
 )
 from blender_mcp_installer.model import FileImage, TreeImage, ImageState
-from blender_mcp_installer.upgrade_cleanup import RollbackUnavailable, assert_rollback_available
+from blender_mcp_installer.upgrade_cleanup import (
+    CleanupReferenceUnproven,
+    RollbackUnavailable,
+    assert_rollback_available,
+)
 from blender_mcp_installer.upgrade_discovery import (
     lease_protocol,
     discover_candidates,
@@ -1356,7 +1360,12 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except (RuntimeInUse, LegacyHandoffRequired, RollbackUnavailable) as exc:
+    except (
+        RuntimeInUse,
+        LegacyHandoffRequired,
+        RollbackUnavailable,
+        CleanupReferenceUnproven,
+    ) as exc:
         print(json.dumps({"error": exc.code, "reason": str(exc)}, sort_keys=True))
         raise SystemExit(1) from None
     except Exception as error:
