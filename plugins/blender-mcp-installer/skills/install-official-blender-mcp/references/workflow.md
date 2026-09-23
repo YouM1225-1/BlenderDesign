@@ -345,7 +345,12 @@ transaction records the exact native stage directory and root identity. Before a
 config stage becomes visible, durable intent binds the original live config, the
 verified cache, the native file inode/hash, and this transaction. A retry with
 intent resumes the conditional move of that same file without rerunning native
-Codex, so changing native timestamps cannot replace the pending config. Before
+Codex, so changing native timestamps cannot replace the pending config. When
+CODEX_HOME is on another volume the move is refused with EXDEV and nothing moves; the
+transaction then exclusively writes a mode-0600 `.registration.transfer` copy in
+CODEX_HOME, requires its bytes to match the bound native file, appends its identity
+to the intent, and only then moves it to the stage on the same volume. An unbound
+or mismatched transfer, or later drift, is preserved and rejected. Before
 intent exists, retries clean the recorded prior attempt before creating another,
 using a persisted deletion image to resume partial cleanup. Successful publication also requires
 this cleanup; missing or conflicting evidence fails closed, and unknown native

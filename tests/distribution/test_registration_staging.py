@@ -406,3 +406,141 @@ def test_unknown_config_stage_is_preserved_without_durable_intent(registration):
         marketplace._register(*args, recovery_id=identity)
     assert stage.read_bytes() == b"unknown ownership"
     assert config.read_bytes() == before and old.exists()
+
+
+@pytest.fixture
+def separate_codex_volume(registration, monkeypatch):
+    """Model CODEX_HOME on another volume: the real renameatx_np refuses to cross it."""
+    import errno
+    import fcntl
+    from blender_mcp_installer import filesystem
+
+    codex_home = os.path.realpath(registration[4].codex_home)
+    rename = filesystem._rename_atomic
+    crossings = []
+
+    def volume(fd):
+        path = fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).rstrip(b"\0").decode()
+        return path == codex_home or path.startswith(codex_home + os.sep)
+
+    def guarded(source_fd, source, target_fd, target, *, swap):
+        if volume(source_fd) != volume(target_fd):
+            crossings.append((source, target))
+            raise OSError(errno.EXDEV, os.strerror(errno.EXDEV), target)
+        return rename(source_fd, source, target_fd, target, swap=swap)
+
+    monkeypatch.setattr(filesystem, "_rename_atomic", guarded)
+    return crossings
+
+
+def _cross_volume_leftovers(recovery, codex_home):
+    return (list(recovery.glob("native-codex.*/config.toml"))
+            + list(codex_home.glob(".blender-mcp-installer.*.registration.*")))
+
+
+def test_cross_volume_codex_home_registers_after_refused_rename(registration, separate_codex_volume):
+    args, identity, config, old, roots = registration
+    initial, old_inode = config.read_bytes(), old.stat().st_ino
+    recovery = marketplace._register(*args, recovery_id=identity)
+    assert [target for _, target in separate_codex_volume] == [f".blender-mcp-installer.{identity}.registration.stage"]
+    assert tomllib.loads(config.read_text())["plugins"]["blender-mcp-installer@official-blender-mcp"]["enabled"]
+    assert marketplace._unmanaged_config(initial) == marketplace._unmanaged_config(config.read_bytes())
+    assert config.stat().st_mode & 0o777 == 0o600
+    assert _cross_volume_leftovers(recovery, roots.codex_home) == []
+    assert old.stat().st_ino == old_inode
+
+
+@pytest.mark.parametrize("boundary", ["after_intent", "transfer_written", "transfer_bound", "after_move", "after_publication"])
+def test_cross_volume_transfer_retries_at_every_durable_boundary(registration, separate_codex_volume, monkeypatch, boundary):
+    args, identity, config, old, roots = registration
+    initial, old_inode = config.read_bytes(), old.stat().st_ino
+    original_json, original_forward, original_codex = marketplace._atomic_json, marketplace.forward_file, marketplace._codex
+    fired, calls = False, 0
+
+    def crash():
+        nonlocal fired
+        fired = True
+        raise RuntimeError("transfer boundary exit")
+
+    def json_write(path, value):
+        binding = path.name == "config-stage.json" and value.get("transfer") is not None
+        if not fired and boundary == "transfer_written" and binding:
+            crash()
+        original_json(path, value)
+        if not fired and ((boundary == "after_intent" and path.name == "config-stage.json")
+                          or (boundary == "transfer_bound" and binding)
+                          or (boundary == "after_publication" and path.name == "publication.json")):
+            crash()
+
+    def forward(target, *argv):
+        result = original_forward(target, *argv)
+        if not fired and boundary == "after_move" and target.relative.name.endswith(".registration.stage"):
+            crash()
+        return result
+
+    def codex(*argv):
+        nonlocal calls
+        calls += 1
+        return original_codex(*argv)
+
+    monkeypatch.setattr(marketplace, "_atomic_json", json_write)
+    monkeypatch.setattr(marketplace, "forward_file", forward)
+    monkeypatch.setattr(marketplace, "_codex", codex)
+    with pytest.raises(RuntimeError, match="transfer boundary exit"):
+        marketplace._register(*args, recovery_id=identity)
+    assert config.read_bytes() == initial and old.stat().st_ino == old_inode
+    before_calls = calls
+    recovery = marketplace._register(*args, recovery_id=identity)
+    assert calls == before_calls and separate_codex_volume
+    assert tomllib.loads(config.read_text())["plugins"]["blender-mcp-installer@official-blender-mcp"]["enabled"]
+    assert _cross_volume_leftovers(recovery, roots.codex_home) == []
+    assert old.stat().st_ino == old_inode
+
+
+@pytest.mark.parametrize("drift", ["unbound_bytes", "bound_bytes", "bound_inode"])
+def test_cross_volume_transfer_drift_fails_closed(registration, separate_codex_volume, monkeypatch, drift):
+    args, identity, config, old, roots = registration
+    initial = config.read_bytes()
+    original_json = marketplace._atomic_json
+    fired = False
+
+    def json_write(path, value):
+        nonlocal fired
+        binding = path.name == "config-stage.json" and value.get("transfer") is not None
+        if not fired and binding and drift == "unbound_bytes":
+            fired = True
+            raise RuntimeError("transfer drift exit")
+        original_json(path, value)
+        if not fired and binding:
+            fired = True
+            raise RuntimeError("transfer drift exit")
+
+    monkeypatch.setattr(marketplace, "_atomic_json", json_write)
+    with pytest.raises(RuntimeError, match="transfer drift exit"):
+        marketplace._register(*args, recovery_id=identity)
+    transfer = roots.codex_home / f".blender-mcp-installer.{identity}.registration.transfer"
+    content = transfer.read_bytes()
+    if drift == "bound_inode":
+        transfer.rename(transfer.with_suffix(".preserved"))
+        transfer.write_bytes(content)
+        transfer.chmod(0o600)
+    else:
+        transfer.write_bytes(content + b"# drift\n")
+    retained = transfer.read_bytes()
+    with pytest.raises(InstallerError, match="requires recovery|state conflict"):
+        marketplace._register(*args, recovery_id=identity)
+    assert transfer.read_bytes() == retained
+    assert not (roots.codex_home / f".blender-mcp-installer.{identity}.registration.stage").exists()
+    assert config.read_bytes() == initial and old.exists()
+
+
+def test_unknown_config_transfer_is_preserved_without_durable_intent(registration):
+    args, identity, config, old, roots = registration
+    transfer = roots.codex_home / f".blender-mcp-installer.{identity}.registration.transfer"
+    transfer.write_bytes(b"unknown ownership")
+    transfer.chmod(0o600)
+    before = config.read_bytes()
+    with pytest.raises(InstallerError, match="lacks durable intent"):
+        marketplace._register(*args, recovery_id=identity)
+    assert transfer.read_bytes() == b"unknown ownership"
+    assert config.read_bytes() == before and old.exists()

@@ -21,7 +21,8 @@ an inspection request does not authorize installation or marketplace changes.
 - Native plugin installation is isolated in a private transaction profile; never run
   `codex plugin add` directly against an existing managed profile during upgrade.
   Preserve old cache paths/inodes until verified finalization. Config staging binds
-  durable intent before moving the native file; recover that exact intent without
+  durable intent before moving the native file (a CODEX_HOME on another volume first
+  binds a transaction-named same-volume copy); recover that exact intent without
   rerunning native registration or adopting external config/stage drift.
 - Never start, terminate, or force-close Blender or open/modify project `.blend`
   files through this installer. Do not install uv or Python. A validated absolute

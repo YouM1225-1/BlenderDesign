@@ -73,6 +73,7 @@ _SCRIPT_USAGE_FD = _entry_lease()
 
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -646,6 +647,41 @@ def _cleanup_native_stage(recovery: Path, *, validate_only: bool = False) -> str
         return name
 
 
+def _transfer_config_stage(
+    root: SafeRoot, relative: Path, native: StagedFile, intent: Path, pending: dict[str, Any],
+) -> StagedFile:
+    """CODEX_HOME on another volume: bind a target-volume copy before its stage name exists."""
+    if pending.get("transfer") is None:
+        current = capture_file(root, relative)
+        if current.state is ImageState.ABSENT:
+            raw, image = read_owned_bytes(native)
+            if image != native.image:
+                raise InstallerError("registration config stage identity changed")
+            parent_fd, name = root.open_parent(relative)
+            try:
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
+                try:
+                    os.fchmod(fd, 0o600)
+                    view = memoryview(raw)
+                    while view:
+                        view = view[os.write(fd, view):]
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+            current = capture_file(root, relative)
+        expected = native.image
+        if (current.state, current.uid, current.mode, current.size, current.sha256) != (
+            expected.state, expected.uid, expected.mode, expected.size, expected.sha256,
+        ):
+            raise InstallerError("registration config transfer requires recovery")
+        pending["transfer"] = current.to_dict()
+        _atomic_json(intent, pending)
+    return StagedFile(root, relative, FileImage.from_dict(pending["transfer"]))
+
+
 def _isolated_registration(
     projection: Path, recovery: Path, codex: Path, home: Path, codex_home: Path,
 ) -> None:
@@ -658,6 +694,7 @@ def _isolated_registration(
     config_relative = Path("config.toml")
     stage_relative = Path(f".blender-mcp-installer.{identity}.registration.stage")
     backup_relative = Path(f".blender-mcp-installer.{identity}.registration.pre")
+    transfer_relative = Path(f".blender-mcp-installer.{identity}.registration.transfer")
     with SafeRoot.open(codex_home, os.getuid(), codex_home) as root:
         config = TargetRef(root, config_relative)
         if publication.exists() or intent.exists():
@@ -667,7 +704,7 @@ def _isolated_registration(
                 raise InstallerError("registration publication identity mismatch")
         else:
             _cleanup_native_stage(recovery)
-            if capture_file(root, stage_relative).state is not ImageState.ABSENT:
+            if any(capture_file(root, name).state is not ImageState.ABSENT for name in (stage_relative, transfer_relative)):
                 raise InstallerError("registration config stage lacks durable intent")
             pre = capture_file(root, config_relative)
             raw = b"" if pre.state is ImageState.ABSENT else read_owned_bytes(config)[0]
@@ -740,10 +777,26 @@ def _isolated_registration(
                 native_config = StagedFile(evidence, Path(stage_record["path"]) / "config.toml", FileImage.from_dict(pending["post"]))
                 target_stage = TargetRef(root, stage_relative)
                 unused_backup = TargetRef(root, Path(f".blender-mcp-installer.{identity}.stage.pre"))
-                while forward_file(target_stage, FileImage.absent(), native_config, unused_backup, NoOpFaultInjector()) is not NativeState.COMPLETED:
-                    pass
-            if capture_file(root, stage_relative) != FileImage.from_dict(pending["post"]):
+
+                def move(source: StagedFile) -> None:
+                    while forward_file(target_stage, FileImage.absent(), source, unused_backup, NoOpFaultInjector()) is not NativeState.COMPLETED:
+                        pass
+
+                cross_volume = pending.get("transfer") is not None
+                if not cross_volume:
+                    try:
+                        move(native_config)
+                    except InstallerError as error:
+                        if getattr(error.__cause__, "errno", None) != errno.EXDEV:
+                            raise
+                        cross_volume = True
+                if cross_volume:
+                    # A refused cross-volume rename moved nothing; the native snapshot is removed with its stage.
+                    native_config = _transfer_config_stage(root, transfer_relative, native_config, intent, pending)
+                    move(native_config)
+            if capture_file(root, stage_relative) != native_config.image:
                 raise InstallerError("registration config stage identity changed")
+            pending["post"] = native_config.image.to_dict()
             _atomic_json(publication, pending)
         previous_native = _cleanup_native_stage(recovery)
         if previous_native is None or pending.get("native_stage") != previous_native:
