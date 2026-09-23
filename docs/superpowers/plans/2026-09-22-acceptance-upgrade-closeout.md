@@ -1,6 +1,6 @@
 # 资产验收与安装升级收尾执行计划
 
-状态：执行中。基线为开发分支 `92169b4` 与主线 `5a3bb97`；本计划按实际剩余工作收尾，不重复已经实现的旧计划任务。
+状态：Task 1–5 已完成并通过独立复审；Task 6 按用户授权快进合入 main 并推送，落地以最终 Git refs 为证。基线为开发分支 `92169b4` 与主线 `5a3bb97`；本计划按实际剩余工作收尾，不重复已经实现的旧计划任务。
 
 ## 目标与依据
 
@@ -10,12 +10,12 @@
 
 ## Global Constraints
 
-- 只在现有 `codex/asset-acceptance-v2-upgrade` worktree 实现；保留既有无关 `.claude/` 删除，不能混入提交或强制清理。
+- 只在现有 `codex/asset-acceptance-v2-upgrade` worktree 实现；既有无关 `.claude/` 删除不能混入提交或强制清理。2026-09-23 用户要求恢复项目级 graft 钩子，这些文件已恢复为已提交版本，不再是待保留的删除。
 - 输入、合同、工具、证据和交付字节必须绑定；未知能力与缺证据保持失败关闭，不删检查、不放松阈值来获得通过。
 - 测试资产和机器证据放在仓库外新目录；不覆盖用户源 `.blend`，不重启或强制退出用户 Blender/Codex。
 - 安装遵循安装技能的受信固定提交和私有工作树流程。真实安装、现场 live、模拟测试与发行门禁分开报告，不替代。
 - 每个提交前运行 `bash scripts/checks.sh`，结果必须包含 `ALL CHECKS PASSED`；最后源码/文档修改后 `graft build .`，交付前 `graft check .` 退出 0。
-- 本轮 final-fix 授权仅包括限定文件提交；不合并或推送 main。审计有问题就修复复审，不以技能轮数上限为由搁置已确认问题。
+- final-fix 实现轮的授权仅包括限定文件提交，不合并或推送 main；独立复审通过后，用户于 2026-09-23 明确授权 Task 6 合并到 main 并正常推送，不 force push、不建 PR。审计有问题就修复复审，不以技能轮数上限为由搁置已确认问题。
 - 每任务只派一个实现者，禁止实现者自行派子代理；独立审查由控制器安排。报告保存至本计划 SDD workspace。
 
 ## Task 1: 核验并收尾现有未提交改动
@@ -58,10 +58,12 @@ Task 4 当前进展（2026-09-23）：已从远端复核 `origin/main=5a3bb97`�
 
 对 main 合入前的全部功能 diff 进行最强模型全分支对抗性审计，重点检查证据伪造/缺失、判定绕过、资源/进程边界、清理归属及锁竞争、验证后内容漂移。审查实现和测试合同，不仅审阅报告。每项实际问题由实现者修复、覆盖测试、独立复审；全部已确认问题闭合才放行。更新结果与计划状态。
 
-Task 5 final-fix（2026-09-23）：修复 I1 durable config-stage 重试、I2 optional explicit rejection 和 I3 Blender 5.2 glTF 内容闭包。Focused 109 项通过；最终真实 Native 完整门禁 21 passed/0 failed/0 skipped，覆盖 Native review 与 exact-D delivery、optional approved/rejected 恢复；最终真实 M3 三文件门禁 8 passed/0 failed/0 skipped，实际锁定真实应用闭包，结果详见 [final-fix 报告](../sdd/2026-09-22-acceptance-upgrade-closeout/final-fix-report.md)。普通完整门禁为 1173 passed / 29 个常规 integration skips，distribution 为 1046 passed，末行 `ALL CHECKS PASSED`。实际 Codex 新 stage 窗口中断/重试和隔离自有 profile installer-version-only install/verify/finalize 均在 controller 核验的固定候选 `6ad6638e77f0cebd226172f793301112bdd7322f` 上通过；真实 Codex 复用同一 recovery ID，重试不再调用 Codex，旧缓存 inode 和未知 stage 保留。隔离 profile 从旧插件版本升级，真实 Blender 5.2 / Codex 验证 26 工具并 finalize，bundle、runtime、扩展与偏好保持不变。完整现场证据和身份见 [final-fix 报告](../sdd/2026-09-22-acceptance-upgrade-closeout/final-fix-report.md)。报告同步后的最终 graft、完整 checks 和报告补充提交待完成；独立全分支复审由 controller 负责。严格 RELEASE 不在本任务重跑，沿用 upstream outdated 的未通过状态；normal profile、LLM、第二台 Mac、legacy user-app handoff 限制不变。Task 6 合并/push 不在本授权范围。
+Task 5 final-fix（2026-09-23）：修复 I1 durable config-stage 重试、I2 optional explicit rejection 和 I3 Blender 5.2 glTF 内容闭包。Focused 109 项通过；最终真实 Native 完整门禁 21 passed/0 failed/0 skipped，覆盖 Native review 与 exact-D delivery、optional approved/rejected 恢复；最终真实 M3 三文件门禁 8 passed/0 failed/0 skipped，实际锁定真实应用闭包，结果详见 [final-fix 报告](../sdd/2026-09-22-acceptance-upgrade-closeout/final-fix-report.md)。普通完整门禁为 1173 passed / 29 个常规 integration skips，distribution 为 1046 passed，末行 `ALL CHECKS PASSED`。实际 Codex 新 stage 窗口中断/重试和隔离自有 profile installer-version-only install/verify/finalize 均在 controller 核验的固定候选 `6ad6638e77f0cebd226172f793301112bdd7322f` 上通过；真实 Codex 复用同一 recovery ID，重试不再调用 Codex，旧缓存 inode 和未知 stage 保留。隔离 profile 从旧插件版本升级，真实 Blender 5.2 / Codex 验证 26 工具并 finalize，bundle、runtime、扩展与偏好保持不变。完整现场证据和身份见 [final-fix 报告](../sdd/2026-09-22-acceptance-upgrade-closeout/final-fix-report.md)。报告同步后的完整 checks（1173 passed / 29 skipped，distribution 1046 passed，`ALL CHECKS PASSED`）与 graft 已完成并提交。严格 RELEASE 不在本任务重跑，沿用 upstream outdated 的未通过状态；normal profile、LLM、第二台 Mac、legacy user-app handoff 限制不变。
+
+Task 5 独立复审（2026-09-23）：对 `140fd69..f8e7692` 的独立只读复审结论为 Ready to merge: Yes，I1/I2/I3 均关闭，无 Critical/Important。复审在仓库外副本运行相关测试 122 passed；在 `140fd69` 生产代码上同一批新用例 31 failed（全部为 I1/I2/I3 新用例），确认回归有效；原 I2 探针在 `98b9140` 得到 SHIP、在修复后得到 REJECTED 且拒绝交付。三项 Minor 为文档证据指针：Native/M3 最终运行日志与时长、已清理的外部证据根、本计划状态，均已在文档中修正。未确认疑点：CODEX_HOME 与 HOME 跨卷时，config stage rename 可能以 EXDEV 失败关闭；真实 Codex 从无 config.toml 起步的路径仅由 fake Codex 覆盖；最终真实门禁日志未记录 tree 身份，只能以 mtime 与工作树等于 `6ad6638` 推断绑定。
 
 ## Task 6: 提交合并到 main 并推送
 
-核对审计结果、暂存范围、`git diff --cached --check`、分支和远端。主工作树既有 `.claude/` 删除必须保留；在能保留它们的前提下将已验证候选合入 main，核对合并树与已测树一致。必要时复测合并引入变化。
+核对审计结果、暂存范围、`git diff --cached --check`、分支和远端。主工作树的 `.claude/` 文件已按用户要求恢复为已提交版本，合入时不得覆盖或混入无关改动；将已验证候选快进合入 main，核对合并树与已测树一致。必要时复测合并引入变化。
 
 推送 origin main，核验远端 HEAD 与本地 main 一致。报告提交、测试、真实验收证据与限制；不删除带未提交内容的 worktree，不强制清理任何历史分支或其他计划 workspace。

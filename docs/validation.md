@@ -157,7 +157,7 @@ RUN_ASSET_NATIVE=1 .venv/bin/python -m pytest \
   --basetemp "$NATIVE_E2E/pytest" > "$NATIVE_E2E/pytest.log" 2>&1
 ```
 
-2026-09-23 在基线 `117b133` 的历史运行完成 `19 passed in 1018.12s`。最终修复候选又以 CPython 3.13.13、Blender 5.2.0 LTS / `fbe6228777e7` 完成全文件 `21 passed in 1080.41s`，0 失败、0 跳过。最终运行覆盖完整的好/坏资产、支持能力正例、审阅准确 D、错误图像拒签以及 durable summary 后 optional review 的 approved/rejected 恢复；日志与临时 evidence 位于 `/private/tmp/blenderdesign-finalfix-native-final2.log` 和 `/private/tmp/blenderdesign-finalfix-native-final2`。每个完整正例验证 24 个现有适用检查、三个固定原生 gates、135 原图、99 比较/差异图、exact-byte fresh reopen 与 E/V；未签收只报告 NEEDS_REVIEW。测试 reviewer 仅验证流程，不能代替真实业务签收。
+2026-09-23 在基线 `117b133` 的历史运行完成 `19 passed in 1018.12s`。最终修复候选又以 CPython 3.13.13、Blender 5.2.0 LTS / `fbe6228777e7` 完成全文件 `21 passed in 1106.08s`，0 失败、0 跳过。最终运行覆盖完整的好/坏资产、支持能力正例、审阅准确 D、错误图像拒签以及 durable summary 后 optional review 的 approved/rejected 恢复；日志位于 `/private/tmp/blenderdesign-finalfix-native-final3.log`，其 basetemp 已清理。更早的 `native-final2`（`21 passed in 1080.41s`）开始于最终 `acceptance/toolchain.py` 修改之前，不作为最终候选结果。每个完整正例验证 24 个现有适用检查、三个固定原生 gates、135 原图、99 比较/差异图、exact-byte fresh reopen 与 E/V；未签收只报告 NEEDS_REVIEW。测试 reviewer 仅验证流程，不能代替真实业务签收。
 
 本门禁只证明当前工具下声明的有限原生静态支持范围。未支持实例/曲线/动画与未知平台仍为 UNVERIFIED，不代表 Phase 0、RELEASE、安装或 live 验收。历史 6 项失败本次未复现，旧证据缺失使其根因不可追溯；[执行记录](superpowers/plans/2026-09-08-asset-acceptance-native.md#当前执行结果2026-09-23) 保存本次完整命令与外部证据位置。
 
@@ -176,7 +176,7 @@ ASSET_CALIBRATION_ROOT="$ASSET_CALIBRATION_ROOT" \
   tests/integration/test_gltf_validator.py -q
 ```
 
-2026-09-23 最终修复候选使用 CPython 3.13.13、Blender 5.2.0 LTS / `fbe6228777e7`、Node v20.20.2 和 `gltf-validator@2.0.0-dev.3.10` 执行上述三文件门禁：`8 passed in 306.80s`，0 失败、0 跳过。测试从最终代码新建 calibration；完整日志和 basetemp 位于 `/private/tmp/blenderdesign-finalfix-m3-final.log` 与 `/private/tmp/blenderdesign-finalfix-m3-final`。先前绑定 `98b9140` 的 M3 记录独立保留，不能冒充最终修复候选的运行结果。修复候选身份和详细门禁链见 [closeout 修复报告](superpowers/sdd/2026-09-22-acceptance-upgrade-closeout/final-fix-report.md)。
+2026-09-23 最终修复候选使用 CPython 3.13.13、Blender 5.2.0 LTS / `fbe6228777e7`、Node v20.20.2 和 `gltf-validator@2.0.0-dev.3.10` 执行上述三文件门禁：`8 passed in 312.62s`，0 失败、0 跳过。测试从最终代码新建 calibration；完整日志位于 `/private/tmp/blenderdesign-finalfix-m3-final.log`，其 basetemp 已清理。先前绑定 `98b9140` 的 M3 记录独立保留，不能冒充最终修复候选的运行结果。修复候选身份和详细门禁链见 [closeout 修复报告](superpowers/sdd/2026-09-22-acceptance-upgrade-closeout/final-fix-report.md)。
 
 完整正例的 34 个适用 check 和五个技术 gate 全部通过，三个合同 N/A 保持 N/A，409 个 manifest 文件无 missing/unknown/unproduced；真实 12 个作业均记录正 PID 并退出 0。受控 fixture reviewer 产生 Q/T，交付 4,952 字节 D 至新目标并生成 receipt，交付前后 D 摘要一致。缺消费者与缺底面分别保持 UNVERIFIED/REJECTED；同一运行还覆盖实际投影差异、Validator 缺资源、报告截断、资源记录篡改和内容重验。测试签收不构成用户作品的业务批准。
 
@@ -210,7 +210,7 @@ ASSET_CALIBRATION_ROOT="$ASSET_CALIBRATION_ROOT" \
 
 在 macOS arm64、Python 3.13.13、uv 0.12.2、Blender 5.2.0 LTS / `fbe6228777e7` 上，修复后的隔离 A→B→C 已完成真实 Codex 注册、MCP 26 工具目录和 Blender 只读调用、验证后物理清理及重复 finalize。A/B/C 使用真实不同 wheel 内容，A→B 的扩展也不同；B→C 的扩展字节相同，但现有事务会重新暂存扩展并清理其 recovery，不声称 inode 不变。非目标插件、marketplace、配置备份、其他 profile 和历史 projection 保持不变。真实旧缓存入口持锁时返回 `cleanup_pending` 并保留目录，释放自有进程后重试物理删除；真实 managed runtime 持锁时在修改前返回 `runtime_in_use`。当前 C 的同内容安装为 `no_op=true`；独立 inspect/verify 不改变 receipts、upgrade journals、active 或 Codex 配置。
 
-本次执行证据位于 `/private/tmp/blenderdesign-closeout-20260922-27x0hxjj/task3`，当前真实升级在 `live-final/`，固定候选与产物哈希见 `fixture-identities-staging.json`。C 为受审不可变提交 `f23c8a783b10be6e17c89aed5f7527caa528a7ec`；该 C 对应首次交付 `5e70856` 的安装运行字节，后续修订必须另行绑定候选身份。测试只启动并正常退出未打开项目文件的自有 Blender，不覆盖源 `.blend` 或停止用户进程。
+本次执行证据曾位于 `/private/tmp/blenderdesign-closeout-20260922-27x0hxjj/task3`，当前真实升级在 `live-final/`，固定候选与产物哈希见 `fixture-identities-staging.json`。该外部证据根此后已被清理，本文及计划中指向它的路径仅供追溯，结论以本节记录与 [closeout 修复报告](superpowers/sdd/2026-09-22-acceptance-upgrade-closeout/final-fix-report.md) 中的身份和日志摘要为准。C 为受审不可变提交 `f23c8a783b10be6e17c89aed5f7527caa528a7ec`；该 C 对应首次交付 `5e70856` 的安装运行字节，后续修订必须另行绑定候选身份。测试只启动并正常退出未打开项目文件的自有 Blender，不覆盖源 `.blend` 或停止用户进程。
 
 仓库 Phase 0 的 `httpx2` / `httpcore2` 旧锁定版本扫描失败，已定向更新至兼容的 2.12.0；官方 runtime 锁和固定产物未改。固定分发完整性、五文件可重建比对及三个依赖审计通过。严格 `RELEASE=1` 仍退出 1：`upstream_freshness=outdated`，固定上游 `4309a39646e644261624bfcd2bca669b343b7621` 落后于当次远端 `ff54e4d8f6b09502f2f466189cca0e52b4a91643`。因此当前不具备 RELEASE 发布资格；未修改上游 pin 或放宽最新性要求。
 
@@ -218,3 +218,5 @@ ASSET_CALIBRATION_ROOT="$ASSET_CALIBRATION_ROOT" \
 
 
 独立审查发现 publication 持久化后中断会在成功重试后遗留敏感 native 配置快照，已增加写入配置前的 stage 根身份记录、publication 绑定和持久删除镜像；重试先安全清理前次记录的尝试，未知目录不删除，缺失/冲突证据失败关闭。三个中断边界及三个冲突回归通过；受审修订候选 `a4bf15db6b565b08de37b76439b96d89e7e7add3` 的真实 Codex 三次中断/重试均清除已记录快照。复用自有 C profile 的 C→D installer-only 升级返回 runtime no-op，随后真实 26 tools/Blender 只读 VERIFY、FINALIZE 及重复 FINALIZE 全部通过，旧 cache 只在 live 后移除，runtime/extension/preferences/receipts/active 字节不变。修订后常规门禁为 1150 passed / 27 explicit skips，distribution 为 1033 passed，`ALL CHECKS PASSED`。证据在同一外部根的 `fix1-*`；官方产物和上游 pin 未变，合并若改变 plugin 版本或代码身份，Task 5 重新绑定候选，不改变既有 RELEASE 不具备发布资格的结论。
+
+最终全分支审查确认的注册 config-stage 早期窗口问题（I1）已修复：配置 stage 可见前先持久记录 intent，并将原 native 配置移动到 stage，不产生新的敏感副本；重试续作已记录的发布而不重跑 native。固定修复候选 `6ad6638e77f0cebd226172f793301112bdd7322f` 上，真实 Codex 在新窗口中断后重试复用同一 recovery ID、不再调用 Codex，旧缓存 inode 与未知 stage 保留，已记录快照清零；隔离自有 profile 从旧插件版本完成 installer-version-only install、真实 Blender 5.2 / Codex 26 工具 VERIFY、FINALIZE 及重复 FINALIZE，bundle、runtime、扩展与偏好不变。该修复已通过独立复审。严格 RELEASE 未重跑，正常 profile、LLM、第二台 Mac 与 legacy 交接限制不变。
