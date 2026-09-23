@@ -20,7 +20,9 @@ an inspection request does not authorize installation or marketplace changes.
   persistent projection for marketplace registration. Do not register the worktree.
 - Native plugin installation is isolated in a private transaction profile; never run
   `codex plugin add` directly against an existing managed profile during upgrade.
-  Preserve old cache paths/inodes until verified finalization.
+  Preserve old cache paths/inodes until verified finalization. Config staging binds
+  durable intent before moving the native file; recover that exact intent without
+  rerunning native registration or adopting external config/stage drift.
 - Never start, terminate, or force-close Blender or open/modify project `.blend`
   files through this installer. Do not install uv or Python. A validated absolute
   symlink to either runner is supported.

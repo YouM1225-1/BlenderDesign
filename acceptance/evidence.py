@@ -287,12 +287,10 @@ def _seal(
             if complete and has_delivery and summary["failure_code"] == "check_failed"
             else "UNVERIFIED"
         )
-    elif policy["required"]:
+    elif policy["required"] or review is not None:
         approved = _validate_review(cast(dict[str, Any], review), bindings, policy, manifest)
         state = "SHIP" if approved else "REJECTED"
     else:
-        if review is not None:
-            _validate_review(review, bindings, policy, manifest)
         state = "SHIP"
     if state == "SHIP":
         actual = measure_file(

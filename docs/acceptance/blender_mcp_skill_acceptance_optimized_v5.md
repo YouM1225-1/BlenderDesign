@@ -1,12 +1,12 @@
 # BlenderDesign 资产验收规范 V5
 
-状态：schema v2 的 M0/M1、有限 M2 原生静态资产与有限 M3 静态 GLB 路径已接线；M2 当前完整门禁为 19 passed/0 failed/0 skipped，M3 当前真实三文件门禁为 8 passed/0 failed/0 skipped；通用资产不能自动放行。
+状态：schema v2 的 M0/M1、有限 M2 原生静态资产与有限 M3 静态 GLB 路径已接线；最终修复候选的 M2 完整门禁为 21 passed/0 failed/0 skipped，M3 真实三文件门禁为 8 passed/0 failed/0 skipped；通用资产不能自动放行。
 
 本规范采用已经认可的资产验收整合设计。官方分发、自研 Phase 0、资产验收分别报告；有限 M3 结果不代表完整原生资产或任意 GLB 通过。V3.8 与外部 V4 是迁移输入，不是 v2 的可兼容合同。
 
 ## 合同与版本
 
-v2 只读取 schema_version=2。旧合同作为政策草案，经重新冻结输入与核对工具后生成新 C/S 和新 run；不自动补值。所有嵌套字段封闭，C 为 canonical.digest("contract.v2", document)。运行快照深不可变。原生与 GLB 的 required 集分别保留 24/34 个现有检查；本页版本表与机器注册表成套更新。
+v2 只读取 schema_version=2。旧合同作为政策草案，经重新冻结输入与核对工具后生成新 C/S 和新 run；不自动补值。所有嵌套字段封闭，C 为 canonical.digest("contract.v2", document)。运行快照深不可变。GLB 合同在计划与 R0/R5 强制核验受支持 macOS Blender 5.2 `io_scene_gltf2` 的实际内容闭包：锁定全部普通非 `__pycache__` 文件，包含动态库/目录外字节码，精确集合与逐文件摘要均须匹配；枚举错误、链接及非普通节点失败关闭。`__pycache__` 缓存不纳入源锁，其节点仍须普通；范围保持可信 L0。原生与 GLB 的 required 集分别保留 24/34 个现有检查；本页版本表与机器注册表成套更新。
 
 ## v2 合同字段表
 
@@ -53,11 +53,11 @@ controller 编译唯一文件/作业计划，固定 writer、输入/输出及安
 
 ## 证据与签收
 
-叶子证据 → E → V → Q → T。E 不引用自己、R5 结论或上层对象；R5 写 V。技术 gate 纳入 schema2 summary.success，并单列 gates/failed_gate_ids。Q 只影响业务接受，不改写技术 V。缺必需审阅时只有 E/V，返回 NEEDS_REVIEW；最后复测 D，写 Q/T，交付只复制已验 D 并生成 receipt。
+叶子证据 → E → V → Q → T。E 不引用自己、R5 结论或上层对象；R5 写 V。技术 gate 纳入 schema2 summary.success，并单列 gates/failed_gate_ids。Q 只影响业务接受，不改写技术 V。缺必需审阅时只有 E/V，返回 NEEDS_REVIEW；可选审阅缺席可继续，但任何有效明确拒收均为 REJECTED 并禁止交付，V 字节不改写；最后复测 D，写 Q/T，交付只复制已验 D 并生成 receipt。
 
 ## 事实与范围
 
-2026-09-23 在候选 `98b9140`、锁定 Blender、Node 与 gltf-validator 上重新执行 M3 三文件真实门禁，覆盖完整 CLI、两进程 surface 和真实 Validator 正反例，结果为 8 通过、0 失败、0 跳过；此前 2026-09-13 结果保留为独立旧证据。Native7 历史记录为 13 通过、6 失败、0 跳过；同日在当前锁定工具与代码上重新执行完整 M2 门禁，结果为 19 通过、0 失败、0 跳过。旧 Native 失败本次未复现，且旧运行证据已不可用，不能追溯根因或宣称修复了某个历史缺陷。曲线、文字、动画、任意实例、任意消费者和通用资产发布均不在这些结果内。
+2026-09-23 在最终修复候选、锁定 Blender、Node 与 gltf-validator 上重新执行 M3 三文件真实门禁，覆盖完整 CLI、两进程 surface 和真实 Validator 正反例，结果为 8 通过、0 失败、0 跳过；完整 Native 门禁为 21 通过、0 失败、0 跳过，并覆盖真实审阅、拒绝和交付。原候选 `98b9140` 的 M3 与 Task 2 的 M2 历史结果保留为独立证据，不替代最终候选结果。曲线、文字、动画、任意实例、任意消费者和通用资产发布均不在这些结果内；详细身份与日志见 [修复报告](../superpowers/sdd/2026-09-22-acceptance-upgrade-closeout/final-fix-report.md)。
 
 ### M2 原生静态资产实现范围与证据
 
@@ -75,7 +75,7 @@ M3 保留全部 34 个适用 check，并要求 `native.scope_supported`、`nativ
 
 Validator 的格式/资源结论、逐 node 绘制预算、表面保真和实际消费者分别报告。原始 GLB 与所有报告/图像进入 E；R5 结论只在 V；Q 绑定实际图像与 C/S/D/E/V。没有真实所需审阅时停在 NEEDS_REVIEW。测试 reviewer 不授权用户作品。
 
-当前 [M3 门禁](../validation.md#独立-m3-资产门禁) 绑定提交 `98b9140` 与树 `d697753`。完整正例的 34 个适用 check 和五个技术 gate 全部通过，三个合同 N/A 保持 N/A；实际交付复测相同 D 并生成 Q/T 与 receipt。缺消费者、缺底面、投影松散数据、真实 surface 变化，以及 Validator 缺资源、截断和资源记录篡改均由同一零跳过运行覆盖。这里的 SHIP 只来自受控 fixture reviewer，不授权用户作品。
+最终修复候选的 [M3 门禁](../validation.md#独立-m3-资产门禁) 完整正例的 34 个适用 check 和五个技术 gate 全部通过，三个合同 N/A 保持 N/A；实际交付复测相同 D 并生成 Q/T 与 receipt。缺消费者、缺底面、投影松散数据、真实 surface 变化，以及 Validator 缺资源、截断和资源记录篡改均由同一零跳过运行覆盖。当前 Blender 5.2 `io_scene_gltf2` 闭包按受支持应用布局完整锁定并在计划、R0、R5 复核。这里的 SHIP 只来自受控 fixture reviewer，不授权用户作品。
 
 ## 当前机器表
 

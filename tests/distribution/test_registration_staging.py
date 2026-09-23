@@ -84,25 +84,20 @@ def test_registration_publication_retries_without_replacing_old_cache(registrati
     old_inode = old.stat().st_ino
     cache_inode = None
     fired = False
-    atomic_json, atomic_write = marketplace._atomic_json, marketplace._atomic_write
+    atomic_json = marketplace._atomic_json
 
     def json_write(path, value):
         nonlocal fired
+        if not fired and boundary == "cache_published" and path.name == "config-stage.json":
+            fired = True
+            raise RuntimeError("injected exit after cache publication")
         atomic_json(path, value)
         if not fired and ((boundary == "config_published" and path.name == "publication.json" and value.get("complete"))
                           or (boundary == "after_evidence" and path.name == "after.json")):
             fired = True
             raise RuntimeError("injected exit after publication")
 
-    def raw_write(path, value):
-        nonlocal fired
-        if not fired and boundary == "cache_published" and path.name.endswith(".registration.stage"):
-            fired = True
-            raise RuntimeError("injected exit after cache publication")
-        return atomic_write(path, value)
-
     monkeypatch.setattr(marketplace, "_atomic_json", json_write)
-    monkeypatch.setattr(marketplace, "_atomic_write", raw_write)
     with pytest.raises(RuntimeError, match="injected exit"):
         marketplace._register(*args, recovery_id=identity)
     assert fired and old.stat().st_ino == old_inode
@@ -276,8 +271,138 @@ def test_native_stage_recovery_conflicts_preserve_evidence(registration, monkeyp
         (native / "config.toml").write_text('changed = true\n')
     else:
         record.unlink()
-    retained = (native / "config.toml").read_bytes()
+    sensitive = native / "config.toml"
+    if not sensitive.exists():
+        sensitive = config.parent / f".blender-mcp-installer.{identity}.registration.stage"
+    retained = sensitive.read_bytes()
     with pytest.raises(InstallerError, match="identity changed|state conflict|lacks native stage evidence"):
         marketplace._register(*args, recovery_id=identity)
-    assert (native / "config.toml").read_bytes() == retained
+    assert sensitive.read_bytes() == retained
     assert config.read_bytes() == initial and old.exists()
+
+
+@pytest.mark.parametrize("conflict", [None, "stage_bytes", "stage_inode", "external_config", "cache"])
+def test_durable_config_stage_retry_uses_original_native_metadata(registration, monkeypatch, conflict):
+    args, identity, config, old, roots = registration
+    initial, inode = config.read_bytes(), old.stat().st_ino
+    original_codex, original_capture = marketplace._codex, marketplace.capture_file
+    native_calls = 0
+    fired = False
+    recovery = args[1] / ("registration." + identity)
+
+    def varying(codex, home, codex_home, *argv):
+        nonlocal native_calls
+        result = original_codex(codex, home, codex_home, *argv)
+        if argv[:3] == ("plugin", "marketplace", "add"):
+            import tomlkit
+            native_calls += 1
+            path = codex_home / "config.toml"
+            data = tomlkit.parse(path.read_text())
+            data["marketplaces"][marketplace.MARKETPLACE_NAME]["last_updated"] = str(native_calls)
+            path.write_text(tomlkit.dumps(data))
+        return result
+
+    def capture(root, relative):
+        nonlocal fired
+        image = original_capture(root, relative)
+        if (not fired and relative.name.endswith(".registration.stage")
+                and image.state is marketplace.ImageState.PRESENT):
+            fired = True
+            assert not (recovery / "publication.json").exists()
+            raise RuntimeError("injected durable stage exit")
+        return image
+
+    monkeypatch.setattr(marketplace, "_codex", varying)
+    monkeypatch.setattr(marketplace, "capture_file", capture)
+    with pytest.raises(RuntimeError, match="injected durable stage"):
+        marketplace._register(*args, recovery_id=identity)
+    assert config.read_bytes() == initial and old.stat().st_ino == inode
+    stage = roots.codex_home / f".blender-mcp-installer.{identity}.registration.stage"
+    stage_before = stage.read_bytes()
+    unknown = recovery / "native-codex.unknown"
+    unknown.mkdir(mode=0o700)
+    (unknown / "sentinel").write_text("keep")
+    if conflict == "stage_bytes":
+        stage.write_bytes(stage_before + b"# drift\n")
+    elif conflict == "stage_inode":
+        stage.rename(stage.with_suffix(".preserved"))
+        stage.write_bytes(stage_before)
+        stage.chmod(0o600)
+    elif conflict == "external_config":
+        config.write_bytes(initial + b"# external edit\n")
+    elif conflict == "cache":
+        (roots.caches / "2.0.0/payload.py").write_text("drift\n")
+    config_before, retained = config.read_bytes(), stage.read_bytes()
+    if conflict:
+        with pytest.raises(InstallerError):
+            marketplace._register(*args, recovery_id=identity)
+        assert stage.read_bytes() == retained and config.read_bytes() == config_before
+    else:
+        marketplace._register(*args, recovery_id=identity)
+        assert config.read_bytes() == stage_before
+        assert not stage.exists()
+        assert not list(recovery.glob("native-codex.*/config.toml"))
+    assert native_calls == 1
+    assert old.stat().st_ino == inode and (unknown / "sentinel").read_text() == "keep"
+
+
+@pytest.mark.parametrize("boundary", ["before_intent", "after_intent", "before_move", "after_move", "before_publication", "after_publication"])
+def test_config_stage_intent_retries_at_every_durable_boundary(registration, monkeypatch, boundary):
+    args, identity, config, old, _ = registration
+    initial, old_inode = config.read_bytes(), old.stat().st_ino
+    original_json, original_forward, original_codex = marketplace._atomic_json, marketplace.forward_file, marketplace._codex
+    fired = False
+    calls = 0
+
+    def crash():
+        nonlocal fired
+        fired = True
+        raise RuntimeError("intent boundary exit")
+
+    def json_write(path, value):
+        if not fired and ((boundary == "before_intent" and path.name == "config-stage.json") or
+                          (boundary == "before_publication" and path.name == "publication.json")):
+            crash()
+        original_json(path, value)
+        if not fired and ((boundary == "after_intent" and path.name == "config-stage.json") or
+                          (boundary == "after_publication" and path.name == "publication.json")):
+            crash()
+
+    def forward(target, *argv):
+        moving = target.relative.name.endswith(".registration.stage")
+        if not fired and moving and boundary == "before_move":
+            crash()
+        result = original_forward(target, *argv)
+        if not fired and moving and boundary == "after_move":
+            crash()
+        return result
+
+    def codex(*argv):
+        nonlocal calls
+        calls += 1
+        return original_codex(*argv)
+
+    monkeypatch.setattr(marketplace, "_atomic_json", json_write)
+    monkeypatch.setattr(marketplace, "forward_file", forward)
+    monkeypatch.setattr(marketplace, "_codex", codex)
+    with pytest.raises(RuntimeError, match="intent boundary exit"):
+        marketplace._register(*args, recovery_id=identity)
+    assert config.read_bytes() == initial and old.stat().st_ino == old_inode
+    before_calls = calls
+    recovery = marketplace._register(*args, recovery_id=identity)
+    assert calls == before_calls if boundary != "before_intent" else calls > before_calls
+    assert not list(recovery.glob("native-codex.*"))
+    assert not list(config.parent.glob("*.registration.stage"))
+    assert old.stat().st_ino == old_inode
+
+
+def test_unknown_config_stage_is_preserved_without_durable_intent(registration):
+    args, identity, config, old, roots = registration
+    stage = roots.codex_home / f".blender-mcp-installer.{identity}.registration.stage"
+    stage.write_bytes(b"unknown ownership")
+    stage.chmod(0o600)
+    before = config.read_bytes()
+    with pytest.raises(InstallerError, match="lacks durable intent"):
+        marketplace._register(*args, recovery_id=identity)
+    assert stage.read_bytes() == b"unknown ownership"
+    assert config.read_bytes() == before and old.exists()

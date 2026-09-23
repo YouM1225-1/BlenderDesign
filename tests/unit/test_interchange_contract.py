@@ -73,6 +73,8 @@ PACKAGE_MEMBERS = (
 
 def plan_contract(tmp_path):
     value = integrated_document(tmp_path, "interchange")
+    from tests.unit.interchange_support import lock_gltf_fixture
+    lock_gltf_fixture(tmp_path, value["tools"][2])
     value["tools"].append(
         dict(
             id="node",
@@ -119,4 +121,79 @@ def test_plan_rejects_unlocked_actual_validator_package(tmp_path, missing):
     contract = type(contract)(value, digest("contract.v2", value))
     with pytest.raises(AcceptanceFailure) as caught:
         build_interchange_plan(contract)
+    assert caught.value.code == "toolchain_mismatch"
+
+
+@pytest.mark.parametrize("mutation", ["one", "all", "new", "drift", "symlink", "cache_symlink"])
+@pytest.mark.parametrize("boundary", ["plan", "measure"])
+def test_gltf_content_closure_at_public_boundaries(tmp_path, mutation, boundary):
+    from acceptance.toolchain import measure_tool
+    from tests.unit.asset_v2_support import REPO
+    contract, value = plan_contract(tmp_path)
+    blender = value["tools"][2]
+    root = Path(blender["path"]).parents[1] / "Resources/5.2/scripts/addons_core/io_scene_gltf2"
+    if mutation in ("one", "all"):
+        blender["files"] = [f for f in blender["files"] if not (
+            root in Path(f["path"]).parents and (mutation == "all" or Path(f["path"]).name == "importer.py"))]
+    elif mutation == "new":
+        (root / "new.py").write_text("new unbound execution member")
+    elif mutation == "drift":
+        (root / "importer.py").write_text("changed contents")
+    else:
+        link = root / ("__pycache__" if mutation == "cache_symlink" else "linked.py")
+        link.symlink_to(tmp_path, target_is_directory=mutation == "cache_symlink")
+    contract = type(contract)(value, digest("contract.v2", value))
+    with pytest.raises(AcceptanceFailure) as caught:
+        if boundary == "plan":
+            build_interchange_plan(contract)
+        else:
+            measure_tool(blender, REPO, require_blender_gltf=True)
+    assert caught.value.code == "toolchain_mismatch"
+
+
+@pytest.mark.parametrize("boundary", ["plan", "r0"])
+def test_interchange_requires_closure_even_without_any_gltf_hint(tmp_path, boundary):
+    from acceptance.contract import thaw
+    from acceptance.stages import run_r0
+    contract, value = plan_contract(tmp_path)
+    value["tools"][2]["files"] = []
+    contract = type(contract)(value, digest("contract.v2", value))
+    if boundary == "plan":
+        with pytest.raises(AcceptanceFailure, match="closure"):
+            build_interchange_plan(contract)
+    else:
+        measured = [
+            {
+                "id": tool["id"],
+                "path": tool["path"],
+                "sha256": tool["sha256"],
+                "version": tool["version"],
+                "files": thaw(tool["files"]),
+            }
+            for tool in value["tools"]
+        ]
+        result = run_r0(contract, tools_measured=measured)
+        assert "closure" in result["r0.contract.tools_locked"][0].detail
+
+
+@pytest.mark.parametrize("problem", ["missing_directory", "enumeration_error", "nonregular"])
+def test_gltf_closure_scan_fails_closed(tmp_path, monkeypatch, problem):
+    import os
+    import shutil
+    from acceptance import toolchain
+    from tests.unit.asset_v2_support import REPO
+    _, value = plan_contract(tmp_path)
+    blender = value["tools"][2]
+    root = Path(blender["path"]).parents[1] / "Resources/5.2/scripts/addons_core/io_scene_gltf2"
+    if problem == "missing_directory":
+        shutil.rmtree(root)
+    elif problem == "nonregular":
+        os.mkfifo(root / "unexpected.pipe")
+    else:
+        def fail(_root, *, followlinks, onerror):
+            onerror(PermissionError("controlled glTF enumeration failure"))
+            return iter(())
+        monkeypatch.setattr(toolchain.os, "walk", fail)
+    with pytest.raises(AcceptanceFailure) as caught:
+        toolchain.measure_tool(blender, REPO, require_blender_gltf=True)
     assert caught.value.code == "toolchain_mismatch"

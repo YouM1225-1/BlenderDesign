@@ -165,4 +165,4 @@ journal 明确包含：schema 版本、UUID 工作流 ID、`install` 或 `regist
 
 发布顺序为已验证的新版本 cache → 条件发布 config；不得重命名、替换或删除旧版本路径/inode。除精确目标 marketplace 项与目标插件 enabled 字段外，所有 TOML 值必须保持不变。外部配置漂移停止发布；cache 已发布而配置未发布时可 exact-match 复用，记录的配置交换通过原条件原语续作。只有原有 finalizer 完成规定验证并取得对应使用锁后才可删除旧缓存；占用状态继续返回 cleanup_pending。
 
-敏感配置写入前必须持久绑定 native stage 的精确目录名和根身份。每次重试先清理前次已记录尝试，再创建下一次；删除镜像在删除前持久化，部分删除按既有条件删除原语续作。publication 绑定同一 stage 记录，成功不能绕过清理；记录缺失、目录替换或删除镜像漂移失败关闭并保留私有证据，不按通配符删除未知目录。
+敏感配置写入前必须持久绑定 native stage 的精确目录名和根身份。配置 stage 可见前，先将原 live config、已验证 cache、native 配置文件 inode/摘要和事务身份写入 durable intent。已有 intent 的重试直接续移同一文件，不重跑 native 或采纳新的 `last_updated`；未产生 intent 的尝试才先清理记录目录，再创建下一次。没有 intent/publication 证明的配置 stage 及任何已绑定身份漂移均保留并拒绝；既有 publication 恢复仍兼容。删除镜像在删除前持久化，部分删除按既有条件删除原语续作。publication 绑定同一 stage 记录，成功不能绕过清理；记录缺失、目录替换或删除镜像漂移失败关闭并保留私有证据，不按通配符删除未知目录。

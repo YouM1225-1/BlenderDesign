@@ -17,7 +17,7 @@
 - [资产验收规范 V5](acceptance/blender_mcp_skill_acceptance_optimized_v5.md)：当前 schema v2 规范；M0/M1 已实现，M2/M3 worker 已接线。
 - [MCP SDK v2 决策](decisions/2026-08-07-mcp-sdk-v2-selection.md)：自研 Phase 0 Server 的 SDK 选择依据和兼容边界。
 
-有限 M2 原生静态路径在锁定环境的完整门禁中 `19 passed`/0 failed/0 skipped；有限 M3 静态 GLB L0 在候选 `98b9140` 的真实三文件门禁中 `8 passed`/0 failed/0 skipped。两者是独立门禁，只证明各自声明范围；测试 reviewer 与交付夹具不构成业务批准，通用资产仍不能自动发布放行。
+有限 M2 原生静态路径在最终修复候选的完整门禁中 `21 passed`/0 failed/0 skipped；有限 M3 静态 GLB L0 在最终修复候选的真实三文件门禁中 `8 passed`/0 failed/0 skipped。修复候选身份和原始日志见 [closeout 修复报告](superpowers/sdd/2026-09-22-acceptance-upgrade-closeout/final-fix-report.md)。两者是独立门禁，只证明各自声明范围；测试 reviewer 与交付夹具不构成业务批准，通用资产仍不能自动发布放行。
 
 ## 设计与计划状态
 

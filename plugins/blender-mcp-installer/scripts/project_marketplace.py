@@ -612,7 +612,7 @@ def _unmanaged_config(raw: bytes) -> Any:
     return data
 
 
-def _cleanup_native_stage(recovery: Path) -> str | None:
+def _cleanup_native_stage(recovery: Path, *, validate_only: bool = False) -> str | None:
     record = recovery / "native-stage.json"
     if _lstat(record) is None:
         return None
@@ -636,6 +636,8 @@ def _cleanup_native_stage(recovery: Path) -> str | None:
             return name
         if (current.dev, current.ino, current.uid, current.mode) != (owned.dev, owned.ino, owned.uid, owned.mode):
             raise InstallerError("native stage identity changed")
+        if validate_only:
+            return name
         if stage["cleanup"] is None:
             # Native may mutate this owned directory; freeze its deletion image once.
             stage["cleanup"] = current.to_dict()
@@ -650,22 +652,23 @@ def _isolated_registration(
     """Native Codex may prune caches: only run plugin add in a private transaction."""
     identity = uuid_text(recovery.name.removeprefix("registration."))
     publication = recovery / "publication.json"
+    intent = recovery / "config-stage.json"
     plugin_id = f"{PLUGIN_NAME}@{MARKETPLACE_NAME}"
     cache = _plugin_cache(projection, codex_home)
     config_relative = Path("config.toml")
     stage_relative = Path(f".blender-mcp-installer.{identity}.registration.stage")
     backup_relative = Path(f".blender-mcp-installer.{identity}.registration.pre")
-    previous_native = _cleanup_native_stage(recovery)
     with SafeRoot.open(codex_home, os.getuid(), codex_home) as root:
         config = TargetRef(root, config_relative)
-        if publication.exists():
+        if publication.exists() or intent.exists():
             with SafeRoot.open(recovery, os.getuid(), recovery) as evidence:
-                pending, _ = read_proof(evidence, Path("publication.json"))
+                pending, _ = read_proof(evidence, Path("publication.json" if publication.exists() else "config-stage.json"))
             if pending["projection"] != str(projection):
                 raise InstallerError("registration publication identity mismatch")
-            if previous_native is None or pending.get("native_stage") != previous_native:
-                raise InstallerError("registration publication lacks native stage evidence")
         else:
+            _cleanup_native_stage(recovery)
+            if capture_file(root, stage_relative).state is not ImageState.ABSENT:
+                raise InstallerError("registration config stage lacks durable intent")
             pre = capture_file(root, config_relative)
             raw = b"" if pre.state is ImageState.ABSENT else read_owned_bytes(config)[0]
             native = Path(tempfile.mkdtemp(prefix="native-codex.", dir=recovery))
@@ -675,8 +678,7 @@ def _isolated_registration(
                     "schema_version": 1, "path": native.name,
                     "root": capture_tree(evidence, Path(native.name)).to_dict(), "cleanup": None,
                 })
-            if raw:
-                _atomic_write(native / "config.toml", raw)
+            _atomic_write(native / "config.toml", raw)
             current, _ = _marketplace_snapshot(native / "config.toml")
             if current.get("source") != str(projection):
                 if current["present"]:
@@ -689,10 +691,11 @@ def _isolated_registration(
                 "commit": projection.name, "projection": str(projection), "plugin_version": version,
             })
             with SafeRoot.open(native, os.getuid(), native) as stage_root:
-                post_raw, _ = read_owned_bytes(TargetRef(stage_root, Path("config.toml")))
+                post_raw, post = read_owned_bytes(TargetRef(stage_root, config_relative))
             parsed = tomllib.loads(post_raw.decode())
             if (
-                _unmanaged_config(raw) != _unmanaged_config(post_raw)
+                post.mode != 0o600
+                or _unmanaged_config(raw) != _unmanaged_config(post_raw)
                 or parsed.get("plugins", {}).get(plugin_id, {}).get("enabled") is not True
             ):
                 raise InstallerError("native registration changed non-target configuration")
@@ -716,20 +719,35 @@ def _isolated_registration(
                 while forward_tree(target_cache, TreeImage.absent(), cache_stage, cache_recovery, NoOpFaultInjector()) is not NativeState.COMPLETED:
                     pass
             _validate_plugin_cache(projection, codex_home)
-            prior_stage = capture_file(root, stage_relative)
-            if prior_stage.state is ImageState.PRESENT:
-                if read_owned_bytes(TargetRef(root, stage_relative))[0] != post_raw:
-                    raise InstallerError("registration config stage requires recovery")
-            else:
-                _atomic_write(codex_home / stage_relative, post_raw)
-            post = capture_file(root, stage_relative)
             pending = {
                 "schema_version": 1, "projection": str(projection), "pre": pre.to_dict(),
                 "post": post.to_dict(), "cache": capture_tree(root, cache.relative_to(codex_home)).to_dict(),
                 "complete": False, "native_stage": native.name,
             }
+            # Bind the existing native file before moving its inode into the public stage name.
+            _atomic_json(intent, pending)
+        if not publication.exists():
+            if _cleanup_native_stage(recovery, validate_only=True) != pending.get("native_stage"):
+                raise InstallerError("registration publication lacks native stage evidence")
+            if capture_file(root, config_relative) != FileImage.from_dict(pending["pre"]):
+                raise InstallerError("registration configuration changed before staging")
+            if capture_tree(root, cache.relative_to(codex_home)) != TreeImage.from_dict(pending["cache"]):
+                raise InstallerError("registration cache changed before staging")
+            with SafeRoot.open(recovery, os.getuid(), recovery) as evidence:
+                stage_record, _ = read_proof(evidence, Path("native-stage.json"))
+                if pending.get("native_stage") != stage_record.get("path"):
+                    raise InstallerError("registration publication lacks native stage evidence")
+                native_config = StagedFile(evidence, Path(stage_record["path"]) / "config.toml", FileImage.from_dict(pending["post"]))
+                target_stage = TargetRef(root, stage_relative)
+                unused_backup = TargetRef(root, Path(f".blender-mcp-installer.{identity}.stage.pre"))
+                while forward_file(target_stage, FileImage.absent(), native_config, unused_backup, NoOpFaultInjector()) is not NativeState.COMPLETED:
+                    pass
+            if capture_file(root, stage_relative) != FileImage.from_dict(pending["post"]):
+                raise InstallerError("registration config stage identity changed")
             _atomic_json(publication, pending)
-            _cleanup_native_stage(recovery)
+        previous_native = _cleanup_native_stage(recovery)
+        if previous_native is None or pending.get("native_stage") != previous_native:
+            raise InstallerError("registration publication lacks native stage evidence")
         if pending["schema_version"] != 1:
             raise InstallerError("unknown registration publication schema")
         expected_cache = TreeImage.from_dict(pending["cache"])

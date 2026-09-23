@@ -1,6 +1,6 @@
 # 资产验收整合设计：可信核心、原生闭环与 GLB 投影
 
-状态：整体设计已于 2026-09-08 获用户认可；schema v2 的 M0/M1 及有限 M2 Native/M3 GLB 路径已实施。当前 M2 独立完整门禁为 19 passed/0 failed/0 skipped；M3 只保留此前有限 L0 证据，新的三文件实际门禁待收尾 Task 5 执行。通用资产仍未获自动发布批准。本文整合源码审计、外部 V4 优化方案与同日 Blender 实测；与[安装升级清理设计](2026-09-08-installer-upgrade-cleanup-design.md)独立实施、独立验收。
+状态：整体设计已于 2026-09-08 获用户认可；schema v2 的 M0/M1 及有限 M2 Native/M3 GLB 路径已实施。最终修复候选上的 M2 独立完整门禁为 21 passed/0 failed/0 skipped，M3 三文件实际门禁为 8 passed/0 failed/0 skipped。通用资产仍未获自动发布批准。本文整合源码审计、外部 V4 优化方案与同日 Blender 实测；与[安装升级清理设计](2026-09-08-installer-upgrade-cleanup-design.md)独立实施、独立验收。
 
 ## 1. 决策、范围与成功标准
 
@@ -76,7 +76,7 @@ L0 先限已打包或无需 Blender 解析即可列明的依赖。依赖发现�
 | 文件计划 | 文件 ID、唯一 writer、固定相对路径、媒体/schema 类型、大小与解析上限、条件展开式 |
 | 资源与签收 | 作业时限、内存/文件/图像预算、目标消费者要求、审阅主体与必需签收项 |
 
-validator 配置、参考图、导出 preset 和其他影响裁决的外部文件均成为冻结内容引用，不能只绑定路径字符串。工具锁不能仅散列 Python/Node 二进制而忽略实际脚本或包；大型应用绑定经审核的分发身份、build 和受支持模块清单。
+validator 配置、参考图、导出 preset 和其他影响裁决的外部文件均成为冻结内容引用，不能只绑定路径字符串。工具锁不能仅散列 Python/Node 二进制而忽略实际脚本或包；大型应用绑定经审核的分发身份、build 和受支持模块清单。当前 GLB 能力由合同 `artifact_kind=interchange` 强制要求 macOS Blender 5.2 应用内 `io_scene_gltf2` 内容闭包；计划和 R0/R5 共同核验实际模块树全部普通非 `__pycache__` 文件的精确集合及长度/摘要，包括动态库和目录外字节码。成员缺失、全量遗漏、新增、链接、非普通节点或枚举错误均拒绝。`__pycache__` 中可再生字节码不属于源/分发锁，但其节点同样不得为链接或非普通文件；本边界仍是本机可信 L0，不宣称对抗同 UID 恶意篡改解释器缓存。
 
 provenance 最小显式闭包覆盖 `acceptance/`、CLI、实际共享依赖 [process_registry](../../../smoke/process_registry.py)、worker/比较器代码及锁定应用身份。完整 SHA-256 用于比较，短摘要仅展示。允许政策放宽的字段受部署方 policy baseline 约束；L0 缺 baseline 必须留痕，L1/L2 缺失则拒绝。失败后不得自动放宽阈值；政策改变必须生成新合同、新 run。
 
@@ -97,7 +97,7 @@ N/A 仅由计划对未调度的不适用检查合成，不带工具、运行 fin
 | NEEDS_REVIEW | 技术通过，合同所需审阅尚未完成 |
 | SHIP / SHIP_WITH_NOTES | 技术通过、所需审阅通过、T 完成且 D 复测一致；后者仅用于合同接受且留痕的 warning |
 
-技术失败与运行事故可同时保留在证据中；主 failure_code 沿用既有优先级。技术通过后业务审阅明确拒收也输出 REJECTED，原因属于审阅层，不改写技术 summary。评分不能抵消 required check；`summary.success=true` 本身不是交付许可。
+技术失败与运行事故可同时保留在证据中；主 failure_code 沿用既有优先级。`review.required` 仅决定缺席审阅是否等待；提供身份有效的审阅时，可选和必需审阅都采用实际结论。技术通过后业务审阅明确拒收也输出 REJECTED，原因属于审阅层，不改写技术 summary。评分不能抵消 required check；`summary.success=true` 本身不是交付许可。
 
 混合状态明确如下：没有基础设施事故时，实际 `Fail/Warning + NotTested` 保留技术 `success=false、failure_code=check_failed` 和实际失败 ID，但因检查不完整，上层为 UNVERIFIED；只有 NotTested 而没有实际检查失败时，技术码继续为 `runner_internal_error`。若已发现的坏数据使下游无法安全执行，记录 `blocked_by` 指向原失败，并以同一混合规则报告“已发现拒收理由，剩余检查未验证”，不能声称完整验收已执行。发生基础设施事故时主码仍按既有优先级选择。上层状态必须检查完整性，不能只从 failure_code 推导。
 

@@ -15,7 +15,7 @@
 - 测试资产和机器证据放在仓库外新目录；不覆盖用户源 `.blend`，不重启或强制退出用户 Blender/Codex。
 - 安装遵循安装技能的受信固定提交和私有工作树流程。真实安装、现场 live、模拟测试与发行门禁分开报告，不替代。
 - 每个提交前运行 `bash scripts/checks.sh`，结果必须包含 `ALL CHECKS PASSED`；最后源码/文档修改后 `graft build .`，交付前 `graft check .` 退出 0。
-- 用户已经授权最终提交到 main 并 push；不重复询问合并推送许可，不 force push。审计有问题就修复复审，不以技能轮数上限为由搁置已确认问题。
+- 本轮 final-fix 授权仅包括限定文件提交；不合并或推送 main。审计有问题就修复复审，不以技能轮数上限为由搁置已确认问题。
 - 每任务只派一个实现者，禁止实现者自行派子代理；独立审查由控制器安排。报告保存至本计划 SDD workspace。
 
 ## Task 1: 核验并收尾现有未提交改动
@@ -58,7 +58,7 @@ Task 4 当前进展（2026-09-23）：已从远端复核 `origin/main=5a3bb97`�
 
 对 main 合入前的全部功能 diff 进行最强模型全分支对抗性审计，重点检查证据伪造/缺失、判定绕过、资源/进程边界、清理归属及锁竞争、验证后内容漂移。审查实现和测试合同，不仅审阅报告。每项实际问题由实现者修复、覆盖测试、独立复审；全部已确认问题闭合才放行。更新结果与计划状态。
 
-Task 5 当前进展（2026-09-23）：候选 `98b9140` / 树 `d697753` 的 M3 三文件真实门禁已完成，8 通过、0 失败、0 跳过；运行前后代码、工具和 calibration 身份一致。M2 的 19/0/0 与安装器修订候选 D 的现场结果已按未变生产字节映射复用，没有重复昂贵原样检查。严格 RELEASE 仍仅因 upstream outdated 失败；正常 profile、LLM、第二台 Mac 和 legacy user-app handoff 限制不变。全分支独立审查已确认三项待修：publication 写入前 config stage 遇到 native `last_updated` 变化会使恢复连续冲突；明确 rejected 的 optional review 仍可能 SHIP；GLB 合同可删去 `io_scene_gltf2` 模块锁闭包仍通过 R0。当前 M3 8 项结果仍是完整锁定 126 个成员的真实有限 fixture 证据，不替代三项生产修复与复审。普通完整门禁为 1150 passed / 27 个常规 integration skips，distribution 为 1034 passed，末行 `ALL CHECKS PASSED`；最终 graft 必须在本段落修改后通过。当前未获 main 合入放行，也未执行 Task 6 的合并或 push。
+Task 5 final-fix（2026-09-23）：修复 I1 durable config-stage 重试、I2 optional explicit rejection 和 I3 Blender 5.2 glTF 内容闭包。Focused 109 项通过；最终真实 Native 完整门禁 21 passed/0 failed/0 skipped，覆盖 Native review 与 exact-D delivery、optional approved/rejected 恢复；最终真实 M3 三文件门禁 8 passed/0 failed/0 skipped，实际锁定真实应用闭包，结果详见 [final-fix 报告](../sdd/2026-09-22-acceptance-upgrade-closeout/final-fix-report.md)。普通完整门禁为 1173 passed / 29 个常规 integration skips，distribution 为 1046 passed，末行 `ALL CHECKS PASSED`。实际 Codex 新 stage 窗口重试、隔离自有 profile version-only install/verify/finalize、固定候选身份核验和最终 graft 仍须完成；独立全分支复审由 controller 负责。严格 RELEASE 不在本任务重跑，沿用 upstream outdated 的未通过状态；normal profile、LLM、第二台 Mac、legacy user-app handoff 限制不变。Task 6 合并/push 不在本授权范围。
 
 ## Task 6: 提交合并到 main 并推送
 

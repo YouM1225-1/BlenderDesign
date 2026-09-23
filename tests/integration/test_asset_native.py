@@ -521,3 +521,45 @@ def test_uncalibrated_platform_remains_unverified(tmp_path: Path, calibration: P
     for gate_id in ("native.cross_process", "native.reference"):
         assert summary["gates"][gate_id]["complete"] is False
         assert "unknown_platform" in finding_codes(summary["gates"][gate_id])
+
+
+@pytest.mark.parametrize("outcome", ["approved", "rejected"])
+def test_optional_review_after_durable_summary_uses_actual_verdict(
+    tmp_path: Path, calibration: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    from acceptance import evidence as module
+    from acceptance.native_run import run_native
+    case = prepare_native_case(BLENDER, tmp_path, "good", calibration_root=calibration)
+    case.document["review"]["required"] = False
+    write_case(case)
+    original = module._write
+
+    def stop(path, value):
+        result = original(path, value)
+        if path.name == "summary.json":
+            raise RuntimeError("durable native summary exit")
+        return result
+
+    case.evidence_root.mkdir(mode=0o700)
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_write", stop)
+        with pytest.raises(RuntimeError, match="durable native summary exit"):
+            run_native(case.contract_path, case.source_root, case.evidence_root, case.scratch_root)
+    before = (case.evidence_root / "summary.json").read_bytes()
+    summary = json.loads(before)
+    assert_complete_native_summary(case, summary)
+    bindings = {key: summary[key] for key in ("C", "S", "E")}
+    bindings.update(D=summary["D"]["sha256"], V=hashlib.sha256(before).hexdigest())
+    review = fixture_review(case, {"bindings": bindings})
+    review["records"][0]["outcome"] = outcome
+    result = module.finish_review(case.evidence_root, delivery_path=case.source_root / "asset.blend", review=review)
+    assert result["state"] == ("SHIP" if outcome == "approved" else "REJECTED")
+    assert (case.evidence_root / "summary.json").read_bytes() == before
+    target = case.root / "delivered.blend"
+    if outcome == "rejected":
+        with pytest.raises(AcceptanceFailure):
+            module.deliver(case.evidence_root, delivery_path=case.source_root / "asset.blend", destination=target)
+        assert not target.exists()
+    else:
+        module.deliver(case.evidence_root, delivery_path=case.source_root / "asset.blend", destination=target)
+        assert target.read_bytes() == (case.source_root / "asset.blend").read_bytes()

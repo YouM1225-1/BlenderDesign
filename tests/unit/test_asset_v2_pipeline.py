@@ -1,3 +1,4 @@
+from pathlib import Path
 from collections import defaultdict
 import datetime
 import hashlib
@@ -18,12 +19,17 @@ def mock_run(
     tmp_path,
     *,
     require_review=False,
+    optional_review=False,
+    gltf=False,
     invalid_geometry=False,
     artifact=False,
     forge=None,
     executable=None,
 ):
     document = valid_document(tmp_path)
+    if gltf:
+        from tests.unit.interchange_support import lock_gltf_fixture
+        lock_gltf_fixture(tmp_path, document["tools"][2])
     if executable is not None:
         document["tools"][0]["path"] = str(executable)
     worker = tmp_path / "fixture_worker.py"
@@ -50,9 +56,9 @@ def mock_run(
         "    p.write_text(json.dumps(result))\n"
     )
     document["tools"][0]["files"].append(file_lock(worker))
-    if require_review:
+    if require_review or optional_review:
         document["review"] = {
-            "required": True,
+            "required": require_review,
             "reviewer_ids": ["fixture-reviewer"],
             "required_image_ids": [],
             "reason": "test harness authorization only",
@@ -654,3 +660,65 @@ def test_contract_disk_drift_after_load_prevents_ship_and_delivery(tmp_path, cha
     with pytest.raises(AcceptanceFailure):
         deliver(evidence, delivery_path=source.path, destination=destination)
     assert not destination.exists() and not (evidence / "delivery-receipt.json").exists()
+
+
+@pytest.mark.parametrize("outcome", ["approved", "rejected"])
+def test_optional_review_recovery_honors_explicit_verdict(tmp_path, monkeypatch, outcome):
+    from acceptance import evidence as module
+    setup = mock_run(tmp_path, optional_review=True)
+    original = module._write
+
+    def stop_after_summary(path, value):
+        result = original(path, value)
+        if path.name == "summary.json":
+            raise RuntimeError("durable V interruption")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_write", stop_after_summary)
+        with pytest.raises(RuntimeError, match="durable V"):
+            seal_fixture(tmp_path, setup)
+    root = setup[3]
+    before = (root / "summary.json").read_bytes()
+    summary = json.loads(before)
+    bindings = {key: summary[key] for key in ("C", "S", "E")}
+    bindings.update(D=summary["D"]["sha256"], V=hashlib.sha256(before).hexdigest())
+    review = {
+        "schema_version": 2, "bindings": bindings,
+        "records": [{"reviewer_id": "fixture-reviewer", "outcome": outcome,
+                     "reviewed_images": [], "reviewed_at": "2026-09-23T00:00:00+00:00",
+                     "note": "optional fixture decision"}],
+    }
+    result = finish_review(root, delivery_path=setup[2].path, review=review)
+    assert result["state"] == ("SHIP" if outcome == "approved" else "REJECTED")
+    assert summary["success"] is True and (root / "summary.json").read_bytes() == before
+    target = tmp_path / "delivered.blend"
+    if outcome == "rejected":
+        with pytest.raises(AcceptanceFailure):
+            deliver(root, delivery_path=setup[2].path, destination=target)
+        assert not target.exists()
+    else:
+        deliver(root, delivery_path=setup[2].path, destination=target)
+        assert target.read_bytes() == setup[2].path.read_bytes()
+
+
+def test_optional_named_reviewer_absent_can_ship(tmp_path):
+    setup = mock_run(tmp_path, optional_review=True)
+    assert seal_fixture(tmp_path, setup)["state"] == "SHIP"
+
+
+@pytest.mark.parametrize("mutation", ["new", "removed", "changed"])
+def test_r5_rejects_gltf_module_drift_after_r0(tmp_path, mutation):
+    setup = mock_run(tmp_path, gltf=True)
+    tool = next(tool for tool in setup[0].raw["tools"] if tool["id"] == "blender")
+    root = Path(tool["path"]).parents[1] / "Resources/5.2/scripts/addons_core/io_scene_gltf2"
+    if mutation == "new":
+        (root / "new.py").write_text("new execution member")
+    elif mutation == "removed":
+        (root / "importer.py").unlink()
+    else:
+        (root / "importer.py").write_text("content changed")
+    assert not setup[4].infra_failures
+    assert seal_fixture(tmp_path, setup)["state"] == "UNVERIFIED"
+    summary = json.loads((setup[3] / "summary.json").read_text())
+    assert summary["success"] is False and summary["failure_code"] == "toolchain_mismatch"

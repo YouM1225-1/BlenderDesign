@@ -97,3 +97,20 @@ def make_budget_fixture(path, nodes):
     path.write_bytes(
         struct.pack("<4sIIII", b"glTF", 2, 20 + len(raw), len(raw), 0x4E4F534A) + raw
     )
+
+
+def lock_gltf_fixture(tmp_path, tool):
+    from tests.unit.asset_v2_support import REPO, file_lock
+    executable = tmp_path / "Blender.app/Contents/MacOS/Blender"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(Path(tool["path"]).read_bytes())
+    executable.chmod(0o700)
+    root = executable.parents[1] / "Resources/5.2/scripts/addons_core/io_scene_gltf2"
+    root.mkdir(parents=True)
+    for name in ("__init__.py", "importer.py", "libdraco.dylib"):
+        (root / name).write_bytes(b"fixture module bytes")
+    tool["path"] = str(executable)
+    tool["sha256"] = file_lock(executable)["sha256"]
+    tool["files"] += [file_lock(p) for p in sorted(root.iterdir())]
+    tool["files"].append(file_lock(REPO / "acceptance/blender_scripts/glb_worker.py"))
+    return root

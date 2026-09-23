@@ -3,6 +3,7 @@ from typing import Any
 
 from acceptance.contract import thaw
 from acceptance.primitives import AcceptanceFailure
+from acceptance.toolchain import verify_blender_gltf
 from acceptance.interchange_policy import validate_interchange_policy
 from acceptance.native_plan import NATIVE_GATES, UNSAFE_R2, native_commands, native_jobs
 from acceptance.native_policy import PASSES, VIEWS
@@ -38,6 +39,10 @@ def build_interchange_plan(contract: Any) -> Any:
         raise AcceptanceFailure(
             "toolchain_mismatch", "validator package members absent from Node lock"
         )
+    blender = next((thaw(tool) for tool in contract.raw["tools"] if tool["id"] == "blender"), None)
+    if blender is None:
+        raise AcceptanceFailure("toolchain_mismatch", "missing Blender glTF tool")
+    verify_blender_gltf(blender)
     native = thaw(contract.raw["native"])
 
     def output(fid: Any, writer: Any, extension: Any = "json") -> Any:

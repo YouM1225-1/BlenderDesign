@@ -44,7 +44,7 @@ def execute(tmp_path, value, *, evidence="evidence", input_root=None):
     )
 
 
-@pytest.mark.parametrize(("kind", "not_tested"), [("blend_native", 15), ("interchange", 25)])
+@pytest.mark.parametrize(("kind", "not_tested"), [("blend_native", 15), ("interchange", 31)])
 def test_production_m1_cli_does_not_publish_mock_success(tmp_path, kind, not_tested):
     completed = execute(tmp_path, valid_document(tmp_path, kind))
     assert completed.returncode == 1

@@ -341,9 +341,13 @@ only this target profile's mode-0600 config snapshot, never login/session files 
 inherited credentials. The snapshot may contain sensitive configuration; it is not
 logged, and successful publication removes temporary config copies. Failed stages
 remain private for explicit diagnosis/recovery. Before writing a config snapshot, the
-transaction records the exact native stage directory and root identity. Retries
-clean the recorded prior attempt before creating another, using a persisted
-deletion image to resume partial cleanup. Successful publication also requires
+transaction records the exact native stage directory and root identity. Before a
+config stage becomes visible, durable intent binds the original live config, the
+verified cache, the native file inode/hash, and this transaction. A retry with
+intent resumes the conditional move of that same file without rerunning native
+Codex, so changing native timestamps cannot replace the pending config. Before
+intent exists, retries clean the recorded prior attempt before creating another,
+using a persisted deletion image to resume partial cleanup. Successful publication also requires
 this cleanup; missing or conflicting evidence fails closed, and unknown native
 directories are never selected by a wildcard.
 
@@ -352,7 +356,9 @@ or inodes. Only then is the config conditionally published, preserving every
 non-target TOML value (including other fields in the target plugin table). Conflicts
 retain evidence and do not overwrite external changes. A crash between cache and
 config publication can reuse the exact new cache; a recorded config swap resumes
-through the existing conditional file primitives. Old busy caches remain pending
+through the existing conditional file primitives. A stage without verifiable intent
+or publication evidence is preserved and rejected, as are stage, config, or cache
+identity conflicts. Existing publication records remain recoverable. Old busy caches remain pending
 until their entry leases are released and a later finalize revalidates them.
 <!-- PERSISTENT_MARKETPLACE_BEGIN -->
 ```bash

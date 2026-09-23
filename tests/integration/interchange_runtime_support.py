@@ -3,6 +3,7 @@ from pathlib import Path
 
 from acceptance import check_registry as reg
 from acceptance.interchange_plan import interchange_commands
+from acceptance.toolchain import blender_gltf_files
 from tests.integration.asset_runtime_support import (
     REPO,
     prepare_native_case,
@@ -50,15 +51,12 @@ def prepare_interchange_case(
             ],
         }
     )
-    gltf_root = blender.resolve().parents[1] / "Resources/5.2/scripts/addons_core/io_scene_gltf2"
-    if not (gltf_root / "__init__.py").is_file():
-        raise ValueError("locked Blender glTF module not found")
     for tool in doc["tools"]:
         if tool["id"] == "blender":
             tool["files"] += [
                 file_lock(REPO / "acceptance/blender_scripts" / name)
                 for name in ("glb_worker.py", "projection_capture.py")
-            ] + [file_lock(path) for path in sorted(gltf_root.rglob("*.py"))]
+            ] + [file_lock(path) for path in blender_gltf_files(blender)]
         if tool["id"] == "python":
             tool["files"] += [
                 file_lock(REPO / "acceptance" / name)

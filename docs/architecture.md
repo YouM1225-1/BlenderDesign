@@ -47,7 +47,7 @@ flowchart LR
 [model.py](../plugins/blender-mcp-installer/scripts/blender_mcp_installer/model.py) 定义 receipt 状态
 `prepared`、`installed`、`rollback_pending`、`rolled_back`，并记录每步 action 的进展。
 安装器结合 active/pending selector、升级 journal、device/inode 使用锁与恢复副本处理事务中断。
-Codex native 注册在私有事务 profile 中执行，验证新 cache 和非目标 TOML 语义后按 cache→config 条件发布。敏感配置快照在写入前绑定受管 stage 身份，恢复仅续删已记录的目录；旧 runtime、扩展恢复副本和插件 cache 只在新版本现场验证成功并重验归属后删除。当前现场证据、严格 RELEASE 与正常用户 profile 限制见 [验证说明](validation.md#2026-09-23-安装升级当前现场结果)。
+Codex native 注册在私有事务 profile 中执行，验证新 cache 和非目标 TOML 语义后按 cache→config 条件发布。敏感配置快照在写入前绑定受管 stage 身份，配置 stage 可见前另行持久记录 live pre、native post inode/摘要与 cache 的 intent，恢复同一文件而不重跑 native；没有 intent/publication 的 stage 和身份漂移均保留并拒绝。恢复仅续删已记录的目录；旧 runtime、扩展恢复副本和插件 cache 只在新版本现场验证成功并重验归属后删除。当前现场证据、严格 RELEASE 与正常用户 profile 限制见 [验证说明](validation.md#2026-09-23-安装升级当前现场结果)。
 
 真实变更前检查选定 Blender 已退出且目标端口空闲。宿主探测及偏好处理可以使用受控后台进程；
 交互式 Blender 由用户正常启动，项目 `.blend` 不属于安装器修改目标。
@@ -130,9 +130,9 @@ Bridge 对请求另设更小的载荷限制。[envelope.py](../protocol/envelope
 |---|---|---|
 | M0/M1 | 封闭合同、冻结输入、工具身份、worker 协议、进程资源、唯一判定与 E/V/Q/T | 有限支持的可信核心，不是通用发布批准 |
 | M2 Native | 原生检查、重开、参考视觉与有效线框已接线 | 锁定环境的完整门禁为 19 passed/0 failed/0 skipped；范围外能力与业务签收仍未验证 |
-| M3 GLB | Validator、逐实例预算、有限表面投影、重开/回导和视觉 worker 已接线 | 候选 `98b9140` 的真实三文件门禁为 8 passed/0 failed/0 skipped；与 M2 独立，范围外能力与业务签收仍未验证 |
+| M3 GLB | Validator、逐实例预算、有限表面投影、重开/回导和视觉 worker 已接线；interchange 工具身份在计划、R0、R5 核验 Blender 5.2 glTF 模块闭包 | 最终修复候选的真实三文件门禁为 8 passed/0 failed/0 skipped；与 M2 独立，范围外能力与业务签收仍未验证 |
 
-每个运行都重验合同、冻结输入、工具与交付字节。测试 reviewer 只验证流程，不代替真实业务签收；未知平台、范围外资产或缺失证据保持失败关闭。
+每个运行都重验合同、冻结输入、工具与交付字节。GLB 计划及 R0/R5 强制核验受支持 Blender glTF 模块树非缓存文件的精确锁定闭包；可选或必需审阅的明确拒收均阻止交付且不改写技术 V。测试 reviewer 只验证流程，不代替真实业务签收；未知平台、范围外资产或缺失证据保持失败关闭。
 
 ## 模块与分发边界
 

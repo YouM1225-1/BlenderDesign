@@ -157,7 +157,7 @@ RUN_ASSET_NATIVE=1 .venv/bin/python -m pytest \
   --basetemp "$NATIVE_E2E/pytest" > "$NATIVE_E2E/pytest.log" 2>&1
 ```
 
-2026-09-23 在代码基线 `117b133`、CPython 3.13.13、Blender 5.2.0 LTS / `fbe6228777e7` 上完成 `19 passed in 1018.12s`，0 失败、0 跳过。每个完整正例验证 24 个现有适用检查、三个固定原生 gates、135 原图、99 比较/差异图、exact-byte fresh reopen 与 E/V；未签收只报告 NEEDS_REVIEW。签收交付用例另行验证 Q/T/D 和真实交付回执。测试 reviewer 仅验证流程，不能代替真实业务签收。
+2026-09-23 在基线 `117b133` 的历史运行完成 `19 passed in 1018.12s`。最终修复候选又以 CPython 3.13.13、Blender 5.2.0 LTS / `fbe6228777e7` 完成全文件 `21 passed in 1080.41s`，0 失败、0 跳过。最终运行覆盖完整的好/坏资产、支持能力正例、审阅准确 D、错误图像拒签以及 durable summary 后 optional review 的 approved/rejected 恢复；日志与临时 evidence 位于 `/private/tmp/blenderdesign-finalfix-native-final2.log` 和 `/private/tmp/blenderdesign-finalfix-native-final2`。每个完整正例验证 24 个现有适用检查、三个固定原生 gates、135 原图、99 比较/差异图、exact-byte fresh reopen 与 E/V；未签收只报告 NEEDS_REVIEW。测试 reviewer 仅验证流程，不能代替真实业务签收。
 
 本门禁只证明当前工具下声明的有限原生静态支持范围。未支持实例/曲线/动画与未知平台仍为 UNVERIFIED，不代表 Phase 0、RELEASE、安装或 live 验收。历史 6 项失败本次未复现，旧证据缺失使其根因不可追溯；[执行记录](superpowers/plans/2026-09-08-asset-acceptance-native.md#当前执行结果2026-09-23) 保存本次完整命令与外部证据位置。
 
@@ -176,7 +176,7 @@ ASSET_CALIBRATION_ROOT="$ASSET_CALIBRATION_ROOT" \
   tests/integration/test_gltf_validator.py -q
 ```
 
-2026-09-23 在提交 `98b91403d30ee3e2023831720619cbea6bd558fa`、树 `d697753f522f18cc25fd55b0f674ed76a68992e0` 上使用 CPython 3.13.13、Blender 5.2.0 LTS / `fbe6228777e7`、Node v20.20.2 和 `gltf-validator@2.0.0-dev.3.10` 执行上述三文件门禁：`8 passed in 263.29s`，0 失败、0 跳过。运行前后 42 个 calibration 输入、Blender、Node、validator 包及 332 个 calibration 文件身份一致；完整日志、身份清单与 pytest basetemp 位于 `/private/tmp/blenderdesign-closeout-20260922-27x0hxjj/task5-m3.rCWtQP`。
+2026-09-23 最终修复候选使用 CPython 3.13.13、Blender 5.2.0 LTS / `fbe6228777e7`、Node v20.20.2 和 `gltf-validator@2.0.0-dev.3.10` 执行上述三文件门禁：`8 passed in 306.80s`，0 失败、0 跳过。测试从最终代码新建 calibration；完整日志和 basetemp 位于 `/private/tmp/blenderdesign-finalfix-m3-final.log` 与 `/private/tmp/blenderdesign-finalfix-m3-final`。先前绑定 `98b9140` 的 M3 记录独立保留，不能冒充最终修复候选的运行结果。修复候选身份和详细门禁链见 [closeout 修复报告](superpowers/sdd/2026-09-22-acceptance-upgrade-closeout/final-fix-report.md)。
 
 完整正例的 34 个适用 check 和五个技术 gate 全部通过，三个合同 N/A 保持 N/A，409 个 manifest 文件无 missing/unknown/unproduced；真实 12 个作业均记录正 PID 并退出 0。受控 fixture reviewer 产生 Q/T，交付 4,952 字节 D 至新目标并生成 receipt，交付前后 D 摘要一致。缺消费者与缺底面分别保持 UNVERIFIED/REJECTED；同一运行还覆盖实际投影差异、Validator 缺资源、报告截断、资源记录篡改和内容重验。测试签收不构成用户作品的业务批准。
 
