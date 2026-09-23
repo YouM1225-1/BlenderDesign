@@ -2144,3 +2144,18 @@ def test_superseded_journal_is_retired_by_the_finalize_that_completes_cleanup(pr
     retired = load_record(state, roots, superseded["id"])
     assert retired["status"] == "complete"
     assert retired["candidates"][0]["reason"] == "verified absent"
+
+
+def test_oversized_cleanup_intent_fails_before_the_deletion_boundary(prepared, monkeypatch):
+    import blender_mcp_installer.filesystem as filesystem
+
+    roots, state, doc, row, old = prepared
+    journal = state.path / "upgrades" / (doc["id"] + ".json")
+    monkeypatch.setattr(filesystem, "STATE_JSON_LIMIT", journal.stat().st_size + 1)
+
+    with pytest.raises(ValueError, match="state JSON is too large"):
+        _finalize_row(state, roots, doc, row)
+
+    monkeypatch.undo()
+    assert load_record(state, roots, doc["id"]) == doc
+    assert old.exists()

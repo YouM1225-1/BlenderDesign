@@ -3066,3 +3066,48 @@ def test_receipt_action_keeps_semantic_restore_images_closed() -> None:
         ReceiptAction.from_dict({**restoring, "recovery_image": post.to_dict()})
     with pytest.raises(ValueError):
         ReceiptAction.from_dict({**restored, "recovery_image": pre.to_dict()})
+
+
+def test_atomic_json_round_trips_state_above_sixteen_mib(tmp_path: Path) -> None:
+    from blender_mcp_installer.filesystem import load_atomic_json_pair
+
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    payload = {"blob": "x" * (17 * 1024 * 1024)}
+    with _safe(owned) as root:
+        ref = TargetRef(root, PurePath("journal.json"))
+        write_atomic_json(
+            ref, FileImage.absent(), payload, INSTALL_ID, fault=NoOpFaultInjector()
+        )
+        assert load_atomic_json_pair(ref, INSTALL_ID) == (payload, None)
+
+
+def test_state_json_bound_matches_every_installer_reader() -> None:
+    from blender_mcp_installer.filesystem import STATE_JSON_LIMIT
+
+    gate = Path(__file__).parents[2] / (
+        "plugins/blender-mcp-installer/scripts/blender_mcp_installer/runtime.py"
+    )
+    assert f"info.st_size > {STATE_JSON_LIMIT}:" in gate.read_text()
+
+
+def test_atomic_json_refuses_oversized_state_before_any_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import blender_mcp_installer.filesystem as filesystem
+
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    target = owned / "journal.json"
+    target.write_text('{"value":"old"}\n')
+    target.chmod(0o600)
+    monkeypatch.setattr(filesystem, "STATE_JSON_LIMIT", 1024)
+    with _safe(owned) as root:
+        ref = TargetRef(root, PurePath("journal.json"))
+        before = capture_file(root, ref.relative)
+        with pytest.raises(ValueError, match="state JSON is too large"):
+            write_atomic_json(
+                ref, before, {"value": "x" * 2048}, INSTALL_ID, fault=NoOpFaultInjector()
+            )
+        assert capture_file(root, ref.relative) == before
+    assert sorted(path.name for path in owned.iterdir()) == ["journal.json"]

@@ -30,6 +30,9 @@ from .model import (
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
+# Writers enforce the reader bound so no state document is published unreadable;
+# it matches the runtime launcher gate's receipt bound.
+STATE_JSON_LIMIT = 32 * 1024 * 1024
 RENAME_SWAP = 0x00000002
 RENAME_EXCL = 0x00000004
 
@@ -1511,6 +1514,8 @@ def write_atomic_json(
     raw = (
         json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode() + b"\n"
     )
+    if len(raw) > STATE_JSON_LIMIT:
+        raise ValueError("state JSON is too large")
     parent_fd, target_name = path.root.open_parent(path.relative)
     temp_name = f".blender-mcp-installer.{install_id}.{target_name}.tmp"
     try:
@@ -1673,10 +1678,10 @@ def _read_private_json(root: SafeRoot, relative: PurePath) -> object | None:
             if _file_image(opened, _hash_fd(fd)) != image:
                 raise ValueError("state JSON changed while reading")
             os.lseek(fd, 0, os.SEEK_SET)
-            raw = b""
+            buffer = bytearray()
             while chunk := os.read(fd, 1024 * 1024):
-                raw += chunk
-                if len(raw) > 16 * 1024 * 1024:
+                buffer += chunk
+                if len(buffer) > STATE_JSON_LIMIT:
                     raise ValueError("state JSON is too large")
             after = os.fstat(fd)
             linked = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
@@ -1690,7 +1695,7 @@ def _read_private_json(root: SafeRoot, relative: PurePath) -> object | None:
         os.close(parent_fd)
     try:
         return json.loads(
-            raw.decode("utf-8"),
+            buffer.decode("utf-8"),
             object_pairs_hook=_json_object,
             parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
         )

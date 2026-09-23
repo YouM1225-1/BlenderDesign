@@ -9,6 +9,7 @@ from pathlib import Path, PurePath
 from typing import Any
 
 from blender_mcp_installer.filesystem import (
+    STATE_JSON_LIMIT,
     InstallerError,
     SafeRoot,
     TargetRef,
@@ -25,13 +26,13 @@ PLUGIN_ID = PLUGIN + "@" + MARKETPLACE
 
 def read_owned_bytes(reference: TargetRef) -> tuple[bytes, FileImage]:
     before = capture_file(reference.root, reference.relative)
-    if before.state is not ImageState.PRESENT or before.size > 32 * 1024 * 1024:
+    if before.state is not ImageState.PRESENT or before.size > STATE_JSON_LIMIT:
         raise InstallerError("missing or oversized identity file")
     parent_fd, name = reference.root.open_parent(reference.relative)
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
         with os.fdopen(fd, "rb") as stream:
-            raw = stream.read(32 * 1024 * 1024 + 1)
+            raw = stream.read(STATE_JSON_LIMIT + 1)
     finally:
         os.close(parent_fd)
     if (
