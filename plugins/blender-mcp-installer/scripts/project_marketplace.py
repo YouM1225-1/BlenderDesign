@@ -661,11 +661,23 @@ def _transfer_config_stage(
             try:
                 fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
                 try:
-                    os.fchmod(fd, 0o600)
-                    view = memoryview(raw)
-                    while view:
-                        view = view[os.write(fd, view):]
-                    os.fsync(fd)
+                    created = os.fstat(fd)
+                    try:
+                        os.fchmod(fd, 0o600)
+                        view = memoryview(raw)
+                        while view:
+                            view = view[os.write(fd, view):]
+                        os.fsync(fd)
+                    except BaseException:
+                        # Only this exclusive, still-open inode is ours to drop; never leave a partial snapshot.
+                        try:
+                            linked = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                            if (linked.st_dev, linked.st_ino) == (created.st_dev, created.st_ino):
+                                os.unlink(name, dir_fd=parent_fd)
+                                os.fsync(parent_fd)
+                        except OSError:
+                            pass
+                        raise
                 finally:
                     os.close(fd)
                 os.fsync(parent_fd)
@@ -676,7 +688,7 @@ def _transfer_config_stage(
         if (current.state, current.uid, current.mode, current.size, current.sha256) != (
             expected.state, expected.uid, expected.mode, expected.size, expected.sha256,
         ):
-            raise InstallerError("registration config transfer requires recovery")
+            raise InstallerError(f"registration config transfer requires recovery: {TargetRef(root, relative).path}")
         pending["transfer"] = current.to_dict()
         _atomic_json(intent, pending)
     return StagedFile(root, relative, FileImage.from_dict(pending["transfer"]))

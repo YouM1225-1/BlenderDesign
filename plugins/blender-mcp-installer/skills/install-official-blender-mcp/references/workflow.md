@@ -349,8 +349,11 @@ Codex, so changing native timestamps cannot replace the pending config. When
 CODEX_HOME is on another volume the move is refused with EXDEV and nothing moves; the
 transaction then exclusively writes a mode-0600 `.registration.transfer` copy in
 CODEX_HOME, requires its bytes to match the bound native file, appends its identity
-to the intent, and only then moves it to the stage on the same volume. An unbound
-or mismatched transfer, or later drift, is preserved and rejected. Before
+to the intent, and only then moves it to the stage on the same volume. A failed
+write removes only the copy it exclusively created. A transfer without intent, one
+whose bytes, mode, or owner differ from the bound native file (for example after an
+interrupted write), or later drift is preserved and rejected; the error names the
+transfer path for explicit operator recovery. Before
 intent exists, retries clean the recorded prior attempt before creating another,
 using a persisted deletion image to resume partial cleanup. Successful publication also requires
 this cleanup; missing or conflicting evidence fails closed, and unknown native

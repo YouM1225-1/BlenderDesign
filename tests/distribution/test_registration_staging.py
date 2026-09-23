@@ -544,3 +544,79 @@ def test_unknown_config_transfer_is_preserved_without_durable_intent(registratio
         marketplace._register(*args, recovery_id=identity)
     assert transfer.read_bytes() == b"unknown ownership"
     assert config.read_bytes() == before and old.exists()
+
+
+def test_non_exdev_stage_rename_failure_is_not_converted_to_transfer(registration, monkeypatch):
+    import errno
+    from blender_mcp_installer import filesystem
+
+    args, identity, config, old, roots = registration
+    initial = config.read_bytes()
+    rename = filesystem._rename_atomic
+
+    def refuse(source_fd, source, target_fd, target, *, swap):
+        if target.endswith(".registration.stage"):
+            raise OSError(errno.EPERM, os.strerror(errno.EPERM), target)
+        return rename(source_fd, source, target_fd, target, swap=swap)
+
+    monkeypatch.setattr(filesystem, "_rename_atomic", refuse)
+    with pytest.raises(InstallerError, match="native rename failed"):
+        marketplace._register(*args, recovery_id=identity)
+    recovery = args[1] / ("registration." + identity)
+    assert "transfer" not in json.loads((recovery / "config-stage.json").read_text())
+    assert not list(roots.codex_home.glob(".blender-mcp-installer.*.registration.*"))
+    assert config.read_bytes() == initial and old.exists()
+
+
+def test_failed_transfer_write_removes_only_its_partial_copy(registration, separate_codex_volume, monkeypatch):
+    import errno
+
+    args, identity, config, old, roots = registration
+    initial = config.read_bytes()
+    transfer = roots.codex_home / f".blender-mcp-installer.{identity}.registration.transfer"
+    write, failed = os.write, []
+
+    def short_then_full(fd, data):
+        if not failed and transfer.exists() and os.fstat(fd).st_ino == transfer.stat().st_ino:
+            failed.append(write(fd, bytes(data[:10])))
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        return write(fd, data)
+
+    monkeypatch.setattr(marketplace.os, "write", short_then_full)
+    with pytest.raises(OSError, match="No space left"):
+        marketplace._register(*args, recovery_id=identity)
+    assert failed == [10] and not transfer.exists()
+    assert config.read_bytes() == initial and old.exists()
+    recovery = marketplace._register(*args, recovery_id=identity)
+    assert tomllib.loads(config.read_text())["plugins"]["blender-mcp-installer@official-blender-mcp"]["enabled"]
+    assert _cross_volume_leftovers(recovery, roots.codex_home) == []
+
+
+@pytest.mark.parametrize("drift", ["external_config", "cache"])
+def test_bound_transfer_rejects_later_config_or_cache_drift(registration, separate_codex_volume, monkeypatch, drift):
+    args, identity, config, old, roots = registration
+    initial = config.read_bytes()
+    original_json = marketplace._atomic_json
+    fired = False
+
+    def json_write(path, value):
+        nonlocal fired
+        original_json(path, value)
+        if not fired and path.name == "config-stage.json" and value.get("transfer") is not None:
+            fired = True
+            raise RuntimeError("bound transfer exit")
+
+    monkeypatch.setattr(marketplace, "_atomic_json", json_write)
+    with pytest.raises(RuntimeError, match="bound transfer exit"):
+        marketplace._register(*args, recovery_id=identity)
+    transfer = roots.codex_home / f".blender-mcp-installer.{identity}.registration.transfer"
+    retained = transfer.read_bytes()
+    if drift == "external_config":
+        config.write_bytes(initial + b"# external edit\n")
+    else:
+        (roots.caches / "2.0.0/payload.py").write_text("drift\n")
+    config_before = config.read_bytes()
+    with pytest.raises(InstallerError, match="changed before staging"):
+        marketplace._register(*args, recovery_id=identity)
+    assert transfer.read_bytes() == retained and config.read_bytes() == config_before
+    assert not (roots.codex_home / f".blender-mcp-installer.{identity}.registration.stage").exists()
