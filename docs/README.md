@@ -26,7 +26,7 @@
 | [安装升级与旧版本自动清理](superpowers/specs/2026-09-08-installer-upgrade-cleanup-design.md) | 已实施 journal、使用锁、私有注册 staging、条件发布、验证后清理与崩溃恢复 |
 | [资产验收整合设计](superpowers/specs/2026-09-08-asset-acceptance-integration-design.md) | 已实施 schema v2 可信核心（M0/M1）、有限静态 M2 原生与 M3 GLB L0；新类型、动画、L1/L2 或更多消费者按其准入规则另行设计与验收；未获通用业务批准 |
 
-安装器的隔离 A→B→C 与修订 C→D 现场验证已覆盖真实 Codex 注册、26 个 MCP 工具、Blender 只读调用、busy/no-op、finalize 及敏感快照恢复。固定分发完整性与三份依赖审计通过；严格 `RELEASE=1` 因上游 outdated 退出 1，正常用户 profile 仍未精确匹配，LLM/第二台 Mac/legacy 交接为 `NOT_RUN`。详见 [验证说明](validation.md#2026-09-23-安装升级当前现场结果)。
+安装器的隔离 A→B→C 与修订 C→D 现场验证已覆盖真实 Codex 注册、26 个 MCP 工具、Blender 只读调用、busy/no-op、finalize 及敏感快照恢复。固定分发完整性与三份依赖审计通过；严格 `RELEASE=1` 因上游 outdated 退出 1。2026-09-24 正常用户 profile 已修复：首代无使用锁的 legacy runtime 已完成外部维护交接，inspect 为 `exact=true`，live VERIFY（26 工具、Blender 只读调用）与注册验证通过；无法证明空闲或来源的旧 recovery 仍保留，工作流为 `cleanup_pending`。LLM/第二台 Mac 仍为 `NOT_RUN`。详见 [验证说明](validation.md#2026-09-23-安装升级当前现场结果)。
 
 ## 待实施计划
 
