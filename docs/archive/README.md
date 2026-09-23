@@ -35,8 +35,32 @@ V3.1 原文标注的审计基线是 `102a3a2efe8aaf2f7dbdc6dd216f621951812d14`�
 
 [2026-08-24 资产验收判定核心计划](plans/2026-08-24-asset-acceptance-decision-core.md)
 原位于 `docs/superpowers/plans/`，记录 schema v1/P0 核心的初期实施与复核过程。
-当前核心行为由源码和正式设计描述；后续开发使用文档中心中的 M0/M1、M2、M3 计划。
+当前核心行为由源码和正式设计描述；后续的 M0/M1、M2、M3 计划也已完成并归档于下文。
 原计划中的复选框和后续建议不作为当前任务状态。
+
+## 2026-09 资产验收 v2 与安装升级清理
+
+2026-09-23 归档。以下计划均已实施，现行设计仍为
+[升级清理设计](../superpowers/specs/2026-09-08-installer-upgrade-cleanup-design.md)与
+[资产验收整合设计](../superpowers/specs/2026-09-08-asset-acceptance-integration-design.md)。
+
+| 档案 | 历史定位 |
+|---|---|
+| [升级清理计划](plans/2026-09-08-installer-upgrade-cleanup.md) | journal、使用锁、验证后清理的实施计划 |
+| [M0/M1 可信核心计划](plans/2026-09-08-asset-acceptance-core-v2.md) | schema v2 合同、冻结输入、唯一判定与证据链 |
+| [M2 原生闭环计划](plans/2026-09-08-asset-acceptance-native.md) | 有限静态原生资产；含 2026-09-23 当前执行结果 |
+| [M3 GLB 闭环计划](plans/2026-09-08-asset-acceptance-interchange.md) | 有限静态 GLB L0 投影与 Validator |
+| [计划审阅与原型验证记录](reviews/2026-09-08-plans-adversarial-review.md) | 上述计划编写期的对抗审阅与仓库外原型 |
+| [收尾执行计划](plans/2026-09-22-acceptance-upgrade-closeout.md) | Task 1–6：M2 复验、安装升级现场验收、主线同步、全分支审计与交付 |
+| [最终全分支审查](closeout/2026-09-22/final-review.md) | 冻结候选 `98b9140` 的审查，确认 I1/I2/I3 三个 Important |
+| [最终修复报告](closeout/2026-09-22/final-fix-report.md) | I1/I2/I3 修复、真实 Native/M3 门禁与现场证据 |
+| [最终修复复审](closeout/2026-09-22/final-fix-rereview.md) | `140fd69..f8e7692` 独立复审及文档增量复审，结论 Ready to merge: Yes |
+
+收尾计划的 Task 6 已于 2026-09-23 完成：`main` 从 `5a3bb97` 快进至
+`18aab986438ccda73f7b4e0d345708536bae2981` 并正常推送，本地与远端 refs 一致。交付时
+严格 RELEASE 仍因上游 outdated 未通过，正常用户 profile 未修复，LLM/第二台 Mac/legacy
+交接为 `NOT_RUN`。三份收尾审查原为仓库外 SDD 工作区记录，归档时仅将本机主目录写作 `~`。
+其中的临时证据路径多已清理，仅供追溯。
 
 ## 保留与合并规则
 

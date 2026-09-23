@@ -57,7 +57,7 @@ controller 编译唯一文件/作业计划，固定 writer、输入/输出及安
 
 ## 事实与范围
 
-2026-09-23 在最终修复候选、锁定 Blender、Node 与 gltf-validator 上重新执行 M3 三文件真实门禁，覆盖完整 CLI、两进程 surface 和真实 Validator 正反例，结果为 8 通过、0 失败、0 跳过；完整 Native 门禁为 21 通过、0 失败、0 跳过，并覆盖真实审阅、拒绝和交付。原候选 `98b9140` 的 M3 与 Task 2 的 M2 历史结果保留为独立证据，不替代最终候选结果。曲线、文字、动画、任意实例、任意消费者和通用资产发布均不在这些结果内；详细身份与日志见 [修复报告](../superpowers/sdd/2026-09-22-acceptance-upgrade-closeout/final-fix-report.md)。
+2026-09-23 在最终修复候选、锁定 Blender、Node 与 gltf-validator 上重新执行 M3 三文件真实门禁，覆盖完整 CLI、两进程 surface 和真实 Validator 正反例，结果为 8 通过、0 失败、0 跳过；完整 Native 门禁为 21 通过、0 失败、0 跳过，并覆盖真实审阅、拒绝和交付。原候选 `98b9140` 的 M3 与 Task 2 的 M2 历史结果保留为独立证据，不替代最终候选结果。曲线、文字、动画、任意实例、任意消费者和通用资产发布均不在这些结果内；详细身份与日志见 [修复报告](../archive/closeout/2026-09-22/final-fix-report.md)。
 
 ### M2 原生静态资产实现范围与证据
 
@@ -65,7 +65,7 @@ controller 编译唯一文件/作业计划，固定 writer、输入/输出及安
 
 普通网格、BEVEL、TRIANGULATE、打包图像和嵌套自定义属性各有完整正例与独立可信参考。正例完成 24 个适用 check、`native.scope_supported` / `native.cross_process` / `native.reference` 三个技术 gate、135 原图及 99 对比较/差异图；未签收时仅为 NEEDS_REVIEW。exact-byte fresh reopen、同进程与跨进程渲染、错误几何/缺件/材质、未支持类型/未知平台、证据及签收身份篡改、E/V/Q/T/D 与真实交付回执均由实际 CLI 测试覆盖。诊断图继续使用零阈值，beauty 仅观察，不扩大为 EEVEE 普遍确定性承诺。
 
-测试 reviewer 仅验证签收封装与拒绝路径，不构成用户作品的真实业务签收。本结果不替代 Phase 0、RELEASE、安装或 live 验收。命令、当前工具/代码身份与外部证据位置见 [M2 执行记录](../superpowers/plans/2026-09-08-asset-acceptance-native.md#当前执行结果2026-09-23)。
+测试 reviewer 仅验证签收封装与拒绝路径，不构成用户作品的真实业务签收。本结果不替代 Phase 0、RELEASE、安装或 live 验收。命令、当前工具/代码身份与外部证据位置见 [M2 执行记录](../archive/plans/2026-09-08-asset-acceptance-native.md#当前执行结果2026-09-23)。
 
 ### M3 静态 GLB 实现范围与证据
 

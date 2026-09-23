@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- 已认可设计：[资产验收整合设计](../specs/2026-09-08-asset-acceptance-integration-design.md)。本文仅 M0/M1；安装清理、M2 与 M3 分别验收。
+- 已认可设计：[资产验收整合设计](../../superpowers/specs/2026-09-08-asset-acceptance-integration-design.md)。本文仅 M0/M1；安装清理、M2 与 M3 分别验收。
 - 首发支持 `blend_native + static_render + local-trusted`。M1 只完成可信核心；未接线的必需项返回 `NotTested`，不能称真实资产已通过。
 - native 保留全部 24 项现有适用检查，interchange 保留全部 34 项，新增业务 gate 不能代替它们。
 - v2 明确拒绝 v1。迁移必须重新冻结输入、生成新合同与新 run；不补摘要、工具、阈值或 N/A。

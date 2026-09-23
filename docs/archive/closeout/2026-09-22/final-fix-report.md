@@ -45,7 +45,7 @@ Final real M3 gate:
 ```bash
 RUN_ASSET_INTERCHANGE=1 RUN_GLTF_VALIDATOR=1 \
 BLENDER_BIN=/Applications/Blender.app/Contents/MacOS/Blender \
-NODE_BIN=/Users/yeminjie/.local/share/pnpm/bin/node \
+NODE_BIN=~/.local/share/pnpm/bin/node \
 GLTF_PACKAGE_ROOT=/private/tmp/blenderdesign-closeout-20260922-27x0hxjj/task5-tools/gltf \
 .venv/bin/python -m pytest tests/integration/test_asset_interchange.py \
   tests/integration/test_interchange_surface.py tests/integration/test_gltf_validator.py \

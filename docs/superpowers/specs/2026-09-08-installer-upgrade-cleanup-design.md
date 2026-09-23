@@ -150,7 +150,7 @@ journal 明确包含：schema 版本、UUID 工作流 ID、`install` 或 `regist
 
 ## 11. 执行计划审计后的具体约束
 
-2026-09-08 的计划原型进一步固定了以下实现细节，删除授权范围不变。完整任务及回归见[执行计划](../plans/2026-09-08-installer-upgrade-cleanup.md)。
+2026-09-08 的计划原型进一步固定了以下实现细节，删除授权范围不变。完整任务及回归见[执行计划](../../archive/plans/2026-09-08-installer-upgrade-cleanup.md)。
 
 - 使用锁按目录的 device/inode 建立，不能以 rename 后会变化的路径作为唯一键。launcher 必须先用托管 runtime 和目标插件缓存之外的 bootstrap Python 获取共享锁，再 exec 托管解释器；锁 FD 跨 exec 继承。bootstrap 边界使用实际 HOME/CODEX_HOME。
 - rename 并不会让旧进程的 `__file__` 或 `sys.path` 自动指向 recovery。整个 runtime 替换之前必须取得旧目录的非阻塞排他锁；占用时，在首次注册/安装目标修改之前返回 `runtime_in_use`。

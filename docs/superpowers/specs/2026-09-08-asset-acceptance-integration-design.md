@@ -218,7 +218,7 @@ M1 先用标准库和已有原语；Blender worker 可导入 `bpy`，coordinator
 
 ## 12. 执行计划实测补充
 
-2026-09-08 编写计划时在仓库外进一步运行了合同/进程/封装原型、真实 Blender 采集/渲染/导入及 Node Validator。以下细节消除了计划中的错误假设；不把原型结果视为本仓库生产功能已实施。任务入口为 [M0/M1](../plans/2026-09-08-asset-acceptance-core-v2.md)、[M2](../plans/2026-09-08-asset-acceptance-native.md) 和 [M3](../plans/2026-09-08-asset-acceptance-interchange.md)。
+2026-09-08 编写计划时在仓库外进一步运行了合同/进程/封装原型、真实 Blender 采集/渲染/导入及 Node Validator。以下细节消除了计划中的错误假设；不把原型结果视为本仓库生产功能已实施。任务入口为 [M0/M1](../../archive/plans/2026-09-08-asset-acceptance-core-v2.md)、[M2](../../archive/plans/2026-09-08-asset-acceptance-native.md) 和 [M3](../../archive/plans/2026-09-08-asset-acceptance-interchange.md)。
 
 - 能力、跨进程、参考和消费者技术门禁进入 v2 `summary.success`，以 gates/failed_gate_ids 单列；保留 37 个现有 check 的身份。Q 仍只决定业务审阅状态。
 - 安全前置失败造成的未启动作业，由 controller 记录 `blocked_by` 和实际未产生文件。不能为这些文件补空内容，也不能将这种已知阻断伪装成运行事故；对应下游与未完成 R5 检查保持 NotTested，上层遵循 Fail + 未完成 = UNVERIFIED 的混合规则。
@@ -229,4 +229,4 @@ M1 先用标准库和已有原语；Blender worker 可导入 `bpy`，coordinator
 - 直接连接 Base Color 图像后，未连接的该 socket 默认值不参与 PBR 比较；发光颜色与 strength 归一到实际乘积。首个 GLB profile 限定非镜像 MESH、scale_length=1、基本 PBR、打包 sRGB RGBA8 PNG 与 Linear/REPEAT/default-active-UV；范围外仍为未验证。
 - npm `gltf-validator` 没有命令行 bin，适配器调用其 `validateBytes`。图像资源的读取证据采用解码尺寸/位深等字段，不能要求每行都有 byteLength；预算独立遍历 scene node，区分唯一 mesh 数据和实例绘制量。controller 另核对 export 前后 S、唯一 D、preset 与原生 occurrence 集。
 
-原型的代码身份、发现和复测口径见[计划对抗审计记录](../reviews/2026-09-08-plans-adversarial-review.md)。
+原型的代码身份、发现和复测口径见[计划对抗审计记录](../../archive/reviews/2026-09-08-plans-adversarial-review.md)。

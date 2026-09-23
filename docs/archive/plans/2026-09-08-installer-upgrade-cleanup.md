@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- 设计依据：[安装升级与旧版本自动清理设计](../specs/2026-09-08-installer-upgrade-cleanup-design.md)。
+- 设计依据：[安装升级与旧版本自动清理设计](../../superpowers/specs/2026-09-08-installer-upgrade-cleanup-design.md)。
 - 仅删除历史托管 runtime recovery、历史托管 extension recovery、`official-blender-mcp/blender-mcp-installer/<version>` 历史缓存。
 - 保留当前 runtime、扩展、插件缓存，用户偏好和 Codex 配置及其备份，历史受审 projection，安装 receipt、注册恢复证据和清理日志。
 - `inspect`、`verify`、`rollback` 不创建清理任务；`verify` 不删除文件。完整安装要求现场 `verify_live`，仅注册不要求 Blender。
