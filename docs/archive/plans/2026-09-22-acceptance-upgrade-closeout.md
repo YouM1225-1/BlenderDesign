@@ -62,8 +62,6 @@ Task 5 final-fix（2026-09-23）：修复 I1 durable config-stage 重试、I2 op
 
 Task 5 独立复审（2026-09-23）：对 `140fd69..f8e7692` 的独立只读复审结论为 Ready to merge: Yes，I1/I2/I3 均关闭，无 Critical/Important。复审在仓库外副本运行相关测试 122 passed；在 `140fd69` 生产代码上以其中 3 个测试文件做 RED 对照为 31 failed（全部为 I1/I2/I3 新用例），确认回归有效；原 I2 探针在 `98b9140` 得到 SHIP、在修复后得到 REJECTED 且拒绝交付。三项 Minor 为文档证据指针：Native/M3 最终运行日志与时长、已清理的外部证据根、本计划状态，均已在文档中修正。未确认疑点：CODEX_HOME 与 HOME 跨卷时，config stage rename 可能以 EXDEV 失败关闭；真实 Codex 从无 config.toml 起步的路径仅由 fake Codex 覆盖；最终真实门禁日志未记录 tree 身份，只能以 mtime 与工作树等于 `6ad6638` 推断绑定。
 
-跨卷疑点跟进（2026-09-23）：已确认为真实回归并修复，EXDEV 回退到 intent 绑定的同卷 transfer 副本；初版修复 `6ed4c3c` 经独立复审为 Ready to merge: Yes，三项 Minor 于 `78c89aa` 修复；最终候选的回归、真实 Codex RAM 盘跨卷四场景与完整门禁见[验证说明](../../validation.md#2026-09-23-安装升级当前现场结果)。真实 Codex 无初始 `config.toml` 起步的疑点已由同卷与跨卷两个真实场景关闭；新证据的 `result.json` 记录候选提交与 tree，此前门禁日志缺少 tree 身份的历史记录保持原样。
-
 ## Task 6: 提交合并到 main 并推送
 
 核对审计结果、暂存范围、`git diff --cached --check`、分支和远端。主工作树的 `.claude/` 文件已按用户要求恢复为已提交版本，合入时不得覆盖或混入无关改动；将已验证候选快进合入 main，核对合并树与已测树一致。必要时复测合并引入变化。
