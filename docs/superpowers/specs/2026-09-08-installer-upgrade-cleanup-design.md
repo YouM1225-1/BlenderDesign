@@ -2,7 +2,7 @@
 
 日期：2026-09-08
 
-状态：整体方向已获用户认可并实施；长期行为包括 upgrade journal、使用锁、私有 Codex 注册 staging、条件发布与验证后清理。2026-09-24 补充历史 recovery 的托管漂移、重启空闲证据、设备号重编与被取代 journal 收尾（§13）。现场结果与限制见 [验证说明](../../validation.md#2026-09-23-安装升级当前现场结果)。
+状态：整体方向已获用户认可并实施；长期行为包括 upgrade journal、使用锁、私有 Codex 注册 staging、条件发布与验证后清理。2026-09-24 补充历史 recovery 的托管漂移、重启空闲证据、设备号重编、被取代 journal 收尾与跨启动稳定的 v2 租约身份（§13）。现场结果与限制见 [验证说明](../../validation.md#2026-09-23-安装升级当前现场结果)。
 
 ## 1. 目标与删除范围
 
@@ -154,10 +154,10 @@ journal 明确包含：schema 版本、UUID 工作流 ID、`install` 或 `regist
 
 2026-09-08 的计划原型进一步固定了以下实现细节，删除授权范围不变。完整任务及回归见[执行计划](../../archive/plans/2026-09-08-installer-upgrade-cleanup.md)。
 
-- 使用锁按目录的 device/inode 建立，不能以 rename 后会变化的路径作为唯一键。launcher 必须先用托管 runtime 和目标插件缓存之外的 bootstrap Python 获取共享锁，再 exec 托管解释器；锁 FD 跨 exec 继承。bootstrap 边界使用实际 HOME/CODEX_HOME。
+- 使用锁按目录身份建立，不能以 rename 后会变化的路径作为唯一键；第一代按 device/inode 命名，现行 v2 只按 inode 命名，见 §13 租约身份。launcher 必须先用托管 runtime 和目标插件缓存之外的 bootstrap Python 获取共享锁，再 exec 托管解释器；锁 FD 跨 exec 继承。bootstrap 边界使用实际 HOME/CODEX_HOME。
 - rename 并不会让旧进程的 `__file__` 或 `sys.path` 自动指向 recovery。整个 runtime 替换之前必须取得旧目录的非阻塞排他锁；占用时，在首次注册/安装目标修改之前返回 `runtime_in_use`。
 - 第一代无使用锁的旧 launcher，需要一次外部维护终端的停止交接：先记录受支持客户端的正向进程身份，停止后再核验。无法证明已停止则返回 `legacy_handoff_required`；这只覆盖合作的受管客户端，不宣称能够识别任意绕过入口的进程。
-- launcher 在导入 runtime 业务模块之前核对 active、installed receipt 和当前目录 inode；PREPARED 或混合版本不可启动。
+- launcher 在导入 runtime 业务模块之前核对 active、installed receipt 和当前目录 inode；PREPARED 或混合版本不可启动。现行 launcher 不再比较 receipt 记录的设备号，改为要求 runtime 根不是挂载点。
 - 完整 finalize 持变更锁执行一次真实现场验证，随后逐候选复核绑定的注册、active、receipt、runtime/extension 镜像；任一漂移停止删除。等待用户启动 Blender 时释放锁，不对每个文件重复完整现场探针。
 - 对精确目标插件 namespace 中完全缺少历史注册证据的旧目录，保留并列为未验证。不存在可删除候选不等于所有旧版本已清理；同内容重试可以建立清理迁移记录，但不制造新的安装代次。
 
@@ -175,5 +175,6 @@ journal 明确包含：schema 版本、UUID 工作流 ID、`install` 或 `regist
 
 - **托管漂移**：父 install post 与子 pre 相同，或同时满足：根目录 inode/属主/模式相同；每个镜像内所有条目共用其根设备号（整卷重编）；除字节码缓存外的路径集合相同，且逐项 kind/inode/属主/模式一致，文件的 size/mtime/SHA-256 也一致；目录时间与大小可变。字节码缓存仅指唯一一层 `__pycache__` 目录，及其中 `<模块>.cpython-3NN[.opt-N].pyc` 文件，其源 `<模块>.py` 必须是上述一致的托管文件。源码改动、新 inode 的整树复制、孤立或非 `.pyc` 缓存及部分设备号变化仍作为未验证发现保留。
 - **重启空闲证据**：仅用于没有使用证据（`lease_known=false`）的 runtime/扩展 recovery；有租约证据的候选始终取独占使用锁。owner receipt 仅在旧树改名后写为 INSTALLED，其最后写入时间早于当前内核 `kern.boottime`（每次 finalize 读取一次）时，改名前可能使用旧树的进程均已随重启结束；受管入口只解析 active runtime 路径，recovery 名称也不是可导入的 Blender 扩展名。启动时间不可读或 receipt 证据不唯一时仍延后。该比较假设当前启动内墙钟没有跨越退役时间向前跳变；`kern.boottime` 随墙钟校正移动，因此不对有租约的候选使用。插件缓存不适用此规则，因为恢复的 Codex 任务可在重启后直接运行旧缓存脚本。begin-handoff 只在一次切换中证明当前 runtime 的合作客户端已停止，不覆盖 Blender 或早已改名的 recovery，因此不用于提升历史候选。
-- **设备号重编**：已记录镜像只有在整树（或单个证据文件）仅设备号不同时，才以当前设备号参与条件删除，其余字段仍逐项比较；部分条目设备号变化视为冲突。使用锁先在记录的设备号上取得独占锁；设备号已变时，新设备号上已存在的租约文件也必须可独占，入口从不创建租约文件，因此缺失即无人持有。
+- **设备号重编**：已记录镜像只有在整树（或单个证据文件）仅设备号不同时，才以当前设备号参与条件删除，其余字段仍逐项比较；部分条目设备号变化视为冲突。使用锁规则见下条。
+- **租约身份 v2**：macOS 数据卷的 `st_dev` 会随重启重编（正常 profile 上同一 inode 先后为 16777229/31/34），第一代租约名 `sha256("tree:<dev>:<ino>")` 与 launcher 对 receipt `install_post.dev` 的比较会让现有安装在下次重启后失败关闭。现行 runtime 与插件树的 `.blender-mcp-usage-v1` 内容为 `inode-v2`，launcher、缓存入口与安装器都以 `sha256("tree-v2:<ino>")` 命名租约；launcher 只比较 receipt 的 `install_post.ino` 与路径，并要求 runtime 根与父目录同设备（不是挂载点）。同一卷上一个 inode 同时只对应一个对象，因此租约名只可能与其他卷上的树或已删除的树共用；共用只会增加持有者，独占获取只会误报忙，不会误判空闲。缺少租约目录或文件时，launcher 与缓存入口以 75 干净退出。入口从不创建租约文件，安装器也不删除租约文件，因此缺失即无人持有；但对 v2 树，缺失的 inode 租约仍按失败关闭处理，只由安装器重新创建，设备号租约不能替代它。第一代（`inode-v1`）树继续按其入口实际打开的设备号租约处理：设备号未变时必须存在并可独占；设备号已变时，记录设备号与当前设备号两个租约文件只要存在就都要取得独占锁，缺失视为无人持有，因为旧入口只能打开已存在的文件，而记录设备号所在的挂载已经结束。runtime 替换前的 quiescence 以 active installed receipt 的 runtime `install_post` 作为 v1 记录设备号（路径与 inode 必须一致）；receipt 缺失或不匹配时按当前设备号处理，缺失租约仍然失败关闭。无标记树（旧 runtime 交接、扩展 recovery）的租约由安装器按其记录镜像的设备号创建，清理时从记录推导，并与 v1 同样处理设备号变化：缺失视为无人持有，存在时仍须可独占。重启后才以新设备号记录、而租约建于更早启动的 v1 候选在本次启动内仍延后，最迟在下次重编后回收。launcher 的同卷检查只约束 runtime 根与父目录，不是跨卷替换的安全边界；祖先目录挂载其他卷最多多出持有者。
 - **被取代 journal**：release 已不是当前版本的 `cleanup_pending` journal 无法通过自身 finalize 的身份验证。当前 release 的 finalize 通过验证后，若该 journal 所有未删除候选的路径经 `SafeRoot` 核验为不存在，则在同一把变更锁内把这些候选记为 `verified absent` 并置为 `complete`；本步骤不删除任何内容，只记录已核验的缺失，因此不要求旧 receipt 或 projection 证据仍存在；journal 无法读取或某路径仍存在时保持原状。仅被新 journal 继承但仍存在的基线不会收尾，旧 journal 继续作为持久删除基线。

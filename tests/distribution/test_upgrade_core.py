@@ -29,7 +29,9 @@ from blender_mcp_installer.upgrade_cleanup import (  # noqa: E402
     finalize_record,
 )
 from blender_mcp_installer.upgrade_locks import (  # noqa: E402
+    device_usage_name,
     ensure_usage_lock,
+    tree_usage_name,
     usage_lock,
     usage_name,
 )
@@ -196,7 +198,8 @@ def uuid4_from_text(value: object) -> UUID:
 
 
 @pytest.fixture
-def prepared(tmp_path):
+def prepared(tmp_path, request):
+    marker = getattr(request, "param", None)
     home, codex = tmp_path / "home", tmp_path / "codex"
     home.mkdir(mode=0o700)
     codex.mkdir(mode=0o700)
@@ -210,6 +213,8 @@ def prepared(tmp_path):
         tree.mkdir(parents=True, mode=0o700)
         (tree / "a").write_bytes(b"old-a")
         (tree / "b").write_bytes(b"old-b")
+        if marker is not None:
+            (tree / ".blender-mcp-usage-v1").write_bytes(marker)
     registration_id = str(uuid4())
     with state_root(roots) as state:
         folder = state.path / "marketplace-recovery" / ("registration." + registration_id)
@@ -231,7 +236,7 @@ def prepared(tmp_path):
                            "expected": capture_file(state, proof.relative_to(state.path)).to_dict()}],
                "content_source": str(old_source), "content_sha256": content_sha256(source_image),
                "lease_known": True, "state": "pending", "reason": ""}
-        ensure_usage_lock(state, old_image.dev, old_image.ino)
+        ensure_usage_lock(state, tree_usage_name(old_image))
         doc = new_record(roots, "register", desired)
         doc["registration"] = {"id": str(uuid4()), "state": "registered"}
         current_registration = (
@@ -369,7 +374,7 @@ def test_active_reference_and_busy_lease_defer(prepared):
     first = finalize_record(state, roots, doc["id"], lambda _: (), lambda _: ([row], []), lambda _: (old / "a",))
     assert first["candidates"][0]["state"] == "deferred_in_use" and old.exists()
     image = row["expected"]
-    with usage_lock(state, image["dev"], image["ino"], exclusive=False) as acquired:
+    with usage_lock(state, device_usage_name(image["dev"], image["ino"]), exclusive=False) as acquired:
         assert acquired
         second = finalize_record(state, roots, doc["id"], lambda _: (), lambda _: ([], []), lambda _: ())
         assert second["candidates"][0]["state"] == "deferred_in_use" and old.exists()
@@ -465,7 +470,7 @@ def test_crash_is_resumed_from_original_image(prepared, point):
 def test_root_inode_lease_survives_rename_and_exec(prepared):
     roots, state, _doc, row, old = prepared
     info = row["expected"]
-    lock_path = state.path / "usage" / usage_name(info["dev"], info["ino"])
+    lock_path = state.path / "usage" / device_usage_name(info["dev"], info["ino"])
     source = (
         "import os,fcntl,sys; fd=os.open(sys.argv[1],os.O_RDWR); "
         "fcntl.flock(fd,fcntl.LOCK_SH); os.set_inheritable(fd,True); "
@@ -479,12 +484,12 @@ def test_root_inode_lease_survives_rename_and_exec(prepared):
         renamed = old.with_name("parked")
         old.rename(renamed)
         assert (renamed.stat().st_dev, renamed.stat().st_ino) == (info["dev"], info["ino"])
-        with usage_lock(state, info["dev"], info["ino"], exclusive=True) as acquired:
+        with usage_lock(state, device_usage_name(info["dev"], info["ino"]), exclusive=True) as acquired:
             assert not acquired
     finally:
         process.terminate()
         process.wait(timeout=5)
-    with usage_lock(state, info["dev"], info["ino"], exclusive=True) as acquired:
+    with usage_lock(state, device_usage_name(info["dev"], info["ino"]), exclusive=True) as acquired:
         assert acquired
 
 
@@ -1240,7 +1245,7 @@ def test_registration_root_binding_is_guarded_through_deletion(
         restore = state.path / "marketplace-recovery/registration.historical/RESTORE.txt"
         assert any(proof["relative"].endswith("/RESTORE.txt") for proof in candidates[0]["proofs"])
         image = candidates[0]["expected"]
-        ensure_usage_lock(state, image["dev"], image["ino"])
+        ensure_usage_lock(state, device_usage_name(image["dev"], image["ino"]))
         original_remove = upgrade_cleanup.conditional_remove_tree
 
         def remove_after_root_binding_drift(reference, expected, guards, fault):
@@ -1303,7 +1308,7 @@ def test_same_root_awaiting_registration_is_not_a_retirement_candidate(tmp_path)
         current = save_record(state, roots, None, current)
         with SafeRoot.open(roots.codex_home, os.getuid(), roots.codex_home) as codex:
             before = capture_tree(codex, cache.relative_to(roots.codex_home))
-        ensure_usage_lock(state, before.dev, before.ino)
+        ensure_usage_lock(state, device_usage_name(before.dev, before.ino))
 
         candidates, findings = discover_candidates(state, roots, current)
         result = finalize_record(
@@ -1412,7 +1417,7 @@ def test_completed_same_root_journal_can_prove_historical_migration(tmp_path):
         assert len(candidates) == 1
         assert any(proof["relative"].startswith("upgrades/") for proof in candidates[0]["proofs"])
         image = candidates[0]["expected"]
-        ensure_usage_lock(state, image["dev"], image["ino"])
+        ensure_usage_lock(state, device_usage_name(image["dev"], image["ino"]))
         result = finalize_record(
             state,
             roots,
@@ -1592,7 +1597,7 @@ def test_full_finalize_stops_after_recorded_cleanup_when_snapshot_changes(
     (second_path / "b").write_bytes(b"old-b")
     with SafeRoot.open(roots.codex_home, os.getuid(), roots.codex_home) as codex:
         second_image = capture_tree(codex, second_path.relative_to(roots.codex_home))
-    ensure_usage_lock(state, second_image.dev, second_image.ino)
+    ensure_usage_lock(state, device_usage_name(second_image.dev, second_image.ino))
     second = copy.deepcopy(first)
     second.update(
         key="plugin_cache:0.9.0",
@@ -2020,8 +2025,8 @@ def test_remounted_leased_cache_honours_both_device_identities(prepared):
     roots, state, doc, row, old = prepared
     image = TreeImage.from_dict(row["expected"])
     row["expected"] = _renumbered(image, image.dev + 7).to_dict()
-    ensure_usage_lock(state, image.dev + 7, image.ino)
-    with usage_lock(state, image.dev, image.ino, exclusive=False) as acquired:
+    ensure_usage_lock(state, device_usage_name(image.dev + 7, image.ino))
+    with usage_lock(state, device_usage_name(image.dev, image.ino), exclusive=False) as acquired:
         assert acquired
         first = _finalize_row(state, roots, doc, row)
     assert first["candidates"][0]["reason"] == "version lease is busy or missing"
@@ -2101,9 +2106,9 @@ def test_host_restart_never_replaces_an_available_lease(legacy_recovery, monkeyp
     roots, state, doc, row, recovery, proof = legacy_recovery
     row["lease_known"] = True
     image = TreeImage.from_dict(row["expected"])
-    ensure_usage_lock(state, image.dev, image.ino)
+    ensure_usage_lock(state, device_usage_name(image.dev, image.ino))
     monkeypatch.setattr(upgrade_cleanup, "host_boot_time_ns", lambda: proof.mtime_ns + 1)
-    with usage_lock(state, image.dev, image.ino, exclusive=False) as acquired:
+    with usage_lock(state, device_usage_name(image.dev, image.ino), exclusive=False) as acquired:
         assert acquired
         busy = _finalize_row(state, roots, doc, row)
     assert busy["candidates"][0]["reason"] == "version lease is busy or missing"
@@ -2122,12 +2127,193 @@ def test_remounted_cache_without_new_device_lease_file_is_removed(prepared):
     roots, state, doc, row, old = prepared
     image = TreeImage.from_dict(row["expected"])
     row["expected"] = _renumbered(image, image.dev + 7).to_dict()
-    ensure_usage_lock(state, image.dev + 7, image.ino)
-    (state.path / "usage" / usage_name(image.dev, image.ino)).unlink()
+    ensure_usage_lock(state, device_usage_name(image.dev + 7, image.ino))
+    (state.path / "usage" / device_usage_name(image.dev, image.ino)).unlink()
 
     result = _finalize_row(state, roots, doc, row)
 
     assert result["status"] == "complete" and not old.exists()
+
+
+V2 = b"inode-v2\n"
+
+
+@pytest.mark.parametrize("prepared", [V2], indirect=True)
+def test_remounted_v2_cache_is_guarded_by_its_inode_lease(prepared):
+    from blender_mcp_installer.model import TreeImage
+
+    roots, state, doc, row, old = prepared
+    image = TreeImage.from_dict(row["expected"])
+    row["expected"] = _renumbered(image, image.dev + 7).to_dict()
+    with usage_lock(state, usage_name(image.ino), exclusive=False) as acquired:
+        assert acquired
+        busy = _finalize_row(state, roots, doc, row)
+    assert busy["candidates"][0]["reason"] == "version lease is busy or missing"
+    assert old.exists()
+
+    released = finalize_record(
+        state, roots, doc["id"], lambda _: (), lambda _: ([], []), lambda _: ()
+    )
+
+    assert released["status"] == "complete" and not old.exists()
+    assert sorted(path.name for path in (state.path / "usage").iterdir()) == [
+        usage_name(image.ino)
+    ]
+
+
+@pytest.mark.parametrize("prepared", [V2], indirect=True)
+@pytest.mark.parametrize("remount", [False, True])
+def test_missing_v2_lease_stays_fail_closed(prepared, remount):
+    from blender_mcp_installer.model import TreeImage
+
+    roots, state, doc, row, old = prepared
+    image = TreeImage.from_dict(row["expected"])
+    if remount:
+        row["expected"] = _renumbered(image, image.dev + 7).to_dict()
+    (state.path / "usage" / usage_name(image.ino)).unlink()
+    # Device-named leases never stand in for the inode lease of a v2 tree.
+    for device in (image.dev, image.dev + 7):
+        ensure_usage_lock(state, device_usage_name(device, image.ino))
+
+    result = _finalize_row(state, roots, doc, row)
+
+    assert result["candidates"][0]["reason"] == "version lease is busy or missing"
+    assert old.exists()
+
+
+@pytest.mark.parametrize("remount", [False, True])
+def test_device_lease_recorded_after_renumbering_is_reclaimed_after_next_remount(
+    prepared, remount
+):
+    from blender_mcp_installer.model import TreeImage
+
+    roots, state, doc, row, old = prepared
+    image = TreeImage.from_dict(row["expected"])
+    # Recorded with the live device of a boot in which its lease was never created.
+    (state.path / "usage" / device_usage_name(image.dev, image.ino)).unlink()
+    if remount:
+        row["expected"] = _renumbered(image, image.dev + 7).to_dict()
+
+    result = _finalize_row(state, roots, doc, row)
+
+    if remount:
+        assert result["status"] == "complete" and not old.exists()
+        assert not list((state.path / "usage").iterdir())
+    else:
+        assert result["candidates"][0]["reason"] == "version lease is busy or missing"
+        assert old.exists()
+
+
+def _quiescent_runtime(tmp_path, marker, offset, *, receipt=True):
+    from blender_mcp_installer.model import TreeImage
+
+    home, codex = tmp_path / "home", tmp_path / "codex"
+    home.mkdir(mode=0o700)
+    codex.mkdir(mode=0o700)
+    roots = UpgradeRoots(home, codex)
+    runtime = home / ".local/share/blender-lab-mcp/runtime"
+    (runtime / "bin").mkdir(parents=True)
+    (runtime / ".blender-mcp-usage-v1").write_bytes(marker)
+    with SafeRoot.open(home, os.getuid(), home) as safe:
+        image = capture_tree(safe, runtime.relative_to(home))
+    assert isinstance(image, TreeImage)
+    installed = _renumbered(image, image.dev + offset) if offset else image
+    identifier = str(uuid4())
+    with state_root(roots) as state:
+        if receipt:
+            (state.path / "receipts").mkdir(mode=0o700)
+            for path, value in (
+                (state.path / "active.json", {"install_id": identifier}),
+                (
+                    state.path / "receipts" / (identifier + ".json"),
+                    {
+                        "install_id": identifier,
+                        "status": "installed",
+                        "targets": [
+                            {
+                                "role": "runtime",
+                                "path": str(runtime),
+                                "install_post": installed.to_dict(),
+                            }
+                        ],
+                    },
+                ),
+            ):
+                path.write_text(json.dumps(value))
+                path.chmod(0o600)
+    return roots, runtime, image
+
+
+def _quiesce(roots, runtime):
+    from blender_mcp_installer.upgrade_handoff import runtime_quiescence
+
+    with state_root(roots) as state:
+        with runtime_quiescence(state, roots, runtime, Path("/unused/codex")) as handoff:
+            return handoff
+
+
+def test_v1_runtime_renumbered_since_install_can_be_quiesced(tmp_path):
+    roots, runtime, image = _quiescent_runtime(tmp_path, b"inode-v1\n", 7)
+    with state_root(roots) as state:
+        # The installer created the lease under the device recorded at install time.
+        ensure_usage_lock(state, device_usage_name(image.dev + 7, image.ino))
+
+    handoff = _quiesce(roots, runtime)
+
+    assert handoff["image"] == image.to_dict()
+    assert sorted(path.name for path in (roots.state / "usage").iterdir()) == [
+        device_usage_name(image.dev + 7, image.ino)
+    ]
+
+
+@pytest.mark.parametrize("held", ["recorded", "live"])
+def test_v1_runtime_lease_held_in_either_device_blocks_quiescence(tmp_path, held):
+    from blender_mcp_installer.upgrade_handoff import RuntimeInUse
+
+    roots, runtime, image = _quiescent_runtime(tmp_path, b"inode-v1\n", 7)
+    names = {
+        "recorded": device_usage_name(image.dev + 7, image.ino),
+        "live": device_usage_name(image.dev, image.ino),
+    }
+    with state_root(roots) as state:
+        for name in names.values():
+            ensure_usage_lock(state, name)
+        with usage_lock(state, names[held], exclusive=False) as acquired:
+            assert acquired
+            with pytest.raises(RuntimeInUse):
+                _quiesce(roots, runtime)
+    assert _quiesce(roots, runtime)["image"] == image.to_dict()
+
+
+@pytest.mark.parametrize("receipt", [True, False])
+def test_v1_runtime_without_renumbering_proof_needs_its_lease(tmp_path, receipt):
+    from blender_mcp_installer.upgrade_handoff import RuntimeInUse
+
+    roots, runtime, image = _quiescent_runtime(
+        tmp_path, b"inode-v1\n", 0 if receipt else 7, receipt=receipt
+    )
+    with state_root(roots) as state:
+        ensure_usage_lock(state, device_usage_name(image.dev + 7, image.ino))
+    with pytest.raises(RuntimeInUse):
+        _quiesce(roots, runtime)
+
+
+def test_v2_runtime_quiescence_needs_and_honours_its_inode_lease(tmp_path):
+    from blender_mcp_installer.upgrade_handoff import RuntimeInUse
+
+    roots, runtime, image = _quiescent_runtime(tmp_path, V2, 7)
+    with state_root(roots) as state:
+        for device in (image.dev, image.dev + 7):
+            ensure_usage_lock(state, device_usage_name(device, image.ino))
+    with pytest.raises(RuntimeInUse):
+        _quiesce(roots, runtime)
+    with state_root(roots) as state:
+        ensure_usage_lock(state, usage_name(image.ino))
+        with usage_lock(state, usage_name(image.ino), exclusive=False) as acquired:
+            assert acquired
+            with pytest.raises(RuntimeInUse):
+                _quiesce(roots, runtime)
+    assert _quiesce(roots, runtime)["image"] == image.to_dict()
 
 
 def test_superseded_journal_is_retired_by_the_finalize_that_completes_cleanup(prepared):

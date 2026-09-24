@@ -106,7 +106,7 @@ from .upgrade_integration import (
     record_recovery_usage,
     select_install_workflow,
 )
-from .upgrade_locks import ensure_usage_lock, mutation_locks
+from .upgrade_locks import ensure_usage_lock, mutation_locks, tree_usage_name
 from .upgrade_state import UpgradeRoots, load_record
 from .verification import (
     EXACT_CHECK_NAMES,
@@ -1593,7 +1593,7 @@ def _changed_install_locked(
                 context.host.runner,
                 codex_home=roots.codex_home,
             )
-            ensure_usage_lock(state, runtime_post.dev, runtime_post.ino)
+            ensure_usage_lock(state, tree_usage_name(runtime_post))
         except Exception as exc:
             runtime_post = runtime_stage.capture()
             if runtime_post.state is not ImageState.PRESENT or (

@@ -25,7 +25,7 @@ from blender_mcp_installer.filesystem import (
     write_atomic_json,
 )
 from blender_mcp_installer.model import FileImage, ImageState, TreeImage
-from blender_mcp_installer.upgrade_locks import usage_lock
+from blender_mcp_installer.upgrade_locks import exclusive_usage
 from blender_mcp_installer.upgrade_registration import content_sha256, read_owned_bytes
 from blender_mcp_installer.upgrade_state import (
     UpgradeRoots,
@@ -358,22 +358,7 @@ def finalize_record(
                         )
                         idle = False
                     else:
-                        # Leases taken before a remount use the recorded device number;
-                        # later entries can only hold an already existing lease file.
-                        idle = leases.enter_context(
-                            usage_lock(state, recorded.dev, recorded.ino, exclusive=True)
-                        ) and (
-                            expected.dev == recorded.dev
-                            or leases.enter_context(
-                                usage_lock(
-                                    state,
-                                    expected.dev,
-                                    expected.ino,
-                                    exclusive=True,
-                                    missing_idle=True,
-                                )
-                            )
-                        )
+                        idle = exclusive_usage(leases, state, recorded, expected.dev)
                         if not idle:
                             row.update(
                                 state="deferred_in_use",

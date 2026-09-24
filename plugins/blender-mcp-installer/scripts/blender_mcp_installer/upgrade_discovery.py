@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 import os
 import re
@@ -27,6 +26,7 @@ from blender_mcp_installer.model import (
     parse_receipt,
 )
 from blender_mcp_installer.upgrade_cleanup import CleanupReferenceUnproven, candidate_path
+from blender_mcp_installer.upgrade_locks import usage_protocol
 from blender_mcp_installer.upgrade_registration import content_sha256, read_owned_bytes
 from blender_mcp_installer.upgrade_state import (
     COMMIT,
@@ -86,13 +86,7 @@ def directory_names(state: SafeRoot, relative: PurePath) -> tuple[str, ...]:
 
 
 def lease_protocol(image: TreeImage) -> bool:
-    expected = hashlib.sha256(b"inode-v1\n").hexdigest()
-    return any(
-        item.path == ".blender-mcp-usage-v1"
-        and item.kind == "file"
-        and item.sha256 == expected
-        for item in image.entries
-    )
+    return usage_protocol(image) is not None
 
 
 BYTECODE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\.cpython-3[0-9]{1,2}(?:\.opt-[12])?\.pyc")

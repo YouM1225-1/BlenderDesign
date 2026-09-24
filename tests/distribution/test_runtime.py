@@ -41,7 +41,12 @@ from blender_mcp_installer.runtime import (  # noqa: E402
     stage_runtime,
     verify_runtime,
 )
-from blender_mcp_installer.upgrade_locks import ensure_usage_lock  # noqa: E402
+from blender_mcp_installer.upgrade_locks import (  # noqa: E402
+    ensure_usage_lock,
+    tree_usage_name,
+    usage_name,
+    usage_protocol,
+)
 from blender_mcp_installer.upgrade_state import UpgradeRoots, state_root  # noqa: E402
 
 
@@ -238,8 +243,12 @@ def _installed_launcher(stage: StagedTree, profile: ManagedProfile):
     roots = UpgradeRoots(profile.home, codex_home)
     identifier = str(uuid4())
     info = stage.path.stat()
+    image = stage.capture()
+    # The installer creates the lease its launcher opens: staged runtimes are v2.
+    assert usage_protocol(image) == 2
+    assert tree_usage_name(image) == usage_name(info.st_ino)
     with state_root(roots) as state:
-        ensure_usage_lock(state, info.st_dev, info.st_ino)
+        ensure_usage_lock(state, tree_usage_name(image))
         (state.path / "receipts").mkdir()
         (state.path / "active.json").write_text(json.dumps({"install_id": identifier}))
         (state.path / "receipts" / f"{identifier}.json").write_text(

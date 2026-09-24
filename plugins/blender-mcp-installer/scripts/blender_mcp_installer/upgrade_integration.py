@@ -23,7 +23,7 @@ from blender_mcp_installer.upgrade_discovery import (
     discover_candidates,
     other_references,
 )
-from blender_mcp_installer.upgrade_locks import ensure_usage_lock
+from blender_mcp_installer.upgrade_locks import ensure_usage_lock, tree_usage_name
 from blender_mcp_installer.upgrade_registration import inspect_registration
 from blender_mcp_installer.upgrade_state import (
     UpgradeRoots,
@@ -171,7 +171,7 @@ def record_recovery_usage(
         raise InstallerError("runtime handoff does not match prepared receipt")
     for image in (runtime, extension):
         if image.state is ImageState.PRESENT:
-            ensure_usage_lock(state, image.dev, image.ino)
+            ensure_usage_lock(state, tree_usage_name(image))
     document = {
         "schema_version": 1,
         "install_id": str(receipt.install_id),

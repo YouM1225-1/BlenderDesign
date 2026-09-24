@@ -189,7 +189,7 @@ def test_typed_install_refusal_never_recovers(workflow, monkeypatch, error_type)
 
 def test_failed_install_recovery_requires_new_runtime_inode(workflow, monkeypatch):
     from contextlib import contextmanager
-    from blender_mcp_installer.upgrade_locks import ensure_usage_lock, usage_lock
+    from blender_mcp_installer.upgrade_locks import ensure_usage_lock, usage_lock, usage_name
 
     args, state, roots, projection, context, events = workflow
     runtime = context.roots.runtime
@@ -198,8 +198,8 @@ def test_failed_install_recovery_requires_new_runtime_inode(workflow, monkeypatc
     @contextmanager
     def barrier(*_):
         info = runtime.stat()
-        ensure_usage_lock(state, info.st_dev, info.st_ino)
-        with usage_lock(state, info.st_dev, info.st_ino, exclusive=True) as acquired:
+        ensure_usage_lock(state, usage_name(info.st_ino))
+        with usage_lock(state, usage_name(info.st_ino), exclusive=True) as acquired:
             if not acquired:
                 raise RuntimeInUse("new runtime busy")
             held.append(info.st_ino)
@@ -213,16 +213,15 @@ def test_failed_install_recovery_requires_new_runtime_inode(workflow, monkeypatc
         runtime.rename(runtime.with_name("old"))
         runtime.mkdir()
         info = runtime.stat()
-        ensure_usage_lock(state, info.st_dev, info.st_ino)
+        ensure_usage_lock(state, usage_name(info.st_ino))
         import subprocess
-        from blender_mcp_installer.upgrade_locks import usage_name
 
         child = subprocess.Popen(
             [
                 sys.executable,
                 "-c",
                 "import fcntl,sys,time; f=open(sys.argv[1],'r+'); fcntl.flock(f,fcntl.LOCK_SH); print('ready',flush=True); time.sleep(60)",
-                str(state.path / "usage" / usage_name(info.st_dev, info.st_ino)),
+                str(state.path / "usage" / usage_name(info.st_ino)),
             ],
             stdout=subprocess.PIPE,
             text=True,
@@ -494,7 +493,7 @@ def test_prepare_after_unfinished_authority_ends_creates_new_migration(tmp_path,
         update_record,
         record_ids,
     )
-    from blender_mcp_installer.upgrade_locks import ensure_usage_lock
+    from blender_mcp_installer.upgrade_locks import device_usage_name, ensure_usage_lock
     from blender_mcp_installer import upgrade_integration
     from uuid import uuid4
 
@@ -562,7 +561,7 @@ def test_prepare_after_unfinished_authority_ends_creates_new_migration(tmp_path,
         )
         update_record(state, roots, historical, status="complete")
         info = old_cache.stat()
-        ensure_usage_lock(state, info.st_dev, info.st_ino)
+        ensure_usage_lock(state, device_usage_name(info.st_dev, info.st_ino))
         second = marketplace._run_workflow(args, state, roots, projection)
         assert second["status"] == "complete" and not old_cache.exists()
         assert second["workflow_id"] != historical["id"] and len(record_ids(state)) == 2
@@ -735,12 +734,12 @@ def exact_cache(tmp_path, monkeypatch):
     return roots, projection, cache, desired
 
 
-def cached_entry(cache, roots, name):
+def cached_entry(cache, roots, name, python=None):
     import os
     import subprocess
 
     return subprocess.run(
-        [sys.executable, "-B", str(cache / "scripts" / name), "--help"],
+        [*([str(python)] if python else [sys.executable, "-B"]), str(cache / "scripts" / name), "--help"],
         env=dict(
             os.environ,
             HOME=str(roots.home),
@@ -767,14 +766,14 @@ def test_exact_current_cache_establishes_runnable_lease(exact_cache, pending):
             doc["registration"] = {"id": doc["id"], "state": "registered"}
             doc = save_record(state, roots, None, doc)
             old_info = cache.stat()
-            ensure_usage_lock(state, old_info.st_dev, old_info.st_ino)
+            ensure_usage_lock(state, usage_name(old_info.st_ino))
             previous = roots.home / "previous-cache"
             cache.rename(previous)
             shutil.copytree(previous, cache)
             assert cache.stat().st_ino != old_info.st_ino
         before_ids = record_ids(state)
         inspected = marketplace.inspect_registration(Path(args.codex), roots, desired)
-        lease = state.path / "usage" / usage_name(inspected.cache.dev, inspected.cache.ino)
+        lease = state.path / "usage" / usage_name(inspected.cache.ino)
         assert not lease.exists()
         result = marketplace._run_workflow(args, state, roots, projection)
         assert record_ids(state) == before_ids  # A lease repair is not a new generation.
@@ -785,6 +784,27 @@ def test_exact_current_cache_establishes_runnable_lease(exact_cache, pending):
     for name in ("install.py", "project_marketplace.py"):
         entry = cached_entry(cache, roots, name)
         assert entry.returncode == 0, entry.stderr
+
+
+def test_cached_entries_survive_volume_renumbering_after_register(exact_cache):
+    from blender_mcp_installer.upgrade_locks import mutation_locks, usage_lock, usage_name
+    from tests.distribution.remount import renumbering_python
+
+    roots, projection, cache, _desired = exact_cache
+    args = SimpleNamespace(reviewed_commit="b" * 40, codex="/fake/codex", workflow_id=None)
+    with mutation_locks(roots) as state:
+        marketplace._run_workflow(args, state, roots, projection)
+        lease = usage_name(cache.stat().st_ino)
+        with usage_lock(state, lease, exclusive=False) as acquired:
+            assert acquired
+    python = renumbering_python(roots.home.parent / "bootstrap", offset=7)
+    for name in ("install.py", "project_marketplace.py"):
+        entry = cached_entry(cache, roots, name, python)
+        assert entry.returncode == 0, entry.stderr
+    (roots.state / "usage" / lease).unlink()
+    for name in ("install.py", "project_marketplace.py"):
+        entry = cached_entry(cache, roots, name, python)
+        assert entry.returncode == 75 and "Traceback" not in entry.stderr, entry.stderr
 
 
 def test_exact_cache_inspection_and_failed_entries_do_not_create_lease(exact_cache):
@@ -834,12 +854,12 @@ def test_current_cache_identity_drift_cannot_succeed_or_lease_replacement(
         with pytest.raises(InstallerError, match="registration changed .* current cache lease"):
             marketplace._run_workflow(args, state, roots, projection)
         info = cache.stat()
-        assert not (state.path / "usage" / usage_name(info.st_dev, info.st_ino)).exists()
+        assert not (state.path / "usage" / usage_name(info.st_ino)).exists()
         assert not list(state.path.glob("upgrades/*.json"))
 
 
 def test_current_lease_repair_retains_unknown_lease_less_history(exact_cache):
-    from blender_mcp_installer.upgrade_locks import mutation_locks, usage_name
+    from blender_mcp_installer.upgrade_locks import device_usage_name, mutation_locks, usage_name
 
     roots, projection, cache, _desired = exact_cache
     old = roots.caches / "unknown-old"
@@ -850,6 +870,7 @@ def test_current_lease_repair_retains_unknown_lease_less_history(exact_cache):
     with mutation_locks(roots) as state:
         result = marketplace._run_workflow(args, state, roots, projection)
         assert result["no_op"] and result["unverified"] and not result["all_old_versions_removed"]
-        assert not (state.path / "usage" / usage_name(info.st_dev, info.st_ino)).exists()
+        for name in (usage_name(info.st_ino), device_usage_name(info.st_dev, info.st_ino)):
+            assert not (state.path / "usage" / name).exists()
     assert (old / "payload").read_bytes() == b"retained unknown history"
     assert cached_entry(cache, roots, "project_marketplace.py").returncode == 0
