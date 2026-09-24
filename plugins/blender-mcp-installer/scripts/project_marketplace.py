@@ -29,6 +29,13 @@ def _entry_directory(path: _Path) -> int:
 
 
 def _entry_lease() -> int | None:
+    try:
+        return _acquire_entry_lease()
+    except OSError:
+        raise SystemExit(75)
+
+
+def _acquire_entry_lease() -> int | None:
     home = _Path(_os.environ.get("HOME", "/"))
     codex = _Path(_os.environ.get("CODEX_HOME", str(home / ".codex")))
     cache = codex / "plugins/cache/official-blender-mcp/blender-mcp-installer"
@@ -41,7 +48,8 @@ def _entry_lease() -> int | None:
     version = cache / relative.parts[0]
     root_fd = _entry_directory(version)
     info = _os.fstat(root_fd)
-    name = _hashlib.sha256(f"tree:{info.st_dev}:{info.st_ino}".encode()).hexdigest() + ".lock"
+    # The inode alone names the lease: a reboot may renumber the volume device.
+    name = _hashlib.sha256(f"tree-v2:{info.st_ino}".encode()).hexdigest() + ".lock"
     usage_fd = _entry_directory(home / ".local/state/blender-mcp-installer/usage")
     lease_fd = _os.open(name, _os.O_RDWR | _os.O_NOFOLLOW, dir_fd=usage_fd)
     lease = _os.fstat(lease_fd)
@@ -120,7 +128,7 @@ from blender_mcp_installer.upgrade_integration import (
     finalize_register_locked,
     profile_from_context,
 )
-from blender_mcp_installer.upgrade_locks import ensure_usage_lock, mutation_locks
+from blender_mcp_installer.upgrade_locks import ensure_usage_lock, mutation_locks, tree_usage_name
 from blender_mcp_installer.upgrade_registration import RegistrationSnapshot, inspect_registration, read_owned_bytes
 from blender_mcp_installer.upgrade_state import (
     UpgradeRoots,
@@ -962,7 +970,7 @@ def _ensure_current_cache_lease(
         return
     if inspect_registration(codex, roots, desired) != snapshot:
         raise InstallerError("registration changed before current cache lease")
-    ensure_usage_lock(state, snapshot.cache.dev, snapshot.cache.ino)
+    ensure_usage_lock(state, tree_usage_name(snapshot.cache))
     if inspect_registration(codex, roots, desired) != snapshot:
         raise InstallerError("registration changed during current cache lease")
 

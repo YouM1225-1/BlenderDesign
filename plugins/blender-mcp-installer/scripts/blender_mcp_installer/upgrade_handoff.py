@@ -5,7 +5,7 @@ import json
 import os
 import shlex
 import subprocess
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path, PurePath
 from typing import Any, Iterator
 from uuid import UUID, uuid4
@@ -21,7 +21,12 @@ from blender_mcp_installer.filesystem import (
 )
 from blender_mcp_installer.model import ImageState, TreeImage
 from blender_mcp_installer.upgrade_discovery import lease_protocol
-from blender_mcp_installer.upgrade_locks import ensure_usage_lock, usage_lock
+from blender_mcp_installer.upgrade_locks import (
+    ensure_usage_lock,
+    exclusive_usage,
+    tree_usage_name,
+    usage_protocol,
+)
 from blender_mcp_installer.upgrade_registration import read_owned_bytes
 from blender_mcp_installer.upgrade_state import UpgradeRoots, uuid_text
 
@@ -188,6 +193,32 @@ def verify_handoff(
     }
 
 
+def installed_runtime(state: SafeRoot, runtime: Path) -> TreeImage | None:
+    """The runtime postimage the active receipt admits, read as a v1 launcher gate does.
+
+    A v1 launcher names its lease by the live device but only proceeds while that
+    device matches this record, so its lease file was created at the recorded device.
+    """
+    try:
+        raw, _proof = read_owned_bytes(TargetRef(state, PurePath("active.json")))
+        identifier = uuid_text(json.loads(raw)["install_id"])
+        raw, _proof = read_owned_bytes(
+            TargetRef(state, PurePath("receipts", identifier + ".json"))
+        )
+        receipt = json.loads(raw)
+        rows = [row for row in receipt["targets"] if row["role"] == "runtime"]
+        if (
+            receipt["status"] != "installed"
+            or receipt["install_id"] != identifier
+            or len(rows) != 1
+            or rows[0]["path"] != str(runtime)
+        ):
+            return None
+        return TreeImage.from_dict(rows[0]["install_post"])
+    except (InstallerError, OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 @contextmanager
 def runtime_quiescence(
     state: SafeRoot,
@@ -208,9 +239,19 @@ def runtime_quiescence(
                 "legacy runtime requires external maintenance handoff"
             )
         proof = verify_handoff(state, roots, runtime, codex, handoff_id, image)
-        ensure_usage_lock(state, image.dev, image.ino)
-    with usage_lock(state, image.dev, image.ino, exclusive=True) as acquired:
-        if not acquired:
+        ensure_usage_lock(state, tree_usage_name(image))
+    recorded = image
+    if usage_protocol(image) == 1:
+        installed = installed_runtime(state, runtime)
+        if (
+            installed is not None
+            and installed.state is ImageState.PRESENT
+            and installed.ino == image.ino
+            and usage_protocol(installed) == 1
+        ):
+            recorded = installed
+    with ExitStack() as leases:
+        if not exclusive_usage(leases, state, recorded, image.dev):
             raise RuntimeInUse("managed runtime is in use; targets unchanged")
         with SafeRoot.open(roots.home, os.getuid(), roots.home) as home:
             if capture_tree(home, runtime.relative_to(roots.home)) != image:

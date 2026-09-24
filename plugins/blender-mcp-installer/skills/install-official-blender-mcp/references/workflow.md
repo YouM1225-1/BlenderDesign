@@ -512,7 +512,13 @@ Runtime handoff does not prove old Codex tasks reloaded: old caches without coop
 usage evidence remain pending. Runtime and extension recoveries retired before the
 current host boot need no handoff, because the restart ended every process that could
 still use them. A cleanup journal for a release that is no longer current completes
-once a current finalize verifies all its remaining baselines absent.
+once a current finalize verifies all its remaining baselines absent. Current launchers
+and cached entries name their lease by inode, so a reboot that renumbers the volume
+device keeps them usable; a missing lease exits 75. A first-generation runtime whose
+device changed since its installed receipt is not reported in use merely because no
+lease exists under the new device number; any existing lease under either number
+must still be free. A first-generation cache or recovery first recorded after a reboot
+whose lease predates that reboot stays pending until the next device renumbering.
 
 
 Verification succeeds only when parsed Codex policy, effective Codex MCP config,

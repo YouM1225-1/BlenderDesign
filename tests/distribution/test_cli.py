@@ -677,7 +677,7 @@ def test_unproven_cleanup_reference_reports_fixed_reason(
 @pytest.mark.parametrize("entry", ["install.py", "project_marketplace.py"])
 def test_cached_entrypoint_leases_before_import_and_help_is_read_only(tmp_path, entry):
     from blender_mcp_installer.upgrade_state import UpgradeRoots, state_root
-    from blender_mcp_installer.upgrade_locks import ensure_usage_lock, usage_lock
+    from blender_mcp_installer.upgrade_locks import ensure_usage_lock, usage_lock, usage_name
 
     home, codex = tmp_path / "home", tmp_path / "custom-codex"
     home.mkdir(mode=0o700)
@@ -704,7 +704,7 @@ sys.path.insert(0,sys.argv[1]); sys.argv=sys.argv[2:]; runpy.run_path(sys.argv[0
     environment = dict(os.environ, HOME=str(home), CODEX_HOME=str(codex))
     with state_root(roots) as state:
         info = version.stat()
-        ensure_usage_lock(state, info.st_dev, info.st_ino)
+        ensure_usage_lock(state, usage_name(info.st_ino))
 
         def snapshot():
             return {
@@ -714,7 +714,7 @@ sys.path.insert(0,sys.argv[1]); sys.argv=sys.argv[2:]; runpy.run_path(sys.argv[0
             }
 
         before = snapshot()
-        with usage_lock(state, info.st_dev, info.st_ino, exclusive=True) as held:
+        with usage_lock(state, usage_name(info.st_ino), exclusive=True) as held:
             assert held
             busy = subprocess.run(argv, env=environment, capture_output=True, text=True, timeout=10)
         assert busy.returncode == 75, busy.stderr
@@ -962,7 +962,7 @@ def test_changed_install_restages_exact_external_blender_with_codex_drift(
         (stage.path / "bin").mkdir()
         (stage.path / "bin/python").write_bytes(b"python")
         (stage.path / "bin/blender-mcp-managed").write_bytes(b"launcher")
-        (stage.path / ".blender-mcp-usage-v1").write_bytes(b"inode-v1\n")
+        (stage.path / ".blender-mcp-usage-v1").write_bytes(b"inode-v2\n")
         return capture_tree(stage.root, stage.relative)
 
     def fake_codex(_fd, _current, _desired, _runtime_python, stage: StagedFile):
@@ -1025,7 +1025,7 @@ def test_prepublication_runtime_barrier_preserves_managed_targets(
     host: HostHarness, monkeypatch: pytest.MonkeyPatch, lease_protocol: bool
 ) -> None:
     from blender_mcp_installer.upgrade_handoff import LegacyHandoffRequired, RuntimeInUse
-    from blender_mcp_installer.upgrade_locks import ensure_usage_lock, usage_lock
+    from blender_mcp_installer.upgrade_locks import ensure_usage_lock, tree_usage_name, usage_lock
     from blender_mcp_installer.upgrade_state import UpgradeRoots, record_ids, state_root
 
     context, _, roots = _install_context(host)
@@ -1068,9 +1068,9 @@ def test_prepublication_runtime_barrier_preserves_managed_targets(
     expected = RuntimeInUse if lease_protocol else LegacyHandoffRequired
     with state_root(upgrade_roots) as state:
         if lease_protocol:
-            ensure_usage_lock(state, before[0].dev, before[0].ino)
+            ensure_usage_lock(state, tree_usage_name(before[0]))
         lease = (
-            usage_lock(state, before[0].dev, before[0].ino, exclusive=False)
+            usage_lock(state, tree_usage_name(before[0]), exclusive=False)
             if lease_protocol
             else nullcontext(True)
         )
@@ -1105,7 +1105,7 @@ def test_first_install_orchestrates_journaled_adapters(
         (stage.path / "bin").mkdir()
         (stage.path / "bin/python").write_bytes(b"python")
         (stage.path / "bin/blender-mcp-managed").write_bytes(b"launcher")
-        (stage.path / ".blender-mcp-usage-v1").write_bytes(b"inode-v1\n")
+        (stage.path / ".blender-mcp-usage-v1").write_bytes(b"inode-v2\n")
         return capture_tree(stage.root, stage.relative)
 
     def fake_blender(_state, _zip, work: Path, _authorizations, _runner):
@@ -2668,7 +2668,7 @@ def _runtime_recovery_images(roots, receipt):
 @pytest.mark.parametrize("interrupted", [None, "prepared", "rollback_pending", "runtime_swapped"])
 def test_rollback_busy_runtime_preserves_targets_and_retries(tmp_path, interrupted):
     from blender_mcp_installer.upgrade_handoff import RuntimeInUse
-    from blender_mcp_installer.upgrade_locks import ensure_usage_lock, usage_lock
+    from blender_mcp_installer.upgrade_locks import ensure_usage_lock, tree_usage_name, usage_lock
     from blender_mcp_installer.upgrade_state import UpgradeRoots, state_root
 
     with _userpref_completion_fault_scenario(tmp_path) as context:
@@ -2677,9 +2677,8 @@ def test_rollback_busy_runtime_preserves_targets_and_retries(tmp_path, interrupt
             roots.runtime.mkdir(parents=True)
             (roots.runtime / ".blender-mcp-usage-v1").write_bytes(b"inode-v1\n")
             (roots.runtime / "preimage").write_bytes(b"old-runtime")
-            info = roots.runtime.stat()
             with state_root(UpgradeRoots(roots.home, roots.codex_home)) as state:
-                ensure_usage_lock(state, info.st_dev, info.st_ino)
+                ensure_usage_lock(state, tree_usage_name(_captured(roots.runtime, tree=True)))
         original_runtime = _captured(roots.runtime, tree=True)
         if interrupted == "prepared":
             with pytest.raises(SystemExit):
@@ -2694,9 +2693,9 @@ def test_rollback_busy_runtime_preserves_targets_and_retries(tmp_path, interrupt
             with pytest.raises(SystemExit):
                 cli.rollback(SimpleNamespace(receipt=receipt, _fault=ExitFaultInjector(point, 70)))
         before = _runtime_recovery_images(roots, receipt)
-        info = roots.runtime.stat()
+        lease = tree_usage_name(_captured(roots.runtime, tree=True))
         with state_root(UpgradeRoots(roots.home, roots.codex_home)) as state:
-            with usage_lock(state, info.st_dev, info.st_ino, exclusive=False) as acquired:
+            with usage_lock(state, lease, exclusive=False) as acquired:
                 assert acquired
                 with pytest.raises(RuntimeInUse):
                     cli.rollback(SimpleNamespace(receipt=receipt, _fault=NoOpFaultInjector()))
@@ -2710,7 +2709,7 @@ def test_rollback_busy_runtime_preserves_targets_and_retries(tmp_path, interrupt
 def test_install_exception_recovery_busy_runtime_preserves_targets_and_retries(tmp_path, monkeypatch):
     from contextlib import ExitStack
     from blender_mcp_installer.upgrade_handoff import RuntimeInUse
-    from blender_mcp_installer.upgrade_locks import usage_lock
+    from blender_mcp_installer.upgrade_locks import tree_usage_name, usage_lock
     from blender_mcp_installer.upgrade_state import UpgradeRoots, state_root
 
     with _userpref_completion_fault_scenario(tmp_path) as context, ExitStack() as leases:
@@ -2720,8 +2719,8 @@ def test_install_exception_recovery_busy_runtime_preserves_targets_and_retries(t
 
         def fail_verification(*_args):
             state = leases.enter_context(state_root(UpgradeRoots(roots.home, roots.codex_home)))
-            info = roots.runtime.stat()
-            assert leases.enter_context(usage_lock(state, info.st_dev, info.st_ino, exclusive=False))
+            lease = tree_usage_name(_captured(roots.runtime, tree=True))
+            assert leases.enter_context(usage_lock(state, lease, exclusive=False))
             receipt = next(path for path in roots.receipts.glob("*.json")
                            if not path.name.endswith(".usage.json"))
             observations.append((receipt, _runtime_recovery_images(roots, receipt)))
@@ -2745,7 +2744,7 @@ def test_rollback_legacy_restored_runtime_accepts_explicit_handoff(
 ):
     import hashlib
     from blender_mcp_installer import upgrade_handoff
-    from blender_mcp_installer.upgrade_locks import usage_lock
+    from blender_mcp_installer.upgrade_locks import tree_usage_name, usage_lock
     from blender_mcp_installer.upgrade_state import UpgradeRoots, state_root
 
     real_context = cli._context
@@ -2820,7 +2819,7 @@ def test_rollback_legacy_restored_runtime_accepts_explicit_handoff(
 
         # Even a valid legacy handoff cannot bypass the restored inode's lease.
         with state_root(upgrade_roots) as state:
-            with usage_lock(state, original_runtime.dev, original_runtime.ino, exclusive=False) as acquired:
+            with usage_lock(state, tree_usage_name(original_runtime), exclusive=False) as acquired:
                 assert acquired
                 assert cli.run_cli(argv + handoff_args, NoOpFaultInjector()) == 1
                 assert json.loads(capsys.readouterr().out)["error"] == "runtime_in_use"

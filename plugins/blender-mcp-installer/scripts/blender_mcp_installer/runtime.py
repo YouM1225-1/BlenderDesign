@@ -127,6 +127,7 @@ import json
 import os
 import stat
 import sys
+import uuid
 from pathlib import Path
 
 def directory(path):
@@ -151,41 +152,54 @@ def json_file(parent, name):
             raise SystemExit(75)
         return json.loads(stream.read(33554433))
 
+def admit(runtime):
+    # Leases and receipts name the runtime by inode: a reboot may renumber the volume
+    # device. Refusing a mount point keeps the root on its parent's volume.
+    root_fd = directory(runtime)
+    root_info = os.fstat(root_fd)
+    parent_fd = directory(runtime.parent)
+    linked = os.stat(runtime.name, dir_fd=parent_fd, follow_symlinks=False)
+    if ((linked.st_dev, linked.st_ino) != (root_info.st_dev, root_info.st_ino)
+            or os.fstat(parent_fd).st_dev != root_info.st_dev):
+        raise SystemExit(75)
+    state_fd = directory(Path(environment['HOME']) / '.local/state/blender-mcp-installer')
+    usage_fd = os.open('usage', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=state_fd)
+    name = hashlib.sha256(f'tree-v2:{root_info.st_ino}'.encode()).hexdigest() + '.lock'
+    lease_fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW, dir_fd=usage_fd)
+    lease_info = os.fstat(lease_fd)
+    if (not stat.S_ISREG(lease_info.st_mode) or lease_info.st_uid != os.getuid()
+            or stat.S_IMODE(lease_info.st_mode) != 0o600 or lease_info.st_nlink != 1):
+        raise SystemExit(75)
+    try:
+        fcntl.flock(lease_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit(75)
+    check_fd = directory(runtime)
+    if (os.fstat(check_fd).st_dev, os.fstat(check_fd).st_ino) != (root_info.st_dev, root_info.st_ino):
+        raise SystemExit(75)
+    active = json_file(state_fd, 'active.json')
+    identifier = active.get('install_id')
+    if not isinstance(identifier, str) or str(uuid.UUID(identifier)) != identifier:
+        raise SystemExit(75)
+    receipts_fd = os.open('receipts', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=state_fd)
+    receipt = json_file(receipts_fd, identifier + '.json')
+    if receipt.get('status') != 'installed' or receipt.get('install_id') != identifier:
+        raise SystemExit(75)
+    matching = [row for row in receipt.get('targets', []) if row.get('role') == 'runtime']
+    if len(matching) != 1 or matching[0].get('path') != str(runtime):
+        raise SystemExit(75)
+    post = matching[0].get('install_post') or {}
+    if post.get('ino') != root_info.st_ino:
+        raise SystemExit(75)
+    for fd in (root_fd, parent_fd, state_fd, usage_fd, check_fd, receipts_fd):
+        os.close(fd)
+    return lease_fd
+
 runtime = Path(__file__).absolute().parent.parent
-root_fd = directory(runtime)
-root_info = os.fstat(root_fd)
-state_fd = directory(Path(environment['HOME']) / '.local/state/blender-mcp-installer')
-usage_fd = os.open('usage', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=state_fd)
-name = hashlib.sha256(f'tree:{root_info.st_dev}:{root_info.st_ino}'.encode()).hexdigest() + '.lock'
-lease_fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW, dir_fd=usage_fd)
-lease_info = os.fstat(lease_fd)
-if (not stat.S_ISREG(lease_info.st_mode) or lease_info.st_uid != os.getuid()
-        or stat.S_IMODE(lease_info.st_mode) != 0o600 or lease_info.st_nlink != 1):
-    raise SystemExit(75)
 try:
-    fcntl.flock(lease_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-except BlockingIOError:
+    lease_fd = admit(runtime)
+except (OSError, ValueError, TypeError, AttributeError, RecursionError):
     raise SystemExit(75)
-check_fd = directory(runtime)
-if (os.fstat(check_fd).st_dev, os.fstat(check_fd).st_ino) != (root_info.st_dev, root_info.st_ino):
-    raise SystemExit(75)
-active = json_file(state_fd, 'active.json')
-identifier = active.get('install_id')
-import uuid
-if not isinstance(identifier, str) or str(uuid.UUID(identifier)) != identifier:
-    raise SystemExit(75)
-receipts_fd = os.open('receipts', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=state_fd)
-receipt = json_file(receipts_fd, identifier + '.json')
-if receipt.get('status') != 'installed' or receipt.get('install_id') != identifier:
-    raise SystemExit(75)
-matching = [row for row in receipt.get('targets', []) if row.get('role') == 'runtime']
-if len(matching) != 1 or matching[0].get('path') != str(runtime):
-    raise SystemExit(75)
-post = matching[0].get('install_post') or {}
-if (post.get('dev'), post.get('ino')) != (root_info.st_dev, root_info.st_ino):
-    raise SystemExit(75)
-for fd in (root_fd, state_fd, usage_fd, check_fd, receipts_fd):
-    os.close(fd)
 os.set_inheritable(lease_fd, True)
 runtime_python = runtime / 'bin/python'
 entry_point = runtime / 'bin/blender-mcp'
@@ -769,7 +783,7 @@ def stage_runtime(
             launcher = runtime / _LAUNCHER
             _write_exclusive(launcher, _launcher_source(launcher_environment), 0o700)
             _write_exclusive(runtime / _LOCK_COPY, lock_raw, 0o600)
-            _write_exclusive(runtime / ".blender-mcp-usage-v1", b"inode-v1\n", 0o600)
+            _write_exclusive(runtime / ".blender-mcp-usage-v1", b"inode-v2\n", 0o600)
             entry_point_raw = _read_stable(runtime / PurePath(metadata["entry_point_relative"]))
             module_raw = _read_stable(runtime / PurePath(metadata["module_relative"]))
             _sync_tree(runtime)

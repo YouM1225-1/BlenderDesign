@@ -300,7 +300,7 @@ def _patch_scenario(cli, root: Path, fixture_kind: str, preimage: str, point: st
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
         (stage.path / "bin/blender-mcp-managed").write_bytes(b"launcher")
-        (stage.path / ".blender-mcp-usage-v1").write_bytes(b"inode-v1\n")
+        (stage.path / ".blender-mcp-usage-v1").write_bytes(b"inode-v2\n")
         return capture_tree(stage.root, stage.relative)
 
     def fake_blender(_state, _zip, work: Path, _authorizations, _runner):
@@ -357,13 +357,16 @@ def _patch_scenario(cli, root: Path, fixture_kind: str, preimage: str, point: st
                 selected.mkdir()
                 (selected / "preimage").write_bytes(b"preimage")
                 if fixture_kind == "runtime_tree":
-                    from blender_mcp_installer.upgrade_locks import ensure_usage_lock
+                    from blender_mcp_installer.upgrade_locks import (
+                        device_usage_name,
+                        ensure_usage_lock,
+                    )
                     from blender_mcp_installer.upgrade_state import UpgradeRoots, state_root
 
                     (selected / ".blender-mcp-usage-v1").write_bytes(b"inode-v1\n")
                     image = selected.stat()
                     with state_root(UpgradeRoots(roots.home, roots.codex_home)) as state:
-                        ensure_usage_lock(state, image.st_dev, image.st_ino)
+                        ensure_usage_lock(state, device_usage_name(image.st_dev, image.st_ino))
             else:
                 selected.write_bytes(b'foreign = "SECRET-SENTINEL"\n')
         marker.write_text("seeded\n")
