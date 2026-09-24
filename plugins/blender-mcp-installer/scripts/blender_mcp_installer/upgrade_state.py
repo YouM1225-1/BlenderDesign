@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import os
 import re
 from contextlib import contextmanager
@@ -16,6 +18,7 @@ from blender_mcp_installer.filesystem import (
     TargetRef,
     capture_file,
     load_atomic_json_pair,
+    load_state_json,
     reconcile_atomic_json,
     write_atomic_json,
 )
@@ -27,6 +30,8 @@ HASH = re.compile(r"[0-9a-f]{64}\Z")
 STATUSES = {"awaiting_verification", "cleanup_pending", "complete", "cancelled"}
 KINDS = {"runtime_recovery", "extension_recovery", "plugin_cache"}
 ROW_STATES = {"pending", "deferred_in_use", "conflict", "removed"}
+# Schema 2 stores each candidate image once, content-addressed, beside the journals.
+IMAGES = PurePath("upgrades", "images")
 
 
 def uuid_text(value: object) -> str:
@@ -82,7 +87,7 @@ def _validate_record(raw: object, roots: UpgradeRoots) -> dict[str, Any]:
     doc = exact(raw, "schema_version id revision mode status home codex_home desired profile "
                 "registration install_id candidates findings verification retired_receipts "
                 "retired_registrations")
-    if type(doc["schema_version"]) is not int or doc["schema_version"] != 1:
+    if type(doc["schema_version"]) is not int or doc["schema_version"] not in {1, 2}:
         raise InstallerError("unsupported upgrade schema")
     uuid_text(doc["id"])
     if type(doc["revision"]) is not int or doc["revision"] < 0:
@@ -210,7 +215,7 @@ def validate_record(raw: object, roots: UpgradeRoots) -> dict[str, Any]:
 def new_record(roots: UpgradeRoots, mode: str, desired: dict[str, str],
                workflow_id: str | None = None) -> dict[str, Any]:
     return validate_record({
-        "schema_version": 1, "id": workflow_id or str(uuid4()), "revision": 0,
+        "schema_version": 2, "id": workflow_id or str(uuid4()), "revision": 0,
         "mode": mode, "status": "awaiting_verification", "home": str(roots.home),
         "codex_home": str(roots.codex_home), "desired": desired, "profile": None,
         "registration": None, "install_id": None, "candidates": [], "findings": [],
@@ -286,13 +291,70 @@ def record_ids(state: SafeRoot) -> tuple[str, ...]:
     return tuple(sorted(result))
 
 
+def _image_bytes(image: object) -> bytes:
+    # The same canonical encoding write_atomic_json publishes.
+    return json.dumps(image, sort_keys=True, separators=(",", ":"), allow_nan=False).encode() + b"\n"
+
+
+def encode_record(doc: dict[str, Any]) -> dict[str, Any]:
+    """Return the stored form of a journal; schema 2 references its candidate images."""
+    stored = copy.deepcopy(doc)
+    if stored["schema_version"] == 2:
+        for row in stored["candidates"]:
+            digest = hashlib.sha256(_image_bytes(row["expected"])).hexdigest()
+            row["expected"] = {"image_sha256": digest}
+    return stored
+
+
+def _decode_record(state: SafeRoot, raw: object) -> object:
+    if type(raw) is not dict or raw.get("schema_version") != 2:
+        return raw
+    decoded = copy.deepcopy(raw)
+    rows = decoded.get("candidates")
+    for row in rows if type(rows) is list else ():
+        if type(row) is not dict:
+            continue
+        digest = exact(row.get("expected"), "image_sha256")["image_sha256"]
+        if type(digest) is not str or not HASH.fullmatch(digest):
+            raise InstallerError("invalid candidate image reference")
+        try:
+            image = load_state_json(TargetRef(state, IMAGES / (digest + ".json")))
+        except (OSError, ValueError) as exc:
+            raise InstallerError("candidate image is missing or changed") from exc
+        if image is None or hashlib.sha256(_image_bytes(image)).hexdigest() != digest:
+            raise InstallerError("candidate image is missing or changed")
+        row["expected"] = image
+    return decoded
+
+
+def _store_images(state: SafeRoot, doc: dict[str, Any], fault: Any) -> None:
+    """Durably publish every candidate image before a journal can reference it."""
+    if doc["schema_version"] != 2 or not doc["candidates"]:
+        return
+    os.close(state.open_directory(IMAGES, create=True))
+    upgrades = state.open_directory(PurePath("upgrades"))
+    try:
+        os.fsync(upgrades)
+    finally:
+        os.close(upgrades)
+    for row in doc["candidates"]:
+        digest = hashlib.sha256(_image_bytes(row["expected"])).hexdigest()
+        ref = TargetRef(state, IMAGES / (digest + ".json"))
+        current = capture_file(state, ref.relative)
+        if current.state is ImageState.PRESENT:
+            if current.sha256 != digest or current.mode != 0o600:
+                raise InstallerError("candidate image is missing or changed")
+            continue
+        write_atomic_json(ref, current, row["expected"], UUID(doc["id"]), fault=fault)
+
+
 def load_record(state: SafeRoot, roots: UpgradeRoots, workflow_id: str,
                 *, recover: bool = False) -> dict[str, Any] | None:
     workflow_id = uuid_text(workflow_id)
     ref = TargetRef(state, PurePath("upgrades", workflow_id + ".json"))
     live, stale = load_atomic_json_pair(ref, UUID(workflow_id))
-    current = None if live is None else validate_record(live, roots)
-    temporary = None if stale is None else validate_record(stale, roots)
+    current = None if live is None else validate_record(_decode_record(state, live), roots)
+    temporary = None if stale is None else validate_record(_decode_record(state, stale), roots)
     if any(doc is not None and doc["id"] != workflow_id for doc in (current, temporary)):
         raise InstallerError("upgrade filename identity mismatch")
     if temporary is None:
@@ -307,7 +369,9 @@ def load_record(state: SafeRoot, roots: UpgradeRoots, workflow_id: str,
     if not recover:
         raise InstallerError("upgrade journal needs reconciliation")
     old, new = transitions[0]
-    reconcile_atomic_json(ref, [(old, new)], UUID(workflow_id), fault=NoOpFaultInjector())
+    stored_old = None if old is None else encode_record(old)
+    reconcile_atomic_json(ref, [(stored_old, encode_record(new))], UUID(workflow_id),
+                          fault=NoOpFaultInjector())
     return new
 
 
@@ -320,8 +384,10 @@ def save_record(state: SafeRoot, roots: UpgradeRoots, old: dict[str, Any] | None
     actual = load_record(state, roots, new["id"])
     if actual != old:
         raise InstallerError("upgrade journal changed concurrently")
-    write_atomic_json(ref, capture_file(state, ref.relative), new, UUID(new["id"]),
-                      fault=fault or NoOpFaultInjector())
+    fault = fault or NoOpFaultInjector()
+    _store_images(state, new, fault)
+    write_atomic_json(ref, capture_file(state, ref.relative), encode_record(new), UUID(new["id"]),
+                      fault=fault)
     return new
 
 

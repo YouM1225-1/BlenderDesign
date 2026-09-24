@@ -32,6 +32,7 @@ from blender_mcp_installer.upgrade_state import (
     COMMIT,
     UpgradeRoots,
     absolute,
+    encode_record,
     load_any_record,
     record_ids,
 )
@@ -254,7 +255,7 @@ def registration_scope(
         raw, journal_proof = read_evidence(
             state, PurePath("upgrades", journal["id"] + ".json")
         )
-        if json.loads(raw) != journal:
+        if json.loads(raw) != encode_record(journal):
             raise InstallerError("upgrade journal changed during discovery")
         journal_proofs.append(journal_proof)
     try:

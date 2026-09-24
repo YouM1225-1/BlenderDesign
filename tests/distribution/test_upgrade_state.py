@@ -1,3 +1,4 @@
+import os
 import sys
 import stat
 from pathlib import Path
@@ -64,7 +65,7 @@ def test_state_rejects_unknown_schema_and_persists_revision(tmp_path: Path) -> N
     roots = _roots(tmp_path)
     doc = new_record(roots, "register", _desired(roots))
     with pytest.raises(InstallerError):
-        validate_record(dict(doc, schema_version=2), roots)
+        validate_record(dict(doc, schema_version=3), roots)
     with state_root(roots) as state:
         saved = save_record(state, roots, None, doc)
         updated = update_record(state, roots, saved, status="cancelled")
@@ -219,3 +220,144 @@ def test_load_record_requires_explicit_recovery_for_atomic_temp(tmp_path: Path) 
             assert (live_path.read_bytes(), temp_path.read_bytes()) == before
         assert load_record(state, roots, doc["id"], recover=True) == updated
         assert load_record(state, roots, doc["id"]) == updated
+
+
+def _image_row(roots: UpgradeRoots, tree: Path, files: int = 200) -> dict[str, object]:
+    from blender_mcp_installer.filesystem import SafeRoot, capture_file, capture_tree
+
+    tree.mkdir(parents=True)
+    for index in range(files):
+        (tree / f"file-{index:04d}.py").write_text(f"value = {index}\n")
+    evidence = roots.home / "evidence.json"
+    evidence.write_text("{}\n")
+    with SafeRoot.open(roots.home, os.getuid(), roots.home) as home:
+        image = capture_tree(home, tree.relative_to(roots.home))
+        proof = capture_file(home, evidence.relative_to(roots.home))
+    return {
+        "key": "plugin_cache:1", "kind": "plugin_cache", "owner": str(uuid4()),
+        "version": "1", "expected": image.to_dict(),
+        "proofs": [{"relative": "receipts/evidence.json", "expected": proof.to_dict()}],
+        "content_source": str(roots.projections / ("c" * 40) / "plugins/blender-mcp-installer"),
+        "content_sha256": "d" * 64, "lease_known": True, "state": "pending", "reason": "",
+    }
+
+
+def _journal(roots: UpgradeRoots, identifier: str) -> Path:
+    return roots.state / "upgrades" / f"{identifier}.json"
+
+
+def _images(roots: UpgradeRoots) -> list[Path]:
+    folder = roots.state / "upgrades" / "images"
+    return sorted(folder.iterdir()) if folder.exists() else []
+
+
+def test_journal_keeps_candidate_images_outside_the_record(tmp_path: Path) -> None:
+    import json
+
+    from blender_mcp_installer.upgrade_state import encode_record
+
+    roots = _roots(tmp_path)
+    row = _image_row(roots, roots.home / "tree")
+    doc = dict(new_record(roots, "register", _desired(roots)), candidates=[row])
+    with state_root(roots) as state:
+        saved = save_record(state, roots, None, doc)
+        second = save_record(
+            state, roots, None, dict(new_record(roots, "register", _desired(roots)), candidates=[row])
+        )
+        raw = _journal(roots, doc["id"]).read_bytes()
+        stored = json.loads(raw)
+        assert len(raw) < 4096 and b"file-0150.py" not in raw
+        images = _images(roots)
+        assert [path.name for path in images] == [
+            stored["candidates"][0]["expected"]["image_sha256"] + ".json"
+        ]
+        assert stat.S_IMODE(images[0].stat().st_mode) == 0o600
+        assert stored == encode_record(saved)
+        assert load_record(state, roots, doc["id"]) == saved
+        assert load_record(state, roots, second["id"]) == second
+
+
+@pytest.mark.parametrize("damage", ["missing", "tampered"])
+def test_missing_or_changed_candidate_image_fails_closed(tmp_path: Path, damage: str) -> None:
+    roots = _roots(tmp_path)
+    row = _image_row(roots, roots.home / "tree")
+    doc = dict(new_record(roots, "register", _desired(roots)), candidates=[row])
+    with state_root(roots) as state:
+        save_record(state, roots, None, doc)
+        image, = _images(roots)
+        if damage == "missing":
+            image.unlink()
+        else:
+            image.write_text('{"state":"absent"}\n')
+            image.chmod(0o600)
+        with pytest.raises(InstallerError, match="candidate image"):
+            load_record(state, roots, doc["id"])
+
+
+def test_version_one_journal_keeps_embedded_images(tmp_path: Path) -> None:
+    import json
+
+    roots = _roots(tmp_path)
+    row = _image_row(roots, roots.home / "tree")
+    doc = dict(
+        new_record(roots, "register", _desired(roots)), schema_version=1, candidates=[row]
+    )
+    with state_root(roots) as state:
+        saved = save_record(state, roots, None, doc)
+        updated = update_record(state, roots, saved, status="cancelled")
+        stored = json.loads(_journal(roots, doc["id"]).read_bytes())
+        assert stored["schema_version"] == 1
+        assert stored["candidates"][0]["expected"] == row["expected"]
+        assert _images(roots) == []
+        assert load_record(state, roots, doc["id"]) == updated
+
+
+class _CrashAtHit:
+    def __init__(self, point: str, occurrence: int) -> None:
+        self.point, self.remaining = point, occurrence
+
+    def hit(self, point: str) -> None:
+        if point == self.point:
+            self.remaining -= 1
+            if self.remaining == 0:
+                raise RuntimeError(point)
+
+
+@pytest.mark.parametrize("first_write", [False, True])
+@pytest.mark.parametrize("crash", ["image", "journal"])
+def test_interrupted_journal_write_recovers_with_its_images(
+    tmp_path: Path, crash: str, first_write: bool
+) -> None:
+    roots = _roots(tmp_path)
+    row = _image_row(roots, roots.home / "tree")
+    doc = new_record(roots, "register", _desired(roots))
+    with state_root(roots) as state:
+        saved = None if first_write else save_record(state, roots, None, doc)
+        updated = (
+            dict(doc, candidates=[row])
+            if first_write
+            else {**saved, "revision": 1, "candidates": [row]}
+        )
+        fault = _CrashAtHit("after_json_file_fsync", 1 if crash == "image" else 2)
+        with pytest.raises(RuntimeError, match="after_json_file_fsync"):
+            save_record(state, roots, saved, updated, fault=fault)
+        if crash == "image":
+            assert load_record(state, roots, doc["id"], recover=True) == saved
+            save_record(state, roots, saved, updated)
+            assert load_record(state, roots, doc["id"]) == updated
+        else:
+            assert load_record(state, roots, doc["id"], recover=True) == updated
+        assert len([path for path in _images(roots) if path.suffix == ".json"]) == 1
+
+
+def test_interrupted_image_copy_never_blocks_a_published_image(tmp_path: Path) -> None:
+    roots = _roots(tmp_path)
+    row = _image_row(roots, roots.home / "tree")
+    doc = dict(new_record(roots, "register", _desired(roots)), candidates=[row])
+    with state_root(roots) as state:
+        saved = save_record(state, roots, None, doc)
+        image, = _images(roots)
+        torn = image.with_name(f".blender-mcp-installer.{doc['id']}.{image.name}.tmp")
+        torn.write_bytes(b'{"state":')
+        torn.chmod(0o600)
+        assert load_record(state, roots, doc["id"]) == saved

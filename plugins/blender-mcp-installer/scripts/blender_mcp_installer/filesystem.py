@@ -1646,6 +1646,11 @@ def reconcile_atomic_json(
         raise InstallerError("atomic JSON reconciliation conflict") from exc
 
 
+def load_state_json(path: TargetRef) -> object | None:
+    """Read only the published document, never an interrupted temporary copy."""
+    return _read_private_json(path.root, path.relative)
+
+
 def load_atomic_json_pair(path: TargetRef, install_id: UUID) -> tuple[object | None, object | None]:
     parent_fd, target_name = path.root.open_parent(path.relative)
     os.close(parent_fd)

@@ -340,7 +340,7 @@ def test_schema_rejects_foreign_and_unknown_fields(prepared):
     invalid["candidates"][0]["proofs"][0]["relative"] = "upgrades/not-a-uuid.json"
     with pytest.raises(InstallerError, match="invalid workflow UUID"):
         validate_record(invalid, roots)
-    for change in ({"schema_version": 2}, {"home": "/foreign"}, {"extra": True}):
+    for change in ({"schema_version": 3}, {"home": "/foreign"}, {"extra": True}):
         with pytest.raises(InstallerError):
             validate_record(dict(doc, **change), roots)
 
