@@ -718,6 +718,7 @@ sys.path.insert(0,sys.argv[1]); sys.argv=sys.argv[2:]; runpy.run_path(sys.argv[0
             assert held
             busy = subprocess.run(argv, env=environment, capture_output=True, text=True, timeout=10)
         assert busy.returncode == 75, busy.stderr
+        assert busy.stderr == "blender-mcp-installer entry: plugin version is being retired\n"
         assert "INSTALLER_IMPORT" not in busy.stdout
         assert snapshot() == before
         released = subprocess.run(argv, env=environment, capture_output=True, text=True, timeout=10)

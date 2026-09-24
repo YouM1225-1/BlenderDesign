@@ -2019,6 +2019,7 @@ def test_remount_never_hides_other_recovery_drift(legacy_recovery, monkeypatch, 
     assert (recovery / "bin/python").read_text() == "legacy"
 
 
+@pytest.mark.parametrize("prepared", [None, b"inode-v1\n"], indirect=True, ids=["unmarked", "v1"])
 def test_remounted_leased_cache_honours_both_device_identities(prepared):
     from blender_mcp_installer.model import TreeImage
 
@@ -2121,6 +2122,7 @@ def test_host_restart_never_replaces_an_available_lease(legacy_recovery, monkeyp
     assert released["status"] == "complete" and not recovery.exists()
 
 
+@pytest.mark.parametrize("prepared", [None, b"inode-v1\n"], indirect=True, ids=["unmarked", "v1"])
 def test_remounted_cache_without_new_device_lease_file_is_removed(prepared):
     from blender_mcp_installer.model import TreeImage
 
@@ -2181,6 +2183,7 @@ def test_missing_v2_lease_stays_fail_closed(prepared, remount):
     assert old.exists()
 
 
+@pytest.mark.parametrize("prepared", [None, b"inode-v1\n"], indirect=True, ids=["unmarked", "v1"])
 @pytest.mark.parametrize("remount", [False, True])
 def test_device_lease_recorded_after_renumbering_is_reclaimed_after_next_remount(
     prepared, remount

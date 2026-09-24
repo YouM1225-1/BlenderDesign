@@ -130,9 +130,18 @@ import sys
 import uuid
 from pathlib import Path
 
+def refuse(reason):
+    # A fixed reason without paths lets the MCP client log show why the gate refused;
+    # an unwritable stderr must not change the exit status.
+    try:
+        os.write(2, ('blender-mcp-managed: ' + reason + '\n').encode())
+    except OSError:
+        pass
+    raise SystemExit(75)
+
 def directory(path):
     if not path.is_absolute() or '..' in path.parts:
-        raise SystemExit(75)
+        refuse('unsafe path')
     fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     try:
         for part in path.parts[1:]:
@@ -149,7 +158,7 @@ def json_file(parent, name):
     with os.fdopen(fd, 'rb') as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 33554432:
-            raise SystemExit(75)
+            refuse('unsafe installer state file')
         return json.loads(stream.read(33554433))
 
 def admit(runtime):
@@ -161,36 +170,38 @@ def admit(runtime):
     linked = os.stat(runtime.name, dir_fd=parent_fd, follow_symlinks=False)
     if ((linked.st_dev, linked.st_ino) != (root_info.st_dev, root_info.st_ino)
             or os.fstat(parent_fd).st_dev != root_info.st_dev):
-        raise SystemExit(75)
+        refuse('runtime root was replaced or is a mount point')
     state_fd = directory(Path(environment['HOME']) / '.local/state/blender-mcp-installer')
     usage_fd = os.open('usage', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=state_fd)
     name = hashlib.sha256(f'tree-v2:{root_info.st_ino}'.encode()).hexdigest() + '.lock'
     lease_fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW, dir_fd=usage_fd)
     lease_info = os.fstat(lease_fd)
+    linked_lease = os.stat(name, dir_fd=usage_fd, follow_symlinks=False)
     if (not stat.S_ISREG(lease_info.st_mode) or lease_info.st_uid != os.getuid()
-            or stat.S_IMODE(lease_info.st_mode) != 0o600 or lease_info.st_nlink != 1):
-        raise SystemExit(75)
+            or stat.S_IMODE(lease_info.st_mode) != 0o600 or lease_info.st_nlink != 1
+            or (lease_info.st_dev, lease_info.st_ino) != (linked_lease.st_dev, linked_lease.st_ino)):
+        refuse('unsafe usage lease')
     try:
         fcntl.flock(lease_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
     except BlockingIOError:
-        raise SystemExit(75)
+        refuse('runtime is being retired')
     check_fd = directory(runtime)
     if (os.fstat(check_fd).st_dev, os.fstat(check_fd).st_ino) != (root_info.st_dev, root_info.st_ino):
-        raise SystemExit(75)
+        refuse('runtime changed during admission')
     active = json_file(state_fd, 'active.json')
     identifier = active.get('install_id')
     if not isinstance(identifier, str) or str(uuid.UUID(identifier)) != identifier:
-        raise SystemExit(75)
+        refuse('no active installation')
     receipts_fd = os.open('receipts', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=state_fd)
     receipt = json_file(receipts_fd, identifier + '.json')
     if receipt.get('status') != 'installed' or receipt.get('install_id') != identifier:
-        raise SystemExit(75)
+        refuse('active installation is not installed')
     matching = [row for row in receipt.get('targets', []) if row.get('role') == 'runtime']
     if len(matching) != 1 or matching[0].get('path') != str(runtime):
-        raise SystemExit(75)
+        refuse('active receipt names another runtime')
     post = matching[0].get('install_post') or {}
     if post.get('ino') != root_info.st_ino:
-        raise SystemExit(75)
+        refuse('active receipt does not match this runtime')
     for fd in (root_fd, parent_fd, state_fd, usage_fd, check_fd, receipts_fd):
         os.close(fd)
     return lease_fd
@@ -198,8 +209,8 @@ def admit(runtime):
 runtime = Path(__file__).absolute().parent.parent
 try:
     lease_fd = admit(runtime)
-except (OSError, ValueError, TypeError, AttributeError, RecursionError):
-    raise SystemExit(75)
+except (OSError, ValueError, TypeError, AttributeError, RecursionError) as exc:
+    refuse('usage lease or installer state unavailable (' + type(exc).__name__ + ')')
 os.set_inheritable(lease_fd, True)
 runtime_python = runtime / 'bin/python'
 entry_point = runtime / 'bin/blender-mcp'

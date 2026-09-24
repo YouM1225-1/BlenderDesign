@@ -79,18 +79,19 @@ def _launched(launcher):
         process.wait(timeout=5)
 
 
-def _refused(launcher) -> None:
+def _refused(launcher, reason: str) -> None:
     with _launched(launcher) as process:
         out, error = process.communicate(timeout=10)
         assert process.returncode == 75, error
         assert not out and "Traceback" not in error
+        assert error == f"blender-mcp-managed: {reason}\n"
 
 
 @pytest.mark.parametrize("status", ["prepared", "installed"])
 def test_external_bootstrap_gates_runtime_before_exec(tmp_path, status):
     with _installed_runtime(tmp_path, status) as (state, launcher, info):
         if status == "prepared":
-            _refused(launcher)
+            _refused(launcher, "active installation is not installed")
             return
         with _launched(launcher) as process:
             assert process.stdout is not None
@@ -123,7 +124,26 @@ def test_launcher_without_lease_exits_cleanly(tmp_path, missing):
         else:
             # A first-generation lease for the old device cannot admit a v2 runtime.
             ensure_usage_lock(state, device_usage_name(info.st_dev, info.st_ino))
-        _refused(launcher)
+        _refused(launcher, "usage lease or installer state unavailable (FileNotFoundError)")
+
+
+def test_launcher_refuses_while_the_installer_retires_the_runtime(tmp_path):
+    with _installed_runtime(tmp_path) as (state, launcher, info):
+        with usage_lock(state, usage_name(info.st_ino), exclusive=True) as held:
+            assert held
+            _refused(launcher, "runtime is being retired")
+
+
+def test_launcher_keeps_exit_75_when_stderr_is_closed(tmp_path):
+    with _installed_runtime(tmp_path) as (state, launcher, info):
+        (state.path / "usage" / usage_name(info.st_ino)).unlink()
+        result = subprocess.run(
+            ["/bin/sh", "-c", 'exec "$0" 2>&-', str(launcher)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 75 and not result.stdout
 
 
 @pytest.mark.parametrize("drift", ["replaced_tree", "runtime_mount"])
@@ -132,7 +152,7 @@ def test_launcher_still_rejects_other_trees_after_renumbering(tmp_path, drift):
     if drift == "replaced_tree":
         bootstrap = renumbering_python(directory, offset=7)
         with _installed_runtime(tmp_path, bootstrap=bootstrap, receipt_ino=1) as (_s, launcher, _i):
-            _refused(launcher)
+            _refused(launcher, "active receipt does not match this runtime")
         return
     with _installed_runtime(tmp_path) as (_state, launcher, info):
         # Only the runtime root reports a new device: it is no longer on its parent's volume.
@@ -141,7 +161,7 @@ def test_launcher_still_rejects_other_trees_after_renumbering(tmp_path, drift):
             str(Path(sys.executable).resolve()).encode(), str(wrapper).encode(), 1
         )
         launcher.write_bytes(source)
-        _refused(launcher)
+        _refused(launcher, "runtime root was replaced or is a mount point")
 
 
 def test_custom_codex_cache_cannot_supply_bootstrap(tmp_path):

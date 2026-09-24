@@ -6,11 +6,12 @@ import hashlib as _hashlib
 import os as _os
 from pathlib import Path as _Path
 import stat as _stat
+from typing import NoReturn as _NoReturn
 
 
 def _entry_directory(path: _Path) -> int:
     if not path.is_absolute() or ".." in path.parts:
-        raise SystemExit(75)
+        _entry_refuse("unsafe cached entry")
     fd = _os.open("/", _os.O_RDONLY | _os.O_DIRECTORY)
     try:
         for part in path.parts[1:]:
@@ -19,18 +20,28 @@ def _entry_directory(path: _Path) -> int:
             fd = child
         info = _os.fstat(fd)
         if info.st_uid != _os.getuid() or _stat.S_IMODE(info.st_mode) & 0o022:
-            raise SystemExit(75)
+            _entry_refuse("unsafe cached entry")
         return fd
     except BaseException:
         _os.close(fd)
         raise
 
 
+def _entry_refuse(reason: str) -> _NoReturn:
+    # A fixed reason without paths; 75 asks the caller to retry from the current version,
+    # and an unwritable stderr must not change that status.
+    try:
+        _os.write(2, ("blender-mcp-installer entry: " + reason + "\n").encode())
+    except OSError:
+        pass
+    raise SystemExit(75)
+
+
 def _entry_lease() -> int | None:
     try:
         return _acquire_entry_lease()
-    except OSError:
-        raise SystemExit(75)
+    except (OSError, ValueError) as exc:
+        _entry_refuse("usage lease unavailable (" + type(exc).__name__ + ")")
 
 
 def _acquire_entry_lease() -> int | None:
@@ -42,7 +53,7 @@ def _acquire_entry_lease() -> int | None:
         return None
     relative = script.relative_to(cache)
     if len(relative.parts) < 2:
-        raise SystemExit(75)
+        _entry_refuse("unsafe cached entry")
     version = cache / relative.parts[0]
     root_fd = _entry_directory(version)
     info = _os.fstat(root_fd)
@@ -59,15 +70,15 @@ def _acquire_entry_lease() -> int | None:
         or lease.st_nlink != 1
         or (lease.st_dev, lease.st_ino) != (linked.st_dev, linked.st_ino)
     ):
-        raise SystemExit(75)
+        _entry_refuse("unsafe usage lease")
     try:
         _fcntl.flock(lease_fd, _fcntl.LOCK_SH | _fcntl.LOCK_NB)
     except BlockingIOError:
-        raise SystemExit(75)
+        _entry_refuse("plugin version is being retired")
     check_fd = _entry_directory(version)
     after = _os.fstat(check_fd)
     if (info.st_dev, info.st_ino) != (after.st_dev, after.st_ino) or not script.is_file():
-        raise SystemExit(75)
+        _entry_refuse("cached entry changed during admission")
     for fd in (root_fd, usage_fd, check_fd):
         _os.close(fd)
     _atexit.register(_os.close, lease_fd)

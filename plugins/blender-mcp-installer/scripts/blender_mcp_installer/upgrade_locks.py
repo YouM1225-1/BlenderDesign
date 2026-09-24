@@ -168,7 +168,8 @@ def exclusive_usage(
 
 @contextmanager
 def script_usage(script: Path, roots: UpgradeRoots) -> Iterator[None]:
-    # Mirrors the v2 entry prelude; a v1 cache has no inode lease and fails closed.
+    # Test-only installer mirror of the v2 entry prelude, which is the real entry guard;
+    # a v1 cache has no inode lease and fails closed.
     script = absolute(str(script))
     if not script.is_relative_to(roots.caches):
         yield

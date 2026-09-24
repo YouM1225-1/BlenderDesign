@@ -46,8 +46,8 @@ flowchart LR
 
 [model.py](../plugins/blender-mcp-installer/scripts/blender_mcp_installer/model.py) 定义 receipt 状态
 `prepared`、`installed`、`rollback_pending`、`rolled_back`，并记录每步 action 的进展。
-安装器结合 active/pending selector、升级 journal、按 inode 命名的使用锁（第一代按 device/inode）与恢复副本处理事务中断；launcher 与缓存入口的租约身份不含会随重启重编的设备号，runtime 根须与父目录同卷。
-Codex native 注册在私有事务 profile 中执行，验证新 cache 和非目标 TOML 语义后按 cache→config 条件发布。敏感配置快照在写入前绑定受管 stage 身份，配置 stage 可见前另行持久记录 live pre、native post inode/摘要与 cache 的 intent，恢复同一文件而不重跑 native；CODEX_HOME 跨卷时先把同卷事务副本身份追加进 intent 再移入 stage；没有 intent/publication 的 stage 和身份漂移均保留并拒绝。恢复仅续删已记录的目录；旧 runtime、扩展恢复副本和插件 cache 只在新版本现场验证成功并重验归属后删除；历史 recovery 只接受字节码缓存、目录时间和整卷设备号重编这类托管漂移，重启前退役的 recovery 以内核启动时间证明空闲。旧注册恢复证据指向整体缺失的 projection 时只保护该路径；其余无法证明的旧注册 source 恢复引用使 finalize 以 `cleanup_reference_unproven` 失败关闭。当前现场证据、严格 RELEASE 与正常用户 profile 限制见 [验证说明](validation.md#2026-09-23-安装升级当前现场结果)。
+安装器结合 active/pending selector、升级 journal、按 inode 命名的使用锁（v1 树与无标记的扩展 recovery、交接 runtime 仍按 device/inode）与恢复副本处理事务中断；launcher 与缓存入口的租约身份不含会随重启重编的设备号，runtime 根须与父目录同卷。
+Codex native 注册在私有事务 profile 中执行，验证新 cache 和非目标 TOML 语义后按 cache→config 条件发布。敏感配置快照在写入前绑定受管 stage 身份，配置 stage 可见前另行持久记录 live pre、native post inode/摘要与 cache 的 intent，恢复同一文件而不重跑 native；CODEX_HOME 跨卷时先把同卷事务副本身份追加进 intent 再移入 stage；没有 intent/publication 的 stage 和身份漂移均保留并拒绝。恢复仅续删已记录的目录；旧 runtime、扩展恢复副本和插件 cache 只在新版本现场验证成功并重验归属后删除；历史 recovery 只接受字节码缓存、目录时间和整卷设备号重编这类托管漂移，重启前退役的 recovery 以内核启动时间证明空闲。旧注册恢复证据指向整体缺失的 projection 时只保护该路径；其余无法证明的旧注册 source 恢复引用使 finalize 以 `cleanup_reference_unproven` 失败关闭。当前现场证据、严格 RELEASE 与正常用户 profile 限制见 [验证说明](validation.md#2026-09-23-安装升级当前现场结果)与 [2026-09-24 现场结果](validation.md#2026-09-24-正常-profile-历史-recovery-回收诊断与现场结果)。
 
 真实变更前检查选定 Blender 已退出且目标端口空闲。宿主探测及偏好处理可以使用受控后台进程；
 交互式 Blender 由用户正常启动，项目 `.blend` 不属于安装器修改目标。

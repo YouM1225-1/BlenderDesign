@@ -517,11 +517,12 @@ current host boot need no handoff, because the restart ended every process that 
 still use them. A cleanup journal for a release that is no longer current completes
 once a current finalize verifies all its remaining baselines absent. Current launchers
 and cached entries name their lease by inode, so a reboot that renumbers the volume
-device keeps them usable; a missing lease exits 75. A first-generation runtime whose
+device keeps them usable; a missing lease exits 75, and every exit-75 refusal prints one
+fixed reason without paths on stderr. A v1-lease (`inode-v1`) runtime whose
 device changed since its installed receipt is not reported in use merely because no
 lease exists under the new device number; any existing lease under either number
-must still be free. A first-generation cache or recovery first recorded after a reboot
-whose lease predates that reboot stays pending until the next device renumbering.
+must still be free. A v1 plugin cache first recorded after a reboot whose lease
+predates that reboot stays pending until the next device renumbering.
 
 
 Verification succeeds only when parsed Codex policy, effective Codex MCP config,
@@ -556,6 +557,8 @@ if test -n "${HANDOFF_ID:-}"; then HANDOFF_ARGS+=(--handoff-id "$HANDOFF_ID"); f
 
 Rollback verifies the receipt and current host state; the receipt path is not
 authorization for a new install. Preserve receipts for audit and future rollback.
+Restoring a v1-lease (`inode-v1`) runtime after a reboot renumbered the volume device
+yields a runtime whose own launcher cannot start; reinstall the current release instead.
 
 ## 5. Cleanup and external acceptance status
 

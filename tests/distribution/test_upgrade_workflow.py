@@ -805,6 +805,9 @@ def test_cached_entries_survive_volume_renumbering_after_register(exact_cache):
     for name in ("install.py", "project_marketplace.py"):
         entry = cached_entry(cache, roots, name, python)
         assert entry.returncode == 75 and "Traceback" not in entry.stderr, entry.stderr
+        assert entry.stderr == (
+            "blender-mcp-installer entry: usage lease unavailable (FileNotFoundError)\n"
+        )
 
 
 def test_exact_cache_inspection_and_failed_entries_do_not_create_lease(exact_cache):
