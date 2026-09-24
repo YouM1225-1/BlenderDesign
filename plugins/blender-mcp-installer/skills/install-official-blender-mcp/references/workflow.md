@@ -310,7 +310,10 @@ run_uv_bootstrap
 Inspect reports the 13 inputs to `exact` in `checks`. `blender_checks` separately
 reports extension-file integrity and the Online Access, host, port, and autostart
 preference checks, so a managed preference drift can be diagnosed without weakening
-the exact gate.
+the exact gate. The receipt's recorded Codex version is evidence only: a Codex update
+alone keeps the installation exact. The effective-config check and host capability
+probe run the current Codex, and the policy and namespace checks read the current
+config. Blender, uv and Python versions still take part in the exact gate.
 
 The operator has set a standing default-allow policy for these four capabilities:
 

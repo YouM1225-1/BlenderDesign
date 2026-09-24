@@ -899,7 +899,8 @@ def _inspect(
         and receipt.host["blender_executable"] == str(current_blender.executable)
         and receipt.host["blender_architecture"] == current_blender.reported_architecture
         and receipt.host["blender_version"] == current_blender.version
-        and receipt.host["codex_version"] == host.codex_version
+        # The recorded Codex version is evidence only: Codex updates itself, and its
+        # behaviour is checked live by the codex_* fields and verification.
         and receipt.host["uv_version"] == host.uv_version
         and receipt.host["python_version"] == host.python_version
     )

@@ -537,6 +537,25 @@ def _absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return bundle, roots, blender, host, controls, calls
 
 
+@pytest.mark.parametrize("codex_version", ["0.149.0-alpha.4.2", "0.150.0", "1.0.0"])
+def test_codex_update_alone_keeps_installation_exact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, codex_version: str
+) -> None:
+    bundle, roots, blender, host, *_ = _installed(tmp_path, monkeypatch)
+    # Codex behaviour is probed live by the codex_* checks; its version is only receipt evidence.
+    updated = inspect_installation(bundle, roots, blender, replace(host, codex_version=codex_version))
+    assert updated.recorded_blender_executable and updated.exact
+
+
+@pytest.mark.parametrize("field", ["uv_version", "python_version"])
+def test_recorded_toolchain_version_change_is_not_exact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    bundle, roots, blender, host, *_ = _installed(tmp_path, monkeypatch)
+    changed = inspect_installation(bundle, roots, blender, replace(host, **{field: "9.9.9"}))
+    assert not changed.recorded_blender_executable and not changed.exact
+
+
 @pytest.mark.parametrize("field", FIELDS)
 def test_adapter_backed_inspection_independently_computes_every_exactness_field(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
