@@ -310,10 +310,10 @@ run_uv_bootstrap
 Inspect reports the 13 inputs to `exact` in `checks`. `blender_checks` separately
 reports extension-file integrity and the Online Access, host, port, and autostart
 preference checks, so a managed preference drift can be diagnosed without weakening
-the exact gate. The receipt's recorded Codex version is evidence only: a Codex update
-alone keeps the installation exact. The effective-config check and host capability
-probe run the current Codex, and the policy and namespace checks read the current
-config. Blender, uv and Python versions still take part in the exact gate.
+the exact gate. The Codex version recorded in the receipt is evidence, not an
+exactness input: the effective-config check and host capability probe run the
+current Codex, and the policy and namespace checks read the current config.
+Blender, uv and Python versions are exactness inputs.
 
 The operator has set a standing default-allow policy for these four capabilities:
 
@@ -341,36 +341,19 @@ mode-0600 recovery evidence is receipt-independent. The helper runs
 `plugin add "blender-mcp-installer@official-blender-mcp"` only in a mode-0700
 transaction CODEX_HOME, because the native command may prune older caches. It stages
 only this target profile's mode-0600 config snapshot, never login/session files or
-inherited credentials. The snapshot may contain sensitive configuration; it is not
-logged, and successful publication removes temporary config copies. Failed stages
-remain private for explicit diagnosis/recovery. Before writing a config snapshot, the
-transaction records the exact native stage directory and root identity. Before a
-config stage becomes visible, durable intent binds the original live config, the
-verified cache, the native file inode/hash, and this transaction. A retry with
-intent resumes the conditional move of that same file without rerunning native
-Codex, so changing native timestamps cannot replace the pending config. When
-CODEX_HOME is on another volume the move is refused with EXDEV and nothing moves; the
-transaction then exclusively writes a mode-0600 `.registration.transfer` copy in
-CODEX_HOME, requires its bytes to match the bound native file, appends its identity
-to the intent, and only then moves it to the stage on the same volume. A failed
-write removes only the copy it exclusively created. A transfer without intent, one
-whose bytes, mode, or owner differ from the bound native file (for example after an
-interrupted write), or later drift is preserved and rejected; the error names the
-transfer path for explicit operator recovery. Before
-intent exists, retries clean the recorded prior attempt before creating another,
-using a persisted deletion image to resume partial cleanup. Successful publication also requires
-this cleanup; missing or conflicting evidence fails closed, and unknown native
-directories are never selected by a wildcard.
+inherited credentials; the snapshot may contain sensitive configuration and is not
+logged. Before a config stage becomes visible, a durable intent binds it to this
+transaction, so an interrupted registration resumes by rerunning the same recipe,
+never by rerunning native Codex by hand. The verified cache is published first
+without replacing older cache paths or inodes; the config is then published
+conditionally, preserving every non-target TOML value and never overwriting
+external changes.
 
-The verified desired cache is published first without replacing older cache paths
-or inodes. Only then is the config conditionally published, preserving every
-non-target TOML value (including other fields in the target plugin table). Conflicts
-retain evidence and do not overwrite external changes. A crash between cache and
-config publication can reuse the exact new cache; a recorded config swap resumes
-through the existing conditional file primitives. A stage without verifiable intent
-or publication evidence is preserved and rejected, as are stage, config, or cache
-identity conflicts. Existing publication records remain recoverable. Old busy caches remain pending
-until their entry leases are released and a later finalize revalidates them.
+Missing or conflicting evidence fails closed. A rejected stage, config, cache, or
+`.registration.transfer` copy is preserved for explicit operator recovery (a transfer
+error names its path): report it; do not delete, move, or rewrite it. Failed stages
+stay private for diagnosis. Old busy caches remain pending until their entry leases
+are released and a later finalize revalidates them.
 <!-- PERSISTENT_MARKETPLACE_BEGIN -->
 ```bash
 run_uv_bootstrap
@@ -512,17 +495,15 @@ clients and managed MCP processes normally. Pass `HANDOFF_ID` into upgrade or ro
 never shut down user applications automatically. A prior rollback can restore a lease-less
 runtime, so a repeated rollback may require a fresh begin-handoff and `--handoff-id`.
 Runtime handoff does not prove old Codex tasks reloaded: old caches without cooperative
-usage evidence remain pending. Runtime and extension recoveries retired before the
-current host boot need no handoff, because the restart ended every process that could
-still use them. A cleanup journal for a release that is no longer current completes
-once a current finalize verifies all its remaining baselines absent. Current launchers
-and cached entries name their lease by inode, so a reboot that renumbers the volume
-device keeps them usable; a missing lease exits 75, and every exit-75 refusal prints one
-fixed reason without paths on stderr. A v1-lease (`inode-v1`) runtime whose
-device changed since its installed receipt is not reported in use merely because no
-lease exists under the new device number; any existing lease under either number
-must still be free. A v1 plugin cache first recorded after a reboot whose lease
-predates that reboot stays pending until the next device renumbering.
+usage evidence remain pending. A later finalize revalidates them and completes an older
+release's cleanup journal once its remaining baselines are verified absent. Runtime and
+extension recoveries retired before the current host boot need no handoff, because the
+restart ended every process that could use them. Current launchers and cached entries
+name their lease by inode and stay usable after a reboot renumbers the volume device.
+A v1-lease (`inode-v1`) plugin cache first recorded after a reboot that its lease
+predates stays pending until the next renumbering; that is expected, not a failure.
+Every entry refusal, including a missing lease, exits 75 and prints one fixed reason
+without paths on stderr; report that reason.
 
 
 Verification succeeds only when parsed Codex policy, effective Codex MCP config,
