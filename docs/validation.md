@@ -146,6 +146,8 @@ Background smoke：
 并对当前受跟踪的 Python、shell、TOML、`pyproject.toml`、`uv.lock` 和生成的 vendored
 protocol 建立有界哈希清单。历史计划或审计文档不参与运行时 provenance。
 
+2026-09-26 在提交 `b36095d`（工具描述补全合同语义，冻结 catalog 更新为 7,246 字节、SHA-256 `4a651553138d2156c35c07c55a06cc2e774ad9de979fd1bde22588c4687f71bc`）的干净 worktree 上，以 CPython 3.13.13、Blender 5.2.0 LTS、uv 0.12.2 运行正式入口，输出 `PHASE0_ACCEPTANCE_OK`；GUI/NFR 与 kill/restart 恢复均 `success=true`，NFR 证据记录的 `ordered_catalog_sha256` 与新冻结值一致。证据位于 `/private/var/tmp/blenderdesign-phase0-evidence-20260926-b36095d`，`summary.json` 的 SHA-256 为 `15555e10deb2f242f7c9a2a8ec0a7483d7c2048d54036f85bc3ccdb9ed9ffa25`。
+
 ### 独立 M2 原生资产门禁
 
 使用锁定 Python、Blender 与仓库外全新证据目录显式执行全部 Native 测试；默认常规门禁的 skip 不能替代它。每次更换 `--basetemp`，避免 pytest 清理旧证据。
