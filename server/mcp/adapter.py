@@ -444,14 +444,27 @@ mcp = MCPServer("blender-codex", version=SERVER_VERSION, instructions=INSTRUCTIO
 
 @mcp.tool()
 def get_blender_status(instance_selector: str | None = None) -> StatusResult:
-    """列出 Blender 实例、Bridge 连接状态与场景概况。无实例时返回引导文案。"""
+    """列出已发现的 Blender 实例、Bridge 连接状态与场景概况。
+
+    返回的 instance_id 供 get_scene_summary 使用。
+    instance_selector 为精确的 instance_id，省略时返回全部实例。
+    无已连接实例时 guidance 返回引导文案。
+    partial 为 true 表示发现未在时限内完成，skipped_count 个实例未检查，可重试。
+    只读，不修改场景。"""
     return StatusResult.model_validate(status_impl(_discovery(), instance_selector))
 
 
 @mcp.tool()
 def get_scene_summary(instance_id: str, include_collections: bool = True,
                       include_managed_objects: bool = True) -> SceneSummaryResult:
-    """返回指定实例的场景摘要：对象统计、单位、scene_hash 与受管对象清单。"""
+    """返回指定实例的场景摘要。
+
+    内容包括场景名、scene_revision、scene_hash、磁盘路径、单位、对象计数与受管对象清单；
+    不返回几何、材质或对象变换。只读。
+    instance_id 取自 get_blender_status。
+    include_collections / include_managed_objects 为 false 时对应列表返回空。
+    实例不存在、Bridge 断开或发现未完成时返回带 code 与 retryable 的错误；
+    仅 retryable 为 true 时重试。"""
     discovery = _discovery()
     try:
         return SceneSummaryResult.model_validate(scene_summary_impl(
@@ -466,7 +479,11 @@ def get_scene_summary(instance_id: str, include_collections: bool = True,
 
 @mcp.tool()
 def describe_capabilities(include_instances: bool = False) -> CapabilitiesResult:
-    """返回本 Server 能力：支持的工具、IR 版本、Blender 基线。默认不连 Bridge。"""
+    """返回本 Server 能力：支持的工具、IR 版本、支持的操作类型与 Blender 基线。
+
+    默认不连 Bridge，Blender 离线时也可回答。
+    include_instances 为 true 时额外列出已连接实例；
+    instances_partial 为 true 表示发现未在时限内完成。"""
     discovery = _discovery() if include_instances else None
     return CapabilitiesResult.model_validate(capabilities_impl(discovery, include_instances))
 
